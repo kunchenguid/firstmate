@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
-# Blocks until any managed crewmate needs attention, then exits printing one reason line:
+# Blocks until supervision work is due, then exits printing one reason line:
 #   signal: <file>...     a crewmate wrote a status line or a turn-end hook fired; signals
 #                         landing within FM_SIGNAL_GRACE of each other coalesce into one wake
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature

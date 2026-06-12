@@ -107,7 +107,9 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
      └─ scout: report at data/<id>/report.md ► relay findings ► teardown
 ```
 
-- **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, or a PR merges. A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running. An idle crew costs you nothing.
+- **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
+  Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
+  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running.
 - **Worktrees, not branches in your checkout** — crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** — ship tasks change projects and end in a validated PR; scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Validation is non-negotiable for shipping** — every project gets `no-mistakes init`; every ship task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
@@ -123,7 +125,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`     | Scaffold a ship brief, or a report-only scout brief with `--scout`                          |
 | `fm-guard.sh`     | Warn when tasks are in flight but the watcher liveness beacon is stale or missing           |
 | `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
-| `fm-watch.sh`     | Block until a crewmate needs attention; exits with one reason line                          |
+| `fm-watch.sh`     | Block until supervision work is due; exits with one reason line                             |
 | `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window                              |
 | `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                                     |
 | `fm-pr-check.sh`  | Record a PR-ready task and arm the watcher's merge poll                                     |
