@@ -35,6 +35,10 @@ There is no app to install; the whole orchestrator is an `AGENTS.md` file that a
 - **A visible crew** — every crewmate lives in a tmux window in your session. Watch any of them work, or type into their window to intervene; the first mate reconciles.
 - **Guarded by construction** — the first mate is read-only over your projects; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees and ship through the [no-mistakes](https://github.com/kunchenguid/no-mistakes) validation pipeline. Nothing lands without a PR you merge.
 
+This is not an agent harness. This is not a skill. This is not a CLI.
+
+This is.. a directory that turns any agent into your firstmate, and you the captain.
+
 ## Quick Start
 
 ```sh
@@ -61,6 +65,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 ```sh
 # 1. an agent harness - claude code is the verified one today
 # 2. git + GitHub auth
+# 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
 gh auth login
 ```
 
@@ -73,6 +78,9 @@ cd firstmate && claude
 
 That is the whole install.
 On first launch the first mate detects what its toolchain is missing (tmux, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+
+**Run it inside tmux for the best experience.**
+firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside tmux puts every crewmate window in your own session, one per task, where you can watch the crew work in real time or type into any window to intervene.
 
 ## How It Works
 
@@ -104,32 +112,38 @@ On first launch the first mate detects what its toolchain is missing (tmux, tree
 - **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, or a PR merges. An idle crew costs you nothing.
 - **Worktrees, not branches in your checkout** — crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Validation is non-negotiable** — every project gets `no-mistakes init`; every task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
-- **Restart-proof** — all state lives in tmux, status files, and committed markdown. Kill the first mate session anytime; the next one reconciles and carries on.
+- **Restart-proof** — all state lives in tmux, status files, and local markdown under `data/`. Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
 
 The first mate drives these; you rarely need to, but they work by hand too.
 
-| Script           | Description                                                                 |
-| ---------------- | --------------------------------------------------------------------------- |
-| `fm-spawn.sh`    | Window → treehouse worktree → agent launched with its brief                 |
-| `fm-watch.sh`    | Block until a crewmate needs attention; exits with one reason line          |
-| `fm-send.sh`     | Send one literal line (or `--key Escape`) to a crewmate window              |
-| `fm-peek.sh`     | Print a bounded tail of a crewmate pane                                     |
-| `fm-teardown.sh` | Return the worktree and kill the window; refuses if work is not on a remote |
+| Script            | Description                                                                  |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `fm-bootstrap.sh` | Detect missing toolchain pieces; install them only after consent             |
+| `fm-brief.sh`     | Scaffold a crewmate brief with the standard contract filled in               |
+| `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief                  |
+| `fm-watch.sh`     | Block until a crewmate needs attention; exits with one reason line           |
+| `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window               |
+| `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                      |
+| `fm-pr-check.sh`  | Record a PR-ready task and arm the watcher's merge poll                      |
+| `fm-teardown.sh`  | Return the worktree and kill the window; refuses if work is not on a remote  |
+| `fm-harness.sh`   | Detect the running harness; resolve the effective crewmate harness           |
+| `fm-lock.sh`      | Single-firstmate session lock                                                |
 
 ## Configuration
 
 The orchestrator's behavior lives in `AGENTS.md` - edit it like any prompt.
-Harness support is a table in section 4 (claude is verified; codex/opencode/pi are stubs awaiting empirical verification).
+Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
-Watcher tuning via environment variables:
+Watcher tuning via environment variables (defaults shown):
 
 ```sh
-FM_POLL=15          # seconds between watcher cycles
-FM_HEARTBEAT=600    # max seconds before a mandatory fleet review
-FM_CHECK_EVERY=20   # cycles between slow checks (merged-PR polls)
-FM_BUSY_REGEX='esc to interrupt'   # busy-pane signatures, extend per harness
+FM_POLL=15              # seconds between watcher cycles
+FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
+FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
+FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
 ```
 
 ## Development
