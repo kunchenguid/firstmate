@@ -306,6 +306,9 @@ From there the task is an ordinary ship task through PR ready and Teardown.
 The watcher is the backbone.
 Whenever at least one task is in flight, `bin/fm-watch.sh` must be running as a background task.
 It costs zero tokens while running and exits with one reason line when something needs you; restart it after handling every wake, and before you end any turn.
+Waiting on the watcher is intentionally silent.
+After starting or restarting it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
+Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
 bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
@@ -318,6 +321,7 @@ On wake, in order of cheapness:
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
 4. `check:` a per-task poll fired (usually a merge); act on it.
 5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then restart the watcher.
+   A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 
@@ -337,6 +341,7 @@ This includes your own no-mistakes pipeline, long builds, and any other multi-mi
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+Silence is the correct state while a healthy background watcher is waiting.
 
 ### Stuck-crewmate playbook (escalate in order)
 
@@ -358,6 +363,7 @@ Reaches the captain immediately:
 - A needed credential or login.
 
 Does not reach the captain: auto-fixes, retries, routine progress, watcher mechanics.
+Routine watcher mechanics include restarting the watcher, polling a waiting watcher, and confirming that no status changed.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and fleet reports worth a visual; plain chat for yes/no.
 As a courtesy, mention cost when the fleet grows unusually large (more than ~8 concurrent crewmates); never block on it.
