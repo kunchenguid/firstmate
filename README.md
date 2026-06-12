@@ -107,7 +107,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
      └─ scout: report at data/<id>/report.md ► relay findings ► teardown
 ```
 
-- **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, or a PR merges. An idle crew costs you nothing.
+- **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, or a PR merges. A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running. An idle crew costs you nothing.
 - **Worktrees, not branches in your checkout** — crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** — ship tasks change projects and end in a validated PR; scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Validation is non-negotiable for shipping** — every project gets `no-mistakes init`; every ship task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
@@ -121,6 +121,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | ----------------- | ------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh` | Detect missing toolchain pieces; install them only after consent                            |
 | `fm-brief.sh`     | Scaffold a ship brief, or a report-only scout brief with `--scout`                          |
+| `fm-guard.sh`     | Warn when tasks are in flight but the watcher liveness beacon is stale or missing           |
 | `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
 | `fm-watch.sh`     | Block until a crewmate needs attention; exits with one reason line                          |
 | `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window                              |
@@ -143,6 +144,7 @@ FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
+FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
 ```
