@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Spawn a crewmate: tmux window -> treehouse worktree subshell -> agent launched with its brief.
-# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command]
-#   With no third arg, the harness comes from fm-harness.sh crew (config/crew-harness,
+# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
+#   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A string containing whitespace is
-#   treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
+#   see AGENTS.md section 7); the default is kind=ship.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -12,13 +14,21 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# On success prints: spawned <id> harness=<name> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout> window=<session:window> worktree=<path>
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ID=$1
-PROJ=$2
-ARG3=${3:-}
+KIND=ship
+POS=()
+for a in "$@"; do
+  case "$a" in
+    --scout) KIND=scout ;;
+    *) POS+=("$a") ;;
+  esac
+done
+ID=${POS[0]}
+PROJ=${POS[1]}
+ARG3=${POS[2]:-}
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in AGENTS.md section 4.
@@ -141,6 +151,7 @@ mkdir -p "$FM_ROOT/state"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  echo "kind=$KIND"
 } > "$FM_ROOT/state/$ID.meta"
 
 LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
@@ -150,4 +161,4 @@ tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
-echo "spawned $ID harness=$HARNESS window=$T worktree=$WT"
+echo "spawned $ID harness=$HARNESS kind=$KIND window=$T worktree=$WT"
