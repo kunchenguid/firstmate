@@ -72,6 +72,10 @@ scan_signals() {
 }
 
 while :; do
+  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
+  # alive. Supervision scripts warn when this goes stale with tasks in flight.
+  touch "$STATE/.last-watcher-beat"
+
   # On the first changed signal, linger one grace period and re-scan before
   # waking: a crewmate's final status write and the same turn's turn-end hook
   # land seconds apart, and reporting them as separate wakes costs a full

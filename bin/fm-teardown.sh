@@ -11,6 +11,7 @@
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$FM_ROOT/bin/fm-guard.sh" || true
 STATE="$FM_ROOT/state"
 ID=$1
 FORCE=${2:-}

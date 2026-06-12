@@ -59,6 +59,7 @@ state/               volatile runtime signals; gitignored
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
+  .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -318,6 +319,14 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 
 Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
 tmux is the ground truth.
+
+**Watcher liveness is guarded, not just disciplined.**
+Restarting the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
+While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
+The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
+So the next time you touch the fleet with no watcher alive, the tool output itself tells you to restart it - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
+The grace window keeps normal handling (watcher briefly down between a wake and its restart) silent.
+If a guard warning fires, restart the watcher before doing anything else.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 

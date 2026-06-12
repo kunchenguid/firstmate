@@ -7,6 +7,7 @@
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 

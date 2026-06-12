@@ -18,6 +18,7 @@
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 POS=()
 for a in "$@"; do

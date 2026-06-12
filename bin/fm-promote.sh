@@ -10,6 +10,7 @@
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 META="$FM_ROOT/state/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }

@@ -4,6 +4,8 @@
 #   <window> may be a bare window name (fm-xyz) or session:window.
 set -eu
 
+"$(dirname "${BASH_SOURCE[0]}")/fm-guard.sh" || true
+
 resolve() {
   case "$1" in
     *:*) echo "$1" ;;
