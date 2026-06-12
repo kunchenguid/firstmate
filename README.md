@@ -63,7 +63,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 **Prerequisites** (the first mate detects everything else and offers to install it):
 
 ```sh
-# 1. an agent harness - claude code is the verified one today
+# 1. a verified agent harness - claude, codex, opencode, or pi
 # 2. git + GitHub auth
 # 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
 gh auth login
