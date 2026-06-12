@@ -291,8 +291,9 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
 - Record it in Done with the report path instead of a PR link.
 
-**Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full unpushed-work protection), then send the crewmate its ship instructions - create branch `fm/<id>`, implement, report `done`, then `/no-mistakes` per the Validate stage.
-The crewmate keeps its worktree, loaded context, and repro; the repro becomes the regression test.
+**Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full unpushed-work protection), then send the crewmate its ship instructions - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, report `done`, then `/no-mistakes` per the Validate stage.
+The crewmate keeps its worktree, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
+The repro becomes the regression test.
 From there the task is an ordinary ship task through PR ready and Teardown.
 
 ## 8. Supervision protocol
