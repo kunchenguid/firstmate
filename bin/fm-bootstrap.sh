@@ -38,6 +38,6 @@ for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
-crew=$(cat "$FM_ROOT/config/crew-harness" 2>/dev/null | tr -d '[:space:]')
+crew=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-harness" 2>/dev/null || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 exit 0

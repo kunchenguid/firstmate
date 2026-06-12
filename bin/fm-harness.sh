@@ -33,13 +33,15 @@ detect_own() {
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
+      break
+    fi
   done
   echo unknown
 }
 
 if [ "${1:-}" = "crew" ]; then
-  crew=$(cat "$FM_ROOT/config/crew-harness" 2>/dev/null | tr -d '[:space:]')
+  crew=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-harness" 2>/dev/null || true)
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
 else
   detect_own
