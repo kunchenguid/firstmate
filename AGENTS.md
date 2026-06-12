@@ -213,7 +213,7 @@ Use these signals in order:
 2. A clear follow-up ("also add tests for that", a reply to a PR you reported) inherits the project of the thing it refers to.
 3. Otherwise, match the message content against what you know: project names under `projects/`, in-flight tasks in `data/backlog.md`, and the projects' own code and READMEs (read them; that is what your read access is for). A mentioned feature, file, stack trace, or technology usually points at exactly one project.
 4. One confident match: proceed, but state the assumption in your reply ("dispatching to `yourapp`") so a wrong guess costs one correction instead of a crewmate's wasted run.
-5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable (everything ships as a PR) but expensive; a question is cheap.
+5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
 
 Then classify the shape:
 
@@ -241,7 +241,7 @@ bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scou
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, and records `harness=` and `kind=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 
 The script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
-Worktrees start at detached HEAD on a clean default branch; the brief's first instruction makes the crewmate create its branch.
+Worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
 Add the task to `data/backlog.md` under In flight.
 
@@ -252,7 +252,7 @@ Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything lon
 
 ### Validate
 
-When a crewmate's status says `done`:
+For ship tasks, when a crewmate's status says `done`:
 
 ```sh
 bin/fm-send.sh fm-<id> '/no-mistakes'
@@ -265,14 +265,14 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 
 ### PR ready
 
-When the pipeline reaches CI-green, the crewmate reports `done: PR <url> checks green`.
+For ship tasks, when the pipeline reaches CI-green, the crewmate reports `done: PR <url> checks green`.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
 Tell the captain: PR link, one-paragraph summary, and the risk level no-mistakes emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise.)
 
 If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval.
 
-### Teardown (only after merge is confirmed)
+### Ship teardown (only after merge is confirmed)
 
 ```sh
 bin/fm-teardown.sh <id>

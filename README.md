@@ -25,15 +25,15 @@
 </p>
 
 You can run one coding agent well.
-But the moment you want three things done in parallel, you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
+But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs to merge.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs or standalone investigation reports.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
-- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs are ready.
+- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs or scout reports are ready.
 - **A visible crew** — every crewmate lives in a tmux window. Watch any of them work, or type into their window to intervene; the first mate reconciles.
-- **Guarded by construction** — the first mate is read-only over your projects; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees and ship through the [no-mistakes](https://github.com/kunchenguid/no-mistakes) validation pipeline. Nothing lands without a PR you merge.
+- **Guarded by construction** — the first mate is read-only over your projects; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees. Ship tasks go through the [no-mistakes](https://github.com/kunchenguid/no-mistakes) validation pipeline, and scout tasks produce local reports without pushing anything.
 
 This is not an agent harness. This is not a skill. This is not a CLI.
 
@@ -102,34 +102,34 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
      ▼            ▼               ▼
   treehouse worktree (clean, disposable, parallel-safe)
      │
-     ▼
-  /no-mistakes pipeline: review ► test ► lint ► push ► PR ► CI green
+     ├─ ship: /no-mistakes ► PR for the captain ► merge ► teardown
      │
-     ▼
-  PR for the captain ── merged ── worktree returned, window closed
+     └─ scout: report at data/<id>/report.md ► relay findings ► teardown
 ```
 
 - **Event-driven supervision** — a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, or a PR merges. An idle crew costs you nothing.
 - **Worktrees, not branches in your checkout** — crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
-- **Validation is non-negotiable** — every project gets `no-mistakes init`; every task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
+- **Two task shapes** — ship tasks change projects and end in a validated PR; scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+- **Validation is non-negotiable for shipping** — every project gets `no-mistakes init`; every ship task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
 - **Restart-proof** — all state lives in tmux, status files, and local markdown under `data/`. Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
 
 The first mate drives these; you rarely need to, but they work by hand too.
 
-| Script            | Description                                                                  |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `fm-bootstrap.sh` | Detect missing toolchain pieces; install them only after consent             |
-| `fm-brief.sh`     | Scaffold a crewmate brief with the standard contract filled in               |
-| `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief                  |
-| `fm-watch.sh`     | Block until a crewmate needs attention; exits with one reason line           |
-| `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window               |
-| `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                      |
-| `fm-pr-check.sh`  | Record a PR-ready task and arm the watcher's merge poll                      |
-| `fm-teardown.sh`  | Return the worktree and kill the window; refuses if work is not on a remote  |
-| `fm-harness.sh`   | Detect the running harness; resolve the effective crewmate harness           |
-| `fm-lock.sh`      | Single-firstmate session lock                                                |
+| Script            | Description                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `fm-bootstrap.sh` | Detect missing toolchain pieces; install them only after consent                            |
+| `fm-brief.sh`     | Scaffold a ship brief, or a report-only scout brief with `--scout`                          |
+| `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
+| `fm-watch.sh`     | Block until a crewmate needs attention; exits with one reason line                          |
+| `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window                              |
+| `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                                     |
+| `fm-pr-check.sh`  | Record a PR-ready task and arm the watcher's merge poll                                     |
+| `fm-promote.sh`   | Promote a scout task in place so it becomes a protected ship task                           |
+| `fm-teardown.sh`  | Return the worktree and kill the window; protects ship work and requires scout reports      |
+| `fm-harness.sh`   | Detect the running harness; resolve the effective crewmate harness                          |
+| `fm-lock.sh`      | Single-firstmate session lock                                                               |
 
 ## Configuration
 
