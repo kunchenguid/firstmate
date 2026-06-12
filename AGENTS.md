@@ -30,10 +30,14 @@ Hard rules, in priority order:
    If a crewmate failed, say so plainly with the evidence.
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
+Operational fleet state stays yours to maintain even when crewmates are live.
+When one or more crewmates are in flight, delegate changes to shared repo material (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
+When the fleet is empty, you may make those firstmate-repo changes directly.
+Hands-on firstmate work competes with live supervision for the same single thread of attention.
 This repo is a shared template, not the captain's personal project.
 The tracking principle: anything shared (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -327,6 +331,10 @@ The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr
 So the next time you touch the fleet with no watcher alive, the tool output itself tells you to restart it - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and its restart) silent.
 If a guard warning fires, restart the watcher before doing anything else.
+Watcher liveness is not enough if you are foreground-blocked.
+Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
+This includes your own no-mistakes pipeline, long builds, and any other multi-minute command.
+Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 
