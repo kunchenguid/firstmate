@@ -1,0 +1,5 @@
+# Per-repo no-mistakes overrides.
+# Keep test evidence out of this repo; it stays in a temp dir instead.
+test:
+  evidence:
+    store_in_repo: false
