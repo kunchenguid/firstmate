@@ -31,9 +31,13 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 1. Never push to the default branch. Never merge a PR.
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status after every meaningful state change by appending one line:
+4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $FM_ROOT/state/$ID.status\`
    States: working, needs-decision, blocked, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on (setup done, bug reproduced, fix implemented, validation passed) and the
+   needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
+   firstmate reads your pane for that.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
