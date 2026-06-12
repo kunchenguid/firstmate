@@ -30,15 +30,17 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 This repo is a shared template, not the captain's personal project.
-The tracking principle: anything shared (AGENTS.md, bin/) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/) is not.
+The tracking principle: anything shared (AGENTS.md, bin/, agent skill files) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, bin/) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, bin/, agent skill files) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
+.agents/skills/      opencode-compatible shared skills, committed
+.claude/skills/      claude-compatible shared skills, committed
 bin/                 helper scripts, committed; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole

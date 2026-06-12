@@ -130,6 +130,8 @@ FM_BUSY_REGEX='esc to interrupt'   # busy-pane signatures, extend per harness
 
 ## Development
 
+Tracked changes to firstmate itself, including `AGENTS.md`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
+
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

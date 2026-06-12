@@ -1,0 +1,25 @@
+/Users/kunchen/.no-mistakes/worktrees/016d88035d58/01KTWY9ZYNCAPW2GY1V0BZA7W8
+A	.agents/skills/no-mistakes/SKILL.md
+A	.claude/skills/no-mistakes/SKILL.md
+M	AGENTS.md
+AGENTS.md:35:This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, bin/) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+.claude/skills/no-mistakes/SKILL.md:2:name: no-mistakes
+.claude/skills/no-mistakes/SKILL.md:4:user-invocable: true
+.agents/skills/no-mistakes/SKILL.md:2:name: no-mistakes
+.agents/skills/no-mistakes/SKILL.md:4:user-invocable: true
+  System
+  ✓ git             git version 2.53.0
+  ✓ gh              ok
+  ✓ data directory  /Users/kunchen/.no-mistakes
+  ✓ database        ok
+  ✓ daemon          running
+
+  Agents
+  ✓ claude          /Users/kunchen/.local/bin/claude
+  ✓ codex           /opt/homebrew/bin/codex
+  – rovodev         not found
+  ✓ opencode        /opt/homebrew/bin/opencode
+  ✓ pi              /Users/kunchen/.nvm/versions/node/v24.13.1/bin/pi
+c21d96b0fa1d212bbc22757f1dedd9e8b9adb7b65964f29a91a3a78f00a54963  .claude/skills/no-mistakes/SKILL.md
+c21d96b0fa1d212bbc22757f1dedd9e8b9adb7b65964f29a91a3a78f00a54963  .agents/skills/no-mistakes/SKILL.md
+skill files are byte-identical
