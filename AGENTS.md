@@ -284,7 +284,7 @@ bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
 On wake, in order of cheapness:
 
 1. Read the reason line.
-2. `signal:` read that status file first; it is ~30 tokens and usually sufficient.
+2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
 4. `check:` a per-task poll fired (usually a merge); act on it.
 5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then restart the watcher.

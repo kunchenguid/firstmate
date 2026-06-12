@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
 # Blocks until any managed crewmate needs attention, then exits printing one reason line:
-#   signal: <file>        a crewmate wrote a status line or a turn-end hook fired
+#   signal: <file>...     a crewmate wrote a status line or a turn-end hook fired; signals
+#                         landing within FM_SIGNAL_GRACE of each other coalesce into one wake
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
@@ -16,6 +17,9 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat wakes
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
+                                      # signals (a status write, then the same turn's
+                                      # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working..."
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
@@ -47,21 +51,46 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
-while :; do
-  # Layer 2 + 3 signals: status files and turn-end markers. Each file is
-  # compared against a persisted size:mtime signature (.seen-*) rather than
-  # mtime-vs-a-startup-touch, so signals that land while no watcher is running
-  # are caught by the next one, and same-second writes cannot slip through a
-  # strict -nt comparison.
+# Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
+# compared against a persisted size:mtime signature (.seen-*) rather than
+# mtime-vs-a-startup-touch, so signals that land while no watcher is running
+# are caught by the next one, and same-second writes cannot slip through a
+# strict -nt comparison. Pure read: prints one "<seen-file>\t<sig>\t<file>"
+# line per changed file; .seen-* is updated only when a wake is reported, so
+# a watcher killed mid-cycle never swallows a signal.
+scan_signals() {
+  local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
     sig=$(stat -f '%z:%Fm' "$f" 2>/dev/null || stat -c '%s:%Y' "$f" 2>/dev/null) || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
-      printf '%s' "$sig" > "$sf"
-      wake "signal: $f"
+      printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
     fi
   done
+  return 0
+}
+
+while :; do
+  # On the first changed signal, linger one grace period and re-scan before
+  # waking: a crewmate's final status write and the same turn's turn-end hook
+  # land seconds apart, and reporting them as separate wakes costs a full
+  # firstmate turn each. The re-scan also picks up a newer signature for an
+  # already-pending file (last write wins below).
+  pending=$(scan_signals)
+  if [ -n "$pending" ]; then
+    sleep "$SIGNAL_GRACE"
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    files=""
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      printf '%s' "$sig" > "$sf"
+      case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+    done <<EOF
+$pending
+EOF
+    wake "signal:$files"
+  fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
