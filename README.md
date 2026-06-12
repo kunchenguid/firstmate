@@ -135,6 +135,7 @@ FM_BUSY_REGEX='esc to interrupt'   # busy-pane signatures, extend per harness
 ## Development
 
 Tracked changes to firstmate itself, including `AGENTS.md`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
+Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt

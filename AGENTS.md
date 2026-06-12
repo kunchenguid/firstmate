@@ -39,8 +39,8 @@ Never add an agent name as co-author.
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
-.agents/skills/      opencode-compatible shared skills, committed
-.claude/skills/      claude-compatible shared skills, committed
+.agents/skills/      shared skills, committed
+.claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -54,6 +54,7 @@ state/               volatile runtime signals; gitignored
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
+.no-mistakes/        local validation state and evidence; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
