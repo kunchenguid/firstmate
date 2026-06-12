@@ -10,7 +10,7 @@ set -u
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 detect_own() {
-  # Layer 1: environment markers (claude VERIFIED; pi source-verified).
+  # Layer 1: environment markers for verified harnesses.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
   # Layer 2: walk the parent chain and match the command name.

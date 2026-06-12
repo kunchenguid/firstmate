@@ -32,7 +32,7 @@ You talk to a single agent - the first mate - and it runs the crew for you: spaw
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
 - **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs are ready.
-- **A visible crew** — every crewmate lives in a tmux window in your session. Watch any of them work, or type into their window to intervene; the first mate reconciles.
+- **A visible crew** — every crewmate lives in a tmux window. Watch any of them work, or type into their window to intervene; the first mate reconciles.
 - **Guarded by construction** — the first mate is read-only over your projects; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees and ship through the [no-mistakes](https://github.com/kunchenguid/no-mistakes) validation pipeline. Nothing lands without a PR you merge.
 
 This is not an agent harness. This is not a skill. This is not a CLI.

@@ -4,7 +4,7 @@
 #   signal: <file>        a crewmate wrote a status line or a turn-end hook fired
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
-#   heartbeat              nothing happened for FM_HEARTBEAT seconds; review the fleet
+#   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
 # Run as a background task. Restart it after handling each wake.
 set -u
 
