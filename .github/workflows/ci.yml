@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: shellcheck bin/*.sh
+
+  invariants:
+    name: Repo invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Symlinks must stay intact
+        run: |
+          set -eu
+          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        run: |
+          set -eu
+          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          if [ -n "$tracked" ]; then
+            echo "::error::Personal fleet paths are tracked in git:"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
