@@ -149,10 +149,14 @@ FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, exte
 
 ## Development
 
-Tracked changes to firstmate itself, including `AGENTS.md`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
+Tracked changes to firstmate itself, including `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.github/workflows/`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
+Human-authored pull requests targeting `main` must be raised through `git push no-mistakes`; see `CONTRIBUTING.md` for the enforced contributor workflow.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
+shellcheck bin/*.sh                       # lint the toolbelt; CI enforces this
+[ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
+[ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")
 ```

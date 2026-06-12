@@ -30,15 +30,18 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 This repo is a shared template, not the captain's personal project.
-The tracking principle: anything shared (AGENTS.md, bin/, agent skill files) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/) is not.
+The tracking principle: anything shared (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, bin/, agent skill files) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
+CONTRIBUTING.md      contributor workflow and repo conventions
+README.md            public overview and development notes
+.github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
