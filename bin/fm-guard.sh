@@ -13,7 +13,13 @@ FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE="$FM_ROOT/state"
 GRACE=${FM_GUARD_GRACE:-300}
 
-ls "$STATE"/*.meta >/dev/null 2>&1 || exit 0
+has_meta=false
+for meta in "$STATE"/*.meta; do
+  [ -e "$meta" ] || continue
+  has_meta=true
+  break
+done
+"$has_meta" || exit 0
 
 BEAT="$STATE/.last-watcher-beat"
 if [ -e "$BEAT" ]; then
