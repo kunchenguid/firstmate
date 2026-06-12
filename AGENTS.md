@@ -32,6 +32,7 @@ You may freely write to this repo itself (backlog, briefs, state, even this file
 This repo is a shared template, not the captain's personal project.
 The tracking principle: anything shared (AGENTS.md, bin/) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
+This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, bin/) through the pipeline yourself - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
