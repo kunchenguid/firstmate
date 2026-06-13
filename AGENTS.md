@@ -274,7 +274,7 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 For ship tasks, when the pipeline reaches CI-green, the crewmate reports `done: PR <url> checks green`.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and the risk level no-mistakes emitted.
-(The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise.)
+(The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
 If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval.
 
@@ -325,6 +325,7 @@ On wake, in order of cheapness:
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
+Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
 tmux is the ground truth.

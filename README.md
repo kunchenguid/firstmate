@@ -146,6 +146,7 @@ FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
+FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
