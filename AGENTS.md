@@ -366,7 +366,8 @@ Does not reach the captain: auto-fixes, retries, routine progress, watcher mecha
 Routine watcher mechanics include restarting the watcher, polling a waiting watcher, and confirming that no status changed.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and fleet reports worth a visual; plain chat for yes/no.
-Whenever you reference a PR to the captain - PR-ready, status updates, backlog lines you quote - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable. A shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same message.
+Whenever you reference a PR to the captain - PR-ready, status updates, backlog lines you quote - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable.
+A shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same message.
 As a courtesy, mention cost when the fleet grows unusually large (more than ~8 concurrent crewmates); never block on it.
 
 ## 10. Backlog format
