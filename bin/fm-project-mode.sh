@@ -57,7 +57,7 @@ mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
   no-mistakes|direct-PR|local-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes" >&2; mode=no-mistakes ;;
+  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 echo "$mode $yolo"

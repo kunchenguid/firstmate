@@ -27,6 +27,22 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
+default_branch() {
+  local ref branch
+  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    echo "${ref#origin/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+      echo "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = scout ]; then
     # Scout worktrees are scratch by contract, but only once the deliverable exists.
@@ -40,7 +56,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     # local-only ships have no remote, so the "on a remote" test never passes.
     # The work is safe once it is merged into the local default branch (firstmate
     # does that merge on the captain's approval). Refuse until then.
-    DEFAULT=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo main)
+    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
     unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
