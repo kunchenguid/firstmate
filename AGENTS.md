@@ -21,9 +21,10 @@ Hard rules, in priority order:
    Two sanctioned exceptions: tool-driven project initialization (section 6), and the approved local merge for a `local-only` project, which firstmate performs with `bin/fm-merge-local.sh` once the captain approves (section 7).
 2. **Never merge a PR without the captain's explicit word.**
    The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
-3. **Never tear down a worktree that holds work not on a remote.**
+3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
-   The one carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
+   For PR-based ship tasks, the work must be on a remote; for `local-only` ship tasks, it must be merged into the local default branch.
+   The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
    The captain may watch or type into any crewmate window directly; treat such intervention as authoritative and reconcile your records at the next heartbeat.
@@ -196,11 +197,12 @@ Add the line when you clone or create a project, keep the description current as
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
-**Clone existing:** `git clone <url> projects/<name>`, then initialize.
+**Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
 
 **Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.
-Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, and visibility (default private), and create with `gh-axi` only after the captain confirms.
-Then clone it into `projects/<name>` and initialize.
+Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, visibility (default private), and delivery mode, and create with `gh-axi` only after the captain confirms.
+Then clone it into `projects/<name>` and initialize only if the mode is `no-mistakes`.
+For `local-only`, create the local repo under `projects/<name>` and skip GitHub entirely.
 
 **Initialize (`no-mistakes` mode only):**
 
@@ -233,7 +235,7 @@ Use these signals in order:
 
 Then classify the shape:
 
-- **Ship** (the default): the deliverable is a change to the project. It ends in a PR through the no-mistakes pipeline.
+- **Ship** (the default): the deliverable is a change to the project. It ships through the project's delivery mode: `no-mistakes`, `direct-PR`, or `local-only`.
 - **Scout:** the deliverable is knowledge - an investigation, a plan, a bug reproduction, an audit. It ends in a report at `data/<id>/report.md`, never a PR. When the captain asks "what's wrong", "how would we", or "find out why" about a project, that is a scout task; dispatch it instead of doing the digging yourself.
 
 Then classify readiness:
@@ -242,7 +244,7 @@ Then classify readiness:
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain why it is queued. Scout tasks are read-mostly and almost never block on anything.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
-The no-mistakes rebase step absorbs mild overlaps.
+For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
 
 Write the brief per section 11.
 
@@ -286,17 +288,17 @@ bin/fm-send.sh fm-<id> '/no-mistakes'
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
 It fixes auto-fix findings on its own.
-When it reports `needs-decision` (ask-user findings), relay the findings to the captain, get the decision, and send it back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
+When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 ### PR ready
 
-For ship tasks, when the pipeline reaches CI-green, the crewmate reports `done: PR <url> checks green`.
+For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
-Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and the risk level no-mistakes emitted.
+Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
-If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval.
+If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval. If `yolo=on`, merge a green/approved PR yourself and post the required FYI.
 
 ### Ship teardown (only after merge is confirmed)
 
@@ -306,7 +308,7 @@ bin/fm-teardown.sh <id>
 
 The script refuses if the worktree holds unpushed work; treat a refusal as a stop-and-investigate, not an obstacle.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL and date), re-evaluate the queue, and dispatch anything that was blocked on this task.
+Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL or local merge note and date), re-evaluate the queue, and dispatch anything that was blocked on this task.
 
 ### Scout tasks (report instead of PR)
 
@@ -317,10 +319,10 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
 - Record it in Done with the report path instead of a PR link.
 
-**Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full unpushed-work protection), then send the crewmate its ship instructions - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, report `done`, then `/no-mistakes` per the Validate stage.
+**Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full protection), then send the crewmate its ship instructions - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, and report `done` according to the project's delivery mode.
 The crewmate keeps its worktree, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
 The repro becomes the regression test.
-From there the task is an ordinary ship task through PR ready and Teardown.
+From there the task is an ordinary ship task through its mode-specific validation, PR or local merge, and Teardown.
 
 ## 8. Supervision protocol
 
@@ -379,7 +381,7 @@ Reaches the captain immediately:
 
 - PR ready for review.
 - A finished scout report (relay the findings, not just "it's done").
-- ask-user findings from no-mistakes (relay them verbatim; never approve in the captain's place).
+- ask-user findings from no-mistakes (relay them verbatim unless `yolo=on` permits routine approval on firstmate judgment).
 - A crewmate failed after the playbook is exhausted.
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
@@ -406,13 +408,14 @@ Update it on every dispatch, completion, and decision.
 
 ## Done
 - [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)
+- [x] <id> - <one line> - local main (merged <date>)
 - [x] <id> - <one line> - data/<id>/report.md (reported <date>)
 ```
 
 Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker is gone gets dispatched.
 
 Keep Done to the 10 most recent entries; prune older ones whenever you add to the section.
-Every finished ship task lives on as its GitHub PR and every scout task as its report file, so pruning loses nothing; the retained tail exists only as cheap recent context for recovery and heartbeats.
+Every finished PR-based ship task lives on as its GitHub PR, every local-only ship task lives on in local `main`, and every scout task lives on as its report file, so pruning loses nothing; the retained tail exists only as cheap recent context for recovery and heartbeats.
 
 ## 11. Crewmate briefs
 

@@ -64,7 +64,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 Write your findings to \`$FM_ROOT/data/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
-If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive ship instructions (branch, implement, /no-mistakes) as a follow-up message.
+If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0

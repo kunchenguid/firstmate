@@ -28,12 +28,12 @@ You can run one coding agent well.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs or standalone investigation reports.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
-- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs or scout reports are ready.
+- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs, local merges, or scout reports are ready.
 - **A visible crew** — every crewmate lives in a tmux window. Watch any of them work, or type into their window to intervene; the first mate reconciles.
-- **Guarded by construction** — the first mate is read-only over your projects; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees. Ship tasks go through the [no-mistakes](https://github.com/kunchenguid/no-mistakes) validation pipeline, and scout tasks produce local reports without pushing anything.
+- **Guarded by construction** — the first mate is read-only over your projects except for approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees. Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
 This is not an agent harness. This is not a skill. This is not a CLI.
 
@@ -90,7 +90,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
                   ▼
  ┌─────────────────────────────────────┐
  │ firstmate            (this repo)    │
- │ reads projects/, never writes them  │
+ │ reads projects/; writes only gated  │
  │ backlog.md ── briefs ── watcher     │
  └──┬──────────────┬───────────────┬───┘
     │ tmux send-keys / status files │
@@ -102,7 +102,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
      ▼            ▼               ▼
   treehouse worktree (clean, disposable, parallel-safe)
      │
-     ├─ ship: /no-mistakes ► PR for the captain ► merge ► teardown
+     ├─ ship: project mode ► PR/local merge ► teardown
      │
      └─ scout: report at data/<id>/report.md ► relay findings ► teardown
 ```
@@ -111,8 +111,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
   A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running.
 - **Worktrees, not branches in your checkout** — crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
-- **Two task shapes** — ship tasks change projects and end in a validated PR; scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
-- **Validation is non-negotiable for shipping** — every project gets `no-mistakes init`; every ship task ends with its pipeline. Human-judgment findings escalate to you through the first mate.
+- **Two task shapes** — ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+- **Project modes are explicit** — `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag. `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 - **Restart-proof** — all state lives in tmux, status files, and local markdown under `data/`. Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
@@ -125,6 +125,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`     | Scaffold a ship brief, or a report-only scout brief with `--scout`                          |
 | `fm-guard.sh`     | Warn when tasks are in flight but the watcher liveness beacon is stale or missing           |
 | `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
+| `fm-project-mode.sh` | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`               |
+| `fm-merge-local.sh` | Fast-forward a `local-only` project's local default branch after approval                  |
 | `fm-watch.sh`     | Block until supervision work is due; exits with one reason line                             |
 | `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window                              |
 | `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                                     |
