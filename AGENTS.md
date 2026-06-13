@@ -156,6 +156,7 @@ pi has no permission system - crewmates are always autonomous.
 Keep the brief as ONE positional argument - multiple positional args become separate queued messages (fm-spawn's template does this correctly).
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory (observed even on clean worktrees); accept with Enter - the decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
 fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse (and pollute the project).
+The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
 
 ## 5. Recovery (run at every session start, after bootstrap)
