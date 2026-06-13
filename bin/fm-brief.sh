@@ -91,7 +91,7 @@ EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1='1. Never push to any remote and never open a PR. Work only on your `fm/'"$ID"'` branch; firstmate handles the merge into local `main`.'
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
@@ -103,8 +103,8 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    SETUP2='
-2. Run `no-mistakes doctor`; if it reports the repo is not initialized here, run `no-mistakes init`.'
+    SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
