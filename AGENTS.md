@@ -285,7 +285,7 @@ bin/fm-teardown.sh <id>
 
 The script refuses if the worktree holds unpushed work; treat a refusal as a stop-and-investigate, not an obstacle.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-Then move the task to Done in `data/backlog.md` (with PR link and date), re-evaluate the queue, and dispatch anything that was blocked on this task.
+Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL and date), re-evaluate the queue, and dispatch anything that was blocked on this task.
 
 ### Scout tasks (report instead of PR)
 
@@ -382,7 +382,7 @@ Update it on every dispatch, completion, and decision.
 - [ ] <id> - <one line> (repo: <name>) blocked-by: <id> - <reason>
 
 ## Done
-- [x] <id> - <one line> - <PR url> (merged <date>)
+- [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)
 - [x] <id> - <one line> - data/<id>/report.md (reported <date>)
 ```
 
