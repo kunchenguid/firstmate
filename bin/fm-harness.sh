@@ -41,7 +41,8 @@ detect_own() {
 }
 
 if [ "${1:-}" = "crew" ]; then
-  crew=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-harness" 2>/dev/null || true)
+  crew=
+  [ -f "$FM_ROOT/config/crew-harness" ] && crew=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-harness" || true)
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
 else
   detect_own
