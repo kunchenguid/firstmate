@@ -135,9 +135,12 @@ EOF
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
     cat > "$FM_ROOT/state/$ID.pi-ext.ts" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
+// Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
+// (fires once, only when the whole run exits): the watcher needs a signal at
+// every turn boundary so an idle crewmate is surfaced, not just at shutdown.
 import { execFile } from "node:child_process";
 export default function (pi: any) {
-  pi.on("agent_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
     ;;
