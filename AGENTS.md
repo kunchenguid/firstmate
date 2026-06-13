@@ -272,7 +272,7 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 
 For ship tasks, when the pipeline reaches CI-green, the crewmate reports `done: PR <url> checks green`.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
-Tell the captain: PR link, one-paragraph summary, and the risk level no-mistakes emitted.
+Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and the risk level no-mistakes emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise.)
 
 If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval.
@@ -366,6 +366,7 @@ Does not reach the captain: auto-fixes, retries, routine progress, watcher mecha
 Routine watcher mechanics include restarting the watcher, polling a waiting watcher, and confirming that no status changed.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and fleet reports worth a visual; plain chat for yes/no.
+Whenever you reference a PR to the captain - PR-ready, status updates, backlog lines you quote - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable. A shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same message.
 As a courtesy, mention cost when the fleet grows unusually large (more than ~8 concurrent crewmates); never block on it.
 
 ## 10. Backlog format
