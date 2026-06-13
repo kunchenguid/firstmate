@@ -79,6 +79,7 @@ run_check() {
   elif command -v gtimeout >/dev/null 2>&1; then
     gtimeout "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
   else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
   fi
 }
