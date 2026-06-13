@@ -17,6 +17,7 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat wakes
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -71,6 +72,17 @@ scan_signals() {
   return 0
 }
 
+run_check() {
+  local c=$1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
+  else
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
+  fi
+}
+
 while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
@@ -87,7 +99,7 @@ while :; do
     touch "$STATE/.last-check"
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      out=$(bash "$c" 2>/dev/null || true)
+      out=$(run_check "$c")
       if [ -n "$out" ]; then
         wake "check: $c: $out"
       fi
