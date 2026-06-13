@@ -24,6 +24,8 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
+MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+[ -n "$MODE" ] || MODE=no-mistakes
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = scout ]; then
@@ -32,6 +34,20 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     if [ ! -f "$REPORT" ]; then
       echo "REFUSED: scout task $ID has no report at $REPORT." >&2
       echo "The report is the work product. Have the crewmate write it (or get the captain's explicit OK to discard, then --force)." >&2
+      exit 1
+    fi
+  elif [ "$MODE" = local-only ]; then
+    # local-only ships have no remote, so the "on a remote" test never passes.
+    # The work is safe once it is merged into the local default branch (firstmate
+    # does that merge on the captain's approval). Refuse until then.
+    DEFAULT=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo main)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT." >&2
+      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or get the captain's explicit OK to discard, then --force." >&2
       exit 1
     fi
   else

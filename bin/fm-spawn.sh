@@ -14,7 +14,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# mode/yolo are resolved per-project from data/projects.md via fm-project-mode.sh.
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -149,6 +150,15 @@ EOF
     ;;
 esac
 
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
+# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
+# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
+# merge, so scout teardown ignores mode.
+PROJ_NAME=$(basename "$PROJ_ABS")
+read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+
 mkdir -p "$FM_ROOT/state"
 {
   echo "window=$T"
@@ -156,6 +166,8 @@ mkdir -p "$FM_ROOT/state"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  echo "mode=$MODE"
+  echo "yolo=$YOLO"
 } > "$FM_ROOT/state/$ID.meta"
 
 LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
@@ -165,4 +177,4 @@ tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND window=$T worktree=$WT"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

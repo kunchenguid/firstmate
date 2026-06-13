@@ -18,8 +18,9 @@ Hard rules, in priority order:
 1. **Never write to a project.**
    You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
    You read projects to understand them; crewmates change them.
-   The single exception is tool-driven project initialization (section 6).
+   Two sanctioned exceptions: tool-driven project initialization (section 6), and the approved local merge for a `local-only` project, which firstmate performs with `bin/fm-merge-local.sh` once the captain approves (section 7).
 2. **Never merge a PR without the captain's explicit word.**
+   The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
 3. **Never tear down a worktree that holds work not on a remote.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
    The one carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
@@ -53,14 +54,14 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
-  projects.md        fleet registry: one line per project under projects/ with a short description
+  projects.md        fleet registry: one line per project under projects/ with a short description and its delivery mode - "- <name> [<mode>] - <desc>", optional "+yolo" (e.g. "[direct-PR +yolo]"); no "[...]" = no-mistakes. fm-project-mode.sh parses it (section 6)
   <id>/brief.md      per-task crewmate brief
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
@@ -182,18 +183,26 @@ All projects live flat under `projects/`.
 Every project in the fleet has a line in `data/projects.md`:
 
 ```markdown
-- <name> - <one-line description> (added <date>)
+- <name> [<mode>] - <one-line description> (added <date>)
 ```
 
 Add the line when you clone or create a project, keep the description current as your understanding deepens, and drop the line if a project is ever removed from `projects/`.
 
+**Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
+
+- `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
+- `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
+- `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
+
+Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
+
 **Clone existing:** `git clone <url> projects/<name>`, then initialize.
 
-**Create new:** a new project needs a GitHub repo first (no-mistakes requires an `origin` remote).
-Creating one is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, and visibility (default private), and create with `gh-axi` only after the captain confirms.
+**Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.
+Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, and visibility (default private), and create with `gh-axi` only after the captain confirms.
 Then clone it into `projects/<name>` and initialize.
 
-**Initialize (mandatory for every project, no exceptions):**
+**Initialize (`no-mistakes` mode only):**
 
 ```sh
 cd projects/<name> && no-mistakes init && no-mistakes doctor
@@ -201,8 +210,9 @@ cd projects/<name> && no-mistakes init && no-mistakes doctor
 
 `no-mistakes init` writes skill files into the project (`.claude/skills/`, `.agents/skills/`).
 Crewmates spawn from committed state, so these files must be committed and pushed before the first task.
-This is the single exception to the never-write rule: you may commit and push the tool-generated init files yourself, on a `chore/no-mistakes-init` branch with a PR, or directly to the default branch if the captain okays it.
+This is one of the two sanctioned exceptions to the never-write rule (section 1): you may commit and push the tool-generated init files yourself, on a `chore/no-mistakes-init` branch with a PR, or directly to the default branch if the captain okays it.
 Touch nothing else in the project.
+`direct-PR` and `local-only` projects skip init entirely - they do not run the pipeline.
 
 If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) before dispatching work to that project.
 
@@ -244,7 +254,7 @@ bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 ```
 
-The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, and records `harness=` and `kind=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
+The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`), and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 
 The script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 Worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
@@ -256,9 +266,19 @@ Add the task to `data/backlog.md` under In flight.
 Covered by section 8.
 Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
 
+### Delivery modes and yolo
+
+A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
+
+- **no-mistakes** - the stages below as written: `/no-mistakes` pipeline -> PR -> captain merge.
+- **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate `/no-mistakes` step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
+- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff (`git -C <worktree> diff <default-branch>...fm/<id>`), relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`.
+
+**yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any yolo merge, post a one-line "yolo merged <full PR URL or local main>" FYI so the captain keeps a trail.
+
 ### Validate
 
-For ship tasks, when a crewmate's status says `done`:
+For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`:
 
 ```sh
 bin/fm-send.sh fm-<id> '/no-mistakes'
@@ -396,8 +416,9 @@ Every finished ship task lives on as its GitHub PR and every scout task as its r
 
 ## 11. Crewmate briefs
 
-Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, never-push-to-default rules, the no-mistakes definition of done) and all paths filled in.
-For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch.
+Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
+For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the `/no-mistakes` pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally. The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
+For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 Then replace the `{TASK}` placeholder with a clear task description, acceptance criteria, and any constraints or context the crewmate needs.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.

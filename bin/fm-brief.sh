@@ -7,6 +7,13 @@
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+# For ship tasks, the definition of done is shaped by the project's delivery mode
+# (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
+#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
+#                firstmate reviews, captain approves, firstmate merges to local main
+# Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -59,7 +66,58 @@ The report must stand alone: what you did, what you found, the evidence (command
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive ship instructions (branch, implement, /no-mistakes) as a follow-up message.
 EOF
-else
+echo "scaffolded: $BRIEF (scout; replace {TASK})"
+exit 0
+fi
+
+# Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
+# yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
+read -r MODE _ <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
+EOF
+
+case "$MODE" in
+  direct-PR)
+    SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+EOF
+)
+    ;;
+  local-only)
+    SETUP2=""
+    RULE1='1. Never push to any remote and never open a PR. Work only on your `fm/'"$ID"'` branch; firstmate handles the merge into local `main`.'
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+EOF
+)
+    ;;
+  *)  # no-mistakes (default)
+    SETUP2='
+2. Run `no-mistakes doctor`; if it reports the repo is not initialized here, run `no-mistakes init`.'
+    RULE1='1. Never push to the default branch. Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
+After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+)
+    ;;
+esac
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -68,11 +126,10 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
-1. First action: create your branch: \`git checkout -b fm/$ID\`
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
-1. Never push to the default branch. Never merge a PR.
+$RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
@@ -86,12 +143,6 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
-# Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
-After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+$DOD
 EOF
-fi
-echo "scaffolded: $BRIEF ($KIND; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
