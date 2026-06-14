@@ -40,6 +40,7 @@ fleet_sync() {
 
   while IFS= read -r line; do
     case "$line" in
+      *': skipped: local-only project') ;;
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
     esac
