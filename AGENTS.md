@@ -171,7 +171,8 @@ Reconcile reality with your records before doing anything else:
 2. Read `data/backlog.md`, every `state/*.meta`, and every `state/*.status`.
 3. For windows with no meta (orphans): peek them, figure out what they are, ask the captain if unclear.
 4. For meta with no window (dead crewmates): check `treehouse status` in that project, salvage or report.
-5. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable). If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
+5. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
+   If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 6. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
 7. Restart the watcher (section 8).
