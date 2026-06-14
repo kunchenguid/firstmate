@@ -132,6 +132,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
 | `fm-project-mode.sh` | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`               |
 | `fm-merge-local.sh` | Fast-forward a `local-only` project's local default branch after approval                  |
+| `fm-review-diff.sh` | Review a crewmate branch against the authoritative base, with optional `--stat` output    |
 | `fm-watch.sh`     | Block until supervision work is due; exits with one reason line                             |
 | `fm-send.sh`      | Send one literal line (or `--key Escape`) to a crewmate window                              |
 | `fm-peek.sh`      | Print a bounded tail of a crewmate pane                                                     |
