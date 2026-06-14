@@ -15,27 +15,28 @@ fleet_sync() {
   [ -d "$FM_ROOT/projects" ] || return 0
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
-  done_file="$tmp.done"
-  (
-    "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null || true
-    : > "$done_file"
-  ) &
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
   pid=$!
 
   timeout=${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-20}
   case "$timeout" in ''|*[!0-9]*) timeout=20 ;; esac
   start=$SECONDS
-  while [ ! -e "$done_file" ]; do
+  while jobs -r -p | grep -qx "$pid"; do
     if [ $((SECONDS - start)) -ge "$timeout" ]; then
-      kill "$pid" 2>/dev/null || true
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
+      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
       echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out"
-      rm -f "$tmp" "$done_file"
+      rm -f "$tmp"
       return 0
     fi
     sleep 1
   done
   wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
 
   while IFS= read -r line; do
     case "$line" in
@@ -43,7 +44,7 @@ fleet_sync() {
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
-  rm -f "$tmp" "$done_file"
+  rm -f "$tmp"
 }
 
 install_cmd() {
