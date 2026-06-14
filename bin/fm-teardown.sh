@@ -98,4 +98,7 @@ fi
 
 tmux kill-window -t "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
+if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
+  "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
+fi
 echo "teardown $ID complete (window $T, worktree $WT)"
