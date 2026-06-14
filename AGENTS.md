@@ -57,6 +57,7 @@ bin/                 helper scripts, committed, including fm-fleet-sync.sh for c
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
+  captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
   projects.md        fleet registry: one line per project under projects/ with a short description and its delivery mode - "- <name> [<mode>] - <desc>", optional "+yolo" (e.g. "[direct-PR +yolo]"); no "[...]" = no-mistakes. fm-project-mode.sh parses it (section 6)
   <id>/brief.md      per-task crewmate brief
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
@@ -93,6 +94,9 @@ Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` second
 
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
+Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
+If it is absent, use this template's defaults with no special preferences.
+Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
 Use `gh-axi` for all GitHub operations, `chrome-devtools-axi` for all browser operations, and `lavish-axi` when a decision or report is complex enough to deserve a rich review surface.
