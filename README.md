@@ -31,7 +31,7 @@ firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
-- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports when PRs, local merges, or scout reports are ready.
+- **One liaison** — you never talk to a worker agent. The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
 - **A visible crew** — every crewmate lives in a tmux window. Watch any of them work, or type into their window to intervene; the first mate reconciles.
 - **Guarded by construction** — the first mate is read-only over your projects except for approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees. Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
