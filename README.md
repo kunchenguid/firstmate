@@ -93,7 +93,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
                   ▼
  ┌─────────────────────────────────────┐
  │ firstmate            (this repo)    │
- │ reads projects/; writes only gated  │
+ │ reads projects/; writes guarded     │
  │ backlog.md ── briefs ── watcher     │
  └──┬──────────────┬───────────────┬───┘
     │ tmux send-keys / status files │
@@ -117,6 +117,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
   `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+- **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work.
 - **Restart-proof** - all state lives in tmux, status files, and local markdown under `data/`.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
@@ -158,6 +159,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
 ```
 

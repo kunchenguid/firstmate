@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Refresh project clones by fast-forwarding their checked-out local default branch
 # to origin/<default> when it is safe to do so.
+# Skips local-only/no-origin projects, dirty clones, non-default checkouts,
+# diverged branches, and fetch/fast-forward failures without forcing or stashing.
 # Usage: fm-fleet-sync.sh [<project-dir>]
 set -eu
 
