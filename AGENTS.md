@@ -277,7 +277,10 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 - **no-mistakes** - the stages below as written: `/no-mistakes` pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate `/no-mistakes` step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
-- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff (`git -C <worktree> diff <default-branch>...fm/<id>`), relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`.
+- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`.
+
+When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
+Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
@@ -358,7 +361,7 @@ tmux is the ground truth.
 **Watcher liveness is guarded, not just disciplined.**
 Restarting the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
-The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
+The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
 So the next time you touch the fleet with no watcher alive, the tool output itself tells you to restart it - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and its restart) silent.
 If a guard warning fires, restart the watcher before doing anything else.
