@@ -20,6 +20,7 @@ fi
 project_label() {
   case "$PROJ" in
     "$FM_ROOT"/projects/*) basename "$PROJ" ;;
+    projects/*) basename "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
   esac
 }
@@ -54,6 +55,12 @@ sync_project() {
   fi
   if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
+    return 0
+  fi
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  mode=${mode_line%% *}
+  if [ "$mode" = "local-only" ]; then
+    echo "$label: skipped: local-only project"
     return 0
   fi
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
