@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, kill the tmux window,
-# clear volatile state, then refresh the project's clone for PR-based ship tasks.
+# clear volatile state, then refresh/prune the project's clone for PR-based ship tasks.
 # REFUSES if the worktree holds work not on any remote, because treehouse return
 # hard-resets the worktree and kills its processes.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
