@@ -19,8 +19,8 @@ Hard rules, in priority order:
 1. **Never write to a project.**
    You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
    You read projects to understand them; crewmates change them.
-   Three sanctioned exceptions: tool-driven project initialization (section 6), clean fast-forwarding a clone's local default branch to match `origin` via `bin/fm-fleet-sync.sh`, and the approved local merge for a `local-only` project, which firstmate performs with `bin/fm-merge-local.sh` once the captain approves (section 7).
-   The fleet sync exception advances only the checked-out local default branch and never forces, creates merge commits, stashes, or changes treehouse worktrees.
+   Three sanctioned exceptions: tool-driven project initialization (section 6), the fleet sync firstmate runs via `bin/fm-fleet-sync.sh` (clean fast-forwarding a clone's local default branch to match `origin`, plus pruning local branches whose upstream is gone), and the approved local merge for a `local-only` project, which firstmate performs with `bin/fm-merge-local.sh` once the captain approves (section 7).
+   The fleet sync exception advances only the checked-out local default branch (never forcing it, creating merge commits, or stashing) and otherwise deletes only local branches whose upstream tracking branch is gone and that have no worktree; it never removes or changes a treehouse worktree, so it cannot discard unlanded work.
 2. **Never merge a PR without the captain's explicit word.**
    The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
 3. **Never tear down a worktree that holds unlanded work.**
@@ -53,7 +53,7 @@ README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
-bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes; read each script's header before first use
+bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -81,7 +81,7 @@ Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
-Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone and clean-fast-forwards its local default branch when safe, best-effort and non-fatal.
+Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
@@ -323,7 +323,7 @@ bin/fm-teardown.sh <id>
 
 The script refuses if the worktree holds unpushed work; treat a refusal as a stop-and-investigate, not an obstacle.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge immediately.
+After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
 Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL or local merge note and date), re-evaluate the queue, and dispatch anything that was blocked on this task.
 
 ### Scout tasks (report instead of PR)

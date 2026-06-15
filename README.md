@@ -35,7 +35,7 @@ There is no app to install; the whole orchestrator is an `AGENTS.md` file that a
   The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
 - **A visible crew** - every crewmate lives in a tmux window.
   Watch any of them work, or type into their window to intervene; the first mate reconciles.
-- **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
+- **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, pruning local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
   Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
 This is not an agent harness. This is not a skill. This is not a CLI.
@@ -117,7 +117,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
   `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-- **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work.
+- **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
 - **Restart-proof** - all state lives in tmux, status files, and local markdown under `data/`.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
@@ -128,7 +128,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | Script            | Description                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh` | Detect missing toolchain pieces; refresh clones best-effort; install tools only after consent |
-| `fm-fleet-sync.sh` | Fetch clones and clean-fast-forward their checked-out local default branches when safe       |
+| `fm-fleet-sync.sh` | Fetch clones, clean-fast-forward their checked-out default branches, and prune branches whose remote is gone |
 | `fm-brief.sh`     | Scaffold a ship brief, or a report-only scout brief with `--scout`                          |
 | `fm-guard.sh`     | Warn when tasks are in flight but the watcher liveness beacon is stale or missing           |
 | `fm-spawn.sh`     | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind   |
