@@ -5,8 +5,8 @@
 # worktree still needs.
 # Skips local-only/no-origin projects, dirty clones, non-default checkouts,
 # diverged branches, and fetch/fast-forward failures without forcing or stashing.
-# Pruning never deletes the checked-out branch, a branch with a live worktree,
-# or a branch not merged into origin/<default>; set FM_FLEET_PRUNE=0 to disable it.
+# Pruning never deletes the checked-out branch or a branch that still has a
+# worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # Usage: fm-fleet-sync.sh [<project-dir>]
 set -eu
 
@@ -55,9 +55,13 @@ prune_gone_branches() {
   # Delete local branches whose upstream tracking branch is gone - the remote
   # branch was deleted, which in this fleet means its PR merged - as long as
   # nothing still needs them. Never the checked-out branch, and never a branch
-  # that still has a worktree (a live or not-yet-torn-down task). The branch
-  # must also be merged into origin/<default>. Set FM_FLEET_PRUNE=0 to skip
-  # pruning entirely.
+  # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
+  # "no worktree" already proves the work landed: teardown removes a branch's
+  # worktree only after confirming the work reached the remote. We deliberately
+  # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
+  # this fleet are squash-merged, so a merged branch is never an ancestor and
+  # such a check would prune nothing. The no-worktree guard is the real safety
+  # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
   [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
 
   local worktree_branches current refline branch track
@@ -72,9 +76,6 @@ prune_gone_branches() {
     [ -n "$branch" ] || continue
     [ "$branch" != "$current" ] || continue
     if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
-      continue
-    fi
-    if ! git -C "$PROJ" merge-base --is-ancestor "$branch" "$BASE"; then
       continue
     fi
     if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
@@ -116,6 +117,8 @@ sync_project() {
     return 0
   fi
 
+  prune_gone_branches || true
+
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -125,8 +128,6 @@ sync_project() {
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
-
-  prune_gone_branches || true
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   if [ "$cur" != "$DEFAULT" ]; then
