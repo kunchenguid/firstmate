@@ -134,6 +134,7 @@ When you verify a new adapter, record its env marker and command name in that sc
 | Busy-pane signature | `esc to interrupt` |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
 First launch in a fresh worktree (or first ever on a machine) may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within ~20s; if such a dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter` (or the choice the dialog requires) and verify the brief started processing.
@@ -145,6 +146,7 @@ After every spawn, peek the pane within ~20s; if such a dialog is showing, accep
 | Busy-pane signature | `esc to interrupt` (shown as `• Working (Xs • esc to interrupt)`) |
 | Exit command | `/quit` (slash popup needs ~1s between text and Enter; fm-send handles it) |
 | Interrupt | single Escape |
+| Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
 
 Directory trust dialog on first run per repo root ("Do you trust the contents of this directory?") - accept with Enter; the decision persists for the repo, so later worktrees of the same project skip it.
 Resume after exit: `codex resume <session-id>` (printed on quit).
@@ -328,7 +330,9 @@ Pooled clones keep their local default refs frozen at clone time and can lag `or
 
 ### Validate
 
-For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`:
+For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
+Use `/no-mistakes` for claude, `$no-mistakes` for codex; natural language also works.
+For example, with claude:
 
 ```sh
 bin/fm-send.sh fm-<id> '/no-mistakes'
