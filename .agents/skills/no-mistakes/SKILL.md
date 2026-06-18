@@ -1,6 +1,6 @@
 ---
 name: no-mistakes
-description: Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR, and CI - before they reach upstream. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
+description: Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR, and CI - before they reach upstream. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes the no-mistakes skill.
 user-invocable: true
 metadata:
   internal: true
@@ -13,21 +13,21 @@ metadata:
 upstream. You drive it through the `no-mistakes axi` command family, which prints
 machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
 
-When the user invokes `/no-mistakes`, report the outcome at the end. If the user
+When the user invokes the no-mistakes skill, report the outcome at the end. If the user
 asks for something specific, translate that request into the matching `axi run`
 flags yourself - for example, "skip the lint step" becomes `--skip=lint`. Run
 `no-mistakes axi run --help` to see the available flags.
 
 ## Two ways to invoke
 
-`/no-mistakes` works in two modes, depending on whether the user hands you a
-task along with the command:
+The no-mistakes skill works in two modes, depending on whether the user hands you
+a task along with the skill invocation:
 
-- **Validate-only** - bare `/no-mistakes` (optionally with flag-style requests
+- **Validate-only** - bare skill invocation (optionally with flag-style requests
   like "skip the lint step"). The user's code changes are already committed;
   validate them and report the outcome.
-- **Task-first** - `/no-mistakes <task>`, e.g.
-  `/no-mistakes add a --json flag to the status command`. First carry out the
+- **Task-first** - skill invocation with a task, e.g.
+  `add a --json flag to the status command`. First carry out the
   task yourself, then validate the result through the pipeline:
   1. **Check scope.** Inspect `git status` before you change or commit anything.
      Preserve unrelated pre-existing uncommitted changes, and when you commit,
