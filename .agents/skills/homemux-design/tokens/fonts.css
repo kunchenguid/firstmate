@@ -1,0 +1,7 @@
+/* HomeMux — Webfonts
+ * The product type direction: IBM Plex Sans (UI) + IBM Plex Mono (terminal).
+ * Both are SIL OFL (open source) — free to bundle into the iOS app. Here they
+ * load from Google Fonts so every web preview renders the real faces; in the
+ * native app, bundle the .otf/.ttf files instead.
+ */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");

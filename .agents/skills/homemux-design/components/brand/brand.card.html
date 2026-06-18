@@ -1,0 +1,35 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Brand — icon & wordmark" subtitle="AppIcon · Wordmark" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);font-family:var(--font-ui);color:var(--text-primary);
+    -webkit-font-smoothing:antialiased;padding:26px;display:flex;align-items:center;gap:34px;flex-wrap:wrap}
+  .cap{font-size:10px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--font-mono);color:var(--text-tertiary);margin-top:10px}
+</style></head><body>
+<div id="root"></div>
+<script type="text/babel">
+const { AppIcon, Wordmark } = window.HomeMuxDesignSystem_359607;
+function Demo(){
+  return (<div style={{display:'flex',alignItems:'center',gap:34,flexWrap:'wrap'}}>
+    <div><AppIcon size={128}/><div className="cap">AppIcon · tile</div></div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end'}}>
+      <AppIcon size={56}/><AppIcon size={36}/>
+      <div style={{width:44,height:44,display:'flex',alignItems:'center',justifyContent:'center',
+        background:'var(--surface-1)',border:'1px solid var(--hairline)',borderRadius:12}}><AppIcon bare size={26}/></div>
+    </div>
+    <div style={{display:'flex',flexDirection:'column',gap:18}}>
+      <Wordmark size={30}/>
+      <Wordmark size={20} mark="bare"/>
+      <div className="cap">Wordmark · tile + bare</div>
+    </div>
+  </div>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body></html>

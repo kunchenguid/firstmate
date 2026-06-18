@@ -1,0 +1,21 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Text & hairlines" subtitle="Label tiers and separator strokes over dark" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);font-family:var(--font-ui);-webkit-font-smoothing:antialiased;padding:22px}
+  .panel{background:var(--surface-1);border:1px solid var(--hairline);border-radius:var(--radius-lg);
+    padding:18px 20px;display:flex;flex-direction:column;gap:10px}
+  .line{display:flex;align-items:baseline;gap:12px}
+  .swatch{font-weight:var(--weight-semibold);font-size:var(--type-body)}
+  .meta{font-family:var(--font-mono);font-size:var(--type-caption);color:var(--text-tertiary);margin-left:auto}
+  .rule{height:1px;width:100%;margin:2px 0}
+</style></head><body>
+  <div class="panel">
+    <div class="line"><span class="swatch" style="color:var(--text-primary)">Primary label — EAF0F8</span><span class="meta">--text-primary</span></div>
+    <div class="line"><span class="swatch" style="color:var(--text-secondary)">Secondary label — 62%</span><span class="meta">--text-secondary</span></div>
+    <div class="line"><span class="swatch" style="color:var(--text-tertiary)">Tertiary label — 36%</span><span class="meta">--text-tertiary</span></div>
+    <div class="rule" style="background:var(--hairline)"></div>
+    <div class="rule" style="background:var(--hairline-strong)"></div>
+  </div>
+</body></html>

@@ -1,0 +1,23 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Brand accent" subtitle="Mint primary + teal secondary — the one calm accent" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);font-family:var(--font-ui);color:var(--text-primary);
+    -webkit-font-smoothing:antialiased;padding:20px;display:flex;gap:14px;flex-wrap:wrap}
+  .sw{display:flex;flex-direction:column;justify-content:flex-end;width:150px;height:108px;
+    border-radius:var(--radius-md);padding:12px;box-sizing:border-box;box-shadow:var(--shadow-sm)}
+  .name{font-size:var(--type-footnote);font-weight:var(--weight-semibold)}
+  .hex{font-family:var(--font-mono);font-size:var(--type-caption2);opacity:.8;margin-top:2px}
+  .ink-dark{color:var(--text-on-accent)}
+  .small{width:96px;height:108px}
+</style></head><body>
+  <div class="sw" style="background:var(--mint-500);box-shadow:0 0 24px var(--accent-glow)">
+    <div class="name ink-dark">accent / mint-500</div><div class="hex ink-dark">#7CF7B6</div></div>
+  <div class="sw small" style="background:var(--mint-600)">
+    <div class="name ink-dark">mint-600</div><div class="hex ink-dark">#5FD89B</div></div>
+  <div class="sw" style="background:var(--teal-400)">
+    <div class="name ink-dark">teal-400 / icon</div><div class="hex ink-dark">#5EEAD4</div></div>
+  <div class="sw small" style="background:var(--accent-soft);border:1px solid var(--accent-line)">
+    <div class="name">accent-soft</div><div class="hex">14% mint</div></div>
+</body></html>

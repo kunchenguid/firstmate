@@ -1,0 +1,39 @@
+<!-- @dsCard group="Brand" viewport="700x300" name="Terminal themes" subtitle="Four built-in palettes · dark-first, license-clean" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);font-family:var(--font-ui);-webkit-font-smoothing:antialiased;
+    padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:var(--t-bg);border:1px solid color-mix(in srgb,var(--t-accent) 35%,transparent);
+    border-radius:var(--radius-lg);padding:14px;display:flex;flex-direction:column;gap:9px}
+  .top{display:flex;align-items:center;justify-content:space-between}
+  .nm{font-size:var(--type-subheadline);font-weight:var(--weight-semibold);color:var(--t-fg)}
+  .ap{font-size:var(--type-caption2);color:color-mix(in srgb,var(--t-fg) 60%,transparent)}
+  .dot{width:11px;height:11px;border-radius:50%;background:var(--t-accent)}
+  .line{font-family:var(--font-mono);font-size:var(--type-caption);line-height:1.45}
+  .g{color:var(--t-10)} .f{color:var(--t-fg)}
+  .ramp{display:grid;grid-template-columns:repeat(8,1fr);gap:3px}
+  .ramp i{height:13px;border-radius:3px}
+</style></head><body>
+  <div class="card term-homemux-dark">
+    <div class="top"><div><div class="nm">HomeMux Dark</div><div class="ap">Dark · default</div></div><div class="dot"></div></div>
+    <div class="line g">$ tmux attach -t work</div><div class="line f">reconnects to your session</div>
+    <div class="ramp"><i style="background:var(--t-0)"></i><i style="background:var(--t-1)"></i><i style="background:var(--t-2)"></i><i style="background:var(--t-3)"></i><i style="background:var(--t-4)"></i><i style="background:var(--t-5)"></i><i style="background:var(--t-6)"></i><i style="background:var(--t-7)"></i></div>
+  </div>
+  <div class="card term-coastline-light">
+    <div class="top"><div><div class="nm">Coastline Light</div><div class="ap">Light</div></div><div class="dot"></div></div>
+    <div class="line g">$ tmux attach -t work</div><div class="line f">reconnects to your session</div>
+    <div class="ramp"><i style="background:var(--t-0)"></i><i style="background:var(--t-1)"></i><i style="background:var(--t-2)"></i><i style="background:var(--t-3)"></i><i style="background:var(--t-4)"></i><i style="background:var(--t-5)"></i><i style="background:var(--t-6)"></i><i style="background:var(--t-7)"></i></div>
+  </div>
+  <div class="card term-ember-console">
+    <div class="top"><div><div class="nm">Ember Console</div><div class="ap">Dark</div></div><div class="dot"></div></div>
+    <div class="line g">$ tmux attach -t work</div><div class="line f">reconnects to your session</div>
+    <div class="ramp"><i style="background:var(--t-0)"></i><i style="background:var(--t-1)"></i><i style="background:var(--t-2)"></i><i style="background:var(--t-3)"></i><i style="background:var(--t-4)"></i><i style="background:var(--t-5)"></i><i style="background:var(--t-6)"></i><i style="background:var(--t-7)"></i></div>
+  </div>
+  <div class="card term-pine-mist">
+    <div class="top"><div><div class="nm">Pine Mist</div><div class="ap">Light</div></div><div class="dot"></div></div>
+    <div class="line g">$ tmux attach -t work</div><div class="line f">reconnects to your session</div>
+    <div class="ramp"><i style="background:var(--t-0)"></i><i style="background:var(--t-1)"></i><i style="background:var(--t-2)"></i><i style="background:var(--t-3)"></i><i style="background:var(--t-4)"></i><i style="background:var(--t-5)"></i><i style="background:var(--t-6)"></i><i style="background:var(--t-7)"></i></div>
+  </div>
+</body></html>

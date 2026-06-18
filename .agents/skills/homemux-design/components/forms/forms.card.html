@@ -1,0 +1,52 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Forms — switch, segmented, field" subtitle="Switch · SegmentedControl · TextField" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@0.456.0/dist/umd/lucide.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);font-family:var(--font-ui);color:var(--text-primary);
+    -webkit-font-smoothing:antialiased;padding:22px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
+  .group{display:flex;flex-direction:column;gap:12px}
+  .cap{font-size:10px;text-transform:uppercase;letter-spacing:.07em;font-family:var(--font-mono);color:var(--text-tertiary)}
+  .switchrow{display:flex;align-items:center;justify-content:space-between;background:var(--surface-1);
+    border:1px solid var(--hairline);border-radius:var(--radius-md);padding:12px 14px}
+</style></head><body>
+<div id="root"></div>
+<script type="text/babel">
+const { Switch, SegmentedControl, TextField, Icon } = window.HomeMuxDesignSystem_359607;
+function Demo(){
+  const [on,setOn]=React.useState(true);
+  const [on2,setOn2]=React.useState(false);
+  const [t,setT]=React.useState("automatic");
+  const [auth,setAuth]=React.useState("key");
+  const [host,setHost]=React.useState("mac-mini.local");
+  const [sess,setSess]=React.useState("claude");
+  return (<div className="grid">
+    <div className="group">
+      <span className="cap">Switch</span>
+      <div className="switchrow"><span>One-tap tmux session</span><Switch checked={on} onChange={setOn}/></div>
+      <div className="switchrow"><span>Create if missing</span><Switch checked={on2} onChange={setOn2}/></div>
+      <span className="cap">Segmented</span>
+      <SegmentedControl value={t} onChange={setT}
+        options={[{label:"Automatic",value:"automatic"},{label:"SSH",value:"ssh"},{label:"Mosh",value:"mosh"}]}/>
+      <SegmentedControl value={auth} onChange={setAuth}
+        options={[{label:"Password",value:"pwd"},{label:"Private Key",value:"key"}]}/>
+    </div>
+    <div className="group">
+      <span className="cap">TextField</span>
+      <TextField label="Host" value={host} onChange={setHost} placeholder="mac-mini.local"
+        leading={<Icon name="server" size={17} color="var(--text-tertiary)"/>}/>
+      <TextField label="Session name" mono value={sess} onChange={setSess}
+        footnote="Attaches if it exists, or creates it if missing."/>
+    </div>
+  </div>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body></html>

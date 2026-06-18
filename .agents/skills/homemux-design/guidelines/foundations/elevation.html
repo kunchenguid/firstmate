@@ -1,0 +1,18 @@
+<!-- @dsCard group="Spacing" viewport="700x180" name="Elevation & glow" subtitle="Soft floating shadows + accent glow" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-base);color:var(--text-primary);font-family:var(--font-ui);
+    -webkit-font-smoothing:antialiased;padding:26px;display:flex;gap:22px;align-items:center;flex-wrap:wrap}
+  .c{display:flex;flex-direction:column;align-items:center;gap:11px}
+  .box{width:96px;height:64px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--radius-md)}
+  .fab{width:56px;height:56px;border-radius:50%;background:var(--material-regular);border:1px solid var(--accent-line);
+    display:flex;align-items:center;justify-content:center;color:var(--accent);font-family:var(--font-mono);font-weight:700}
+  .l{font-family:var(--font-mono);font-size:var(--type-caption2);color:var(--text-secondary)}
+</style></head><body>
+  <div class="c"><div class="box" style="box-shadow:var(--shadow-sm)"></div><span class="l">shadow-sm</span></div>
+  <div class="c"><div class="box" style="box-shadow:var(--shadow-card)"></div><span class="l">shadow-card</span></div>
+  <div class="c"><div class="fab" style="box-shadow:var(--shadow-float)">❯</div><span class="l">shadow-float (FAB)</span></div>
+  <div class="c"><div class="box" style="background:var(--bg-abyss);box-shadow:0 0 22px var(--accent-glow);border-color:var(--accent-line)"></div><span class="l">glow / accent</span></div>
+</body></html>

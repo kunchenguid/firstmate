@@ -1,0 +1,86 @@
+/* HomeMux — Color tokens
+ * Lifted from HomeMux/Theming/TerminalTheme.swift (HomeMux Dark) and the app
+ * icon source (generate_app_icon.py). HomeMux is a dark-first, "zen" terminal
+ * client: a near-black canvas, a single calm mint-teal accent, and a full
+ * 16-color ANSI terminal palette that stays readable and never shouts.
+ */
+
+:root {
+  /* ---- Brand / accent ------------------------------------------------ */
+  --mint-300: #A6FBCF;
+  --mint-400: #8AF0BB;
+  --mint-500: #7CF7B6;   /* primary brand accent — caret + interactive tint */
+  --mint-600: #5FD89B;
+  --teal-400: #5EEAD4;   /* app-icon glyph color — secondary accent */
+  --teal-500: #2DD4BF;
+
+  --accent: var(--mint-500);
+  --accent-press: var(--mint-600);
+  --accent-soft: rgba(124, 247, 182, 0.14);   /* tinted icon wells, fills */
+  --accent-line: rgba(124, 247, 182, 0.35);   /* hairline on accent chrome */
+  --accent-glow: rgba(124, 247, 182, 0.45);
+
+  /* ---- Canvas & surfaces (dark) -------------------------------------- */
+  --bg-abyss: #0A0D12;   /* terminal background + deepest app canvas */
+  --bg-base: #0B0E14;    /* app background */
+  --surface-1: #11151C;  /* elevated cards / grouped rows */
+  --surface-2: #171C26;  /* raised controls, sheets */
+  --surface-3: #1F2632;  /* tertiary fill — keycaps, chips */
+  --surface-ansi-black: #151A22; /* ANSI 0 — terminal "black" cell */
+
+  /* iOS-style translucent materials sit over the canvas */
+  --material-regular: rgba(20, 25, 33, 0.72);
+  --material-thin: rgba(20, 25, 33, 0.55);
+  --material-bar: rgba(11, 14, 20, 0.80);
+
+  /* ---- Hairlines & separators ---------------------------------------- */
+  --hairline: rgba(255, 255, 255, 0.08);        /* default card stroke */
+  --hairline-strong: rgba(255, 255, 255, 0.14);
+  --separator: rgba(255, 255, 255, 0.06);
+
+  /* ---- Text (over dark) ---------------------------------------------- */
+  --text-primary: #EAF0F8;
+  --text-secondary: rgba(221, 229, 241, 0.62);
+  --text-tertiary: rgba(221, 229, 241, 0.36);
+  --text-on-accent: #07120C;   /* near-black ink on a mint button */
+
+  /* ---- Semantic status ----------------------------------------------- */
+  --status-connected: #67E8A5;  /* green dot — connected */
+  --status-connecting: #F6C177; /* orange dot — connecting */
+  --status-failed: #FF6B72;     /* red dot — failed */
+  --status-info: #7AA2FF;       /* blue — informational */
+
+  --success: #67E8A5;
+  --warning: #F6C177;
+  --danger: #FF6B72;
+  --info: #7AA2FF;
+  --danger-soft: rgba(255, 107, 114, 0.14);
+  --warning-soft: rgba(246, 193, 119, 0.14);
+
+  /* ---- HomeMux Dark — full 16-color ANSI palette --------------------- */
+  /* Normal */
+  --ansi-black: #151A22;
+  --ansi-red: #FF6B72;
+  --ansi-green: #67E8A5;
+  --ansi-yellow: #F6C177;
+  --ansi-blue: #7AA2FF;
+  --ansi-magenta: #C792EA;
+  --ansi-cyan: #5EDDE6;
+  --ansi-white: #DDE5F1;
+  /* Bright */
+  --ansi-bright-black: #5A6472;
+  --ansi-bright-red: #FF8F95;
+  --ansi-bright-green: #8AF0BB;
+  --ansi-bright-yellow: #F9D99A;
+  --ansi-bright-blue: #9BB8FF;
+  --ansi-bright-magenta: #D9A5F2;
+  --ansi-bright-cyan: #8BEAF0;
+  --ansi-bright-white: #F7FAFF;
+
+  /* Terminal canvas semantic aliases */
+  --term-bg: var(--bg-abyss);
+  --term-fg: #DDE5F1;
+  --term-caret: var(--mint-500);
+  --term-prompt: var(--ansi-bright-green);  /* $ prompt glyph */
+  --term-muted: var(--ansi-bright-black);
+}

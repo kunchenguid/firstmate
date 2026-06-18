@@ -1,0 +1,25 @@
+<!-- @dsCard group="Type" viewport="700x180" name="Monospace — terminal" subtitle="IBM Plex Mono · prompt, command drafts, keycaps" -->
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="../../styles.css"/>
+<style>
+  html,body{margin:0}
+  body{background:var(--bg-abyss);font-family:var(--font-mono);-webkit-font-smoothing:antialiased;padding:24px}
+  .term{display:flex;flex-direction:column;gap:6px;font-size:var(--type-subheadline);line-height:var(--leading-snug)}
+  .prompt{color:var(--ansi-bright-green)}
+  .fg{color:var(--term-fg)}
+  .err{color:var(--ansi-bright-yellow)}
+  .muted{color:var(--term-muted)}
+  .caret{display:inline-block;width:9px;height:17px;background:var(--term-caret);
+    vertical-align:-3px;margin-left:3px;border-radius:1px;animation:blink 1.1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .label{margin-top:14px;font-size:10px;letter-spacing:var(--tracking-mono-label);
+    text-transform:uppercase;color:var(--text-tertiary)}
+</style></head><body>
+  <div class="term">
+    <div><span class="prompt">❯</span> <span class="fg">tmux attach -t work</span></div>
+    <div class="fg">HomeMux reconnects to your session<span class="caret"></span></div>
+    <div class="err">errors stay readable, prompts stay calm</div>
+    <div class="muted"># --font-mono · IBM Plex Mono, ui-monospace, Menlo</div>
+  </div>
+  <div class="label">IBM Plex Mono · SIL OFL · bundle-able into the iOS app</div>
+</body></html>

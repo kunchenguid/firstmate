@@ -1,0 +1,48 @@
+/* HomeMux — Typography tokens
+ * HomeMux ships no custom font. It uses the iOS system families: SF Pro for
+ * UI, SF Pro Rounded for a few playful controls (the Mic key), and SF Mono for
+ * everything terminal — command drafts, keycaps, theme previews, the prompt.
+ * On non-Apple devices these stacks fall back to the platform default; that
+ * substitution is expected (see README → Visual Foundations).
+ */
+
+:root {
+  /* ---- Families ------------------------------------------------------ */
+  /* Product type: IBM Plex Sans (UI) + IBM Plex Mono (terminal) — both SIL OFL,
+   * loaded via tokens/fonts.css. System families trail as fallbacks. The native
+   * iOS app should bundle the licensed Plex files rather than rely on the web. */
+  --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-rounded: "IBM Plex Sans", ui-rounded, -apple-system, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- iOS type scale (pt ≈ px) -------------------------------------- */
+  --type-large-title: 34px;
+  --type-title1: 28px;
+  --type-title2: 22px;
+  --type-title3: 20px;
+  --type-headline: 17px;   /* semibold body */
+  --type-body: 17px;
+  --type-callout: 16px;
+  --type-subheadline: 15px;
+  --type-footnote: 13px;
+  --type-caption: 12px;
+  --type-caption2: 11px;
+
+  /* ---- Weights ------------------------------------------------------- */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ---- Line heights -------------------------------------------------- */
+  --leading-tight: 1.1;
+  --leading-snug: 1.25;
+  --leading-normal: 1.4;
+  --leading-relaxed: 1.5;
+
+  /* ---- Tracking ------------------------------------------------------ */
+  --tracking-tight: -0.02em;   /* large display text */
+  --tracking-normal: 0;
+  --tracking-wide: 0.02em;
+  --tracking-mono-label: 0.06em; /* uppercase mono micro-labels */
+}
