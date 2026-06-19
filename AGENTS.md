@@ -418,6 +418,7 @@ This includes your own no-mistakes pipeline, long builds, and any other multi-mi
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 
 ### Stuck-crewmate playbook (escalate in order)
@@ -425,7 +426,10 @@ Silence is the correct state while a healthy background watcher is waiting.
 1. Peek the pane.
 2. Crewmate is waiting on a question its brief already answers: answer in one line via fm-send.
 3. Crewmate is confused or looping: interrupt with the adapter's interrupt key (the window's harness is recorded as `harness=` in `state/<id>.meta`; e.g. `bin/fm-send.sh <window> --key Escape`), then redirect with one corrective line.
-4. Crewmate is context-exhausted or wedged: exit the agent with the adapter's exit command, relaunch with the same brief plus a `progress so far` note you append to it. The worktree and commits persist; this is cheap.
+4. Crewmate is genuinely wedged after redirection: exit the agent with the adapter's exit command, relaunch with the same brief plus a `progress so far` note you append to it.
+   Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
+   A low context reading is not wedging; modern harnesses auto-compact and keep going.
+   The worktree and commits persist; this is cheap.
 5. Second relaunch fails too: write `failed` to backlog, tell the captain with evidence.
 
 ## 9. Escalation and captain etiquette
