@@ -311,6 +311,20 @@ test_guard_warns_on_pending_queue() {
   pass "guard warns when queued wakes are pending"
 }
 
+test_guard_rearms_after_draining_pending_queue() {
+  local dir state err
+  dir=$(make_case guard-order)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
+  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
+  grep -F 'After draining queued wakes, re-arm the watcher' "$err" >/dev/null || fail "guard did not order re-arm after drain"
+  ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
+  pass "guard orders watcher re-arm after queued wake drain"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -321,3 +335,4 @@ test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warns_on_pending_queue
+test_guard_rearms_after_draining_pending_queue

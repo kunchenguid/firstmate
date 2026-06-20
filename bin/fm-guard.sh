@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 STATE="${FM_STATE_OVERRIDE:-$FM_ROOT/state}"
 GRACE=${FM_GUARD_GRACE:-300}
+queue_pending=false
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -33,6 +34,7 @@ done
 "$has_meta" || exit 0
 
 if [ -s "$FM_WAKE_QUEUE" ]; then
+  queue_pending=true
   echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
 fi
 
@@ -45,5 +47,9 @@ if [ -e "$BEAT" ]; then
 else
   echo "WARNING: tasks are in flight but no watcher has ever run (no liveness beacon)." >&2
 fi
-echo "Restart it NOW, before anything else: run bin/fm-watch.sh as a background task." >&2
+if "$queue_pending"; then
+  echo "After draining queued wakes, re-arm the watcher: run bin/fm-watch.sh as a background task." >&2
+else
+  echo "Restart it NOW, before anything else: run bin/fm-watch.sh as a background task." >&2
+fi
 exit 0

@@ -185,13 +185,13 @@ Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
-2. `tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ':fm-'` to find live crewmates.
-3. Read `data/backlog.md`, every `state/*.meta`, and every `state/*.status`.
-4. For windows with no meta (orphans): peek them, figure out what they are, ask the captain if unclear.
-5. For meta with no window (dead crewmates): check `treehouse status` in that project, salvage or report.
-6. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
+1. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
+2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
+3. `tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ':fm-'` to find live crewmates.
+4. Read `data/backlog.md`, every `state/*.meta`, and every `state/*.status`.
+5. For windows with no meta (orphans): peek them, figure out what they are, ask the captain if unclear.
+6. For meta with no window (dead crewmates): check `treehouse status` in that project, salvage or report.
 7. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
 8. Handle drained wakes, then arm the watcher (section 8).
