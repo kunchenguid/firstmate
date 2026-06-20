@@ -71,6 +71,8 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+  .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
 .no-mistakes/        local validation state and evidence; gitignored
@@ -191,7 +193,7 @@ Reconcile reality with your records before doing anything else:
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 6. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-7. Restart the watcher (section 8).
+7. Drain queued wakes with `bin/fm-wake-drain.sh`, handle anything pending, then arm the watcher (section 8).
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, and treehouse; your conversation memory is a cache.
@@ -381,22 +383,30 @@ From there the task is an ordinary ship task through its mode-specific validatio
 
 The watcher is the backbone.
 Whenever at least one task is in flight, `bin/fm-watch.sh` must be running as a background task.
-It costs zero tokens while running and exits with one reason line when something needs you; restart it after handling every wake, and before you end any turn.
+It costs zero tokens while running and exits with one reason line when something needs you.
+It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
+At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
+The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
+After handling drained wakes, re-arm `bin/fm-watch.sh` before you end the turn.
+The watcher is singleton-safe: if one is already alive, another invocation exits cleanly instead of creating a duplicate watcher.
+Do not pkill-and-restart the watcher as a routine operation; just arm it, and let the singleton lock no-op when appropriate.
+P2/P3 of the watcher reliability design - a persistent detector daemon and blocking waiter split - are deferred; this phase intentionally preserves the current one-shot restart model.
 Waiting on the watcher is intentionally silent.
-After starting or restarting it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
+After arming it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
 Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
 bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
+bin/fm-wake-drain.sh   # drain queued wake records at turn start
 ```
 
 On wake, in order of cheapness:
 
-1. Read the reason line.
+1. Read the reason line and drain queued wake records with `bin/fm-wake-drain.sh`.
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
 4. `check:` a per-task poll fired (usually a merge); act on it.
-5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then restart the watcher.
+5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
@@ -406,12 +416,13 @@ Never rely on hooks or status files alone; the heartbeat review of every window 
 tmux is the ground truth.
 
 **Watcher liveness is guarded, not just disciplined.**
-Restarting the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
+Arming the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
-The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
-So the next time you touch the fleet with no watcher alive, the tool output itself tells you to restart it - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
-The grace window keeps normal handling (watcher briefly down between a wake and its restart) silent.
-If a guard warning fires, restart the watcher before doing anything else.
+The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, or that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
+So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
+The grace window keeps normal handling (watcher briefly down between a wake and its re-arm) silent.
+If a guard warning says queued wakes are pending, drain them before doing anything else.
+If a guard warning says watcher liveness is stale, arm `bin/fm-watch.sh` after draining any queued wakes.
 Watcher liveness is not enough if you are foreground-blocked.
 Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
 This includes your own no-mistakes pipeline, long builds, and any other multi-minute command.

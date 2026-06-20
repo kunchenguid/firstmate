@@ -15,7 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh
+      - run: shellcheck bin/*.sh tests/*.sh
+
+  tests:
+    name: Behavior tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: tests/fm-wake-queue.test.sh
 
   invariants:
     name: Repo invariants

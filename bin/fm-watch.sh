@@ -6,12 +6,28 @@
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
-# Run as a background task. Restart it after handling each wake.
+# Run as a background task. Re-arm it after handling each wake; duplicate
+# invocations no-op through the watcher singleton lock.
 set -u
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE="$FM_ROOT/state"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+STATE="${FM_STATE_OVERRIDE:-$FM_ROOT/state}"
 mkdir -p "$STATE"
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+WATCH_LOCK="$STATE/.watch.lock"
+if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    echo "watcher: already running pid $FM_LOCK_HELD_PID"
+  else
+    echo "watcher: already running"
+  fi
+  exit 0
+fi
+trap 'fm_lock_release "$WATCH_LOCK"' EXIT
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
@@ -112,14 +128,17 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
-    touch "$STATE/.last-check"
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       out=$(run_check "$c")
       if [ -n "$out" ]; then
-        wake "check: $c: $out"
+        reason="check: $c: $out"
+        fm_wake_append check "$c" "$reason" || exit 1
+        touch "$STATE/.last-check"
+        wake "$reason"
       fi
     done
+    touch "$STATE/.last-check"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
@@ -134,12 +153,24 @@ while :; do
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
-      printf '%s' "$sig" > "$sf"
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
     done <<EOF
 $pending
 EOF
-    wake "signal:$files"
+    reason="signal:$files"
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+    done <<EOF
+$pending
+EOF
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      printf '%s' "$sig" > "$sf"
+    done <<EOF
+$pending
+EOF
+    wake "$reason"
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
@@ -161,6 +192,7 @@ EOF
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+          fm_wake_append stale "$w" "stale: $w" || exit 1
           printf '%s' "$h" > "$sf"
           wake "stale: $w"
         fi
@@ -179,6 +211,7 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    fm_wake_append heartbeat heartbeat heartbeat || exit 1
     touch "$STATE/.last-heartbeat"
     wake "heartbeat"
   fi

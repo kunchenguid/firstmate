@@ -9,9 +9,13 @@
 # Always exits 0: the guard warns, it never blocks.
 set -u
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE="$FM_ROOT/state"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+STATE="${FM_STATE_OVERRIDE:-$FM_ROOT/state}"
 GRACE=${FM_GUARD_GRACE:-300}
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 # Portable mtime; see fm-watch.sh for why the `stat -f || stat -c` fallback breaks on Linux.
 if [ "$(uname)" = Darwin ]; then
@@ -27,6 +31,10 @@ for meta in "$STATE"/*.meta; do
   break
 done
 "$has_meta" || exit 0
+
+if [ -s "$FM_WAKE_QUEUE" ]; then
+  echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
+fi
 
 BEAT="$STATE/.last-watcher-beat"
 if [ -e "$BEAT" ]; then

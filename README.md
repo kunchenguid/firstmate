@@ -111,8 +111,9 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 ```
 
 - **Event-driven supervision** - a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
+  Detected wakes are also written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed one-shot process exit can be recovered by draining the queue.
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
-  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running.
+  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
@@ -133,12 +134,13 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
 | `fm-brief.sh`            | Scaffold a ship brief, or a report-only scout brief with `--scout`                                                  |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
-| `fm-guard.sh`            | Warn when tasks are in flight but the watcher liveness beacon is stale or missing                                   |
+| `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
 | `fm-spawn.sh`            | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind                           |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
-| `fm-watch.sh`            | Block until supervision work is due; exits with one reason line                                                     |
+| `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line |
+| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
 | `fm-send.sh`             | Send one literal line (or `--key Escape`) to a crewmate window                                                      |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
@@ -174,10 +176,13 @@ Tracked changes to firstmate itself, including `AGENTS.md`, `README.md`, `CONTRI
 When supervising live crewmates, keep long validation or build work in the background so watcher wakes can still be handled.
 Human-authored pull requests targeting `main` must be raised through `git push no-mistakes`; see `CONTRIBUTING.md` for the enforced contributor workflow.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
+The current watcher reliability work keeps the one-shot process model and adds a durable queue plus singleton lock.
+The persistent detector daemon and blocking waiter split are deferred follow-up phases.
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
-shellcheck bin/*.sh                       # lint the toolbelt; CI enforces this
+shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
+tests/fm-wake-queue.test.sh               # durable wake queue and singleton behavior tests
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")
