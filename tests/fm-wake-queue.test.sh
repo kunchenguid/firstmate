@@ -282,6 +282,23 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
+test_live_stale_watch_lock_is_actionable() {
+  local dir state fakebin out err status
+  dir=$(make_case live-stale-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
+  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
+  pass "live watcher lock with stale heartbeat is actionable"
+}
+
 test_guard_warns_on_pending_queue() {
   local dir state err
   dir=$(make_case guard)
@@ -302,4 +319,5 @@ test_singleton_start
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
+test_live_stale_watch_lock_is_actionable
 test_guard_warns_on_pending_queue

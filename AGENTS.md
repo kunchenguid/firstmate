@@ -185,15 +185,16 @@ Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. `tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ':fm-'` to find live crewmates.
-2. Read `data/backlog.md`, every `state/*.meta`, and every `state/*.status`.
-3. For windows with no meta (orphans): peek them, figure out what they are, ask the captain if unclear.
-4. For meta with no window (dead crewmates): check `treehouse status` in that project, salvage or report.
-5. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
+1. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
+2. `tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ':fm-'` to find live crewmates.
+3. Read `data/backlog.md`, every `state/*.meta`, and every `state/*.status`.
+4. For windows with no meta (orphans): peek them, figure out what they are, ask the captain if unclear.
+5. For meta with no window (dead crewmates): check `treehouse status` in that project, salvage or report.
+6. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
-6. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
+7. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-7. Drain queued wakes with `bin/fm-wake-drain.sh`, handle anything pending, then arm the watcher (section 8).
+8. Handle drained wakes, then arm the watcher (section 8).
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, and treehouse; your conversation memory is a cache.
@@ -388,7 +389,7 @@ It also writes each detected wake to the durable queue at `state/.wake-queue` be
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
 After handling drained wakes, re-arm `bin/fm-watch.sh` before you end the turn.
-The watcher is singleton-safe: if one is already alive, another invocation exits cleanly instead of creating a duplicate watcher.
+The watcher is singleton-safe: if one is already alive with a fresh liveness beacon, another invocation exits cleanly instead of creating a duplicate watcher; if the live holder's beacon is stale, the new invocation exits with an actionable failure.
 Do not pkill-and-restart the watcher as a routine operation; just arm it, and let the singleton lock no-op when appropriate.
 P2/P3 of the watcher reliability design - a persistent detector daemon and blocking waiter split - are deferred; this phase intentionally preserves the current one-shot restart model.
 Waiting on the watcher is intentionally silent.
