@@ -7,6 +7,12 @@
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); the default is kind=ship.
+# Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
+#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
+#   Each pair re-execs this script in single-task mode, so the single path stays the only
+#   source of truth; a shared --scout applies to every pair. The loop lives here, in bash,
+#   so callers never hand-write a multi-task shell loop (the tool shell is zsh, which does
+#   not word-split unquoted $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -19,7 +25,9 @@
 set -eu
 
 FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"$FM_ROOT/bin/fm-guard.sh" || true
+# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
+# set by the batch loop below), so the guard runs once for the batch, not once per pair.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 POS=()
 for a in "$@"; do
@@ -28,6 +36,30 @@ for a in "$@"; do
     *) POS+=("$a") ;;
   esac
 done
+
+# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
+# positional as one and spawn each by re-execing this script in single-task mode. We use
+# the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
+# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
+# exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
+# one (task ids are bare slugs), so they fall straight through to the logic below.
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  rc=0
+  for pair in "${POS[@]}"; do
+    case "$pair" in
+      *=*) : ;;
+      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
+    esac
+    if [ "$KIND" = scout ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    else
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    fi
+  done
+  exit "$rc"
+fi
 ID=${POS[0]}
 PROJ=${POS[1]}
 ARG3=${POS[2]:-}
