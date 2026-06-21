@@ -22,7 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: tests/fm-wake-queue.test.sh
+      - run: |
+          set -eu
+          for test_script in tests/*.test.sh; do
+            "$test_script"
+          done
 
   invariants:
     name: Repo invariants
