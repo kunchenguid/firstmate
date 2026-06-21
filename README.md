@@ -135,7 +135,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`            | Scaffold a ship brief, or a report-only scout brief with `--scout`                                                  |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
-| `fm-spawn.sh`            | Window → treehouse worktree → agent launched with its brief; records ship/scout task kind                           |
+| `fm-spawn.sh`            | Spawn one task, or several `id=repo` pairs in one batch; records ship/scout task kind                                |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
@@ -182,7 +182,7 @@ The persistent detector daemon and blocking waiter split are deferred follow-up 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
-tests/fm-wake-queue.test.sh               # durable wake queue and singleton behavior tests
+for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")
