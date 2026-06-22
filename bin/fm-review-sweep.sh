@@ -219,7 +219,19 @@ spawn_review() {
         "$FM_ROOT/bin/fm-spawn.sh" "$id" "$FM_ROOT/$proj" 2>&1) || spawn_rc=$?
   if [ "$spawn_rc" -ne 0 ]; then
     log "  error   $repo#$num fm-spawn failed (rc=$spawn_rc): $(printf '%s' "$spawn_out" | tail -1)"
-    rm -f "$FM_ROOT/state/$id.meta" "$status_file"; rm -rf "$FM_ROOT/data/$id"
+    # fm-spawn may already have created the window and/or worktree before failing;
+    # reclaim both so repeated sweep runs do not leak them.
+    tmux kill-window -t "fm-$id" 2>/dev/null || true
+    local fmeta="$FM_ROOT/state/$id.meta" fwt fproj
+    if [ -f "$fmeta" ]; then
+      fwt=$(grep '^worktree=' "$fmeta" 2>/dev/null | cut -d= -f2-)
+      fproj=$(grep '^project=' "$fmeta" 2>/dev/null | cut -d= -f2-)
+      if [ -n "$fwt" ] && [ -n "$fproj" ]; then
+        ( cd "$fproj" && treehouse return --force "$fwt" ) >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$fmeta" "$status_file" "$FM_ROOT/state/$id.turn-ended" "$FM_ROOT/state/$id.pi-ext.ts"
+    rm -rf "$FM_ROOT/data/$id"
     return 1
   fi
   log "  spawn   $repo#$num -> $id (cifail=$cifail)"
@@ -278,16 +290,26 @@ maybe_transition_jira() {
 # ---- teardown a sweep crewmate (best-effort) -------------------------------
 teardown_task() {
   local id=$1
-  local window="fm-$id"
+  local meta="$FM_ROOT/state/$id.meta"
+  local window="fm-$id" wt="" proj=""
+  if [ -f "$meta" ]; then
+    window=$(grep '^window=' "$meta" 2>/dev/null | cut -d= -f2-)
+    wt=$(grep '^worktree=' "$meta" 2>/dev/null | cut -d= -f2-)
+    proj=$(grep '^project=' "$meta" 2>/dev/null | cut -d= -f2-)
+  fi
+  [ -n "$window" ] || window="fm-$id"
   # Tell pi to quit, then exit the treehouse subshell, then kill the window.
   tmux send-keys -t "$window" '/quit' Enter 2>/dev/null || true
   sleep 2
   tmux send-keys -t "$window" 'exit' Enter 2>/dev/null || true
   sleep 1
   tmux kill-window -t "$window" 2>/dev/null || true
-  # return the worktree to the pool if treehouse still holds it
-  treehouse prune --yes >/dev/null 2>&1 || true
-  rm -f "$FM_ROOT/state/$id.meta" "$FM_ROOT/state/$id.turn-ended" \
+  # return THIS task's worktree to the pool (deterministic; a global prune could
+  # reap another live task's worktree when the sweep runs alongside a session).
+  if [ -n "$wt" ] && [ -n "$proj" ]; then
+    ( cd "$proj" && treehouse return --force "$wt" ) >/dev/null 2>&1 || true
+  fi
+  rm -f "$meta" "$FM_ROOT/state/$id.turn-ended" \
         "$FM_ROOT/state/$id.pi-ext.ts" "$FM_ROOT/state/$id.status"
   rm -rf "$FM_ROOT/data/$id"
 }
@@ -299,7 +321,10 @@ main() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    --one) ONLY_REPO="${2:-}"; shift 2 ;;
+    --one)
+      [ $# -ge 2 ] || { echo "error: --one requires a repo argument" >&2; exit 2; }
+      ONLY_REPO="$2"; shift 2
+      ;;
     -h|--help)
       sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
@@ -353,7 +378,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$total" -eq 0 ]; then
     say "(no candidate PRs after filters)"
   else
-    printf 'repo\t#cifail\ttitle\turl\n' 
+    printf 'repo\t#num\tcifail\ttitle\n' 
     while IFS=$'\t' read -r repo num cifail title url head proj; do
       printf '%s\t#%s\t%s\t%s\n' "$repo" "$num" "$cifail" "$title"
     done < "$PLAN_FILE"
@@ -404,7 +429,12 @@ try_reap() {
   log "  result  $repo#$num status='$last' recommendation='${decision}'"
   say "sweep: $repo#$num -> recommendation=${decision:-unknown} ($last)"
   if [ -n "$decision" ]; then maybe_transition_jira "$repo" "$num" "$decision"; fi
-  teardown_task "$id"
+  if [ "$last" != "timeout" ]; then
+    teardown_task "$id"
+  else
+    # Leave the window + worktree intact so an unattended overrun can be inspected.
+    log "  inspect  $repo#$num ($id) left for inspection: window fm-$id, meta state/$id.meta"
+  fi
   reviewed=$((reviewed + 1))
   # compact: move last element into slot i, then pop (order does not matter).
   local last_idx=$((${#A_ID[@]} - 1))
