@@ -72,7 +72,7 @@ launch_template() {
     claude) printf '%s' 'claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
     codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
-    pi) printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"' ;;
+    pi) printf '%s' 'pi --approve -e __PIEXT__ "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -117,18 +117,51 @@ fi
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 tmux send-keys -t "$T" 'treehouse get' Enter
 
-# Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+# Wait for the treehouse subshell to be ready before sending the launch command.
+# Two race conditions to defeat (verified live on this host, default shell fish):
+#  1. PATH TRANSIENT: for ~100ms after `new-window -c PROJ_ABS`, tmux reports
+#     pane_current_path as $HOME (e.g. /home/boks) before fish's slow startup
+#     (conda+fnm+omf+direnv) applies the requested -c directory. A naive
+#     "path != PROJ_ABS" check breaks on that transient and captures $HOME.
+#  2. FOREGROUND RACE: while `treehouse get` runs it is the foreground process
+#     (cwd = PROJ_ABS); the worktree subshell (fish) is its child. A launch
+#     command sent while treehouse is still foreground lands in the wrong
+#     context and is dropped, so the agent never starts.
+# Fix: only accept a path that is a real treehouse worktree AND whose foreground
+# process is the interactive shell (the subshell is up and ready to receive).
+is_treehouse_path() {
+  # treehouse worktrees live under ~/.treehouse/<repo>-<rand>/<n>/<branch>
+  case "$1" in *.treehouse/*) return 0 ;; *) return 1 ;; esac
+}
+# Interactive shells treehouse may open as the subshell (shell-of-record is fish
+# here, but accept the common set so this stays portable across hosts).
+is_interactive_shell() {
+  case "$(basename "$1")" in fish|bash|zsh|sh|dash) return 0 ;; *) return 1 ;; esac
+}
 WT=""
-for _ in $(seq 1 60); do
+prev=""
+for _ in $(seq 1 90); do
   p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-  if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-    WT="$p"
-    break
+  c=$(tmux display-message -p -t "$T" '#{pane_current_command}' 2>/dev/null || true)
+  # Accept only a real treehouse worktree path that is NOT the project dir we
+  # launched from, with an interactive shell foreground (subshell is ready), AND
+  # stable across two consecutive polls — so a one-shot transient (the ~100ms
+  # $HOME blip, or an intermediate worktree path as treehouse selects one) is
+  # never captured. prev holds the previous valid candidate; matching it twice
+  # means the subshell has settled on a single worktree.
+  if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ] && is_treehouse_path "$p" && is_interactive_shell "$c"; then
+    if [ "$p" = "$prev" ]; then
+      WT="$p"
+      break
+    fi
+    prev="$p"
+  else
+    prev=""
   fi
   sleep 1
 done
 if [ -z "$WT" ]; then
-  echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  echo "error: treehouse get did not reach an interactive shell in a worktree within 90s; inspect window $T (last: cmd='${c:-}' path='${p:-}')" >&2
   exit 1
 fi
 
@@ -205,8 +238,46 @@ mkdir -p "$FM_ROOT/state"
 LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
 LAUNCH=${LAUNCH//__TURNEND__/$TURNEND}
 LAUNCH=${LAUNCH//__PIEXT__/$FM_ROOT/state/$ID.pi-ext.ts}
-tmux send-keys -t "$T" -l "$LAUNCH"
-sleep 0.3
-tmux send-keys -t "$T" Enter
+
+# What pane_current_command reports once the harness is actually running, used by
+# the post-launch verify below. For the verified adapters the binary name is the
+# harness name (pi/claude/codex/opencode); the raw-launch escape hatch derived
+# HARNESS from the command basename, so it works there too.
+EXPECTED_CMD=$(basename "$HARNESS")
+
+# Send the launch command and VERIFY the harness actually started. A headless
+# dispatch (cron sweep, or any spawn without a live supervisor watching the pane)
+# cannot tolerate a silent drop: if the keystrokes land while the shell is still
+# mid-startup the launch can be swallowed and the pane is left at a shell prompt
+# with no agent process. So confirm pane_current_command flips to the harness
+# binary within a grace window; if it does not, resend once and re-check.
+send_launch() {
+  tmux send-keys -t "$T" -l "$LAUNCH"
+  sleep 0.4
+  tmux send-keys -t "$T" Enter
+}
+harness_running() {
+  case "$(basename "$(tmux display-message -p -t "$T" '#{pane_current_command}' 2>/dev/null || true)")" in
+    "$EXPECTED_CMD"|node*) return 0 ;; *) return 1 ;;
+  esac
+}
+send_launch
+verified=0
+for _ in $(seq 1 40); do   # ~40s grace for slow agent startup (pi/claude cold start)
+  if harness_running; then verified=1; break; fi
+  sleep 1
+done
+if [ "$verified" -ne 1 ]; then
+  echo "warn: harness '$HARNESS' not detected as foreground within 40s; resending launch once" >&2
+  send_launch
+  for _ in $(seq 1 40); do
+    if harness_running; then verified=1; break; fi
+    sleep 1
+  done
+fi
+if [ "$verified" -ne 1 ]; then
+  echo "error: harness '$HARNESS' failed to start in window $T after retry; pane left for inspection" >&2
+  exit 1
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
