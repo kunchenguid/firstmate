@@ -66,13 +66,13 @@ EOF
 # ---- ci_status: FAILURE in any check => fail; otherwise pass ---------------
 # Stub gh to emit a given JSON array of states.
 stub_gh() {
-  local states_json="$1"
+  local states_json="$1" exit_code="${2:-0}"
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/gh" <<EOF
 #!/usr/bin/env bash
 # test stub
 case "\$*" in
-  *pr*checks*) printf '%s' "$states_json" ;;
+  *pr*checks*) printf '%s' "$states_json"; exit $exit_code ;;
 esac
 EOF
   chmod +x "$TMP/bin/gh"
@@ -80,9 +80,11 @@ EOF
 }
 
 test_ci_status_failure_is_fail() {
-  stub_gh '["SUCCESS","FAILURE","SUCCESS"]'
-  [ "$(ci_status owner/name 1)" = "fail" ] || fail "FAILURE should make ci_status return fail"
-  pass "ci_status returns fail when any check is FAILURE"
+  # Real `gh pr checks` exits 1 when any check FAILED. The stub mirrors that;
+  # ci_status must classify from the check content, NOT the non-zero exit code.
+  stub_gh '["SUCCESS","FAILURE","SUCCESS"]' 1
+  [ "$(ci_status owner/name 1)" = "fail" ] || fail "FAILURE should make ci_status return fail even when gh exits 1"
+  pass "ci_status returns fail when any check is FAILURE (gh exit 1)"
 }
 
 test_ci_status_all_success_is_pass() {
@@ -92,10 +94,11 @@ test_ci_status_all_success_is_pass() {
 }
 
 test_ci_status_pending_is_not_fail() {
-  # PENDING/STARTED are running states, not hard failures.
-  stub_gh '["STARTED","PENDING"]'
+  # PENDING/STARTED are running states, not hard failures. Real `gh pr checks`
+  # exits 8 while checks are pending; the stub mirrors that.
+  stub_gh '["STARTED","PENDING"]' 8
   [ "$(ci_status owner/name 1)" = "pass" ] || fail "pending/running should not count as fail"
-  pass "ci_status treats PENDING/STARTED as non-failure"
+  pass "ci_status treats PENDING/STARTED as non-failure (gh exit 8)"
 }
 
 test_ci_status_empty_is_unknown() {

@@ -81,9 +81,7 @@ resolve_fleet() {
 # check is in a hard-failure state; pending/running/missing checks are not fails.
 ci_status() {
   local repo=$1 num=$2 states out
-  if ! out=$(gh pr checks "$num" --repo "$repo" --json state -q '[.[].state]' 2>/dev/null); then
-    echo unknown; return
-  fi
+  out=$(gh pr checks "$num" --repo "$repo" --json state -q '[.[].state]' 2>/dev/null || true)
   states=$(printf '%s' "$out" | tr -d ' \n[]"')
   [ -z "$states" ] && { echo unknown; return; }
   # hard failures
