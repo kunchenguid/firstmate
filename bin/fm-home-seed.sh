@@ -35,6 +35,25 @@ registry_owns_for_line() {
   sed -n 's/.*owns: \([^;)]*\).*/\1/p'
 }
 
+registry_home_for_line() {
+  sed -n 's/.*home: \([^;)]*\).*/\1/p'
+}
+
+path_key() {
+  local path=$1 parent base
+  if [ -d "$path" ]; then
+    cd "$path" && pwd -P
+    return
+  fi
+  parent=$(dirname "$path")
+  base=$(basename "$path")
+  if [ -d "$parent" ]; then
+    cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base"
+    return
+  fi
+  printf '%s\n' "$path"
+}
+
 owner_for_project() {
   local project=$1 line id owns item old_ifs
   [ -f "$REG" ] || return 1
@@ -56,6 +75,28 @@ owner_for_project() {
           fi
         done
         IFS=$old_ifs
+        ;;
+    esac
+  done < "$REG"
+  return 1
+}
+
+owner_for_home() {
+  local home=$1 target line id registered_home registered_key
+  [ -f "$REG" ] || return 1
+  target=$(path_key "$home")
+  while IFS= read -r line; do
+    case "$line" in
+      "- "*)
+        id=${line#- }
+        id=${id%% *}
+        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
+        [ -n "$registered_home" ] || continue
+        registered_key=$(path_key "$registered_home")
+        if [ "$registered_key" = "$target" ]; then
+          printf '%s\n' "$id"
+          return 0
+        fi
         ;;
     esac
   done < "$REG"
@@ -186,6 +227,22 @@ ensure_home() {
   printf '%s\n' "$(cd "$home" && pwd -P)"
 }
 
+validate_home_assignment() {
+  local id=$1 home=$2 marker_id owner
+  if [ -f "$home/$SUB_HOME_MARKER" ]; then
+    marker_id=$(cat "$home/$SUB_HOME_MARKER" 2>/dev/null || true)
+    if [ "$marker_id" != "$id" ]; then
+      echo "error: sub-firstmate home $home is already marked for ${marker_id:-unknown}" >&2
+      return 1
+    fi
+  fi
+  owner=$(owner_for_home "$home" || true)
+  if [ -n "$owner" ] && [ "$owner" != "$id" ]; then
+    echo "error: sub-firstmate home $home is already registered to $owner" >&2
+    return 1
+  fi
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
@@ -314,6 +371,7 @@ seed_home() {
   done
 
   home=$(ensure_home "$requested_home")
+  validate_home_assignment "$id" "$home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   for project in "$@"; do

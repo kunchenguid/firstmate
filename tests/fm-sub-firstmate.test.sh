@@ -222,6 +222,47 @@ test_home_seed_refuses_active_home_and_root() {
   pass "home seeding refuses active home and repo root"
 }
 
+test_home_seed_refuses_home_marked_for_another_id() {
+  local home subhome err
+  home="$TMP_ROOT/marked-seed-home"
+  subhome="$TMP_ROOT/marked-seed-subhome"
+  err="$TMP_ROOT/marked-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  git clone --quiet "$ROOT" "$subhome"
+  printf 'other\n' > "$subhome/.fm-sub-firstmate-home"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for marked-home seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed reused a home marked for another sub-firstmate"
+  fi
+  grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain marked-home rejection"
+  [ "$(cat "$subhome/.fm-sub-firstmate-home")" = "other" ] || fail "seed overwrote another sub-firstmate marker"
+  pass "home seeding refuses homes marked for another id"
+}
+
+test_home_seed_refuses_home_registered_to_another_id() {
+  local home subhome subhome_abs err
+  home="$TMP_ROOT/registered-seed-home"
+  subhome="$TMP_ROOT/registered-seed-subhome"
+  err="$TMP_ROOT/registered-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  git clone --quiet "$ROOT" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; owns: beta; added 2026-06-22)' > "$home/data/firstmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for registered-home seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed reused a home registered to another sub-firstmate"
+  fi
+  grep -F 'already registered to other' "$err" >/dev/null || fail "seed did not explain registered-home rejection"
+  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "seed wrote a marker before rejecting a registered home"
+  pass "home seeding refuses homes registered to another id"
+}
+
 test_home_seed_refuses_remote_backed_project_without_origin() {
   local home subhome err
   home="$TMP_ROOT/no-origin-home"
@@ -392,7 +433,7 @@ EOF
 }
 
 test_firstmate_teardown_requires_seed_marker() {
-  local home subhome fakebin err
+  local home subhome fakebin err log
   home="$TMP_ROOT/unmarked-teardown-home"
   subhome="$TMP_ROOT/unmarked-teardown-subhome"
   err="$TMP_ROOT/unmarked-teardown.err"
@@ -410,13 +451,59 @@ owned_projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/unmarked-teardown-fake")
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/unmarked-teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unmarked-teardown-fake/pane.txt" \
+  log="$TMP_ROOT/unmarked-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unmarked-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
     fail "teardown removed an unmarked firstmate home"
   fi
   [ -d "$subhome" ] || fail "teardown removed unmarked subhome after refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before seed marker validation"
   grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain missing seed marker"
   pass "firstmate teardown requires seeded home marker"
+}
+
+test_firstmate_force_teardown_prevalidates_before_child_cleanup() {
+  local home subhome childproj childwt fakebin err log
+  home="$TMP_ROOT/prevalidate-teardown-home"
+  subhome="$TMP_ROOT/prevalidate-teardown-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/prevalidate-child-worktree"
+  err="$TMP_ROOT/prevalidate-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+owned_projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
+  log="$TMP_ROOT/prevalidate-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/prevalidate-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown discarded child work before validating subhome"
+  fi
+  [ -d "$subhome" ] || fail "force teardown removed unmarked subhome after refusal"
+  [ -d "$childwt" ] || fail "force teardown removed child worktree before validation"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta before validation"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta before validation"
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before subhome validation"
+  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "force teardown did not explain missing seed marker"
+  pass "force teardown validates subhome before child cleanup"
 }
 
 test_firstmate_teardown_refuses_home_ancestor() {
@@ -503,6 +590,8 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_and_disjoint_routing
 test_home_seed_refuses_active_home_and_root
+test_home_seed_refuses_home_marked_for_another_id
+test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
@@ -510,6 +599,7 @@ test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
 test_firstmate_teardown_requires_seed_marker
+test_firstmate_force_teardown_prevalidates_before_child_cleanup
 test_firstmate_teardown_refuses_home_ancestor
 test_firstmate_idle_pane_is_not_stale
 test_watcher_ignores_foreign_tmux_windows

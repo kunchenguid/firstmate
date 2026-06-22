@@ -114,8 +114,8 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
-remove_firstmate_home() {
-  local home=$1 label=$2 abs_home_path
+validate_firstmate_home_for_removal() {
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -123,11 +123,48 @@ remove_firstmate_home() {
     echo "REFUSED: unsafe $label removal target $home is not a seeded sub-firstmate home" >&2
     return 1
   fi
+  if [ -n "$expected_id" ]; then
+    marker_id=$(cat "$abs_home_path/$SUB_HOME_MARKER" 2>/dev/null || true)
+    if [ "$marker_id" != "$expected_id" ]; then
+      echo "REFUSED: unsafe $label removal target $home is marked for sub-firstmate ${marker_id:-unknown}, expected $expected_id" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$abs_home_path"
+}
+
+remove_firstmate_home() {
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+  [ -n "$home" ] || return 0
+  [ -e "$home" ] || return 0
+  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
+  [ -n "$abs_home_path" ] || return 0
   if command -v treehouse >/dev/null 2>&1; then
     ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || safe_rm_rf "$abs_home_path" "$label"
   else
     safe_rm_rf "$abs_home_path" "$label"
   fi
+}
+
+validate_firstmate_home_children_removal() {
+  local home=$1 sub_state child_meta child_id child_wt child_kind child_home
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    child_wt=$(meta_value "$child_meta" worktree)
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_kind" = firstmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      validate_firstmate_home_children_removal "$child_home" || return 1
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_removal_target "$child_wt" "child worktree" >/dev/null || return 1
+    fi
+  done
 }
 
 cleanup_firstmate_home_children() {
@@ -148,7 +185,7 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home"
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
@@ -170,8 +207,15 @@ remove_firstmate_registry_entry() {
   mv "$tmp" "$FIRSTMATE_REG"
 }
 
-if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = firstmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  validate_firstmate_home_for_removal "$HOME_PATH" "sub-firstmate home" "$ID" >/dev/null || exit 1
+  if [ "$FORCE" = "--force" ]; then
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  fi
+fi
+
+if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
@@ -184,7 +228,6 @@ if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
 fi
 
 if [ "$KIND" = firstmate ] && [ "$FORCE" = "--force" ]; then
-  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
@@ -246,7 +289,7 @@ fi
 tmux kill-window -t "$T" 2>/dev/null || true
 if [ "$KIND" = firstmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "sub-firstmate home"
+  remove_firstmate_home "$HOME_PATH" "sub-firstmate home" "$ID"
   remove_firstmate_registry_entry "$ID"
 fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
