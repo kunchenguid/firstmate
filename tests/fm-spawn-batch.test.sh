@@ -19,9 +19,17 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# Run fm-spawn with the guard suppressed; capture combined output and exit status.
+# Clear ambient firstmate overrides so the behavior test owns its environment.
+# Use a known harness in targeted calls that must reach the missing-brief check.
 run_spawn() {
-  FM_SPAWN_NO_GUARD=1 "$SPAWN" "$@" 2>&1
+  FM_ROOT_OVERRIDE='' \
+    FM_HOME='' \
+    FM_STATE_OVERRIDE='' \
+    FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE='' \
+    FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$@" 2>&1
 }
 
 test_batch_dispatches_each_pair() {
@@ -84,7 +92,8 @@ test_fm_home_scopes_projects_path() {
   local home out status expected
   home="$TMP_ROOT/home path"
   mkdir -p "$home/data" "$home/projects/alpha"
-  out=$(FM_HOME="$home" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-home-z7 projects/alpha 2>&1)
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-home-z7 projects/alpha codex 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
   expected="error: no brief at $home/data/nope-home-z7/brief.md"
@@ -101,7 +110,8 @@ test_fm_projects_override_scopes_projects_path() {
   home="$TMP_ROOT/override home"
   projects="$TMP_ROOT/override projects"
   mkdir -p "$home/data" "$projects/alpha"
-  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-override-z8 projects/alpha 2>&1)
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-override-z8 projects/alpha codex 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
   expected="error: no brief at $home/data/nope-override-z8/brief.md"
