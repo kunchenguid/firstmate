@@ -32,6 +32,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+SUB_HOME_MARKER=".fm-sub-firstmate-home"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -147,6 +148,37 @@ firstmate_registry_value() {
   printf '%s\n' "$value"
 }
 
+resolved_existing_dir() {
+  local path=$1
+  [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
+  cd "$path" && pwd -P
+}
+
+validate_firstmate_home_for_spawn() {
+  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
+  abs_home=$(resolved_existing_dir "$home") || return 1
+  abs_active_home=$(resolved_existing_dir "$FM_HOME")
+  abs_root=$(resolved_existing_dir "$FM_ROOT")
+  if [ "$abs_home" = "$abs_active_home" ]; then
+    echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
+    return 1
+  fi
+  if [ "$abs_home" = "$abs_root" ]; then
+    echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    return 1
+  fi
+  if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
+    echo "error: firstmate home $home is not a seeded sub-firstmate home" >&2
+    return 1
+  fi
+  marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
+  if [ "$marker_id" != "$id" ]; then
+    echo "error: firstmate home $home is marked for sub-firstmate ${marker_id:-unknown}, expected $id" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_home"
+}
+
 if [ "$KIND" = firstmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -158,7 +190,7 @@ fi
 
 if [ "$KIND" = firstmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
-  PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd -P)"
+  PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"

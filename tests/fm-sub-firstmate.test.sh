@@ -66,6 +66,7 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     cat "$FM_FAKE_TMUX_CAPTURE"
     exit 0
     ;;
@@ -319,6 +320,7 @@ test_firstmate_spawn_records_home_meta() {
   subhome="$TMP_ROOT/spawn-subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd -P)
+  printf 'spawn-sub\n' > "$subhome/.fm-sub-firstmate-home"
   printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; scope: spawn domain; projects: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
   printf 'stale parent charter\n' > "$home/data/spawn-sub/brief.md"
   printf 'current persistent charter\n' > "$subhome/data/charter.md"
@@ -342,6 +344,52 @@ test_firstmate_spawn_records_home_meta() {
   grep -F 'notify=' "$log" >/dev/null && fail "firstmate codex launch should not install parent turn-end notify"
   grep -F 'turn-ended' "$log" >/dev/null && fail "firstmate launch should not reference parent turn-end marker"
   pass "kind=firstmate spawn launches in the home and records routing meta"
+}
+
+test_firstmate_spawn_requires_seeded_matching_home() {
+  local home subhome wronghome fakebin log err
+  home="$TMP_ROOT/spawn-validate-home"
+  subhome="$TMP_ROOT/spawn-validate-subhome"
+  wronghome="$TMP_ROOT/spawn-validate-wronghome"
+  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-validate-fake")
+  log="$TMP_ROOT/spawn-validate-fake/tmux.log"
+  err="$TMP_ROOT/spawn-validate.err"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted an unseeded home"
+  fi
+  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "spawn did not explain missing seed marker"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before seed marker validation"
+
+  : > "$log"
+  printf 'other\n' > "$wronghome/.fm-sub-firstmate-home"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$wronghome" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted a home marked for another sub-firstmate"
+  fi
+  grep -F 'marked for sub-firstmate other, expected domain' "$err" >/dev/null || fail "spawn did not explain marker mismatch"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before marker mismatch validation"
+
+  : > "$log"
+  printf 'domain\n' > "$home/.fm-sub-firstmate-home"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$home" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted the active home"
+  fi
+  grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before active-home validation"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$ROOT" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted the firstmate repo root"
+  fi
+  grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null || fail "spawn did not reject firstmate repo root"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before root validation"
+
+  pass "firstmate spawn validates homes before launch"
 }
 
 test_fm_send_resolves_bare_firstmate_window_from_home_meta() {
@@ -378,12 +426,48 @@ EOF
   pass "fm-send resolves bare firstmate windows through this home"
 }
 
+test_fm_peek_resolves_bare_firstmate_window_from_home_meta() {
+  local home fakebin log err out
+  home="$TMP_ROOT/peek-home"
+  mkdir -p "$home/state"
+  touch "$home/state/.last-watcher-beat"
+  cat > "$home/state/domain.meta" <<EOF
+window=current-session:fm-domain
+kind=firstmate
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/peek-fake")
+  log="$TMP_ROOT/peek-fake/tmux.log"
+  err="$TMP_ROOT/peek-fake/peek.err"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-domain" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/peek-fake/pane.txt" \
+    "$ROOT/bin/fm-peek.sh" fm-domain 10 2>"$err") \
+    || fail "fm-peek failed for a bare firstmate window with home metadata"
+  [ "$out" = "idle prompt" ] || fail "fm-peek did not print the captured pane"
+  grep -F 'capture-pane -p -t current-session:fm-domain -S -10' "$log" >/dev/null \
+    || fail "fm-peek did not use the window recorded in this home's meta"
+  grep -F 'capture-pane -p -t other-session:fm-domain' "$log" >/dev/null \
+    && fail "fm-peek targeted a foreign window with the same bare name"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-missing" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/peek-fake/pane.txt" \
+    "$ROOT/bin/fm-peek.sh" fm-missing >/dev/null 2>"$err"; then
+    fail "fm-peek inspected a bare firstmate window without home metadata"
+  fi
+  grep -F "no metadata for fm-missing in $home/state" "$err" >/dev/null \
+    || fail "fm-peek did not explain missing home metadata"
+  grep -F 'capture-pane -p -t other-session:fm-missing' "$log" >/dev/null \
+    && fail "fm-peek fell back to a foreign same-name window"
+
+  pass "fm-peek resolves bare firstmate windows through this home"
+}
+
 test_recovery_respawn_uses_persistent_home() {
   local home subhome subhome_abs fakebin meta
   home="$TMP_ROOT/recovery-home"
   subhome="$TMP_ROOT/recovery-subhome"
   mkdir -p "$home/data" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd -P)
+  printf 'recover-sub\n' > "$subhome/.fm-sub-firstmate-home"
   printf 'charter\n' > "$subhome/data/charter.md"
   printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; scope: recovery domain; projects: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
@@ -636,7 +720,9 @@ test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
+test_firstmate_spawn_requires_seeded_matching_home
 test_fm_send_resolves_bare_firstmate_window_from_home_meta
+test_fm_peek_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
