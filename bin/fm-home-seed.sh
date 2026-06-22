@@ -291,9 +291,9 @@ registry_line_for_project() {
 }
 
 project_mode_in_home() {
-  local home=$1 project=$2 mode yolo
-  read -r mode yolo <<EOF
-$(FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+  local home=$1 project=$2 mode
+  read -r mode _ <<EOF
+$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   printf '%s\n' "$mode"
 }
