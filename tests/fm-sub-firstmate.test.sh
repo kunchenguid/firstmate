@@ -1289,7 +1289,42 @@ EOF
   pass "firstmate force teardown discards child work"
 }
 
-test_firstmate_force_teardown_refuses_symlinked_state_dir() {
+test_firstmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
+  local opdir home subhome target fakebin err log
+  for opdir in data state config projects; do
+    home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
+    subhome="$TMP_ROOT/symlink-inside-teardown-subhome-$opdir"
+    target="$subhome/internal-$opdir"
+    err="$TMP_ROOT/symlink-inside-teardown-$opdir.err"
+    rm -rf "$home" "$subhome"
+    mkdir -p "$home/state" "$home/data" "$subhome" "$target"
+    printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+    ln -s "$target" "$subhome/$opdir"
+    cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+    printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+    fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-inside-teardown-fake-$opdir")
+    log="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/tmux.log"
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+      || fail "force teardown refused $opdir symlinked inside the sub-firstmate home"
+    [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
+    [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
+    grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
+  done
+  pass "force teardown allows operational directory symlinks inside the subhome"
+}
+
+test_firstmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   local home subhome external_state fakebin err log
   home="$TMP_ROOT/symlink-state-teardown-home"
   subhome="$TMP_ROOT/symlink-state-teardown-subhome"
@@ -1319,9 +1354,9 @@ EOF
   [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
   [ -d "$external_state" ] || fail "force teardown removed external symlink target"
   grep -F 'state directory' "$err" >/dev/null || fail "teardown did not explain symlinked state refusal"
-  grep -F 'must not be a symlink' "$err" >/dev/null || fail "teardown did not identify state symlink"
+  grep -F 'resolves outside the sub-firstmate home' "$err" >/dev/null || fail "teardown did not identify unsafe state symlink"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before symlinked state refusal"
-  pass "force teardown refuses symlinked sub-firstmate state dirs"
+  pass "force teardown refuses operational directory symlinks outside the subhome"
 }
 
 test_firstmate_teardown_requires_seed_marker() {
@@ -1781,7 +1816,8 @@ test_fm_send_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
-test_firstmate_force_teardown_refuses_symlinked_state_dir
+test_firstmate_force_teardown_allows_operational_dir_symlinks_inside_home
+test_firstmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_firstmate_teardown_requires_seed_marker
 test_firstmate_teardown_refuses_registered_nested_home
 test_firstmate_teardown_refuses_child_registry_nested_home

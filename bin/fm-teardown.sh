@@ -173,11 +173,18 @@ validate_firstmate_operational_dirs_for_removal() {
   for name in data state config projects; do
     dir="$home/$name"
     [ -e "$dir" ] || [ -L "$dir" ] || continue
-    if [ -L "$dir" ]; then
-      echo "REFUSED: unsafe $label $name directory $dir must not be a symlink" >&2
+    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+      echo "REFUSED: unsafe $label $name directory $dir resolves outside the sub-firstmate home" >&2
       return 1
     fi
-    abs_dir=$(removal_target_abs_path "$dir" 2>/dev/null || true)
+    if [ -d "$dir" ]; then
+      abs_dir=$(cd "$dir" && pwd -P)
+    elif [ -e "$dir" ]; then
+      echo "REFUSED: unsafe $label $name path $dir is not a directory" >&2
+      return 1
+    else
+      abs_dir=
+    fi
     if [ -z "$abs_dir" ] || ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
       echo "REFUSED: unsafe $label $name directory $dir resolves outside the sub-firstmate home" >&2
       return 1
