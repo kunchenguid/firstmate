@@ -170,6 +170,10 @@ validate_firstmate_home_for_spawn() {
   abs_home=$(resolved_existing_dir "$home") || return 1
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
+  if [ "$abs_home" = "/" ]; then
+    echo "error: sub-firstmate home cannot be the filesystem root: $home" >&2
+    return 1
+  fi
   if [ "$abs_home" = "$abs_active_home" ]; then
     echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
     return 1
@@ -186,6 +190,15 @@ validate_firstmate_home_for_spawn() {
     echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
+  if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
+    echo "error: sub-firstmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home" "$abs_root"; then
+    echo "error: sub-firstmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    return 1
+  fi
+  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
     echo "error: firstmate home $home is not a seeded sub-firstmate home" >&2
     return 1
@@ -196,6 +209,37 @@ validate_firstmate_home_for_spawn() {
     return 1
   fi
   printf '%s\n' "$abs_home"
+}
+
+validate_firstmate_operational_dirs() {
+  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
+  for name in data state config projects; do
+    dir="$abs_home/$name"
+    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+      echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+      return 1
+    fi
+    if [ -d "$dir" ]; then
+      abs_dir=$(cd "$dir" && pwd -P)
+    elif [ -e "$dir" ]; then
+      echo "error: sub-firstmate $name path is not a directory: $dir" >&2
+      return 1
+    else
+      abs_dir="$abs_home/$name"
+    fi
+    if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
+      echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+      return 1
+    fi
+    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
+      echo "error: sub-firstmate $name directory cannot be inside the active firstmate home: $dir" >&2
+      return 1
+    fi
+    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
+      echo "error: sub-firstmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      return 1
+    fi
+  done
 }
 
 if [ "$KIND" = firstmate ]; then

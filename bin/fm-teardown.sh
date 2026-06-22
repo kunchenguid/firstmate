@@ -145,8 +145,8 @@ validate_removal_target() {
 }
 
 registered_descendant_home_for_removal() {
-  local target=$1 line id registered_home registered_abs
-  [ -f "$FIRSTMATE_REG" ] || return 1
+  local reg=$1 target=$2 line id registered_home registered_abs
+  [ -f "$reg" ] || return 1
   while IFS= read -r line; do
     case "$line" in
       "- "*)
@@ -163,7 +163,7 @@ registered_descendant_home_for_removal() {
         fi
         ;;
     esac
-  done < "$FIRSTMATE_REG"
+  done < "$reg"
   return 1
 }
 
@@ -218,7 +218,10 @@ validate_firstmate_home_for_removal() {
       return 1
     fi
   fi
-  conflict=$(registered_descendant_home_for_removal "$abs_home_path" || true)
+  conflict=$(registered_descendant_home_for_removal "$FIRSTMATE_REG" "$abs_home_path" || true)
+  if [ -z "$conflict" ]; then
+    conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/firstmates.md" "$abs_home_path" || true)
+  fi
   if [ -n "$conflict" ]; then
     IFS=$'\t' read -r child_id child_home <<EOF
 $conflict

@@ -213,6 +213,10 @@ refuse_active_home_path() {
   abs_home=$(resolved_path "$home")
   abs_active_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
+  if [ "$abs_home" = "/" ]; then
+    echo "error: sub-firstmate home cannot be the filesystem root: $home" >&2
+    return 1
+  fi
   if [ "$abs_home" = "$abs_active_home" ]; then
     echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
     return 1
@@ -229,6 +233,46 @@ refuse_active_home_path() {
     echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
+  if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
+    echo "error: sub-firstmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home" "$abs_root"; then
+    echo "error: sub-firstmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    return 1
+  fi
+}
+
+validate_operational_dir() {
+  local home=$1 name=$2 dir abs_home abs_dir abs_active_home abs_root
+  dir="$home/$name"
+  if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+    echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+    return 1
+  fi
+  abs_home=$(resolved_path "$home")
+  abs_dir=$(resolved_path "$dir")
+  abs_active_home=$(resolved_path "$FM_HOME")
+  abs_root=$(resolved_path "$FM_ROOT")
+  if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
+    echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+    return 1
+  fi
+  if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
+    echo "error: sub-firstmate $name directory cannot be inside the active firstmate home: $dir" >&2
+    return 1
+  fi
+  if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
+    echo "error: sub-firstmate $name directory cannot be inside the firstmate repo: $dir" >&2
+    return 1
+  fi
+}
+
+validate_operational_dirs() {
+  local home=$1 name
+  for name in data state config projects; do
+    validate_operational_dir "$home" "$name" || return 1
+  done
 }
 
 validate_project_destination() {
@@ -335,6 +379,7 @@ verify_firstmate_home() {
   refuse_active_home_path "$home" || return 1
   [ -f "$home/AGENTS.md" ] || { echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2; return 1; }
   [ -d "$home/bin" ] || { echo "error: $home is not a firstmate home (missing bin/)" >&2; return 1; }
+  validate_operational_dirs "$home" || return 1
   printf '%s\n' "$(cd "$home" && pwd -P)"
 }
 
@@ -675,6 +720,7 @@ seed_home() {
   SEED_HOME="$home"
   validate_home_assignment "$id" "$home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  validate_operational_dirs "$home" || return 1
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
