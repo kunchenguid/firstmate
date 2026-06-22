@@ -250,7 +250,7 @@ The charter must be filled before seeding; direct seed without a preexisting bri
 Seeding is transactional: if validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `bin/fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only; `local-only` projects stay with the main firstmate.
-For `no-mistakes` projects, seeding initializes only newly cloned sub-home projects and refuses to mutate a preexisting clone that is not already initialized.
+For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 ### Project memory ownership
 
@@ -373,7 +373,7 @@ Add the task to `data/backlog.md` under In flight.
 Covered by section 8.
 Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
 Steer a secondmate the same way.
-Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays in the sub-home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
+Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays inside the secondmate home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
 
 ### Delivery modes and yolo
 
@@ -430,7 +430,7 @@ An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
 When it is safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
-With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and sub-home state, removes the route, and removes the retired secondmate home.
+With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and state inside the secondmate home, removes the route, and removes the retired secondmate home.
 
 ### Scout tasks (report instead of PR)
 
@@ -625,7 +625,7 @@ The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
 Keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
-`bin/fm-home-seed.sh` copies the charter into the sub-home as `data/charter.md`; `bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
+`bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`; `bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.

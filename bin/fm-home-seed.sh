@@ -5,7 +5,7 @@
 #   fm-home-seed.sh <id> <home|-> <project>...
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via treehouse get. Projects are cloned
-#       from this home into the sub-home's projects/ directory.
+#       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, a .fm-secondmate-home marker is written, and
@@ -14,8 +14,10 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe.
-#       Set FM_SECONDMATE_SCOPE='<scope>' to override the registry routing scope.
-#       Otherwise the registry summary and scope are derived from the filled charter brief.
+#       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
+#       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
+#       to override the registry routing scope. Otherwise the registry summary
+#       and scope are derived from the filled charter brief.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.
