@@ -467,7 +467,7 @@ Failing-CI PRs are **kept** (not skipped): their review brief adds an instructio
 
 The `review-rectify-pi` skill already deletes its prior `Review Findings - Rectification Status` comment and posts the fresh one (Phase 9); the sweep relies on that and does not re-implement comment deletion. After each review lands its comment, the sweep parses the recommendation: on a **clean APPROVE** (not CONDITIONAL APPROVE), it transitions the PR's linked Jira ticket (the `MILE-\d+` key from the title/body) to "In Review" via `jira issue move` — composing with the standing Jira rule. Status-only; it never merges.
 
-`--dry-run` enumerates, filters, and prints the plan without dispatching. `FM_SWEEP_CONCURRENCY` and `FM_SWEEP_TASK_TIMEOUT` (default 1800s) tune the run. Because it dispatches headlessly, it depends on `fm-spawn`'s headless-launch reliability - `--approve` to clear pi's project-trust gate, stable-worktree detection, and a post-launch verify that the harness binary is actually running (section 4).
+`--dry-run` enumerates, filters, and prints the plan without dispatching; `--one <owner>/<name>` restricts the run to a single fleet repo (for testing). `FM_SWEEP_CONCURRENCY` and `FM_SWEEP_TASK_TIMEOUT` (default 1800s) tune the run; a review that overruns the timeout is abandoned and left for inspection (window `fm-sweep-*`, worktree, meta) rather than torn down, so an unattended overrun may need manual cleanup. Because it dispatches headlessly, it depends on `fm-spawn`'s headless-launch reliability - `--approve` to clear pi's project-trust gate, stable-worktree detection, and a post-launch verify that the harness binary is actually running (section 4).
 
 ## 9. Escalation and captain etiquette
 
