@@ -156,7 +156,7 @@ ensure_home() {
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url mode
+  local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
   dst="$home/projects/$project"
   [ -d "$src" ] || { echo "error: owned project $project not found at $src" >&2; return 1; }
@@ -165,8 +165,19 @@ clone_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ -e "$dst" ]; then
+    [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
+    git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
     if [ "$mode" = local-only ]; then
       git -C "$dst" remote remove origin 2>/dev/null || true
+    else
+      url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+      [ -n "$url" ] || { echo "error: owned project $project is $mode but has no origin remote" >&2; return 1; }
+      dst_url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+      [ -n "$dst_url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $url" >&2; return 1; }
+      [ "$dst_url" = "$url" ] || {
+        echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
+        return 1
+      }
     fi
     return 0
   fi
@@ -174,11 +185,8 @@ EOF
     git clone --quiet "$src" "$dst"
   else
     url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-    if [ -n "$url" ]; then
-      git clone --quiet "$url" "$dst"
-    else
-      git clone --quiet "$src" "$dst"
-    fi
+    [ -n "$url" ] || { echo "error: owned project $project is $mode but has no origin remote" >&2; return 1; }
+    git clone --quiet "$url" "$dst"
   fi
   if [ "$mode" = local-only ]; then
     git -C "$dst" remote remove origin 2>/dev/null || true

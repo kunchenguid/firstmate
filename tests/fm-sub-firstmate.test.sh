@@ -33,6 +33,13 @@ make_git_project() {
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
+add_file_origin() {
+  local repo=$1 remote=$2 remote_abs
+  git clone --quiet --bare "$repo" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$repo" remote add origin "file://$remote_abs"
+}
+
 make_fake_tmux() {
   local dir=$1 fakebin log capture
   fakebin="$dir/fakebin"
@@ -155,6 +162,8 @@ test_home_seed_registry_and_disjoint_routing() {
   make_git_project "$home/projects/alpha"
   make_git_project "$home/projects/beta"
   make_git_project "$home/projects/gamma"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/alpha.git"
+  add_file_origin "$home/projects/gamma" "$TMP_ROOT/remotes/gamma.git"
   cat > "$home/data/projects.md" <<EOF
 - alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
 - beta [local-only] - beta project (added 2026-06-22)
@@ -187,6 +196,49 @@ EOF
     fail "seed allowed duplicate ownership of beta"
   fi
   pass "firstmates registry routes owners and refuses duplicate project scope"
+}
+
+test_home_seed_refuses_remote_backed_project_without_origin() {
+  local home subhome err
+  home="$TMP_ROOT/no-origin-home"
+  subhome="$TMP_ROOT/no-origin-subhome"
+  err="$TMP_ROOT/no-origin.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for no-origin seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed remote-backed project without origin"
+  fi
+  grep -F 'owned project alpha is direct-PR but has no origin remote' "$err" >/dev/null || fail "seed did not explain missing origin for remote-backed project"
+  pass "remote-backed subhome seeding requires a source origin"
+}
+
+test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
+  local home subhome subhome_abs err expected
+  home="$TMP_ROOT/wrong-origin-home"
+  subhome="$TMP_ROOT/wrong-origin-subhome"
+  err="$TMP_ROOT/wrong-origin.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/wrong-alpha.git"
+  git clone --quiet "$ROOT" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd)
+  mkdir -p "$subhome/projects"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for wrong-origin seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted existing remote-backed project with wrong origin"
+  fi
+  expected=$(git -C "$home/projects/alpha" remote get-url origin)
+  grep -F "seeded project alpha at $subhome_abs/projects/alpha has origin" "$err" >/dev/null \
+    || fail "seed did not identify wrong origin for existing remote-backed project"
+  grep -F "expected $expected" "$err" >/dev/null \
+    || fail "seed did not report expected origin for existing remote-backed project"
+  pass "remote-backed subhome seeding validates existing destination origins"
 }
 
 test_firstmate_spawn_records_home_meta() {
@@ -367,6 +419,8 @@ test_watcher_ignores_foreign_tmux_windows() {
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_and_disjoint_routing
+test_home_seed_refuses_remote_backed_project_without_origin
+test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
