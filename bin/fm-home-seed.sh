@@ -32,21 +32,6 @@ registry_home_for_line() {
   sed -n 's/.*home: \([^;)]*\).*/\1/p'
 }
 
-path_key() {
-  local path=$1 parent base
-  if [ -d "$path" ]; then
-    cd "$path" && pwd -P
-    return
-  fi
-  parent=$(dirname "$path")
-  base=$(basename "$path")
-  if [ -d "$parent" ]; then
-    cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base"
-    return
-  fi
-  printf '%s\n' "$path"
-}
-
 normalize_joined_path() {
   local prefix=$1 tail=$2 component out old_ifs
   out=${prefix%/}
@@ -122,20 +107,25 @@ path_is_ancestor_of() {
   return 1
 }
 
-owner_for_home() {
-  local home=$1 target line id registered_home registered_key
+registry_home_conflict_for_assignment() {
+  local id=$1 home=$2 target line registered_id registered_home registered_key
   [ -f "$REG" ] || return 1
-  target=$(path_key "$home")
+  target=$(resolved_path "$home")
   while IFS= read -r line; do
     case "$line" in
       "- "*)
-        id=${line#- }
-        id=${id%% *}
+        registered_id=${line#- }
+        registered_id=${registered_id%% *}
         registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
         [ -n "$registered_home" ] || continue
-        registered_key=$(path_key "$registered_home")
+        registered_key=$(resolved_path "$registered_home")
         if [ "$registered_key" = "$target" ]; then
-          printf '%s\n' "$id"
+          [ "$registered_id" = "$id" ] && continue
+          printf 'exact\t%s\t%s\n' "$registered_id" "$registered_key"
+          return 0
+        fi
+        if path_is_ancestor_of "$registered_key" "$target" || path_is_ancestor_of "$target" "$registered_key"; then
+          printf 'overlap\t%s\t%s\n' "$registered_id" "$registered_key"
           return 0
         fi
         ;;
@@ -145,7 +135,7 @@ owner_for_home() {
 }
 
 validate_registry() {
-  local tmp line id registered_home home_key duplicates
+  local tmp line id registered_home home_key duplicates overlaps
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmates.XXXXXX")
   if [ -f "$REG" ]; then
     while IFS= read -r line; do
@@ -155,7 +145,7 @@ validate_registry() {
           id=${id%% *}
           registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
           [ -n "$registered_home" ] || continue
-          home_key=$(path_key "$registered_home")
+          home_key=$(resolved_path "$registered_home")
           printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
           ;;
       esac
@@ -174,6 +164,28 @@ validate_registry() {
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
     printf 'error: duplicate sub-firstmate home assignment:\n%s\n' "$duplicates" >&2
+    return 1
+  }
+  overlaps=$(awk -F '\t' '
+    function ancestor(a, b) { return a != b && index(b, a "/") == 1 }
+    {
+      for (i = 1; i <= count; i++) {
+        if (ancestor($1, path[i])) {
+          print $1 " (" $2 ") contains " path[i] " (" id[i] ")"
+          bad=1
+        } else if (ancestor(path[i], $1)) {
+          print path[i] " (" id[i] ") contains " $1 " (" $2 ")"
+          bad=1
+        }
+      }
+      count++
+      path[count]=$1
+      id[count]=$2
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$tmp" 2>/dev/null) || {
+    rm -f "$tmp"
+    printf 'error: overlapping sub-firstmate home assignment:\n%s\n' "$overlaps" >&2
     return 1
   }
   rm -f "$tmp"
@@ -327,7 +339,7 @@ verify_firstmate_home() {
 }
 
 validate_home_assignment() {
-  local id=$1 home=$2 marker_id owner
+  local id=$1 home=$2 marker_id conflict conflict_type owner registered_home
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     marker_id=$(cat "$home/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$id" ]; then
@@ -335,11 +347,17 @@ validate_home_assignment() {
       return 1
     fi
   fi
-  owner=$(owner_for_home "$home" || true)
-  if [ -n "$owner" ] && [ "$owner" != "$id" ]; then
+  conflict=$(registry_home_conflict_for_assignment "$id" "$home" || true)
+  [ -n "$conflict" ] || return 0
+  IFS=$'\t' read -r conflict_type owner registered_home <<EOF
+$conflict
+EOF
+  if [ "$conflict_type" = exact ]; then
     echo "error: sub-firstmate home $home is already registered to $owner" >&2
     return 1
   fi
+  echo "error: sub-firstmate home $home overlaps registered sub-firstmate home $registered_home for $owner" >&2
+  return 1
 }
 
 clone_project() {
@@ -649,6 +667,7 @@ seed_home() {
   else
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
+    validate_home_assignment "$id" "$requested_abs" || return 1
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
     home=$(ensure_home "$requested_abs")

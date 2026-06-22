@@ -59,6 +59,10 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
+registry_home_for_line() {
+  sed -n 's/.*home: \([^;)]*\).*/\1/p'
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -140,6 +144,29 @@ validate_removal_target() {
   printf '%s\n' "$abs_target"
 }
 
+registered_descendant_home_for_removal() {
+  local target=$1 line id registered_home registered_abs
+  [ -f "$FIRSTMATE_REG" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "- "*)
+        id=${line#- }
+        id=${id%% *}
+        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
+        [ -n "$registered_home" ] || continue
+        registered_abs=$(removal_target_abs_path "$registered_home" 2>/dev/null || true)
+        [ -n "$registered_abs" ] || continue
+        [ "$registered_abs" = "$target" ] && continue
+        if path_is_ancestor_of "$target" "$registered_abs"; then
+          printf '%s\t%s\n' "$id" "$registered_abs"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$FIRSTMATE_REG"
+  return 1
+}
+
 validate_child_worktree_for_removal() {
   local target=$1 project=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -176,7 +203,7 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_firstmate_home_for_removal() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -190,6 +217,14 @@ validate_firstmate_home_for_removal() {
       echo "REFUSED: unsafe $label removal target $home is marked for sub-firstmate ${marker_id:-unknown}, expected $expected_id" >&2
       return 1
     fi
+  fi
+  conflict=$(registered_descendant_home_for_removal "$abs_home_path" || true)
+  if [ -n "$conflict" ]; then
+    IFS=$'\t' read -r child_id child_home <<EOF
+$conflict
+EOF
+    echo "REFUSED: unsafe $label removal target $home contains registered sub-firstmate home $child_home for $child_id" >&2
+    return 1
   fi
   printf '%s\n' "$abs_home_path"
 }

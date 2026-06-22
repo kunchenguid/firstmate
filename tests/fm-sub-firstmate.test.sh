@@ -260,6 +260,28 @@ EOF
   pass "home seed validation rejects duplicate home routes"
 }
 
+test_home_seed_validate_rejects_nested_homes() {
+  local home ancestor descendant ancestor_abs descendant_abs err
+  home="$TMP_ROOT/nested-home"
+  ancestor="$TMP_ROOT/nested-domain-a"
+  descendant="$ancestor/domain-b"
+  err="$TMP_ROOT/nested-home.err"
+  mkdir -p "$home/data" "$ancestor" "$descendant"
+  ancestor_abs=$(cd "$ancestor" && pwd -P)
+  descendant_abs=$(cd "$descendant" && pwd -P)
+  cat > "$home/data/firstmates.md" <<EOF
+- design - design domain (home: $ancestor_abs; scope: design work; projects: alpha; added 2026-06-22)
+- triage - triage domain (home: $descendant_abs; scope: issue triage; projects: beta; added 2026-06-22)
+EOF
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted nested sub-firstmate homes"
+  fi
+  grep -F 'overlapping sub-firstmate home assignment' "$err" >/dev/null \
+    || fail "registry validation did not explain nested home assignment"
+  pass "home seed validation rejects nested home routes"
+}
+
 test_home_seed_uses_treehouse_acquired_home() {
   local home acquired acquired_abs fakebin log out
   home="$TMP_ROOT/dash-home"
@@ -481,6 +503,41 @@ test_home_seed_refuses_home_registered_to_another_id() {
   grep -F 'already registered to other' "$err" >/dev/null || fail "seed did not explain registered-home rejection"
   [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "seed wrote a marker before rejecting a registered home"
   pass "home seeding refuses homes registered to another id"
+}
+
+test_home_seed_refuses_home_overlapping_registered_home() {
+  local home registered_parent registered_child nested parent err
+  home="$TMP_ROOT/overlap-seed-home"
+  registered_parent="$TMP_ROOT/overlap-registered-parent"
+  registered_child="$TMP_ROOT/overlap-registered-child-parent/child"
+  nested="$registered_parent/nested"
+  parent="$TMP_ROOT/overlap-registered-child-parent"
+  err="$TMP_ROOT/overlap-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/overlap-alpha.git"
+  git clone --quiet "$ROOT" "$registered_parent"
+  git clone --quiet "$ROOT" "$registered_child"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  cat > "$home/data/firstmates.md" <<EOF
+- parent - parent domain (home: $registered_parent; scope: parent domain; projects: beta; added 2026-06-22)
+- child - child domain (home: $registered_child; scope: child domain; projects: gamma; added 2026-06-22)
+EOF
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a home inside a registered sub-firstmate home"
+  fi
+  grep -F 'overlaps registered sub-firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain registered ancestor overlap"
+  [ ! -e "$nested" ] || fail "seed created a nested home inside a registered home"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$parent" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a home containing a registered sub-firstmate home"
+  fi
+  grep -F 'overlaps registered sub-firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain registered descendant overlap"
+  [ ! -f "$parent/.fm-sub-firstmate-home" ] || fail "seed marked a home containing a registered home"
+  pass "home seeding refuses registered home overlaps"
 }
 
 test_home_seed_refuses_remote_backed_project_without_origin() {
@@ -903,6 +960,56 @@ EOF
   pass "firstmate teardown requires seeded home marker"
 }
 
+test_firstmate_teardown_refuses_registered_nested_home() {
+  local home subhome nested fakebin err log
+  home="$TMP_ROOT/nested-teardown-home"
+  subhome="$TMP_ROOT/nested-teardown-subhome"
+  nested="$subhome/nested-domain"
+  err="$TMP_ROOT/nested-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'nested\n' > "$nested/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  cat > "$home/state/nested.meta" <<EOF
+window=firstmate:fm-nested
+worktree=$nested
+project=$nested
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$nested
+projects=beta
+EOF
+  cat > "$home/data/firstmates.md" <<EOF
+- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)
+- nested - nested domain (home: $nested; scope: nested domain; projects: beta; added 2026-06-22)
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/nested-teardown-fake")
+  log="$TMP_ROOT/nested-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed a home containing another registered sub-firstmate home"
+  fi
+  [ -d "$subhome" ] || fail "teardown removed registered ancestor home after refusal"
+  [ -d "$nested" ] || fail "teardown removed registered nested home after refusal"
+  [ -e "$home/state/domain.meta" ] || fail "teardown cleared ancestor meta after nested-home refusal"
+  [ -e "$home/state/nested.meta" ] || fail "teardown cleared nested meta after nested-home refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before nested-home refusal"
+  grep -F 'contains registered sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain registered nested-home refusal"
+  pass "firstmate teardown refuses homes containing registered nested homes"
+}
+
 test_firstmate_force_teardown_prevalidates_before_child_cleanup() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/prevalidate-teardown-home"
@@ -1212,6 +1319,7 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
 test_home_seed_validate_rejects_duplicate_homes
+test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_does_not_return_unsafe_acquired_home
@@ -1220,6 +1328,7 @@ test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
+test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
@@ -1233,6 +1342,7 @@ test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
 test_firstmate_teardown_requires_seed_marker
+test_firstmate_teardown_refuses_registered_nested_home
 test_firstmate_force_teardown_prevalidates_before_child_cleanup
 test_firstmate_force_teardown_refuses_child_active_home_descendant
 test_firstmate_force_teardown_refuses_child_repo_descendant
