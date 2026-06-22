@@ -921,7 +921,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
     rm -rf "$subhome" "$sink"
     git clone --quiet "$ROOT" "$subhome"
     mkdir -p "$sink"
-    rm -rf "$subhome/$opdir"
+    rm -rf "${subhome:?}/${opdir:?}"
     ln -s "$sink" "$subhome/$opdir"
     if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
       fail "seed accepted a subhome with $opdir symlinked outside the subhome"
@@ -1139,7 +1139,7 @@ test_firstmate_spawn_refuses_operational_dirs_outside_subhome() {
     mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$sink"
     printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
     printf 'charter\n' > "$subhome/data/charter.md"
-    rm -rf "$subhome/$opdir"
+    rm -rf "${subhome:?}/${opdir:?}"
     ln -s "$sink" "$subhome/$opdir"
     if [ "$opdir" = data ]; then
       printf 'charter\n' > "$sink/charter.md"

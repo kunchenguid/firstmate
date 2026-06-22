@@ -129,7 +129,7 @@ test_daemon_state_root_uses_fm_home() {
   override="$dir/override-state"
   mkdir -p "$home" "$override"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE= _state_root)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE='' _state_root)
   [ "$out" = "$home/state" ] || fail "daemon state root ignored FM_HOME: $out"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$override" _state_root)
