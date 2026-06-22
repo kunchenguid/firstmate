@@ -260,6 +260,28 @@ EOF
   pass "home seed validation rejects duplicate home routes"
 }
 
+test_home_seed_validate_rejects_duplicate_ids() {
+  local home first second first_abs second_abs err
+  home="$TMP_ROOT/duplicate-id-home"
+  first="$TMP_ROOT/duplicate-id-first"
+  second="$TMP_ROOT/duplicate-id-second"
+  err="$TMP_ROOT/duplicate-id.err"
+  mkdir -p "$home/data" "$first" "$second"
+  first_abs=$(cd "$first" && pwd -P)
+  second_abs=$(cd "$second" && pwd -P)
+  cat > "$home/data/firstmates.md" <<EOF
+- design - design domain (home: $first_abs; scope: design work; projects: alpha; added 2026-06-22)
+- design - design domain (home: $second_abs; scope: design work; projects: beta; added 2026-06-22)
+EOF
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted two homes for the same sub-firstmate id"
+  fi
+  grep -F 'duplicate sub-firstmate id assignment' "$err" >/dev/null \
+    || fail "registry validation did not explain duplicate id assignment"
+  pass "home seed validation rejects duplicate id routes"
+}
+
 test_home_seed_validate_rejects_nested_homes() {
   local home ancestor descendant ancestor_abs descendant_abs err
   home="$TMP_ROOT/nested-home"
@@ -523,6 +545,36 @@ test_home_seed_refuses_home_registered_to_another_id() {
   grep -F 'already registered to other' "$err" >/dev/null || fail "seed did not explain registered-home rejection"
   [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "seed wrote a marker before rejecting a registered home"
   pass "home seeding refuses homes registered to another id"
+}
+
+test_home_seed_refuses_reassigning_existing_id_to_different_home() {
+  local home first second first_abs second_abs err
+  home="$TMP_ROOT/reassign-id-home"
+  first="$TMP_ROOT/reassign-id-first"
+  second="$TMP_ROOT/reassign-id-second"
+  err="$TMP_ROOT/reassign-id.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/reassign-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_FIRSTMATE_SCOPE='design domain' "$ROOT/bin/fm-home-seed.sh" design "$first" alpha >/dev/null \
+    || fail "initial seed failed for reassigning-id test"
+  first_abs=$(cd "$first" && pwd -P)
+
+  if FM_HOME="$home" FM_FIRSTMATE_SCOPE='design domain' "$ROOT/bin/fm-home-seed.sh" design "$second" alpha >/dev/null 2>"$err"; then
+    fail "seed reassigned an existing sub-firstmate id to a different home"
+  fi
+  grep -F "sub-firstmate id design is already registered to home $first_abs" "$err" >/dev/null \
+    || fail "seed did not explain same-id different-home rejection"
+  [ ! -e "$second" ] || fail "failed id reassignment created the new subhome"
+  [ "$(cat "$first/.fm-sub-firstmate-home")" = design ] || fail "failed id reassignment changed the original marker"
+  grep -F "home: $first_abs" "$home/data/firstmates.md" >/dev/null \
+    || fail "failed id reassignment did not preserve the original registry route"
+  second_abs=$(cd "$(dirname "$second")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$second")")
+  grep -F "home: $second_abs" "$home/data/firstmates.md" >/dev/null \
+    && fail "failed id reassignment recorded the rejected home"
+  pass "home seeding refuses same-id reassignment to a different home"
 }
 
 test_home_seed_refuses_home_overlapping_registered_home() {
@@ -1465,6 +1517,7 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
 test_home_seed_validate_rejects_duplicate_homes
+test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
@@ -1474,6 +1527,7 @@ test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
+test_home_seed_refuses_reassigning_existing_id_to_different_home
 test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin

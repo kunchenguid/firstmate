@@ -134,8 +134,30 @@ registry_home_conflict_for_assignment() {
   return 1
 }
 
+registry_id_conflict_for_assignment() {
+  local id=$1 home=$2 target line registered_id registered_home registered_key
+  [ -f "$REG" ] || return 1
+  target=$(resolved_path "$home")
+  while IFS= read -r line; do
+    case "$line" in
+      "- "*)
+        registered_id=${line#- }
+        registered_id=${registered_id%% *}
+        [ "$registered_id" = "$id" ] || continue
+        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
+        [ -n "$registered_home" ] || continue
+        registered_key=$(resolved_path "$registered_home")
+        [ "$registered_key" = "$target" ] && continue
+        printf '%s\n' "$registered_key"
+        return 0
+        ;;
+    esac
+  done < "$REG"
+  return 1
+}
+
 validate_registry() {
-  local tmp line id registered_home home_key duplicates overlaps
+  local tmp line id registered_home home_key duplicate_homes duplicate_ids overlaps
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmates.XXXXXX")
   if [ -f "$REG" ]; then
     while IFS= read -r line; do
@@ -151,7 +173,7 @@ validate_registry() {
       esac
     done < "$REG"
   fi
-  duplicates=$(awk -F '\t' '
+  duplicate_homes=$(awk -F '\t' '
     {
       if (($1 in owner) && owner[$1] != $2) {
         print $1 ": " owner[$1] ", " $2
@@ -163,7 +185,22 @@ validate_registry() {
     END { exit bad ? 1 : 0 }
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
-    printf 'error: duplicate sub-firstmate home assignment:\n%s\n' "$duplicates" >&2
+    printf 'error: duplicate sub-firstmate home assignment:\n%s\n' "$duplicate_homes" >&2
+    return 1
+  }
+  duplicate_ids=$(awk -F '\t' '
+    {
+      if ($2 in home) {
+        print $2 ": " home[$2] ", " $1
+        bad=1
+      } else {
+        home[$2]=$1
+      }
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$tmp" 2>/dev/null) || {
+    rm -f "$tmp"
+    printf 'error: duplicate sub-firstmate id assignment:\n%s\n' "$duplicate_ids" >&2
     return 1
   }
   overlaps=$(awk -F '\t' '
@@ -384,13 +421,18 @@ verify_firstmate_home() {
 }
 
 validate_home_assignment() {
-  local id=$1 home=$2 marker_id conflict conflict_type owner registered_home
+  local id=$1 home=$2 marker_id id_conflict conflict conflict_type owner registered_home
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     marker_id=$(cat "$home/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$id" ]; then
       echo "error: sub-firstmate home $home is already marked for ${marker_id:-unknown}" >&2
       return 1
     fi
+  fi
+  id_conflict=$(registry_id_conflict_for_assignment "$id" "$home" || true)
+  if [ -n "$id_conflict" ]; then
+    echo "error: sub-firstmate id $id is already registered to home $id_conflict; retire it before assigning $home" >&2
+    return 1
   fi
   conflict=$(registry_home_conflict_for_assignment "$id" "$home" || true)
   [ -n "$conflict" ] || return 0
