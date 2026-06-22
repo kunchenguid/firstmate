@@ -86,6 +86,8 @@
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
@@ -126,9 +128,9 @@ FM_INJECT_MARK=$'\x1f'
 AFK_FLAG_NAME=".afk"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
-# $FM_ROOT/state, computed in fm_super_main. Kept as a function so the pure
+# $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
-_state_root() { printf '%s' "${FM_STATE_OVERRIDE:-${FM_ROOT:-$FM_DAEMON_DIR/..}/state}"; }
+_state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
@@ -677,7 +679,6 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
-  FM_ROOT="$(cd "$FM_DAEMON_DIR/.." && pwd)"
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"

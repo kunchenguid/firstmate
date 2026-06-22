@@ -122,6 +122,22 @@ SH
   printf '%s\n' "$dir"
 }
 
+test_daemon_state_root_uses_fm_home() {
+  local dir home override out
+  dir=$(make_supercase daemon-fm-home)
+  home="$dir/firstmate-home"
+  override="$dir/override-state"
+  mkdir -p "$home" "$override"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE= _state_root)
+  [ "$out" = "$home/state" ] || fail "daemon state root ignored FM_HOME: $out"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$override" _state_root)
+  [ "$out" = "$override" ] || fail "daemon state root ignored FM_STATE_OVERRIDE: $out"
+
+  pass "supervise daemon state root is scoped by FM_HOME"
+}
+
 append_wake() {
   local state=$1 kind=$2 key=$3 payload=$4
   (
@@ -945,6 +961,7 @@ test_classify_stale_dedup_against_signal() {
   pass "classify_stale dedupes against the signal path seen marker"
 }
 
+test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

@@ -226,6 +226,14 @@ validate_firstmate_home_for_spawn() {
     echo "error: firstmate home $home is marked for sub-firstmate ${marker_id:-unknown}, expected $id" >&2
     return 1
   fi
+  if [ ! -f "$abs_home/AGENTS.md" ]; then
+    echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2
+    return 1
+  fi
+  if [ ! -d "$abs_home/bin" ]; then
+    echo "error: $home is not a firstmate home (missing bin/)" >&2
+    return 1
+  fi
   printf '%s\n' "$abs_home"
 }
 

@@ -52,6 +52,12 @@ scaffold_firstmate_charter() {
   FM_HOME="$home" FM_FIRSTMATE_CHARTER="$charter" "$ROOT/bin/fm-brief.sh" "$id" --firstmate "$@" >/dev/null
 }
 
+mark_firstmate_home() {
+  local home=$1
+  mkdir -p "$home/bin"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+}
+
 make_fake_tmux() {
   local dir=$1 fakebin log capture
   fakebin="$dir/fakebin"
@@ -966,6 +972,7 @@ test_firstmate_spawn_records_home_meta() {
   home="$TMP_ROOT/spawn home"
   subhome="$TMP_ROOT/spawn subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
+  mark_firstmate_home "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'spawn-sub\n' > "$subhome/.fm-sub-firstmate-home"
   printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; scope: spawn domain; projects: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
@@ -994,10 +1001,11 @@ test_firstmate_spawn_records_home_meta() {
 }
 
 test_firstmate_spawn_requires_seeded_matching_home() {
-  local home subhome wronghome active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
+  local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
   home="$TMP_ROOT/spawn-validate-home"
   subhome="$TMP_ROOT/spawn-validate-subhome"
   wronghome="$TMP_ROOT/spawn-validate-wronghome"
+  marker_only="$TMP_ROOT/spawn-validate-marker-only"
   active_descendant="$home/data/spawn-descendant-home"
   active_ancestor="$TMP_ROOT/spawn-active-ancestor"
   ancestor_active_home="$active_ancestor/main-home"
@@ -1005,7 +1013,7 @@ test_firstmate_spawn_requires_seeded_matching_home() {
   root_descendant="$fakeroot/tmp/spawn-descendant-home"
   root_ancestor="$TMP_ROOT/spawn-root-ancestor"
   root_inside="$root_ancestor/repo"
-  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin"
+  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$marker_only/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin"
   cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1036,6 +1044,25 @@ SH
   fi
   grep -F 'marked for sub-firstmate other, expected domain' "$err" >/dev/null || fail "spawn did not explain marker mismatch"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before marker mismatch validation"
+
+  : > "$log"
+  printf 'domain\n' > "$marker_only/.fm-sub-firstmate-home"
+  printf 'charter\n' > "$marker_only/data/charter.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted a marked home missing AGENTS.md"
+  fi
+  grep -F 'not a firstmate home (missing AGENTS.md)' "$err" >/dev/null || fail "spawn did not explain missing AGENTS.md"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before AGENTS.md validation"
+
+  : > "$log"
+  printf '# Firstmate\n' > "$marker_only/AGENTS.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted a marked home missing bin"
+  fi
+  grep -F 'not a firstmate home (missing bin/)' "$err" >/dev/null || fail "spawn did not explain missing bin"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before bin validation"
 
   : > "$log"
   printf 'domain\n' > "$home/.fm-sub-firstmate-home"
@@ -1168,6 +1195,7 @@ test_recovery_respawn_uses_persistent_home() {
   home="$TMP_ROOT/recovery-home"
   subhome="$TMP_ROOT/recovery-subhome"
   mkdir -p "$home/data" "$home/state" "$subhome/data"
+  mark_firstmate_home "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'recover-sub\n' > "$subhome/.fm-sub-firstmate-home"
   printf 'charter\n' > "$subhome/data/charter.md"
