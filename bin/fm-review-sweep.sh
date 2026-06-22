@@ -39,46 +39,17 @@ STATE_DIR="$FM_ROOT/state"
 PROJECTS_MD="$FM_ROOT/data/projects.md"
 SWEEP_LOG="$STATE_DIR/sweep.log"
 SWEEP_RUN_DIR="$STATE_DIR/sweep"          # per-run scratch (task ids, briefs live under data/)
-mkdir -p "$STATE_DIR" "$SWEEP_RUN_DIR"
 
 CONCURRENCY="${FM_SWEEP_CONCURRENCY:-3}"
 TASK_TIMEOUT="${FM_SWEEP_TASK_TIMEOUT:-1800}"
 DRY_RUN=0
 ONLY_REPO=""
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --dry-run) DRY_RUN=1; shift ;;
-    --one) ONLY_REPO="${2:-}"; shift 2 ;;
-    -h|--help)
-      sed -n '2,40p' "$0"; exit 0 ;;
-    *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
-  esac
-done
-
 log() { printf '%s\n' "$*" >> "$SWEEP_LOG"; }
 say() { printf '%s\n' "$*"; }   # stdout (cron redirects both to sweep.log via >>2>&1)
-
-# ---- flock: never overlap two sweeps ---------------------------------------
-LOCK_FD=9
-exec 9>>"$STATE_DIR/.sweep.lock"
-if ! flock -n "$LOCK_FD"; then
-  say "sweep: another run holds the lock; exiting"
-  exit 0
-fi
-
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-RUN_TS="$(ts)"
-log ""
-log "==== sweep start $RUN_TS (dry-run=$DRY_RUN, concurrency=$CONCURRENCY) ===="
-
-# ---- prerequisites ----------------------------------------------------------
+# prerequisite helper (used inside main)
 need() { command -v "$1" >/dev/null 2>&1 || { say "error: missing required tool '$1'"; exit 1; }; }
-need gh
-need tmux
-need jq
-need git
-# jira is optional (only the transition needs it); checked lazily where used.
 
 # ---- resolve fleet repos from data/projects.md -----------------------------
 # Each registry line carries a github.com/<owner>/<name> URL. Emit
@@ -86,7 +57,7 @@ need git
 # so fm-spawn can `treehouse get` a worktree of that repo.
 resolve_fleet() {
   [ -f "$PROJECTS_MD" ] || { say "error: no fleet registry at $PROJECTS_MD"; exit 1; }
-  local line url owner name proj
+  local line url proj
   # project name is the first token of each "- <name> [...]" bullet; the local
   # clone lives at projects/<name>. The github URL is the github.com/<o>/<n> token.
   while IFS= read -r line; do
@@ -94,10 +65,11 @@ resolve_fleet() {
       *github.com/*)
         url=$(printf '%s' "$line" | grep -oE 'github.com/[^ )"]+' | head -1 | sed 's#github.com/##')
         proj=$(printf '%s' "$line" | grep -oE '^- [A-Za-z0-9_-]+' | sed 's/^- //')
-        [ -n "$url" ] && [ -n "$proj" ] || continue
         # strip a trailing .git if present
         url="${url%.git}"
-        printf '%s\t%s\n' "$url" "projects/$proj"
+        if [ -n "$url" ] && [ -n "$proj" ]; then
+          printf '%s\t%s\n' "$url" "projects/$proj"
+        fi
         ;;
     esac
   done < "$PROJECTS_MD"
@@ -125,7 +97,7 @@ ci_status() {
 # Emits TSV rows: repo<TAB>num<TAB>cifail<TAB>title<TAB>url<TAB>headRefOid
 # Drafts and APPROVED PRs are excluded here.
 emit_repo_prs() {
-  local repo=$1 proj=$2 prs json num draft dec cifail title url head
+  local repo=$1 proj=$2 prs num draft dec cifail title url head
   prs=$(gh pr list --repo "$repo" --state open --limit 100 \
         --json number,isDraft,reviewDecision,title,url,headRefOid 2>/dev/null) || return 0
   [ -n "$prs" ] || return 0
@@ -235,10 +207,13 @@ EOF
 # review is NOT done yet. Best-effort: never aborts the caller.
 spawn_review() {
   local repo=$1 num=$2 cifail=$3 proj=$4
-  local id="sweep-$(printf '%s' "$repo" | tr '/.' '--')-${num}-$$"
-  local status_file="$FM_ROOT/state/$id.status"
-  local brief
-  brief=$(write_brief "$id" "$repo" "$num" "$cifail" "$proj") || { log "  error   $repo#$num brief write failed"; return 1; }
+  local id status_file
+  id="sweep-$(printf '%s' "$repo" | tr '/.' '--')-${num}-$$"
+  status_file="$FM_ROOT/state/$id.status"
+  if ! write_brief "$id" "$repo" "$num" "$cifail" "$proj"; then
+    log "  error   $repo#$num brief write failed"
+    return 1
+  fi
   : > "$status_file"
   # Spawn headlessly (cron has no TMUX). FM_SPAWN_NO_GUARD: no watcher to guard.
   local spawn_out spawn_rc=0
@@ -252,35 +227,6 @@ spawn_review() {
   printf '%s\n' "$id" >> "$SWEEP_RUN_DIR/.active"
   log "  spawn   $repo#$num -> $id (cifail=$cifail)"
   SPAWN_ID="$id"
-}
-
-# ---- wait for one task to finish (blocking) -------------------------------
-# Polls the task's status file (and window liveness) until a terminal status or
-# timeout. Sets WAIT_STATUS. Used by the concurrent pool reaper.
-wait_review() {
-  local id=$1 window="fm-$id"
-  local status_file="$FM_ROOT/state/$id.status"
-  local deadline=$(( $(date +%s) + TASK_TIMEOUT ))
-  local last=""
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    last=$(tail -1 "$status_file" 2>/dev/null || true)
-    case "$last" in
-      done:*|failed:*|blocked:*|needs-decision:*) break ;;
-    esac
-    # Fallback: window gone means the crewmate exited without a terminal status.
-    if ! tmux list-windows -a -F '#{window_name}' 2>/dev/null | grep -qx "$window"; then
-      [ -n "$last" ] || { echo "done: window-exited" >> "$status_file"; last="done: window-exited"; }
-      break
-    fi
-    sleep 15
-  done
-  if [ "$(date +%s)" -ge "$deadline" ]; then
-    case "$last" in
-      done:*|failed:*|blocked:*|needs-decision:*) : ;;
-      *) last="timeout"; log "  timeout $id after ${TASK_TIMEOUT}s" ;;
-    esac
-  fi
-  WAIT_STATUS="$last"
 }
 
 # ---- parse the recommendation from the posted PR comment -------------------
@@ -335,7 +281,8 @@ maybe_transition_jira() {
 
 # ---- teardown a sweep crewmate (best-effort) -------------------------------
 teardown_task() {
-  local id=$1 window="fm-$id"
+  local id=$1
+  local window="fm-$id"
   # Tell pi to quit, then exit the treehouse subshell, then kill the window.
   tmux send-keys -t "$window" '/quit' Enter 2>/dev/null || true
   sleep 2
@@ -350,8 +297,39 @@ teardown_task() {
 }
 
 # ============================================================================
-# Main
+# Main (guarded so the helper functions above can be sourced by tests)
 # ============================================================================
+main() {
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --one) ONLY_REPO="${2:-}"; shift 2 ;;
+    -h|--help)
+      sed -n '2,40p' "$0"; exit 0 ;;
+    *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$STATE_DIR" "$SWEEP_RUN_DIR"
+
+# ---- flock: never overlap two sweeps ---------------------------------------
+exec 9>>"$STATE_DIR/.sweep.lock"
+if ! flock -n 9; then
+  say "sweep: another run holds the lock; exiting"
+  exit 0
+fi
+
+RUN_TS="$(ts)"
+log ""
+log "==== sweep start $RUN_TS (dry-run=$DRY_RUN, concurrency=$CONCURRENCY) ===="
+
+# ---- prerequisites ----------------------------------------------------------
+need gh
+need tmux
+need jq
+need git
+# jira is optional (only the transition needs it); checked lazily where used.
+
 say "sweep: enumerating fleet PRs..."
 FLEET=$(resolve_fleet)
 [ -n "$FLEET" ] || { say "sweep: no fleet repos resolved; nothing to do"; log "==== sweep end (no repos) ===="; exit 0; }
@@ -472,3 +450,7 @@ done
 
 log "==== sweep end $RUN_TS: considered=$considered candidates=$total reviewed=$reviewed failures=$failures ===="
 say "sweep done: reviewed=$reviewed failures=$failures (see state/sweep.log)"
+}
+
+# Run main only when executed, not when sourced (e.g. by tests).
+[ "${BASH_SOURCE[0]:-$0}" = "$0" ] && main "$@"
