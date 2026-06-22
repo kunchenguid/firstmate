@@ -84,7 +84,11 @@ validate_removal_target() {
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(removal_target_abs_path "$target")
-  abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P || true)
+  if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
+    :
+  else
+    abs_home=
+  fi
   abs_root=$(cd "$FM_ROOT" && pwd -P)
   case "$abs_target" in
     ''|/) echo "REFUSED: unsafe $label removal target $target" >&2; return 1 ;;
@@ -179,7 +183,9 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    [ -n "$child_t" ] && tmux kill-window -t "$child_t" 2>/dev/null || true
+    if [ -n "$child_t" ]; then
+      tmux kill-window -t "$child_t" 2>/dev/null || true
+    fi
     if [ "$child_kind" = firstmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
