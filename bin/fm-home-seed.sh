@@ -2,16 +2,14 @@
 # Provision and route persistent sub-firstmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> <owned-project>...
+#   fm-home-seed.sh <id> <home|-> <project>...
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
-#       a fresh firstmate worktree via treehouse get. Owned projects are cloned
+#       a fresh firstmate worktree via treehouse get. Projects are cloned
 #       from this home into the sub-home's projects/ directory, the charter brief
-#       is copied to data/charter.md, no-mistakes owned projects are initialized,
+#       is copied to data/charter.md, no-mistakes projects are initialized,
 #       a .fm-sub-firstmate-home marker is written, and data/firstmates.md is updated.
-#   fm-home-seed.sh owner <project>
-#       Print the registered sub-firstmate id that owns <project>.
 #   fm-home-seed.sh validate
-#       Refuse duplicate project ownership in data/firstmates.md.
+#       Refuse duplicate home assignments in data/firstmates.md.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,17 +21,8 @@ REG="$DATA/firstmates.md"
 SUB_HOME_MARKER=".fm-sub-firstmate-home"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> <owned-project>..." >&2
-  echo "       fm-home-seed.sh owner <project>" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
   echo "       fm-home-seed.sh validate" >&2
-}
-
-trim() {
-  sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-}
-
-registry_owns_for_line() {
-  sed -n 's/.*owns: \([^;)]*\).*/\1/p'
 }
 
 registry_home_for_line() {
@@ -53,33 +42,6 @@ path_key() {
     return
   fi
   printf '%s\n' "$path"
-}
-
-owner_for_project() {
-  local project=$1 line id owns item old_ifs
-  [ -f "$REG" ] || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      "- "*)
-        id=${line#- }
-        id=${id%% *}
-        owns=$(printf '%s\n' "$line" | registry_owns_for_line)
-        [ -n "$owns" ] || continue
-        old_ifs=$IFS
-        IFS=,
-        for item in $owns; do
-          item=$(printf '%s' "$item" | trim)
-          if [ "$item" = "$project" ]; then
-            IFS=$old_ifs
-            printf '%s\n' "$id"
-            return 0
-          fi
-        done
-        IFS=$old_ifs
-        ;;
-    esac
-  done < "$REG"
-  return 1
 }
 
 owner_for_home() {
@@ -105,7 +67,7 @@ owner_for_home() {
 }
 
 validate_registry() {
-  local tmp line id owns item duplicates old_ifs
+  local tmp line id registered_home home_key duplicates
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmates.XXXXXX")
   if [ -f "$REG" ]; then
     while IFS= read -r line; do
@@ -113,16 +75,10 @@ validate_registry() {
         "- "*)
           id=${line#- }
           id=${id%% *}
-          owns=$(printf '%s\n' "$line" | registry_owns_for_line)
-          [ -n "$owns" ] || continue
-          old_ifs=$IFS
-          IFS=,
-          for item in $owns; do
-            item=$(printf '%s' "$item" | trim)
-            [ -n "$item" ] || continue
-            printf '%s\t%s\n' "$item" "$id" >> "$tmp"
-          done
-          IFS=$old_ifs
+          registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
+          [ -n "$registered_home" ] || continue
+          home_key=$(path_key "$registered_home")
+          printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
           ;;
       esac
     done < "$REG"
@@ -139,14 +95,14 @@ validate_registry() {
     END { exit bad ? 1 : 0 }
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
-    printf 'error: duplicate sub-firstmate ownership:\n%s\n' "$duplicates" >&2
+    printf 'error: duplicate sub-firstmate home assignment:\n%s\n' "$duplicates" >&2
     return 1
   }
   rm -f "$tmp"
   return 0
 }
 
-join_owned() {
+join_projects() {
   local out="" project
   for project in "$@"; do
     out="${out}${out:+, }$project"
@@ -248,8 +204,8 @@ clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
   dst="$home/projects/$project"
-  [ -d "$src" ] || { echo "error: owned project $project not found at $src" >&2; return 1; }
-  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: owned project $project is not a git repo" >&2; return 1; }
+  [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
+  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
@@ -260,7 +216,7 @@ EOF
       git -C "$dst" remote remove origin 2>/dev/null || true
     else
       url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-      [ -n "$url" ] || { echo "error: owned project $project is $mode but has no origin remote" >&2; return 1; }
+      [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
       dst_url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
       [ -n "$dst_url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $url" >&2; return 1; }
       [ "$dst_url" = "$url" ] || {
@@ -274,7 +230,7 @@ EOF
     git clone --quiet "$src" "$dst"
   else
     url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-    [ -n "$url" ] || { echo "error: owned project $project is $mode but has no origin remote" >&2; return 1; }
+    [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
     git clone --quiet "$url" "$dst"
   fi
   if [ "$mode" = local-only ]; then
@@ -308,9 +264,9 @@ sync_project_registry() {
     awk -v names="$names" '
       BEGIN {
         split(names, a, "\034")
-        for (i in a) owned[a[i]]=1
+        for (i in a) selected[a[i]]=1
       }
-      !($1=="-" && ($2 in owned)) { print }
+      !($1=="-" && ($2 in selected)) { print }
     ' "$sub_reg" > "$tmp"
   else
     : > "$tmp"
@@ -342,9 +298,10 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 owned_csv=$3 charter tmp today
+  local id=$1 home=$2 projects_csv=$3 scope summary tmp today
   mkdir -p "$DATA"
-  charter=${FM_FIRSTMATE_CHARTER:-"sub-firstmate for $owned_csv"}
+  scope=${FM_FIRSTMATE_SCOPE:-${FM_FIRSTMATE_CHARTER:-"sub-firstmate for $projects_csv"}}
+  summary=${FM_FIRSTMATE_CHARTER:-$scope}
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
@@ -352,24 +309,17 @@ write_registry() {
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; owns: %s; added %s)\n' "$id" "$charter" "$home" "$owned_csv" "$today" >> "$tmp"
+  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
   mv "$tmp" "$REG"
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 home owned_csv project owner
+  local id=$1 requested_home=$2 home projects_csv project
   shift 2
-  [ $# -gt 0 ] || { echo "error: sub-firstmate needs at least one owned project" >&2; return 1; }
+  [ $# -gt 0 ] || { echo "error: sub-firstmate needs at least one project" >&2; return 1; }
 
   mkdir -p "$DATA"
   validate_registry
-  for project in "$@"; do
-    owner=$(owner_for_project "$project" || true)
-    if [ -n "$owner" ] && [ "$owner" != "$id" ]; then
-      echo "error: project $project is already owned by sub-firstmate $owner" >&2
-      return 1
-    fi
-  done
 
   home=$(ensure_home "$requested_home")
   validate_home_assignment "$id" "$home"
@@ -388,17 +338,13 @@ seed_home() {
   fi
   cp "$DATA/$id/brief.md" "$home/data/charter.md"
 
-  owned_csv=$(join_owned "$@")
-  write_registry "$id" "$home" "$owned_csv"
+  projects_csv=$(join_projects "$@")
+  write_registry "$id" "$home" "$projects_csv"
   validate_registry
   printf 'home=%s\n' "$home"
 }
 
 case "${1:-}" in
-  owner)
-    [ $# -eq 2 ] || { usage; exit 1; }
-    owner_for_project "$2"
-    ;;
   validate)
     [ $# -eq 1 ] || { usage; exit 1; }
     validate_registry

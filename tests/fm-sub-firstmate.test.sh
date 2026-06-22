@@ -153,7 +153,7 @@ test_lock_status_is_per_home() {
   pass "fm-lock status is scoped per home"
 }
 
-test_home_seed_registry_and_disjoint_routing() {
+test_home_seed_registry_scope_and_overlapping_projects() {
   local home subhome subhome_abs otherhome fakebin out
   home="$TMP_ROOT/main-home"
   subhome="$TMP_ROOT/design-home"
@@ -171,12 +171,13 @@ test_home_seed_registry_and_disjoint_routing() {
 EOF
 
   fakebin=$(make_fake_no_mistakes "$TMP_ROOT/no-mistakes-fake")
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha beta gamma >/dev/null || fail "charter scaffold failed"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FIRSTMATE_SCOPE='feature design and implementation for alpha beta gamma' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report subhome"
   [ -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed did not mark subhome as seeded"
   [ -f "$subhome/data/charter.md" ] || fail "seed did not write charter into subhome"
+  grep -F 'feature design and implementation for alpha beta gamma' "$subhome/data/charter.md" >/dev/null \
+    || fail "seeded charter did not record natural-language scope"
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
   [ -d "$subhome/projects/gamma/.git" ] || fail "gamma was not cloned into subhome"
@@ -187,16 +188,22 @@ EOF
   [ "$out" = "direct-PR on" ] || fail "seed did not preserve alpha delivery mode in subhome registry"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" beta)
   [ "$out" = "local-only off" ] || fail "seed did not preserve beta delivery mode in subhome registry"
-  grep -F -- '- design - design domain' "$home/data/firstmates.md" >/dev/null || fail "registry line was not written"
+  grep -F -- '- design - feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line was not written"
+  grep -F 'scope: feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record scope"
+  grep -F 'projects: alpha, beta, gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record project clone list"
+  grep -F 'owns:' "$home/data/firstmates.md" >/dev/null && fail "registry line still used owns field"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" owner alpha)
-  [ "$out" = "design" ] || fail "owner lookup did not route alpha to design"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" other "$otherhome" beta >/dev/null 2>&1; then
-    fail "seed allowed duplicate ownership of beta"
+  FM_HOME="$home" FM_FIRSTMATE_SCOPE='issue triage and support for beta' "$ROOT/bin/fm-home-seed.sh" other "$otherhome" beta >/dev/null 2>&1 \
+    || fail "seed refused overlapping project clones across different scopes"
+  grep -F -- '- other - issue triage and support for beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping registry line was not written"
+  grep -F 'projects: beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping project clone list was not recorded"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation rejected overlapping projects"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" owner alpha >/dev/null 2>&1; then
+    fail "owner subcommand still succeeded after routing moved to scopes"
   fi
-  pass "firstmates registry routes owners and refuses duplicate project scope"
+  pass "firstmates registry records scopes and allows overlapping project clone lists"
 }
 
 test_home_seed_refuses_active_home_and_root() {
@@ -252,7 +259,7 @@ test_home_seed_refuses_home_registered_to_another_id() {
   git clone --quiet "$ROOT" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; owns: beta; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/firstmates.md"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for registered-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
@@ -276,7 +283,7 @@ test_home_seed_refuses_remote_backed_project_without_origin() {
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed allowed remote-backed project without origin"
   fi
-  grep -F 'owned project alpha is direct-PR but has no origin remote' "$err" >/dev/null || fail "seed did not explain missing origin for remote-backed project"
+  grep -F 'project alpha is direct-PR but has no origin remote' "$err" >/dev/null || fail "seed did not explain missing origin for remote-backed project"
   pass "remote-backed subhome seeding requires a source origin"
 }
 
@@ -312,7 +319,7 @@ test_firstmate_spawn_records_home_meta() {
   subhome="$TMP_ROOT/spawn-subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd -P)
-  printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; owns: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; scope: spawn domain; projects: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
   printf 'stale parent charter\n' > "$home/data/spawn-sub/brief.md"
   printf 'current persistent charter\n' > "$subhome/data/charter.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-fake")
@@ -325,7 +332,7 @@ test_firstmate_spawn_records_home_meta() {
   meta="$home/state/spawn-sub.meta"
   grep -Fx 'kind=firstmate' "$meta" >/dev/null || fail "meta did not record kind=firstmate"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record subhome"
-  grep -Fx 'owned_projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record owned projects"
+  grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record project clone list"
   grep -F 'treehouse get' "$log" >/dev/null && fail "firstmate spawn should not run project treehouse get"
   grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "firstmate launch did not set FM_HOME to subhome"
   grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear operational overrides"
@@ -344,7 +351,7 @@ test_recovery_respawn_uses_persistent_home() {
   mkdir -p "$home/data" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'charter\n' > "$subhome/data/charter.md"
-  printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; owns: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; scope: recovery domain; projects: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/recovery-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/recovery-fake/pane.txt" \
@@ -372,9 +379,9 @@ kind=firstmate
 mode=firstmate
 yolo=off
 home=$subhome
-owned_projects=alpha
+projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
@@ -402,9 +409,9 @@ kind=firstmate
 mode=firstmate
 yolo=off
 home=$subhome
-owned_projects=alpha
+projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -447,9 +454,9 @@ kind=firstmate
 mode=firstmate
 yolo=off
 home=$subhome
-owned_projects=alpha
+projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/unmarked-teardown-fake")
   log="$TMP_ROOT/unmarked-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unmarked-teardown-fake/pane.txt" \
@@ -479,9 +486,9 @@ kind=firstmate
 mode=firstmate
 yolo=off
 home=$subhome
-owned_projects=alpha
+projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -522,9 +529,9 @@ kind=firstmate
 mode=firstmate
 yolo=off
 home=$danger
-owned_projects=alpha
+projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$danger"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$danger"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/ancestor-teardown-fake")
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/ancestor-teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/ancestor-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
@@ -547,7 +554,7 @@ project=$TMP_ROOT/watch-subhome
 harness=echo
 kind=firstmate
 home=$TMP_ROOT/watch-subhome
-owned_projects=alpha
+projects=alpha
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/watch-fake")
   out="$TMP_ROOT/watch-fake/watch.out"
@@ -588,7 +595,7 @@ test_watcher_ignores_foreign_tmux_windows() {
 
 test_fm_home_parameterization
 test_lock_status_is_per_home
-test_home_seed_registry_and_disjoint_routing
+test_home_seed_registry_scope_and_overlapping_projects
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id

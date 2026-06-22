@@ -5,11 +5,12 @@
 # and may adjust other sections when the task genuinely deviates (e.g. working an
 # existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
-#        fm-brief.sh <task-id> --firstmate <owned-project>...
+#        fm-brief.sh <task-id> --firstmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
-#   --firstmate writes a persistent sub-firstmate charter. The owned projects
-#   are delegated to the sub-firstmate and routine churn stays in its own home;
+#   --firstmate writes a persistent sub-firstmate charter. The project list
+#   is cloned into the sub-firstmate home, while the natural-language scope
+#   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   only captain-relevant escalations append to this home's status file.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
@@ -44,25 +45,30 @@ BRIEF="$DATA/$ID/brief.md"
 mkdir -p "$DATA/$ID"
 
 if [ "$KIND" = firstmate ]; then
-OWNED_PROJECTS=""
+FIRSTMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
-  OWNED_PROJECTS="${OWNED_PROJECTS}${OWNED_PROJECTS:+ }${POS[$idx]}"
+  FIRSTMATE_PROJECTS="${FIRSTMATE_PROJECTS}${FIRSTMATE_PROJECTS:+ }${POS[$idx]}"
   idx=$((idx + 1))
 done
-[ -n "$OWNED_PROJECTS" ] || { echo "error: --firstmate requires at least one owned project" >&2; exit 1; }
-OWNED_LIST=$(printf '%s\n' "$OWNED_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+[ -n "$FIRSTMATE_PROJECTS" ] || { echo "error: --firstmate requires at least one project" >&2; exit 1; }
+FIRSTMATE_SCOPE=${FM_FIRSTMATE_SCOPE:-${FM_FIRSTMATE_CHARTER:-"{TASK}"}}
+PROJECT_LIST=$(printf '%s\n' "$FIRSTMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
 cat > "$BRIEF" <<EOF
 You are a sub-firstmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
 {TASK}
 
-# Owned projects
-$OWNED_LIST
+# Routing scope
+$FIRSTMATE_SCOPE
+
+# Project clones
+$PROJECT_LIST
 
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
+The projects above are local clones for work you supervise; they are not an exclusive ownership claim.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 
@@ -76,7 +82,7 @@ Routine internal supervision, heartbeats, retries, and crewmate churn stay insid
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
-On startup and restart, run normal firstmate bootstrap and recovery for your own home, then supervise your owned projects.
+On startup and restart, run normal firstmate bootstrap and recovery for your own home, then supervise work that matches your scope.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
 echo "scaffolded: $BRIEF (firstmate charter; replace {TASK})"

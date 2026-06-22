@@ -24,7 +24,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|firstmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
-# firstmate spawns record mode=firstmate, yolo=off, home=, and owned_projects=.
+# firstmate spawns record mode=firstmate, yolo=off, home=, and projects=.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -262,11 +262,11 @@ fi
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-OWNED_PROJECTS=
+FIRSTMATE_PROJECTS=
 if [ "$KIND" = firstmate ]; then
   MODE=firstmate
   YOLO=off
-  OWNED_PROJECTS=$(firstmate_registry_value "$ID" owns || true)
+  FIRSTMATE_PROJECTS=$(firstmate_registry_value "$ID" projects || true)
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
@@ -285,7 +285,7 @@ mkdir -p "$STATE"
   echo "yolo=$YOLO"
   if [ "$KIND" = firstmate ]; then
     echo "home=$PROJ_ABS"
-    echo "owned_projects=$OWNED_PROJECTS"
+    echo "projects=$FIRSTMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
 

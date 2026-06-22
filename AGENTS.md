@@ -72,14 +72,14 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
   projects.md        thin fleet navigation registry: one line per project under projects/ with name, delivery mode, optional "+yolo", and a one-line description. It is firstmate-private, not a project knowledge dump; fm-project-mode.sh parses it (section 6)
-  firstmates.md      sub-firstmate routing table: one line per persistent domain owner, with disjoint owned projects and its home path; fm-home-seed.sh maintains and validates it (section 6)
+  firstmates.md      sub-firstmate routing table: one line per persistent domain owner, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains and validates home uniqueness (section 6)
   <id>/brief.md      per-task crewmate brief, or per-sub-firstmate charter brief when kind=firstmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=firstmate also records home= and owned_projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=firstmate also records home= and projects= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -115,7 +115,8 @@ Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
 Then read `data/firstmates.md` if present.
 It is the routing table for persistent sub-firstmates.
-Ownership is disjoint by construction: a project belongs to exactly one sub-firstmate, and a new sub-firstmate is created only when no existing one owns the scope.
+Each line has a natural-language `scope:` field that the main firstmate uses with judgment during intake.
+The `projects:` field is only the list of clones provisioned into that sub-firstmate home; it is not exclusive, and the same project may appear under multiple sub-firstmates with different scopes.
 Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
 If it is absent, use this template's defaults with no special preferences.
 Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
@@ -242,20 +243,24 @@ Durable descriptive detail belongs in the project's own `AGENTS.md`.
 Every persistent sub-firstmate has one line:
 
 ```markdown
-- <id> - <charter summary> (home: <absolute-home-path>; owns: <project-a>, <project-b>; added <date>)
+- <id> - <charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
 ```
 
-The owned project list is disjoint.
-`bin/fm-home-seed.sh` validates that no project appears under two sub-firstmates.
-Before every delegation, resolve the project's owner from this table.
-If an existing sub-firstmate owns the scope, route the work to that sub-firstmate instead of improvising onto a convenient one.
-If no existing sub-firstmate owns the scope, either handle it in the main firstmate or, with the captain, create a new sub-firstmate for that scope.
+The `scope:` field is the routing key.
+It should be clear enough that the main firstmate can distinguish domains by the nature of the work, not just by project name.
+For example, one sub-firstmate may own GitHub issue triage across several repos while another owns feature development on some of the same repos.
+The `projects:` field is only the list of project clones to provision into that sub-firstmate home for local work and recovery.
+It is not an ownership claim, and project names may overlap across sub-firstmates.
+`bin/fm-home-seed.sh` validates that one home directory belongs to exactly one sub-firstmate; it does not decide where tasks route.
+Before every delegation, read the registered scopes and decide whether the work belongs to one of them using the same judgment you use to resolve the project during intake.
+If an existing sub-firstmate's scope fits, route the work to that sub-firstmate instead of improvising onto a convenient one.
+If no existing scope fits, either handle it in the main firstmate or, with the captain, create a new sub-firstmate with a distinguishing scope.
 A sub-firstmate's home is persistent by default.
 It is an isolated firstmate home with its own `state/`, `data/`, `config/`, and `projects/`, and the main firstmate supervises it only as a direct report.
 
-To create one, scaffold a charter with `bin/fm-brief.sh <id> --firstmate <owned-project>...`, replace `{TASK}` with the charter, seed the home with `bin/fm-home-seed.sh <id> <home|-> <owned-project>...`, then launch it with `bin/fm-spawn.sh <id> --firstmate`.
+To create one, choose a clear natural-language scope, scaffold a charter with `bin/fm-brief.sh <id> --firstmate <project>...`, replace `{TASK}` with the charter, seed the home with `FM_FIRSTMATE_SCOPE='<scope>' bin/fm-home-seed.sh <id> <home|-> <project>...`, then launch it with `bin/fm-spawn.sh <id> --firstmate`.
 Using `-` as the home asks `fm-home-seed.sh` to acquire a clean firstmate worktree through `treehouse get`; passing a path creates or reuses that home.
-The seed copies the charter into the sub-home as `data/charter.md`, clones only the owned projects into its `projects/`, initializes no-mistakes for owned `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
+The seed copies the charter into the sub-home as `data/charter.md`, clones each listed project into its `projects/`, initializes no-mistakes for listed `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
 
 ### Project memory ownership
 
@@ -325,11 +330,13 @@ Use these signals in order:
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
 5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
 
-Then resolve the owner.
-Look up the project in `data/firstmates.md` before dispatching.
-If a sub-firstmate owns it, steer that sub-firstmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
-Do not spawn a direct crewmate for a project that belongs to a sub-firstmate unless the sub-firstmate is blocked or the captain explicitly redirects ownership.
-If no sub-firstmate owns the scope, proceed in the main firstmate or create a new sub-firstmate with the captain when that domain should become persistent.
+Then resolve the sub-firstmate scope.
+Read `data/firstmates.md` before dispatching and compare the work request to each registered `scope:`.
+Route by the nature of the task, not just the project name.
+A project may appear in several `projects:` clone lists, so choose the sub-firstmate whose natural-language scope actually fits the work, such as triage versus feature development.
+If a sub-firstmate's scope fits, steer that sub-firstmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+Do not spawn a direct crewmate for work that belongs to a sub-firstmate scope unless the sub-firstmate is blocked or the captain explicitly redirects it.
+If no sub-firstmate scope fits, proceed in the main firstmate or create a new sub-firstmate with the captain when that domain should become persistent.
 
 Then classify the shape:
 
@@ -361,7 +368,7 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-For `kind=firstmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `owned_projects=`, and uses the charter brief as the launch prompt.
+For `kind=firstmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For `kind=firstmate`, the script creates the same kind of window but starts directly in the persistent home.
@@ -622,9 +629,9 @@ The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
-For sub-firstmates use `bin/fm-brief.sh <id> --firstmate <owned-project>...`.
+For sub-firstmates use `bin/fm-brief.sh <id> --firstmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
-It names the owned projects, tells the sub-firstmate to use its local firstmate home for routine work, and retargets escalation to the main firstmate status file.
+It records the natural-language routing scope, names the project clones available in the sub-home, tells the sub-firstmate to use its local firstmate home for routine work, and retargets escalation to the main firstmate status file.
 The charter is copied into the sub-home as `data/charter.md` by `bin/fm-home-seed.sh`, then launched through the same `fm-spawn.sh` launch-template path.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 Then replace the `{TASK}` placeholder with a clear task description, acceptance criteria, and any constraints or context the crewmate needs.
