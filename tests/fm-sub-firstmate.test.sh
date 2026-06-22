@@ -505,6 +505,31 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   pass "remote-backed subhome seeding validates existing destination origins"
 }
 
+test_home_seed_refuses_project_destinations_outside_subhome() {
+  local home subhome sink err
+  home="$TMP_ROOT/symlink-project-home"
+  subhome="$TMP_ROOT/symlink-project-subhome"
+  sink="$home/data/symlink-projects"
+  err="$TMP_ROOT/symlink-project.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$sink"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-alpha.git"
+  git clone --quiet "$ROOT" "$subhome"
+  rm -rf "$subhome/projects"
+  ln -s "$sink" "$subhome/projects"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for symlink destination seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed followed a subhome projects symlink outside the subhome"
+  fi
+  grep -F 'sub-firstmate projects directory must resolve inside the sub-firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain unsafe project destination rejection"
+  [ ! -e "$sink/alpha" ] || fail "seed cloned a project through an unsafe projects symlink"
+  [ ! -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed marked subhome after unsafe project destination rejection"
+  pass "home seeding refuses project destinations outside the subhome"
+}
+
 test_firstmate_spawn_records_home_meta() {
   local home subhome subhome_abs fakebin log meta
   home="$TMP_ROOT/spawn-home"
@@ -1091,6 +1116,7 @@ test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
+test_home_seed_refuses_project_destinations_outside_subhome
 test_firstmate_spawn_records_home_meta
 test_firstmate_spawn_requires_seeded_matching_home
 test_fm_send_resolves_bare_firstmate_window_from_home_meta

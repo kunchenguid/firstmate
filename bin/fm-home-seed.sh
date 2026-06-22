@@ -219,6 +219,34 @@ refuse_active_home_path() {
   fi
 }
 
+validate_project_destination() {
+  local home=$1 project=$2 dst projects_dir abs_home abs_projects abs_dst abs_active_home abs_root
+  projects_dir="$home/projects"
+  dst="$projects_dir/$project"
+  abs_home=$(resolved_path "$home")
+  abs_projects=$(resolved_path "$projects_dir")
+  abs_dst=$(resolved_path "$dst")
+  abs_active_home=$(resolved_path "$FM_HOME")
+  abs_root=$(resolved_path "$FM_ROOT")
+  if ! path_is_ancestor_of "$abs_home" "$abs_projects"; then
+    echo "error: sub-firstmate projects directory must resolve inside the sub-firstmate home: $projects_dir" >&2
+    return 1
+  fi
+  if ! path_is_ancestor_of "$abs_projects" "$abs_dst"; then
+    echo "error: seeded project $project destination must resolve inside the sub-firstmate projects directory: $dst" >&2
+    return 1
+  fi
+  if [ "$abs_dst" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dst"; then
+    echo "error: seeded project $project destination cannot be inside the active firstmate home: $dst" >&2
+    return 1
+  fi
+  if [ "$abs_dst" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dst"; then
+    echo "error: seeded project $project destination cannot be inside the firstmate repo: $dst" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_dst"
+}
+
 acquire_treehouse_home() {
   local tmp runner home
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-home-path.XXXXXX")
@@ -282,7 +310,7 @@ validate_home_assignment() {
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
-  dst="$home/projects/$project"
+  dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
@@ -398,6 +426,28 @@ seed_remove_created_home() {
   rm -rf -- "$abs_home" 2>/dev/null || true
 }
 
+seed_project_rollback_target() {
+  local target=$1 abs_target abs_home abs_projects
+  abs_target=$(seed_rollback_target "$target" "created project") || return 1
+  abs_home=$(resolved_path "$SEED_HOME")
+  abs_projects=$(resolved_path "$SEED_HOME/projects")
+  if ! path_is_ancestor_of "$abs_home" "$abs_projects"; then
+    echo "REFUSED: unsafe created project rollback target $target has projects directory outside the sub-firstmate home" >&2
+    return 1
+  fi
+  if ! path_is_ancestor_of "$abs_projects" "$abs_target"; then
+    echo "REFUSED: unsafe created project rollback target $target is outside the sub-firstmate projects directory" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_target"
+}
+
+seed_remove_created_project() {
+  local project_path=$1 abs_project
+  abs_project=$(seed_project_rollback_target "$project_path") || return 0
+  rm -rf -- "$abs_project" 2>/dev/null || true
+}
+
 seed_rollback() {
   local project_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
@@ -419,7 +469,7 @@ seed_rollback() {
       if [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] && [ -f "$SEED_CREATED_PROJECTS_FILE" ]; then
         while IFS= read -r project_path; do
           [ -n "$project_path" ] || continue
-          rm -rf -- "$project_path" 2>/dev/null || true
+          seed_remove_created_project "$project_path"
         done < "$SEED_CREATED_PROJECTS_FILE"
       fi
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
@@ -488,7 +538,7 @@ initialize_no_mistakes_project() {
     echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
     return 1
   }
-  dst="$home/projects/$project"
+  dst=$(validate_project_destination "$home" "$project") || return 1
   ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
     echo "error: failed to initialize no-mistakes for $project at $dst" >&2
     return 1
@@ -575,7 +625,7 @@ seed_home() {
   SEED_HOME_BACKED_UP=1
 
   for project in "$@"; do
-    project_dst="$home/projects/$project"
+    project_dst=$(validate_project_destination "$home" "$project") || return 1
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
     clone_project "$project" "$home"
   done
