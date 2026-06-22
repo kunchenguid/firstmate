@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Spawn a crewmate: tmux window -> treehouse worktree subshell -> agent launched with its brief.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --firstmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md section 7); the default is kind=ship.
+#   see AGENTS.md section 7); --firstmate records kind=firstmate and launches in a
+#   provisioned firstmate home; the default is kind=ship.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -20,11 +22,15 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|firstmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md via fm-project-mode.sh.
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -33,6 +39,7 @@ POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
+    --firstmate) KIND=firstmate ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -52,7 +59,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       *=*) : ;;
       *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
     esac
-    if [ "$KIND" = scout ]; then
+    if [ "$KIND" = firstmate ]; then
+      echo "error: batch dispatch does not support --firstmate; spawn each sub-firstmate explicitly" >&2
+      rc=2
+      continue
+    elif [ "$KIND" = scout ]; then
       if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
       if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
@@ -61,8 +72,24 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   exit "$rc"
 fi
 ID=${POS[0]}
-PROJ=${POS[1]}
-ARG3=${POS[2]:-}
+PROJ=
+ARG3=
+FIRSTMATE_HOME=
+
+if [ "$KIND" = firstmate ]; then
+  case "${POS[1]:-}" in
+    ''|claude|codex|opencode|pi|*' '*)
+      ARG3=${POS[1]:-}
+      ;;
+    *)
+      FIRSTMATE_HOME=${POS[1]}
+      ARG3=${POS[2]:-}
+      ;;
+  esac
+else
+  PROJ=${POS[1]}
+  ARG3=${POS[2]:-}
+fi
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in AGENTS.md section 4.
@@ -95,9 +122,43 @@ case "$ARG3" in
     ;;
 esac
 
-BRIEF="$FM_ROOT/data/$ID/brief.md"
+firstmate_registry_value() {
+  local id=$1 key=$2 reg line value
+  reg="$DATA/firstmates.md"
+  [ -f "$reg" ] || return 1
+  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
+  [ -n "$line" ] || return 1
+  value=$(printf '%s\n' "$line" | sed -n "s/.*$key: \\([^;)]*\\).*/\\1/p")
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+BRIEF="$DATA/$ID/brief.md"
+if [ "$KIND" = firstmate ] && [ ! -f "$BRIEF" ]; then
+  existing_home=${FIRSTMATE_HOME:-}
+  if [ -z "$existing_home" ] && [ -f "$STATE/$ID.meta" ]; then
+    existing_home=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  fi
+  if [ -n "$existing_home" ] && [ -f "$existing_home/data/charter.md" ]; then
+    BRIEF="$existing_home/data/charter.md"
+  fi
+fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-PROJ_ABS="$(cd "$PROJ" && pwd)"
+
+if [ "$KIND" = firstmate ]; then
+  if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
+    FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  fi
+  if [ -z "$FIRSTMATE_HOME" ]; then
+    FIRSTMATE_HOME=$(firstmate_registry_value "$ID" home || true)
+  fi
+  [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
+  PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd)"
+  WT="$PROJ_ABS"
+else
+  PROJ_ABS="$(cd "$PROJ" && pwd)"
+  WT=""
+fi
 
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
@@ -115,27 +176,28 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
 fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
-tmux send-keys -t "$T" 'treehouse get' Enter
+if [ "$KIND" != firstmate ]; then
+  tmux send-keys -t "$T" 'treehouse get' Enter
 
-# Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-WT=""
-for _ in $(seq 1 60); do
-  p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-  if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-    WT="$p"
-    break
+  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  for _ in $(seq 1 60); do
+    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
+      WT="$p"
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$WT" ]; then
+    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    exit 1
   fi
-  sleep 1
-done
-if [ -z "$WT" ]; then
-  echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-  exit 1
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
-TURNEND="$FM_ROOT/state/$ID.turn-ended"
+TURNEND="$STATE/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -166,7 +228,7 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-    cat > "$FM_ROOT/state/$ID.pi-ext.ts" <<EOF
+    cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
@@ -186,12 +248,19 @@ esac
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-PROJ_NAME=$(basename "$PROJ_ABS")
-read -r MODE YOLO <<EOF
+OWNED_PROJECTS=
+if [ "$KIND" = firstmate ]; then
+  MODE=firstmate
+  YOLO=off
+  OWNED_PROJECTS=$(firstmate_registry_value "$ID" owns || true)
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
+fi
 
-mkdir -p "$FM_ROOT/state"
+mkdir -p "$STATE"
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -200,11 +269,15 @@ mkdir -p "$FM_ROOT/state"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
-} > "$FM_ROOT/state/$ID.meta"
+  if [ "$KIND" = firstmate ]; then
+    echo "home=$PROJ_ABS"
+    echo "owned_projects=$OWNED_PROJECTS"
+  fi
+} > "$STATE/$ID.meta"
 
 LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
 LAUNCH=${LAUNCH//__TURNEND__/$TURNEND}
-LAUNCH=${LAUNCH//__PIEXT__/$FM_ROOT/state/$ID.pi-ext.ts}
+LAUNCH=${LAUNCH//__PIEXT__/$STATE/$ID.pi-ext.ts}
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

@@ -5,8 +5,12 @@
 # and may adjust other sections when the task genuinely deviates (e.g. working an
 # existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
+#        fm-brief.sh <task-id> --firstmate <owned-project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --firstmate writes a persistent sub-firstmate charter. The owned projects
+#   are delegated to the sub-firstmate and routine churn stays in its own home;
+#   only captain-relevant escalations append to this home's status file.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
@@ -19,21 +23,67 @@
 # Refuses to overwrite an existing brief.
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
+    --firstmate) KIND=firstmate ;;
     *) POS+=("$a") ;;
   esac
 done
 ID=${POS[0]}
-REPO=${POS[1]}
 
-BRIEF="$FM_ROOT/data/$ID/brief.md"
+BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$FM_ROOT/data/$ID"
+mkdir -p "$DATA/$ID"
+
+if [ "$KIND" = firstmate ]; then
+OWNED_PROJECTS=""
+idx=1
+while [ "$idx" -lt "${#POS[@]}" ]; do
+  OWNED_PROJECTS="${OWNED_PROJECTS}${OWNED_PROJECTS:+ }${POS[$idx]}"
+  idx=$((idx + 1))
+done
+[ -n "$OWNED_PROJECTS" ] || { echo "error: --firstmate requires at least one owned project" >&2; exit 1; }
+OWNED_LIST=$(printf '%s\n' "$OWNED_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+cat > "$BRIEF" <<EOF
+You are a sub-firstmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
+
+# Charter
+{TASK}
+
+# Owned projects
+$OWNED_LIST
+
+# Operating model
+You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
+Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
+Do not invent a second delegation system.
+
+# Escalation to main firstmate
+Handle routine work yourself.
+Escalate only true captain-relevant outcomes by appending one line:
+   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
+States: working, needs-decision, blocked, done, failed.
+Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
+
+# Definition of done
+You are persistent by default. Do not exit just because your queue is empty.
+On startup and restart, run normal firstmate bootstrap and recovery for your own home, then supervise your owned projects.
+If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
+EOF
+echo "scaffolded: $BRIEF (firstmate charter; replace {TASK})"
+exit 0
+fi
+
+REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -53,7 +103,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $FM_ROOT/state/$ID.status\`
+   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/done/failed states. No step-by-step
@@ -63,7 +113,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
 # Definition of done
-Write your findings to \`$FM_ROOT/data/$ID/report.md\`.
+Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
@@ -135,7 +185,7 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $FM_ROOT/state/$ID.status\`
+   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

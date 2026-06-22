@@ -10,7 +10,10 @@
 # Usage: fm-fleet-sync.sh [<project-dir>]
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -25,7 +28,7 @@ fi
 
 project_label() {
   case "$PROJ" in
-    "$FM_ROOT"/projects/*) basename "$PROJ" ;;
+    "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
   esac
@@ -186,7 +189,6 @@ if [ $# -eq 1 ]; then
   exit 0
 fi
 
-PROJECTS="$FM_ROOT/projects"
 [ -d "$PROJECTS" ] || exit 0
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue

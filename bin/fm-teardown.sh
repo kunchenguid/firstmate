@@ -7,14 +7,20 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
+# Sub-firstmates (kind=firstmate in meta) are persistent homes, not returned
+# project worktrees. Teardown only kills their direct window after their own
+# home has no in-flight crewmate meta files.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check. Only use it when the captain has
 #   explicitly said to discard the work.
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 "$FM_ROOT/bin/fm-guard.sh" || true
-STATE="$FM_ROOT/state"
 ID=$1
 FORCE=${2:-}
 
@@ -23,6 +29,7 @@ META="$STATE/$ID.meta"
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -45,10 +52,25 @@ default_branch() {
   return 1
 }
 
+if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  SUB_STATE="$HOME_PATH/state"
+  if [ -d "$SUB_STATE" ]; then
+    for child_meta in "$SUB_STATE"/*.meta; do
+      [ -e "$child_meta" ] || continue
+      echo "REFUSED: sub-firstmate $ID still has in-flight work in $SUB_STATE." >&2
+      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+      exit 1
+    done
+  fi
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if [ "$KIND" = scout ]; then
+  if [ "$KIND" = firstmate ]; then
+    :
+  elif [ "$KIND" = scout ]; then
     # Scout worktrees are scratch by contract, but only once the deliverable exists.
-    REPORT="$FM_ROOT/data/$ID/report.md"
+    REPORT="$DATA/$ID/report.md"
     if [ ! -f "$REPORT" ]; then
       echo "REFUSED: scout task $ID has no report at $REPORT." >&2
       echo "The report is the work product. Have the crewmate write it (or get the captain's explicit OK to discard, then --force)." >&2
@@ -83,7 +105,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ -d "$WT" ]; then
+if [ -d "$WT" ] && [ "$KIND" != firstmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -98,9 +120,13 @@ if [ -d "$WT" ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
+if [ "$KIND" = firstmate ] && [ -d "${HOME_PATH:-$WT}" ]; then
+  rm -f "${HOME_PATH:-$WT}/.claude/settings.local.json" "${HOME_PATH:-$WT}/.opencode/plugins/fm-turn-end.js"
+fi
+
 tmux kill-window -t "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
-if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != firstmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"

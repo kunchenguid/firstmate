@@ -8,7 +8,10 @@
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -30,7 +33,7 @@ case "${2:-}" in
 esac
 [ $# -le 2 ] || { usage; exit 1; }
 
-META="$FM_ROOT/state/$ID.meta"
+META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)

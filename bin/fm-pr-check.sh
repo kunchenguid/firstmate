@@ -6,17 +6,20 @@
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
-FM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 
-META="$FM_ROOT/state/$ID.meta"
+META="$STATE/$ID.meta"
 if [ -f "$META" ] && ! grep -qxF "pr=$URL" "$META"; then
   echo "pr=$URL" >> "$META"
 fi
 
-cat > "$FM_ROOT/state/$ID.check.sh" <<EOF
+cat > "$STATE/$ID.check.sh" <<EOF
 state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] && echo "merged"
 EOF
