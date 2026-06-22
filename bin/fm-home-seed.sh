@@ -29,7 +29,7 @@ usage() {
 }
 
 registry_home_for_line() {
-  sed -n 's/.*home: \([^;)]*\).*/\1/p'
+  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }
 
 normalize_registry_text() {
@@ -54,6 +54,24 @@ brief_section_text() {
     in_section && /^# / { exit }
     in_section { print }
   ' "$brief"
+}
+
+registry_summary_for_brief() {
+  local brief=$1
+  if [ -n "${FM_FIRSTMATE_CHARTER:-}" ]; then
+    printf '%s\n' "$FM_FIRSTMATE_CHARTER" | normalize_registry_text
+  else
+    brief_section_text "$brief" "Charter" | normalize_registry_text
+  fi
+}
+
+registry_scope_for_brief() {
+  local brief=$1
+  if [ -n "${FM_FIRSTMATE_SCOPE:-}" ]; then
+    printf '%s\n' "$FM_FIRSTMATE_SCOPE" | normalize_registry_text
+  else
+    brief_section_text "$brief" "Routing scope" | normalize_registry_text
+  fi
 }
 
 normalize_joined_path() {
@@ -723,18 +741,8 @@ initialize_no_mistakes_project() {
 write_registry() {
   local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
   mkdir -p "$DATA"
-  if [ -n "${FM_FIRSTMATE_SCOPE:-}" ]; then
-    scope=$(printf '%s\n' "$FM_FIRSTMATE_SCOPE" | normalize_registry_text)
-  else
-    scope=$(brief_section_text "$brief" "Routing scope" | normalize_registry_text)
-  fi
-  if [ -n "${FM_FIRSTMATE_CHARTER:-}" ]; then
-    summary=$(printf '%s\n' "$FM_FIRSTMATE_CHARTER" | normalize_registry_text)
-  else
-    summary=$(brief_section_text "$brief" "Charter" | normalize_registry_text)
-  fi
-  [ -n "$scope" ] || scope="sub-firstmate for $projects_csv"
-  [ -n "$summary" ] || summary=$scope
+  scope=$(registry_scope_for_brief "$brief")
+  summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
@@ -747,7 +755,7 @@ write_registry() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   shift 2
   [ $# -gt 0 ] || { echo "error: sub-firstmate needs at least one project" >&2; return 1; }
 
@@ -824,6 +832,16 @@ seed_home() {
     echo "error: firstmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
     return 1
   fi
+  charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
+  [ -n "$charter_summary" ] || {
+    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
+    return 1
+  }
+  charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF")
+  [ -n "$charter_scope" ] || {
+    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
+    return 1
+  }
 
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1

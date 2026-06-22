@@ -282,7 +282,7 @@ test_home_seed_validate_rejects_duplicate_homes() {
   mkdir -p "$home/data" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/data/firstmates.md" <<EOF
-- design - design domain (home: $subhome_abs; scope: design work; projects: alpha; added 2026-06-22)
+- design - design domain mentions home: $TMP_ROOT/ignored-summary-home (home: $subhome_abs; scope: design work mentions home: $TMP_ROOT/ignored-scope-home; projects: alpha; added 2026-06-22)
 - triage - triage domain (home: $subhome_abs; scope: issue triage; projects: beta; added 2026-06-22)
 EOF
 
@@ -501,6 +501,35 @@ test_home_seed_refuses_placeholder_charter() {
   [ ! -e "$subhome" ] || fail "placeholder charter seed left a generated subhome"
   [ ! -e "$subhome/projects/alpha" ] || fail "placeholder charter seed cloned before refusing"
   pass "home seeding refuses unfilled placeholder charters"
+}
+
+test_home_seed_refuses_empty_charter_fields() {
+  local home subhome err
+  home="$TMP_ROOT/empty-charter-home"
+  subhome="$TMP_ROOT/empty-charter-subhome"
+  err="$TMP_ROOT/empty-charter.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/empty-charter-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='   ' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a whitespace-only charter"
+  fi
+  grep -F 'empty Charter section' "$err" >/dev/null \
+    || fail "seed did not explain empty charter refusal"
+  [ ! -e "$subhome" ] || fail "empty charter seed left a generated subhome"
+
+  rm -rf "$home/data/design" "$subhome" "$err"
+  FM_FIRSTMATE_SCOPE='   ' scaffold_firstmate_charter "$home" design 'filled charter' alpha \
+    || fail "empty scope fixture scaffold failed"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an empty routing scope"
+  fi
+  grep -F 'empty Routing scope section' "$err" >/dev/null \
+    || fail "seed did not explain empty routing scope refusal"
+  [ ! -e "$subhome" ] || fail "empty routing scope seed left a generated subhome"
+  pass "home seeding refuses empty normalized charter fields"
 }
 
 test_home_seed_refuses_local_only_project() {
@@ -1086,7 +1115,7 @@ test_recovery_respawn_uses_persistent_home() {
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'recover-sub\n' > "$subhome/.fm-sub-firstmate-home"
   printf 'charter\n' > "$subhome/data/charter.md"
-  printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; scope: recovery domain; projects: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- recover-sub - recovery domain mentions home: '"$TMP_ROOT/ignored-summary-home"' (home: '"$subhome"'; scope: recovery domain mentions home: '"$TMP_ROOT/ignored-scope-home"'; projects: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/recovery-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/recovery-fake/pane.txt" \
@@ -1095,6 +1124,7 @@ test_recovery_respawn_uses_persistent_home() {
 
   meta="$home/state/recover-sub.meta"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "respawn did not preserve persistent home from meta/registry"
+  grep -Fx 'projects=gamma' "$meta" >/dev/null || fail "respawn did not preserve project clone list from registry"
   grep -Fx 'window=firstmate:fm-recover-sub' "$meta" >/dev/null || fail "respawn did not reconstruct the direct report window"
   pass "restart recovery can respawn a sub-firstmate from durable registry and charter"
 }
@@ -1238,7 +1268,7 @@ projects=beta
 EOF
   cat > "$home/data/firstmates.md" <<EOF
 - domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)
-- nested - nested domain (home: $nested; scope: nested domain; projects: beta; added 2026-06-22)
+- nested - nested domain mentions home: $TMP_ROOT/ignored-summary-home (home: $nested; scope: nested domain mentions home: $TMP_ROOT/ignored-scope-home; projects: beta; added 2026-06-22)
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/nested-teardown-fake")
   log="$TMP_ROOT/nested-teardown-fake/tmux.log"
@@ -1609,6 +1639,7 @@ test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
+test_home_seed_refuses_empty_charter_fields
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

@@ -143,7 +143,11 @@ firstmate_registry_value() {
   [ -f "$reg" ] || return 1
   line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
   [ -n "$line" ] || return 1
-  value=$(printf '%s\n' "$line" | sed -n "s/.*$key: \\([^;)]*\\).*/\\1/p")
+  case "$key" in
+    home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
+    projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
+    *) return 1 ;;
+  esac
   [ -n "$value" ] || return 1
   printf '%s\n' "$value"
 }

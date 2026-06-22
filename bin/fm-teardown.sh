@@ -60,7 +60,7 @@ meta_value() {
 }
 
 registry_home_for_line() {
-  sed -n 's/.*home: \([^;)]*\).*/\1/p'
+  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }
 
 path_is_ancestor_of() {
