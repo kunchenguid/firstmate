@@ -94,12 +94,25 @@ fi
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in AGENTS.md section 4.
 launch_template() {
+  local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
-  case "$1" in
+  case "$harness" in
     claude) printf '%s' 'claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
-    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"' ;;
+    codex)
+      if [ "$kind" = firstmate ]; then
+        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+      else
+        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+      fi
+      ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
-    pi) printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"' ;;
+    pi)
+      if [ "$kind" = firstmate ]; then
+        printf '%s' 'pi "$(cat __BRIEF__)"'
+      else
+        printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -114,11 +127,11 @@ case "$ARG3" in
     ;;
   '')
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-    LAUNCH=$(launch_template "$HARNESS") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
 
@@ -133,18 +146,6 @@ firstmate_registry_value() {
   printf '%s\n' "$value"
 }
 
-BRIEF="$DATA/$ID/brief.md"
-if [ "$KIND" = firstmate ] && [ ! -f "$BRIEF" ]; then
-  existing_home=${FIRSTMATE_HOME:-}
-  if [ -z "$existing_home" ] && [ -f "$STATE/$ID.meta" ]; then
-    existing_home=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
-  fi
-  if [ -n "$existing_home" ] && [ -f "$existing_home/data/charter.md" ]; then
-    BRIEF="$existing_home/data/charter.md"
-  fi
-fi
-[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-
 if [ "$KIND" = firstmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -152,6 +153,17 @@ if [ "$KIND" = firstmate ]; then
   if [ -z "$FIRSTMATE_HOME" ]; then
     FIRSTMATE_HOME=$(firstmate_registry_value "$ID" home || true)
   fi
+fi
+
+BRIEF="$DATA/$ID/brief.md"
+if [ "$KIND" = firstmate ] && [ ! -f "$BRIEF" ]; then
+  if [ -n "${FIRSTMATE_HOME:-}" ] && [ -f "$FIRSTMATE_HOME/data/charter.md" ]; then
+    BRIEF="$FIRSTMATE_HOME/data/charter.md"
+  fi
+fi
+[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+if [ "$KIND" = firstmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd)"
   WT="$PROJ_ABS"
@@ -205,30 +217,31 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
-case "$HARNESS" in
-  claude*)
-    mkdir -p "$WT/.claude"
-    cat > "$WT/.claude/settings.local.json" <<EOF
+if [ "$KIND" != firstmate ]; then
+  case "$HARNESS" in
+    claude*)
+      mkdir -p "$WT/.claude"
+      cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
-    exclude_path '.claude/settings.local.json'
-    ;;
-  opencode*)
-    mkdir -p "$WT/.opencode/plugins"
-    cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
+      exclude_path '.claude/settings.local.json'
+      ;;
+    opencode*)
+      mkdir -p "$WT/.opencode/plugins"
+      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
   },
 })
 EOF
-    exclude_path '.opencode/plugins/fm-turn-end.js'
-    ;;
-  pi*)
-    # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-    # loaded from inside the project (verified live), but an explicit -e path
-    # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-    cat > "$STATE/$ID.pi-ext.ts" <<EOF
+      exclude_path '.opencode/plugins/fm-turn-end.js'
+      ;;
+    pi*)
+      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
+      # loaded from inside the project (verified live), but an explicit -e path
+      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+      cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
@@ -238,11 +251,12 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
-    ;;
-  codex*)
-    # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
-    ;;
-esac
+      ;;
+    codex*)
+      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+  esac
+fi
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
@@ -278,6 +292,10 @@ mkdir -p "$STATE"
 LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
 LAUNCH=${LAUNCH//__TURNEND__/$TURNEND}
 LAUNCH=${LAUNCH//__PIEXT__/$STATE/$ID.pi-ext.ts}
+if [ "$KIND" = firstmate ]; then
+  sq_home=$(printf "'"; printf '%s' "$PROJ_ABS" | sed "s/'/'\\\\''/g"; printf "'")
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

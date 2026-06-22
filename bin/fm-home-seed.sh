@@ -170,6 +170,42 @@ clone_project() {
   fi
 }
 
+registry_line_for_project() {
+  local project=$1 line
+  [ -f "$DATA/projects.md" ] || return 1
+  line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line"
+}
+
+sync_project_registry() {
+  local home=$1 sub_reg tmp project line today names
+  shift
+  sub_reg="$home/data/projects.md"
+  tmp="$sub_reg.tmp.$$"
+  names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
+  if [ -f "$sub_reg" ]; then
+    awk -v names="$names" '
+      BEGIN {
+        split(names, a, "\034")
+        for (i in a) owned[a[i]]=1
+      }
+      !($1=="-" && ($2 in owned)) { print }
+    ' "$sub_reg" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  today=$(date +%F)
+  for project in "$@"; do
+    line=$(registry_line_for_project "$project" || true)
+    if [ -z "$line" ]; then
+      line="- $project - cloned project (added $today)"
+    fi
+    printf '%s\n' "$line" >> "$tmp"
+  done
+  mv "$tmp" "$sub_reg"
+}
+
 write_registry() {
   local id=$1 home=$2 owned_csv=$3 charter tmp today
   mkdir -p "$DATA"
@@ -205,6 +241,7 @@ seed_home() {
   for project in "$@"; do
     clone_project "$project" "$home"
   done
+  sync_project_registry "$home" "$@"
 
   if [ ! -f "$DATA/$id/brief.md" ]; then
     "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"

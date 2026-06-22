@@ -127,6 +127,10 @@ test_home_seed_registry_and_disjoint_routing() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
   make_git_project "$home/projects/beta"
+  cat > "$home/data/projects.md" <<EOF
+- alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
+- beta [local-only] - beta project (added 2026-06-22)
+EOF
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha beta >/dev/null || fail "charter scaffold failed"
   out=$(FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta)
@@ -135,6 +139,10 @@ test_home_seed_registry_and_disjoint_routing() {
   [ -f "$subhome/data/charter.md" ] || fail "seed did not write charter into subhome"
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
+  out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" alpha)
+  [ "$out" = "direct-PR on" ] || fail "seed did not preserve alpha delivery mode in subhome registry"
+  out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" beta)
+  [ "$out" = "local-only off" ] || fail "seed did not preserve beta delivery mode in subhome registry"
   grep -F -- '- design - design domain' "$home/data/firstmates.md" >/dev/null || fail "registry line was not written"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" owner alpha)
@@ -159,7 +167,7 @@ test_firstmate_spawn_records_home_meta() {
   log="$TMP_ROOT/spawn-fake/tmux.log"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" "echo launch" --firstmate >/dev/null \
+    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --firstmate >/dev/null \
     || fail "firstmate spawn failed"
 
   meta="$home/state/spawn-sub.meta"
@@ -167,6 +175,10 @@ test_firstmate_spawn_records_home_meta() {
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record subhome"
   grep -Fx 'owned_projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record owned projects"
   grep -F 'treehouse get' "$log" >/dev/null && fail "firstmate spawn should not run project treehouse get"
+  grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "firstmate launch did not set FM_HOME to subhome"
+  grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear operational overrides"
+  grep -F 'notify=' "$log" >/dev/null && fail "firstmate codex launch should not install parent turn-end notify"
+  grep -F 'turn-ended' "$log" >/dev/null && fail "firstmate launch should not reference parent turn-end marker"
   pass "kind=firstmate spawn launches in the home and records routing meta"
 }
 
@@ -174,19 +186,10 @@ test_recovery_respawn_uses_persistent_home() {
   local home subhome subhome_abs fakebin meta
   home="$TMP_ROOT/recovery-home"
   subhome="$TMP_ROOT/recovery-subhome"
-  mkdir -p "$home/data/recover-sub" "$home/state" "$subhome"
+  mkdir -p "$home/data" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd)
-  printf 'charter\n' > "$home/data/recover-sub/brief.md"
+  printf 'charter\n' > "$subhome/data/charter.md"
   printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; owns: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
-  cat > "$home/state/recover-sub.meta" <<EOF
-window=dead:fm-recover-sub
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=firstmate
-home=$subhome
-owned_projects=gamma
-EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/recovery-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/recovery-fake/pane.txt" \
@@ -196,7 +199,7 @@ EOF
   meta="$home/state/recover-sub.meta"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "respawn did not preserve persistent home from meta/registry"
   grep -Fx 'window=firstmate:fm-recover-sub' "$meta" >/dev/null || fail "respawn did not reconstruct the direct report window"
-  pass "restart recovery can respawn a sub-firstmate from durable meta and registry"
+  pass "restart recovery can respawn a sub-firstmate from durable registry and charter"
 }
 
 test_firstmate_teardown_requires_empty_home() {
