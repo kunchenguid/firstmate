@@ -170,12 +170,16 @@ ensure_home() {
   local requested=$1 home
   if [ "$requested" = "-" ]; then
     home=$(acquire_treehouse_home)
+    [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] && SEED_HOME="$home"
     refuse_active_home_path "$home" || return 1
-    printf '%s\n' "$home"
+    [ -f "$home/AGENTS.md" ] || { echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2; return 1; }
+    [ -d "$home/bin" ] || { echo "error: $home is not a firstmate home (missing bin/)" >&2; return 1; }
+    printf '%s\n' "$(cd "$home" && pwd -P)"
     return
   fi
 
   home=$(abs_path_for_new "$requested")
+  [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] && SEED_HOME="$home"
   refuse_active_home_path "$home" || return 1
   if [ -e "$home" ]; then
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
@@ -248,6 +252,67 @@ EOF
   fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+}
+
+SEED_ROLLBACK_ACTIVE=0
+SEED_COMMITTED=0
+SEED_HOME=
+SEED_HOME_CREATED=0
+SEED_HOME_BACKED_UP=0
+SEED_BACKUP_DIR=
+SEED_CREATED_PROJECTS_FILE=
+SEED_PARENT_REG_EXISTED=0
+SEED_PARENT_BRIEF=
+SEED_PARENT_BRIEF_CREATED=0
+SEED_PARENT_BRIEF_DIR_CREATED=0
+SEED_SUB_REG_EXISTED=0
+SEED_CHARTER_EXISTED=0
+SEED_MARKER_EXISTED=0
+
+restore_seed_file() {
+  local existed=$1 backup=$2 path=$3
+  if [ "$existed" = 1 ]; then
+    mkdir -p "$(dirname "$path")"
+    cp "$backup" "$path" 2>/dev/null || true
+  else
+    rm -f "$path" 2>/dev/null || true
+  fi
+}
+
+seed_rollback() {
+  local project_path
+  [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
+  [ "${SEED_COMMITTED:-0}" = 0 ] || return 0
+
+  if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_CREATED" = 1 ]; then
+    rm -f "$SEED_PARENT_BRIEF" 2>/dev/null || true
+  fi
+  if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_DIR_CREATED" = 1 ]; then
+    rmdir "$(dirname "$SEED_PARENT_BRIEF")" 2>/dev/null || true
+  fi
+
+  if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
+    if [ "$SEED_HOME_CREATED" = 1 ]; then
+      rm -rf -- "$SEED_HOME" 2>/dev/null || true
+    else
+      if [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] && [ -f "$SEED_CREATED_PROJECTS_FILE" ]; then
+        while IFS= read -r project_path; do
+          [ -n "$project_path" ] || continue
+          rm -rf -- "$project_path" 2>/dev/null || true
+        done < "$SEED_CREATED_PROJECTS_FILE"
+      fi
+      if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
+        restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
+        restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
+      fi
+    fi
+  fi
+
+  if [ -n "${SEED_BACKUP_DIR:-}" ]; then
+    restore_seed_file "$SEED_PARENT_REG_EXISTED" "$SEED_BACKUP_DIR/parent-firstmates.md" "$REG"
+    rm -rf -- "$SEED_BACKUP_DIR" 2>/dev/null || true
+  fi
 }
 
 registry_line_for_project() {
@@ -326,7 +391,7 @@ write_registry() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 home projects_csv project
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst
   shift 2
   [ $# -gt 0 ] || { echo "error: sub-firstmate needs at least one project" >&2; return 1; }
 
@@ -336,11 +401,56 @@ seed_home() {
     validate_seed_project "$project"
   done
 
-  home=$(ensure_home "$requested_home")
+  SEED_ROLLBACK_ACTIVE=1
+  SEED_COMMITTED=0
+  SEED_HOME=
+  SEED_HOME_CREATED=0
+  SEED_HOME_BACKED_UP=0
+  SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
+  SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
+  : > "$SEED_CREATED_PROJECTS_FILE"
+  SEED_PARENT_REG_EXISTED=0
+  SEED_PARENT_BRIEF="$DATA/$id/brief.md"
+  SEED_PARENT_BRIEF_CREATED=0
+  SEED_PARENT_BRIEF_DIR_CREATED=0
+  SEED_SUB_REG_EXISTED=0
+  SEED_CHARTER_EXISTED=0
+  SEED_MARKER_EXISTED=0
+  trap seed_rollback EXIT
+  if [ -f "$REG" ]; then
+    SEED_PARENT_REG_EXISTED=1
+    cp "$REG" "$SEED_BACKUP_DIR/parent-firstmates.md"
+  fi
+
+  if [ "$requested_home" = "-" ]; then
+    SEED_HOME_CREATED=1
+    home=$(ensure_home "$requested_home")
+  else
+    requested_abs=$(abs_path_for_new "$requested_home")
+    SEED_HOME="$requested_abs"
+    [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
+    home=$(ensure_home "$requested_abs")
+  fi
+  SEED_HOME="$home"
   validate_home_assignment "$id" "$home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+  if [ -f "$home/data/projects.md" ]; then
+    SEED_SUB_REG_EXISTED=1
+    cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
+  fi
+  if [ -f "$home/data/charter.md" ]; then
+    SEED_CHARTER_EXISTED=1
+    cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
+  fi
+  if [ -f "$home/$SUB_HOME_MARKER" ]; then
+    SEED_MARKER_EXISTED=1
+    cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
+  fi
+  SEED_HOME_BACKED_UP=1
+
   for project in "$@"; do
+    project_dst="$home/projects/$project"
+    [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
@@ -349,13 +459,19 @@ seed_home() {
   done
 
   if [ ! -f "$DATA/$id/brief.md" ]; then
+    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
     "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"
+    SEED_PARENT_BRIEF_CREATED=1
   fi
   cp "$DATA/$id/brief.md" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv"
   validate_registry
+  SEED_COMMITTED=1
+  trap - EXIT
+  rm -rf -- "$SEED_BACKUP_DIR"
   printf 'home=%s\n' "$home"
 }
 

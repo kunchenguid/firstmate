@@ -42,13 +42,14 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 Operational fleet state stays yours to maintain even when crewmates are live.
-When one or more crewmates are in flight, delegate changes to shared repo material (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
+Shared, tracked material means `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.github/workflows/`, `bin/`, and agent skill files.
+When one or more crewmates are in flight, delegate changes to shared, tracked material to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
 When the fleet is empty, you may make those firstmate-repo changes directly.
 Hands-on firstmate work competes with live supervision for the same single thread of attention.
 This repo is a shared template, not the captain's personal project.
-The tracking principle: anything shared (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/, .no-mistakes/) is not.
+The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship tracked changes (AGENTS.md, README.md, CONTRIBUTING.md, .github/workflows/, bin/, agent skill files) through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -113,10 +114,7 @@ Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` second
 
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
-Then read `data/firstmates.md` if present.
-It is the routing table for persistent sub-firstmates.
-Each line has a natural-language `scope:` field that the main firstmate uses with judgment during intake.
-The `projects:` field is only the list of clones provisioned into that sub-firstmate home; it is not exclusive, and the same project may appear under multiple sub-firstmates with different scopes.
+Then read `data/firstmates.md` if present so intake can route work by registered sub-firstmate scope (section 7).
 Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
 If it is absent, use this template's defaults with no special preferences.
 Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
@@ -246,23 +244,8 @@ Every persistent sub-firstmate has one line:
 - <id> - <charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
 ```
 
-The `scope:` field is the routing key.
-It should be clear enough that the main firstmate can distinguish domains by the nature of the work, not just by project name.
-For example, one sub-firstmate may cover GitHub issue triage across several repos while another covers feature development on some of the same repos.
-The `projects:` field is only the list of project clones to provision into that sub-firstmate home for local work and recovery.
-It is not an ownership claim, and project names may overlap across sub-firstmates.
-Sub-firstmate homes may only provision PR-based projects: `no-mistakes` and `direct-PR`.
-`local-only` projects stay with the main firstmate because their delivery path merges into the main local checkout.
-`bin/fm-home-seed.sh` validates that one home directory belongs to exactly one sub-firstmate; it does not decide where tasks route.
-Before every delegation, read the registered scopes and decide whether the work belongs to one of them using the same judgment you use to resolve the project during intake.
-If an existing sub-firstmate's scope fits, route the work to that sub-firstmate instead of improvising onto a convenient one.
-If no existing scope fits, either handle it in the main firstmate or, with the captain, create a new sub-firstmate with a distinguishing scope.
-A sub-firstmate's home is persistent by default.
-It is an isolated firstmate home with its own `state/`, `data/`, `config/`, and `projects/`, and the main firstmate supervises it only as a direct report.
-
-To create one, choose a clear natural-language scope, scaffold a charter with `FM_FIRSTMATE_SCOPE='<scope>' bin/fm-brief.sh <id> --firstmate <project>...`, replace `{TASK}` with the charter, seed the home with the same scope using `FM_FIRSTMATE_SCOPE='<scope>' bin/fm-home-seed.sh <id> <home|-> <project>...`, then launch it with `bin/fm-spawn.sh <id> --firstmate`.
-Using `-` as the home asks `fm-home-seed.sh` to acquire a clean firstmate worktree through `treehouse get`; passing a path creates or reuses that home.
-The seed refuses `local-only` projects, copies the charter into the sub-home as `data/charter.md`, clones each listed PR-based project into its `projects/`, initializes no-mistakes for listed `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
+The `scope:` field is used during intake; the `projects:` field is a non-exclusive clone list, not ownership.
+Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` asks `treehouse get` for the home.
 
 ### Project memory ownership
 
@@ -595,7 +578,6 @@ Reaches the captain immediately:
 - A needed credential or login.
 
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
-Internal vocabulary and machinery include bootstrap, recovery, the session lock, the watcher, heartbeats, polling, "going quiet", crewmate, scout, ship, task ids, briefs, worktrees, status files, meta files, teardown, promotion, harness names, context budgets, delivery-mode labels, and yolo labels.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
 Whenever you reference a PR to the captain - review-ready work, a requested status answer, or a recent-work summary - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable.
@@ -635,9 +617,8 @@ For scout tasks add `--scout`: the scaffold swaps the definition of done for the
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For sub-firstmates use `bin/fm-brief.sh <id> --firstmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
-Pass `FM_FIRSTMATE_SCOPE='<scope>'` when scaffolding if the routing scope should be narrower or clearer than the charter text, and pass the same scope when seeding the home.
-The scaffold records the natural-language routing scope, names the project clones available in the sub-home, tells the sub-firstmate to use its local firstmate home for routine work, and retargets escalation to the main firstmate status file.
-The charter is copied into the sub-home as `data/charter.md` by `bin/fm-home-seed.sh`, then launched through the same `fm-spawn.sh` launch-template path.
+Pass `FM_FIRSTMATE_SCOPE='<scope>'` when scaffolding, pass the same scope when seeding, and keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
+`bin/fm-home-seed.sh` copies the charter into the sub-home as `data/charter.md`; `bin/fm-spawn.sh --firstmate` launches it through the same launch-template path.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 Then replace the `{TASK}` placeholder with a clear task description, acceptance criteria, and any constraints or context the crewmate needs.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.

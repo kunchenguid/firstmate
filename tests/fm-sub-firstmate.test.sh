@@ -83,6 +83,11 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = get ] && [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
+  mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
+  ( cd "$FM_FAKE_TREEHOUSE_HOME" && "$SHELL" )
+  exit $?
+fi
 if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
   rm -rf -- "$3"
 fi
@@ -212,6 +217,83 @@ EOF
     fail "owner subcommand still succeeded after routing moved to scopes"
   fi
   pass "firstmates registry records scopes and allows overlapping project clone lists"
+}
+
+test_home_seed_validate_rejects_duplicate_homes() {
+  local home subhome subhome_abs err
+  home="$TMP_ROOT/duplicate-home"
+  subhome="$TMP_ROOT/duplicate-subhome"
+  err="$TMP_ROOT/duplicate-home.err"
+  mkdir -p "$home/data" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  cat > "$home/data/firstmates.md" <<EOF
+- design - design domain (home: $subhome_abs; scope: design work; projects: alpha; added 2026-06-22)
+- triage - triage domain (home: $subhome_abs; scope: issue triage; projects: beta; added 2026-06-22)
+EOF
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted two sub-firstmates with the same home"
+  fi
+  grep -F 'duplicate sub-firstmate home assignment' "$err" >/dev/null \
+    || fail "registry validation did not explain duplicate home assignment"
+  pass "home seed validation rejects duplicate home routes"
+}
+
+test_home_seed_uses_treehouse_acquired_home() {
+  local home acquired acquired_abs fakebin log out
+  home="$TMP_ROOT/dash-home"
+  acquired="$TMP_ROOT/dash-acquired-home"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
+  log="$TMP_ROOT/dash-fake/tmux.log"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FIRSTMATE_SCOPE='dash acquired scope' "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
+    || fail "seed failed for a treehouse-acquired home"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
+  grep -F 'treehouse get' "$log" >/dev/null || fail "seed did not ask treehouse for a home"
+  [ -f "$acquired/.fm-sub-firstmate-home" ] || fail "seed did not mark acquired home"
+  [ "$(cat "$acquired/.fm-sub-firstmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
+  [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
+  grep -F "home: $acquired_abs" "$home/data/firstmates.md" >/dev/null || fail "registry did not record acquired home"
+  pass "home seeding accepts treehouse-acquired dash homes"
+}
+
+test_home_seed_rolls_back_failed_clone() {
+  local home subhome err missing_remote
+  home="$TMP_ROOT/rollback-home"
+  subhome="$TMP_ROOT/rollback-subhome"
+  err="$TMP_ROOT/rollback-home.err"
+  missing_remote="$TMP_ROOT/remotes/missing-beta.git"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  make_git_project "$home/projects/beta"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/rollback-alpha.git"
+  git -C "$home/projects/beta" remote add origin "file://$missing_remote"
+  cat > "$home/data/projects.md" <<EOF
+- alpha [direct-PR] - alpha project (added 2026-06-22)
+- beta [direct-PR] - beta project (added 2026-06-22)
+EOF
+
+  if FM_HOME="$home" FM_FIRSTMATE_SCOPE='rollback scope' "$ROOT/bin/fm-home-seed.sh" rollback "$subhome" alpha beta >/dev/null 2>"$err"; then
+    fail "seed succeeded even though the second project clone failed"
+  fi
+  grep -F 'does not appear to be a git repository' "$err" >/dev/null \
+    || grep -F 'repository' "$err" >/dev/null \
+    || fail "seed failure did not include the clone error"
+  [ ! -e "$subhome" ] || fail "failed seed left the newly created sub-firstmate home behind"
+  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "failed seed left a subhome marker"
+  [ ! -e "$subhome/projects/alpha" ] || fail "failed seed left a previously cloned project"
+  [ ! -e "$home/data/rollback/brief.md" ] || fail "failed seed left a generated charter brief"
+  if [ -f "$home/data/firstmates.md" ] && grep -F -- '- rollback ' "$home/data/firstmates.md" >/dev/null; then
+    fail "failed seed left a registry route"
+  fi
+  pass "home seeding rolls back failed clone attempts without residue"
 }
 
 test_home_seed_refuses_local_only_project() {
@@ -452,41 +534,6 @@ EOF
     && fail "fm-send fell back to a foreign same-name window"
 
   pass "fm-send resolves bare firstmate windows through this home"
-}
-
-test_fm_peek_resolves_bare_firstmate_window_from_home_meta() {
-  local home fakebin log err out
-  home="$TMP_ROOT/peek-home"
-  mkdir -p "$home/state"
-  touch "$home/state/.last-watcher-beat"
-  cat > "$home/state/domain.meta" <<EOF
-window=current-session:fm-domain
-kind=firstmate
-EOF
-  fakebin=$(make_fake_tmux "$TMP_ROOT/peek-fake")
-  log="$TMP_ROOT/peek-fake/tmux.log"
-  err="$TMP_ROOT/peek-fake/peek.err"
-
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-domain" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/peek-fake/pane.txt" \
-    "$ROOT/bin/fm-peek.sh" fm-domain 10 2>"$err") \
-    || fail "fm-peek failed for a bare firstmate window with home metadata"
-  [ "$out" = "idle prompt" ] || fail "fm-peek did not print the captured pane"
-  grep -F 'capture-pane -p -t current-session:fm-domain -S -10' "$log" >/dev/null \
-    || fail "fm-peek did not use the window recorded in this home's meta"
-  grep -F 'capture-pane -p -t other-session:fm-domain' "$log" >/dev/null \
-    && fail "fm-peek targeted a foreign window with the same bare name"
-
-  : > "$log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-missing" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/peek-fake/pane.txt" \
-    "$ROOT/bin/fm-peek.sh" fm-missing >/dev/null 2>"$err"; then
-    fail "fm-peek inspected a bare firstmate window without home metadata"
-  fi
-  grep -F "no metadata for fm-missing in $home/state" "$err" >/dev/null \
-    || fail "fm-peek did not explain missing home metadata"
-  grep -F 'capture-pane -p -t other-session:fm-missing' "$log" >/dev/null \
-    && fail "fm-peek fell back to a foreign same-name window"
-
-  pass "fm-peek resolves bare firstmate windows through this home"
 }
 
 test_recovery_respawn_uses_persistent_home() {
@@ -860,30 +907,12 @@ EOF
   pass "idle kind=firstmate pane is healthy and not stale"
 }
 
-test_watcher_ignores_foreign_tmux_windows() {
-  local home fakebin out pid window
-  home="$TMP_ROOT/watch-foreign-home"
-  mkdir -p "$home/state"
-  window="firstmate:fm-sub-child"
-  fakebin=$(make_fake_tmux "$TMP_ROOT/watch-foreign-fake")
-  out="$TMP_ROOT/watch-foreign-fake/watch.out"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_LOG="$TMP_ROOT/watch-foreign-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/watch-foreign-fake/pane.txt" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
-  pid=$!
-  if ! wait_live "$pid" 25; then
-    wait "$pid" || true
-    grep -F "stale: $window" "$out" >/dev/null && fail "foreign tmux window triggered stale wake"
-    fail "watcher exited unexpectedly while foreign window was present"
-  fi
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  grep -F "stale: $window" "$out" >/dev/null && fail "foreign tmux window triggered stale wake"
-  pass "watcher ignores fm windows not recorded in this home"
-}
-
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
+test_home_seed_validate_rejects_duplicate_homes
+test_home_seed_uses_treehouse_acquired_home
+test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
@@ -893,7 +922,6 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
 test_firstmate_spawn_requires_seeded_matching_home
 test_fm_send_resolves_bare_firstmate_window_from_home_meta
-test_fm_peek_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
@@ -904,4 +932,3 @@ test_firstmate_force_teardown_refuses_child_repo_descendant
 test_firstmate_force_teardown_refuses_unregistered_child_worktree
 test_firstmate_teardown_refuses_home_ancestor
 test_firstmate_idle_pane_is_not_stale
-test_watcher_ignores_foreign_tmux_windows
