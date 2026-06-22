@@ -75,6 +75,9 @@ state/               volatile runtime signals; gitignored
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
+  sweep.log          recurring review sweep run log (cron appends here; section 8)
+  sweep/             per-run scratch for the review sweep (transient plan files)
+  .sweep.lock        flock guard so two review sweeps never overlap
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -175,7 +178,8 @@ If a pane shows the exit banner, relaunch with `--continue` to resume the sessio
 
 pi has no permission system - crewmates are always autonomous.
 Keep the brief as ONE positional argument - multiple positional args become separate queued messages (fm-spawn's template does this correctly).
-Project trust dialog can appear on the first pi run in any not-yet-trusted directory (observed even on clean worktrees); accept with Enter - the decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
+The launch template passes `--approve`, so pi trusts project-local files for each run and a spawned crewmate never blocks on pi's project-trust dialog - this is what lets the unattended review sweep dispatch pi headlessly.
+A pi you launch by hand still shows that dialog on the first run in a not-yet-trusted directory (observed even on clean worktrees); accept with Enter - the decision persists per path in `~/.pi/agent/trust.json`, so later manual runs in the same path skip it.
 fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse (and pollute the project).
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
@@ -463,7 +467,7 @@ Failing-CI PRs are **kept** (not skipped): their review brief adds an instructio
 
 The `review-rectify-pi` skill already deletes its prior `Review Findings - Rectification Status` comment and posts the fresh one (Phase 9); the sweep relies on that and does not re-implement comment deletion. After each review lands its comment, the sweep parses the recommendation: on a **clean APPROVE** (not CONDITIONAL APPROVE), it transitions the PR's linked Jira ticket (the `MILE-\d+` key from the title/body) to "In Review" via `jira issue move` — composing with the standing Jira rule. Status-only; it never merges.
 
-`--dry-run` enumerates, filters, and prints the plan without dispatching. `FM_SWEEP_CONCURRENCY` and `FM_SWEEP_TASK_TIMEOUT` (default 1800s) tune the run. Because it dispatches headlessly, it depends on `fm-spawn`'s headless-launch reliability (detection + post-launch verify).
+`--dry-run` enumerates, filters, and prints the plan without dispatching. `FM_SWEEP_CONCURRENCY` and `FM_SWEEP_TASK_TIMEOUT` (default 1800s) tune the run. Because it dispatches headlessly, it depends on `fm-spawn`'s headless-launch reliability - `--approve` to clear pi's project-trust gate, stable-worktree detection, and a post-launch verify that the harness binary is actually running (section 4).
 
 ## 9. Escalation and captain etiquette
 
