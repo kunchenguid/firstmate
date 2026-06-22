@@ -448,6 +448,23 @@ Silence is the correct state while a healthy background watcher is waiting.
    The worktree and commits persist; this is cheap.
 5. Second relaunch fails too: write `failed` to backlog, tell the captain with evidence.
 
+### Recurring review sweep (cron)
+
+`bin/fm-review-sweep.sh` is a standalone, unattended sweep that reviews every open fleet PR on a fixed cadence, independent of the live supervisor. It is designed to run from cron (no firstmate session is required to be live):
+
+```sh
+0 */8 * * * /home/boks/Projects/firstmate/bin/fm-review-sweep.sh >> /home/boks/Projects/firstmate/state/sweep.log 2>&1
+```
+Firstmate installs the crontab line after merge; the script never installs it itself.
+
+Each run: enumerate every open PR across the fleet repos (resolved from `data/projects.md`), exclude drafts and already-approved PRs (`reviewDecision=APPROVED`), fetch CI status per PR, and dispatch a `review-rectify-pi` review in `--push` mode — **review-only, no code edits or fixes** — to each kept PR as a crewmate via `bin/fm-spawn.sh`, bounded to `FM_SWEEP_CONCURRENCY` (default **3**) concurrent reviews. The sweep is flock-guarded (no overlapping runs), best-effort per PR (a single PR's failure never aborts the run; `set -uo pipefail`, no `-e`), and logs a run summary to `state/sweep.log`.
+
+Failing-CI PRs are **kept** (not skipped): their review brief adds an instruction to investigate the CI failure root cause and include a `## CI Failure` section in the posted comment naming the failing job and error.
+
+The `review-rectify-pi` skill already deletes its prior `Review Findings - Rectification Status` comment and posts the fresh one (Phase 9); the sweep relies on that and does not re-implement comment deletion. After each review lands its comment, the sweep parses the recommendation: on a **clean APPROVE** (not CONDITIONAL APPROVE), it transitions the PR's linked Jira ticket (the `MILE-\d+` key from the title/body) to "In Review" via `jira issue move` — composing with the standing Jira rule. Status-only; it never merges.
+
+`--dry-run` enumerates, filters, and prints the plan without dispatching. `FM_SWEEP_CONCURRENCY` and `FM_SWEEP_TASK_TIMEOUT` (default 1800s) tune the run. Because it dispatches headlessly, it depends on `fm-spawn`'s headless-launch reliability (detection + post-launch verify).
+
 ## 9. Escalation and captain etiquette
 
 **Talk in outcomes, not mechanics.**
