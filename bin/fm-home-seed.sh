@@ -258,6 +258,7 @@ SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_HOME=
 SEED_HOME_CREATED=0
+SEED_HOME_ACQUIRED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
 SEED_CREATED_PROJECTS_FILE=
@@ -279,6 +280,17 @@ restore_seed_file() {
   fi
 }
 
+seed_safe_to_return_home() {
+  local home=$1 home_key active_key root_key
+  [ -n "$home" ] || return 1
+  [ "$home" != "/" ] || return 1
+  home_key=$(path_key "$home")
+  active_key=$(path_key "$FM_HOME")
+  root_key=$(path_key "$FM_ROOT")
+  [ "$home_key" != "$active_key" ] || return 1
+  [ "$home_key" != "$root_key" ] || return 1
+}
+
 seed_rollback() {
   local project_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
@@ -292,7 +304,11 @@ seed_rollback() {
   fi
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
-    if [ "$SEED_HOME_CREATED" = 1 ]; then
+    if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
+      if seed_safe_to_return_home "$SEED_HOME"; then
+        treehouse return --force "$SEED_HOME" >/dev/null 2>&1 || true
+      fi
+    elif [ "$SEED_HOME_CREATED" = 1 ]; then
       rm -rf -- "$SEED_HOME" 2>/dev/null || true
     else
       if [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] && [ -f "$SEED_CREATED_PROJECTS_FILE" ]; then
@@ -405,6 +421,7 @@ seed_home() {
   SEED_COMMITTED=0
   SEED_HOME=
   SEED_HOME_CREATED=0
+  SEED_HOME_ACQUIRED=0
   SEED_HOME_BACKED_UP=0
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
@@ -423,7 +440,7 @@ seed_home() {
   fi
 
   if [ "$requested_home" = "-" ]; then
-    SEED_HOME_CREATED=1
+    SEED_HOME_ACQUIRED=1
     home=$(ensure_home "$requested_home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
