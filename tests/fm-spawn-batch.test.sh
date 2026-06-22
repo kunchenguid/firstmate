@@ -7,6 +7,8 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-batch.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -78,8 +80,43 @@ test_id_with_slash_is_not_batch() {
   pass "an arg whose id part contains '/' is not treated as a batch pair"
 }
 
+test_fm_home_scopes_projects_path() {
+  local home out status expected
+  home="$TMP_ROOT/home path"
+  mkdir -p "$home/data" "$home/projects/alpha"
+  out=$(FM_HOME="$home" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-home-z7 projects/alpha 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
+  expected="error: no brief at $home/data/nope-home-z7/brief.md"
+  printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
+    || fail "projects/alpha was not resolved through FM_HOME before the brief check"
+  if printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null; then
+    fail "spawn attempted to resolve projects/alpha from the caller cwd"
+  fi
+  pass "FM_HOME scopes projects/ paths for single-task spawn"
+}
+
+test_fm_projects_override_scopes_projects_path() {
+  local home projects out status expected
+  home="$TMP_ROOT/override home"
+  projects="$TMP_ROOT/override projects"
+  mkdir -p "$home/data" "$projects/alpha"
+  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-override-z8 projects/alpha 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
+  expected="error: no brief at $home/data/nope-override-z8/brief.md"
+  printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
+    || fail "projects/alpha was not resolved through FM_PROJECTS_OVERRIDE before the brief check"
+  if printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null; then
+    fail "spawn attempted to resolve projects/alpha from the caller cwd"
+  fi
+  pass "FM_PROJECTS_OVERRIDE scopes projects/ paths for single-task spawn"
+}
+
 test_batch_dispatches_each_pair
 test_single_pair_is_batch
 test_single_mode_unaffected
 test_batch_rejects_non_pair_argument
 test_id_with_slash_is_not_batch
+test_fm_home_scopes_projects_path
+test_fm_projects_override_scopes_projects_path
