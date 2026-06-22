@@ -12,6 +12,8 @@
 #   is cloned into the sub-firstmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   only captain-relevant escalations append to this home's status file.
+#   Set FM_FIRSTMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   FM_FIRSTMATE_CHARTER is a fallback routing scope for older callers; replace {TASK} manually.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)

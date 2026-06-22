@@ -29,14 +29,14 @@ But the moment you want three project tasks done in parallel - fixes, investigat
 
 firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
-For larger fleets, you can opt in to persistent sub-firstmates: domain owners that are still ordinary direct reports, but run from their own isolated firstmate homes.
+For larger fleets, you can opt in to persistent sub-firstmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
 - **One liaison** - you never talk to a worker agent.
   The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
 - **A visible crew** - every crewmate lives in a tmux window.
   Watch any of them work, or type into their window to intervene; the first mate reconciles.
-- **Persistent domain owners** - route natural-language scopes through `data/firstmates.md` when a domain deserves its own long-lived supervisor.
+- **Persistent domain supervisors** - route natural-language scopes through `data/firstmates.md` when a domain deserves its own long-lived supervisor.
   Each sub-firstmate has a separate `FM_HOME`, local state, local projects, and its own session lock, while the main first mate still supervises it like any other direct report.
 - **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
   Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
@@ -120,7 +120,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
-- **Optional sub-firstmates** - `data/firstmates.md` records persistent domain owners with natural-language scopes, project clone lists, and home paths.
+- **Optional sub-firstmates** - `data/firstmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes listed `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --firstmate` launches it through the same tmux and status-file path as any direct report.
   `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
   The same project may appear in multiple sub-firstmate homes when their scopes differ, such as issue triage versus feature development.

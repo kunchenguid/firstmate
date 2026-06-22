@@ -5,9 +5,12 @@
 #   fm-home-seed.sh <id> <home|-> <project>...
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via treehouse get. Projects are cloned
-#       from this home into the sub-home's projects/ directory, the charter brief
+#       from this home into the sub-home's projects/ directory.
+#       That project list is non-exclusive provisioning data. The charter brief
 #       is copied to data/charter.md, no-mistakes projects are initialized,
 #       a .fm-sub-firstmate-home marker is written, and data/firstmates.md is updated.
+#       Set FM_FIRSTMATE_SCOPE='<scope>' to write the registry routing scope.
+#       FM_FIRSTMATE_CHARTER can provide the registry summary and fallback scope.
 #   fm-home-seed.sh validate
 #       Refuse duplicate home assignments in data/firstmates.md.
 set -eu
