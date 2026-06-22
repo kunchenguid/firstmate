@@ -354,6 +354,27 @@ validate_operational_dirs() {
   done
 }
 
+validate_seed_leaf_files() {
+  local home=$1 label path abs_home abs_path
+  abs_home=$(resolved_path "$home")
+  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+    path="$home/$label"
+    if [ -L "$path" ]; then
+      echo "error: sub-firstmate leaf file must not be a symlink: $path" >&2
+      return 1
+    fi
+    [ -e "$path" ] || continue
+    abs_path=$(resolved_path "$path")
+    case "$abs_path" in
+      "$abs_home"/*) ;;
+      *)
+        echo "error: sub-firstmate leaf file must resolve inside the sub-firstmate home: $path" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 validate_project_destination() {
   local home=$1 project=$2 dst projects_dir abs_home abs_projects abs_dst abs_active_home abs_root
   projects_dir="$home/projects"
@@ -805,6 +826,7 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   validate_operational_dirs "$home" || return 1
+  validate_seed_leaf_files "$home" || return 1
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"

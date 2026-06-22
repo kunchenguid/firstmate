@@ -905,6 +905,40 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
   pass "home seeding refuses operational directories outside the subhome"
 }
 
+test_home_seed_refuses_symlinked_leaf_files() {
+  local home subhome sink err leaf target expected
+  home="$TMP_ROOT/symlink-leaf-home"
+  err="$TMP_ROOT/symlink-leaf.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-leaf-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink leaf seed test"
+
+  for leaf in data/projects.md data/charter.md .fm-sub-firstmate-home; do
+    subhome="$TMP_ROOT/symlink-leaf-subhome-${leaf//\//-}"
+    sink="$home/data/symlink-leaf-${leaf//\//-}"
+    rm -rf "$subhome" "$sink"
+    git clone --quiet "$ROOT" "$subhome"
+    mkdir -p "$(dirname "$subhome/$leaf")" "$(dirname "$sink")"
+    expected=outside
+    if [ "$leaf" = ".fm-sub-firstmate-home" ]; then
+      expected=design
+    fi
+    printf '%s\n' "$expected" > "$sink"
+    ln -s "$sink" "$subhome/$leaf"
+    if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+      fail "seed accepted symlinked leaf file $leaf"
+    fi
+    grep -F 'sub-firstmate leaf file must not be a symlink:' "$err" >/dev/null \
+      || fail "seed did not explain symlinked leaf refusal for $leaf"
+    target=$(cat "$sink")
+    [ "$target" = "$expected" ] || fail "seed overwrote outside symlink target for $leaf"
+    [ ! -f "$subhome/.fm-sub-firstmate-home" ] || [ "$leaf" = ".fm-sub-firstmate-home" ] || fail "seed marked subhome after symlinked leaf refusal"
+  done
+  pass "home seeding refuses symlinked leaf files"
+}
+
 test_firstmate_spawn_records_home_meta() {
   local home subhome subhome_abs fakebin log meta
   home="$TMP_ROOT/spawn-home"
@@ -1653,6 +1687,7 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
+test_home_seed_refuses_symlinked_leaf_files
 test_firstmate_spawn_records_home_meta
 test_firstmate_spawn_requires_seeded_matching_home
 test_firstmate_spawn_refuses_operational_dirs_outside_subhome
