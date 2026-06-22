@@ -116,6 +116,27 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_recording_no_mistakes() {
+  local dir=$1 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\t%s\n' "$PWD" "${1:-}" >> "$FM_FAKE_NO_MISTAKES_LOG"
+if [ "$(basename "$PWD")" = "${FM_FAKE_NO_MISTAKES_FAIL_PROJECT:-}" ]; then
+  exit 1
+fi
+case "${1:-}" in
+  init) touch .no-mistakes-init ;;
+  doctor) touch .no-mistakes-doctor ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf '%s\n' "$fakebin"
+}
+
 wait_live() {
   local pid=$1 limit=${2:-30} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -503,6 +524,91 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   grep -F "expected $expected" "$err" >/dev/null \
     || fail "seed did not report expected origin for existing remote-backed project"
   pass "remote-backed subhome seeding validates existing destination origins"
+}
+
+test_home_seed_resolves_relative_source_origins() {
+  local home subhome subhome_abs expected out actual
+  home="$TMP_ROOT/relative-origin-home"
+  subhome="$TMP_ROOT/relative-origin-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/remotes"
+  make_git_project "$home/projects/alpha"
+  git clone --quiet --bare "$home/projects/alpha" "$home/remotes/relative-alpha.git"
+  git -C "$home/projects/alpha" remote add origin ../../remotes/relative-alpha.git
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for relative origin seed test"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha)
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  expected=$(cd "$home/remotes/relative-alpha.git" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report relative-origin subhome"
+  [ -d "$subhome/projects/alpha/.git" ] || fail "relative source origin was not cloned"
+  actual=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$actual" = "$expected" ] || fail "relative source origin was not cloned through the resolved path"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "relative source origin did not compare equal on reseed"
+  pass "home seeding resolves relative source origins against the source project"
+}
+
+test_home_seed_skips_initialized_existing_no_mistakes_projects() {
+  local home subhome err fakebin log origin
+  home="$TMP_ROOT/existing-initialized-home"
+  subhome="$TMP_ROOT/existing-initialized-subhome"
+  err="$TMP_ROOT/existing-initialized.err"
+  log="$TMP_ROOT/existing-initialized-no-mistakes.log"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  make_git_project "$home/projects/beta"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/existing-alpha.git"
+  add_file_origin "$home/projects/beta" "$TMP_ROOT/remotes/existing-beta.git"
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/projects"
+  origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git clone --quiet "$origin" "$subhome/projects/alpha"
+  git -C "$subhome/projects/alpha" remote add no-mistakes "$TMP_ROOT/no-mistakes-alpha.git"
+  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' '- beta - beta project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-initialized-fake")
+  : > "$log"
+
+  if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_FAKE_NO_MISTAKES_FAIL_PROJECT=beta \
+    FM_HOME="$home" FM_FIRSTMATE_SCOPE='existing init rollback scope' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
+    fail "seed succeeded even though later no-mistakes initialization failed"
+  fi
+  grep -F 'failed to initialize no-mistakes for beta' "$err" >/dev/null \
+    || fail "seed did not explain later no-mistakes initialization failure"
+  grep -F "$subhome/projects/alpha" "$log" >/dev/null \
+    && fail "seed ran no-mistakes against an initialized existing clone"
+  [ ! -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed mutated initialized existing clone with no-mistakes init"
+  [ ! -f "$subhome/projects/alpha/.no-mistakes-doctor" ] || fail "seed mutated initialized existing clone with no-mistakes doctor"
+  [ ! -e "$subhome/projects/beta" ] || fail "failed seed left a newly cloned project after no-mistakes failure"
+  pass "home seeding skips initialized existing no-mistakes clones"
+}
+
+test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
+  local home subhome err fakebin log origin
+  home="$TMP_ROOT/existing-uninitialized-home"
+  subhome="$TMP_ROOT/existing-uninitialized-subhome"
+  err="$TMP_ROOT/existing-uninitialized.err"
+  log="$TMP_ROOT/existing-uninitialized-no-mistakes.log"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/uninitialized-alpha.git"
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/projects"
+  origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git clone --quiet "$origin" "$subhome/projects/alpha"
+  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-uninitialized-fake")
+  : > "$log"
+
+  if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
+    FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed initialized a preexisting no-mistakes clone"
+  fi
+  grep -F 'refusing to mutate preexisting clone' "$err" >/dev/null \
+    || fail "seed did not explain uninitialized existing no-mistakes clone refusal"
+  [ ! -s "$log" ] || fail "seed ran no-mistakes before refusing an uninitialized existing clone"
+  [ ! -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed mutated uninitialized existing clone"
+  pass "home seeding refuses uninitialized existing no-mistakes clones"
 }
 
 test_home_seed_refuses_project_destinations_outside_subhome() {
@@ -1116,6 +1222,9 @@ test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
+test_home_seed_resolves_relative_source_origins
+test_home_seed_skips_initialized_existing_no_mistakes_projects
+test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_firstmate_spawn_records_home_meta
 test_firstmate_spawn_requires_seeded_matching_home

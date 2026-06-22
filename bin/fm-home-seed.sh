@@ -247,6 +247,41 @@ validate_project_destination() {
   printf '%s\n' "$abs_dst"
 }
 
+normalize_origin_url() {
+  local repo=$1 url=$2 prefix
+  case "$url" in
+    file://*|*://*)
+      printf '%s\n' "$url"
+      return
+      ;;
+    *:*)
+      prefix=${url%%:*}
+      case "$prefix" in
+        */*) ;;
+        *)
+          printf '%s\n' "$url"
+          return
+          ;;
+      esac
+      ;;
+  esac
+  ( cd "$repo" && canonical_path_for_check "$url" )
+}
+
+source_origin_url() {
+  local project=$1 mode=$2 src=$3 url
+  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+  normalize_origin_url "$src" "$url"
+}
+
+seeded_origin_url() {
+  local project=$1 dst=$2 expected=$3 url
+  url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+  [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $expected" >&2; return 1; }
+  normalize_origin_url "$dst" "$url"
+}
+
 acquire_treehouse_home() {
   local tmp runner home
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-home-path.XXXXXX")
@@ -323,18 +358,15 @@ EOF
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
-    url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-    [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
-    dst_url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
-    [ -n "$dst_url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $url" >&2; return 1; }
+    url=$(source_origin_url "$project" "$mode" "$src") || return 1
+    dst_url=$(seeded_origin_url "$project" "$dst" "$url") || return 1
     [ "$dst_url" = "$url" ] || {
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
     return 0
   fi
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+  url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
 }
 
@@ -448,6 +480,13 @@ seed_remove_created_project() {
   rm -rf -- "$abs_project" 2>/dev/null || true
 }
 
+seed_project_was_created() {
+  local project_path=$1
+  [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] || return 1
+  [ -f "$SEED_CREATED_PROJECTS_FILE" ] || return 1
+  grep -Fx -- "$project_path" "$SEED_CREATED_PROJECTS_FILE" >/dev/null 2>&1
+}
+
 seed_rollback() {
   local project_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
@@ -531,14 +570,21 @@ sync_project_registry() {
 }
 
 initialize_no_mistakes_project() {
-  local home=$1 project=$2 mode dst
+  local home=$1 project=$2 created=$3 mode dst
   mode=$(project_mode_in_home "$home" "$project")
   [ "$mode" = no-mistakes ] || return 0
+  dst=$(validate_project_destination "$home" "$project") || return 1
+  if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$created" != 1 ]; then
+    echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
+    return 1
+  fi
   command -v no-mistakes >/dev/null 2>&1 || {
     echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
     return 1
   }
-  dst=$(validate_project_destination "$home" "$project") || return 1
   ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
     echo "error: failed to initialize no-mistakes for $project at $dst" >&2
     return 1
@@ -631,7 +677,12 @@ seed_home() {
   done
   sync_project_registry "$home" "$@"
   for project in "$@"; do
-    initialize_no_mistakes_project "$home" "$project"
+    project_dst=$(validate_project_destination "$home" "$project") || return 1
+    if seed_project_was_created "$project_dst"; then
+      initialize_no_mistakes_project "$home" "$project" 1
+    else
+      initialize_no_mistakes_project "$home" "$project" 0
+    fi
   done
 
   if [ ! -f "$DATA/$id/brief.md" ]; then
