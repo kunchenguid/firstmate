@@ -170,6 +170,7 @@ EOF
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
   [ -d "$subhome/projects/gamma/.git" ] || fail "gamma was not cloned into subhome"
+  git -C "$subhome/projects/beta" remote get-url origin >/dev/null 2>&1 && fail "local-only beta kept an origin remote"
   [ -f "$subhome/projects/gamma/.no-mistakes-init" ] || fail "no-mistakes project was not initialized"
   [ -f "$subhome/projects/gamma/.no-mistakes-doctor" ] || fail "no-mistakes project was not checked"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" alpha)

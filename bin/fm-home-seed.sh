@@ -156,17 +156,32 @@ ensure_home() {
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url
+  local project=$1 home=$2 src dst url mode
   src="$PROJECTS/$project"
   dst="$home/projects/$project"
   [ -d "$src" ] || { echo "error: owned project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: owned project $project is not a git repo" >&2; return 1; }
-  [ -e "$dst" ] && return 0
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-  if [ -n "$url" ]; then
-    git clone --quiet "$url" "$dst"
-  else
+  read -r mode _ <<EOF
+$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+EOF
+  if [ -e "$dst" ]; then
+    if [ "$mode" = local-only ]; then
+      git -C "$dst" remote remove origin 2>/dev/null || true
+    fi
+    return 0
+  fi
+  if [ "$mode" = local-only ]; then
     git clone --quiet "$src" "$dst"
+  else
+    url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+    if [ -n "$url" ]; then
+      git clone --quiet "$url" "$dst"
+    else
+      git clone --quiet "$src" "$dst"
+    fi
+  fi
+  if [ "$mode" = local-only ]; then
+    git -C "$dst" remote remove origin 2>/dev/null || true
   fi
 }
 
