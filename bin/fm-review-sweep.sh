@@ -217,14 +217,13 @@ spawn_review() {
   : > "$status_file"
   # Spawn headlessly (cron has no TMUX). FM_SPAWN_NO_GUARD: no watcher to guard.
   local spawn_out spawn_rc=0
-  if ! spawn_out=$(env -u TMUX FM_SPAWN_NO_GUARD=1 \
-        "$FM_ROOT/bin/fm-spawn.sh" "$id" "$FM_ROOT/$proj" 2>&1); then
-    spawn_rc=$?
+  spawn_out=$(env -u TMUX FM_SPAWN_NO_GUARD=1 \
+        "$FM_ROOT/bin/fm-spawn.sh" "$id" "$FM_ROOT/$proj" 2>&1) || spawn_rc=$?
+  if [ "$spawn_rc" -ne 0 ]; then
     log "  error   $repo#$num fm-spawn failed (rc=$spawn_rc): $(printf '%s' "$spawn_out" | tail -1)"
     rm -f "$FM_ROOT/state/$id.meta" "$status_file"; rm -rf "$FM_ROOT/data/$id"
     return 1
   fi
-  printf '%s\n' "$id" >> "$SWEEP_RUN_DIR/.active"
   log "  spawn   $repo#$num -> $id (cifail=$cifail)"
   SPAWN_ID="$id"
 }
@@ -240,7 +239,6 @@ parse_recommendation() {
   comments=$(gh api "repos/$repo/issues/$num/comments" --jq '.[].body' 2>/dev/null) || { echo ""; return; }
   # Find the recommendation line in the review-rectify comment block.
   line=$(printf '%s\n' "$comments" | grep -iE '^[# ]*Recommendation:' | tail -1)
-  [ -n "$line" ] || line=$(printf '%s\n' "$comments" | grep -iE 'Recommendation:' | tail -1)
   [ -n "$line" ] || { echo ""; return; }
   # strip up to the colon, take the first decision word, uppercase
   local decision
@@ -337,6 +335,7 @@ FLEET=$(resolve_fleet)
 # Collect candidate PRs into a plan.
 PLAN_FILE="$SWEEP_RUN_DIR/$$.plan"
 : > "$PLAN_FILE"
+trap 'rm -f "$PLAN_FILE"' EXIT
 considered=0
 while IFS=$'\t' read -r repo proj; do
   [ -n "$repo" ] || continue
@@ -385,9 +384,10 @@ try_reap() {
   id=${A_ID[i]}; repo=${A_REPO[i]}; num=${A_NUM[i]}; dl=${A_DEADLINE[i]}
   now=$(date +%s)
   last=$(tail -1 "$FM_ROOT/state/$id.status" 2>/dev/null || true)
-  local finished=0
+  local finished=0 review_posted=0
   case "$last" in
-    done:*|failed:*|blocked:*|needs-decision:*) finished=1 ;;
+    done:*) finished=1; review_posted=1 ;;
+    failed:*|blocked:*|needs-decision:*) finished=1 ;;
   esac
   if [ "$finished" -ne 1 ]; then
     # window gone? crewmate exited without terminal status.
@@ -402,7 +402,7 @@ try_reap() {
   [ "$finished" -eq 1 ] || return 1
   # Collect result.
   local decision=""
-  decision=$(parse_recommendation "$repo" "$num")
+  [ "$review_posted" -eq 1 ] && decision=$(parse_recommendation "$repo" "$num")
   log "  result  $repo#$num status='$last' recommendation='${decision}'"
   say "sweep: $repo#$num -> recommendation=${decision:-unknown} ($last)"
   if [ -n "$decision" ]; then maybe_transition_jira "$repo" "$num" "$decision"; fi

@@ -268,8 +268,13 @@ for _ in $(seq 1 40); do   # ~40s grace for slow agent startup (pi/claude cold s
   sleep 1
 done
 if [ "$verified" -ne 1 ]; then
-  echo "warn: harness '$HARNESS' not detected as foreground within 40s; resending launch once" >&2
-  send_launch
+  fg_cmd="$(tmux display-message -p -t "$T" '#{pane_current_command}' 2>/dev/null || true)"
+  if is_interactive_shell "$fg_cmd"; then
+    echo "warn: harness '$HARNESS' not detected within 40s; pane at interactive shell ('$fg_cmd'); resending launch once" >&2
+    send_launch
+  else
+    echo "warn: harness '$HARNESS' not detected within 40s; foreground '$fg_cmd' is not a known shell — not resending (would risk injecting into a running process), continuing to poll" >&2
+  fi
   for _ in $(seq 1 40); do
     if harness_running; then verified=1; break; fi
     sleep 1
