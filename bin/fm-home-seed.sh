@@ -6,7 +6,8 @@
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via treehouse get. Owned projects are cloned
 #       from this home into the sub-home's projects/ directory, the charter brief
-#       is copied to data/charter.md, and data/firstmates.md is updated.
+#       is copied to data/charter.md, no-mistakes owned projects are initialized,
+#       a .fm-sub-firstmate-home marker is written, and data/firstmates.md is updated.
 #   fm-home-seed.sh owner <project>
 #       Print the registered sub-firstmate id that owns <project>.
 #   fm-home-seed.sh validate

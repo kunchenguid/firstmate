@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Acquire or inspect the single-firstmate session lock.
+# Acquire or inspect the per-home firstmate session lock.
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.

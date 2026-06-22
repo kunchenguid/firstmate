@@ -255,7 +255,7 @@ It is an isolated firstmate home with its own `state/`, `data/`, `config/`, and 
 
 To create one, scaffold a charter with `bin/fm-brief.sh <id> --firstmate <owned-project>...`, replace `{TASK}` with the charter, seed the home with `bin/fm-home-seed.sh <id> <home|-> <owned-project>...`, then launch it with `bin/fm-spawn.sh <id> --firstmate`.
 Using `-` as the home asks `fm-home-seed.sh` to acquire a clean firstmate worktree through `treehouse get`; passing a path creates or reuses that home.
-The seed copies the charter into the sub-home as `data/charter.md`, clones only the owned projects into its `projects/`, and records the route in `data/firstmates.md`.
+The seed copies the charter into the sub-home as `data/charter.md`, clones only the owned projects into its `projects/`, initializes no-mistakes for owned `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
 
 ### Project memory ownership
 
@@ -353,6 +353,7 @@ bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harn
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --firstmate                 # launch a registered persistent sub-firstmate in its home
+bin/fm-spawn.sh <id> <firstmate-home> --firstmate   # launch or recover an explicit sub-firstmate home
 bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
 ```
 
@@ -360,7 +361,7 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-For `kind=firstmate`, the same script launches in the registered firstmate home instead of running `treehouse get` for a project, records `home=` and `owned_projects=`, and uses the charter brief as the launch prompt.
+For `kind=firstmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `owned_projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For `kind=firstmate`, the script creates the same kind of window but starts directly in the persistent home.

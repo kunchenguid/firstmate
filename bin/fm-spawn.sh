@@ -23,7 +23,8 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|firstmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
-# mode/yolo are resolved per-project from data/projects.md via fm-project-mode.sh.
+# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
+# firstmate spawns record mode=firstmate, yolo=off, home=, and owned_projects=.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
