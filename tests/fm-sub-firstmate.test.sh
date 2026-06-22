@@ -33,6 +33,12 @@ make_git_project() {
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
+make_git_worktree() {
+  local repo=$1 worktree=$2 branch=$3
+  make_git_project "$repo"
+  git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
+}
+
 add_file_origin() {
   local repo=$1 remote=$2 remote_abs
   git clone --quiet --bare "$repo" "$remote"
@@ -516,7 +522,8 @@ test_firstmate_force_teardown_discards_child_work() {
   subhome="$TMP_ROOT/force-teardown-subhome"
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/force-child-worktree"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  make_git_worktree "$childproj" "$childwt" force-child
   printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -631,6 +638,147 @@ EOF
   pass "force teardown validates subhome before child cleanup"
 }
 
+test_firstmate_force_teardown_refuses_child_active_home_descendant() {
+  local home subhome childproj childwt fakebin err log
+  home="$TMP_ROOT/child-active-descendant-home"
+  subhome="$TMP_ROOT/child-active-descendant-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$home/data"
+  err="$TMP_ROOT/child-active-descendant.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
+  log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown removed a child worktree inside active FM_HOME"
+  fi
+  [ -d "$home/data" ] || fail "force teardown removed active home data"
+  [ -d "$subhome" ] || fail "force teardown removed subhome after child validation refusal"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after child validation refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after child validation refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before child validation refusal"
+  grep -F 'inside the active firstmate home' "$err" >/dev/null || fail "force teardown did not explain active home descendant rejection"
+  pass "force teardown refuses child worktrees inside the active home"
+}
+
+test_firstmate_force_teardown_refuses_child_repo_descendant() {
+  local home subhome childproj childwt fakeroot fakebin err log
+  home="$TMP_ROOT/child-repo-descendant-home"
+  subhome="$TMP_ROOT/child-repo-descendant-subhome"
+  childproj="$subhome/projects/alpha"
+  fakeroot="$TMP_ROOT/child-repo-descendant-root"
+  childwt="$fakeroot/data"
+  err="$TMP_ROOT/child-repo-descendant.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt" "$fakeroot/bin"
+  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakeroot/bin/fm-guard.sh"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
+  log="$TMP_ROOT/child-repo-descendant-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-repo-descendant-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown removed a child worktree inside FM_ROOT"
+  fi
+  [ -d "$childwt" ] || fail "force teardown removed repo descendant worktree"
+  [ -d "$subhome" ] || fail "force teardown removed subhome after repo child validation refusal"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after repo child validation refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after repo child validation refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before repo child validation refusal"
+  grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "force teardown did not explain repo descendant rejection"
+  pass "force teardown refuses child worktrees inside the firstmate repo"
+}
+
+test_firstmate_force_teardown_refuses_unregistered_child_worktree() {
+  local home subhome childproj childwt fakebin err log
+  home="$TMP_ROOT/unregistered-child-home"
+  subhome="$TMP_ROOT/unregistered-child-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/unregistered-child-worktree"
+  err="$TMP_ROOT/unregistered-child.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
+  log="$TMP_ROOT/unregistered-child-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown removed an unregistered child worktree"
+  fi
+  [ -d "$childwt" ] || fail "force teardown removed unregistered child worktree"
+  [ -d "$subhome" ] || fail "force teardown removed subhome after unregistered child refusal"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after unregistered child refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after unregistered child refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before unregistered child refusal"
+  grep -F 'is not a git worktree for' "$err" >/dev/null || fail "force teardown did not explain unregistered child rejection"
+  pass "force teardown refuses unregistered child worktree paths"
+}
+
 test_firstmate_teardown_refuses_home_ancestor() {
   local danger home fakebin err
   danger="$TMP_ROOT/ancestor-teardown"
@@ -728,6 +876,9 @@ test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
 test_firstmate_teardown_requires_seed_marker
 test_firstmate_force_teardown_prevalidates_before_child_cleanup
+test_firstmate_force_teardown_refuses_child_active_home_descendant
+test_firstmate_force_teardown_refuses_child_repo_descendant
+test_firstmate_force_teardown_refuses_unregistered_child_worktree
 test_firstmate_teardown_refuses_home_ancestor
 test_firstmate_idle_pane_is_not_stale
 test_watcher_ignores_foreign_tmux_windows

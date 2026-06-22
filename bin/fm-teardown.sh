@@ -79,6 +79,26 @@ removal_target_abs_path() {
   fi
 }
 
+worktree_registered_for_project() {
+  local project=$1 target=$2 abs_target listed line listed_abs
+  [ -n "$project" ] || return 1
+  [ -d "$project" ] || return 1
+  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  abs_target=$(removal_target_abs_path "$target")
+  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        listed_abs=$(removal_target_abs_path "${line#worktree }" 2>/dev/null || true)
+        [ "$listed_abs" = "$abs_target" ] && return 0
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  return 1
+}
+
 validate_removal_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -112,9 +132,38 @@ validate_removal_target() {
   printf '%s\n' "$abs_target"
 }
 
+validate_child_worktree_for_removal() {
+  local target=$1 project=$2 abs_target abs_home abs_root
+  [ -n "$target" ] || return 0
+  [ -e "$target" ] || return 0
+  abs_target=$(validate_removal_target "$target" "child worktree") || return 1
+  if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
+    if path_is_ancestor_of "$abs_home" "$abs_target"; then
+      echo "REFUSED: unsafe child worktree removal target $target is inside the active firstmate home" >&2
+      return 1
+    fi
+  fi
+  abs_root=$(cd "$FM_ROOT" && pwd -P)
+  if path_is_ancestor_of "$abs_root" "$abs_target"; then
+    echo "REFUSED: unsafe child worktree removal target $target is inside the firstmate repo" >&2
+    return 1
+  fi
+  if ! worktree_registered_for_project "$project" "$target"; then
+    echo "REFUSED: unsafe child worktree removal target $target is not a git worktree for ${project:-the recorded project}" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_target"
+}
+
 safe_rm_rf() {
   local target=$1 label=$2
   validate_removal_target "$target" "$label" >/dev/null || return 1
+  rm -rf -- "$target"
+}
+
+safe_rm_rf_child_worktree() {
+  local target=$1 project=$2
+  validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
   rm -rf -- "$target"
 }
 
@@ -151,7 +200,7 @@ remove_firstmate_home() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_kind child_home
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -166,7 +215,8 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      validate_removal_target "$child_wt" "child worktree" >/dev/null || return 1
+      child_proj=$(meta_value "$child_meta" project)
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
   done
 }
@@ -194,11 +244,12 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf "$child_wt" "child worktree"
+        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       else
-        safe_rm_rf "$child_wt" "child worktree"
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"
