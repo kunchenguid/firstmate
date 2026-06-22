@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision and route persistent sub-firstmate homes.
+# Provision and route persistent secondmate homes.
 #
 # Usage:
 #   fm-home-seed.sh <id> <home|-> <project>...
@@ -8,17 +8,17 @@
 #       from this home into the sub-home's projects/ directory.
 #       That project list is non-exclusive provisioning data. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, a .fm-sub-firstmate-home marker is written, and
-#       data/firstmates.md is updated.
+#       initialized, a .fm-secondmate-home marker is written, and
+#       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe.
-#       Set FM_FIRSTMATE_SCOPE='<scope>' to override the registry routing scope.
+#       Set FM_SECONDMATE_SCOPE='<scope>' to override the registry routing scope.
 #       Otherwise the registry summary and scope are derived from the filled charter brief.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
-#       data/firstmates.md.
+#       data/secondmates.md.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,8 +26,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-REG="$DATA/firstmates.md"
-SUB_HOME_MARKER=".fm-sub-firstmate-home"
+REG="$DATA/secondmates.md"
+SUB_HOME_MARKER=".fm-secondmate-home"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
@@ -64,8 +64,8 @@ brief_section_text() {
 
 registry_summary_for_brief() {
   local brief=$1
-  if [ -n "${FM_FIRSTMATE_CHARTER:-}" ]; then
-    printf '%s\n' "$FM_FIRSTMATE_CHARTER" | normalize_registry_text
+  if [ -n "${FM_SECONDMATE_CHARTER:-}" ]; then
+    printf '%s\n' "$FM_SECONDMATE_CHARTER" | normalize_registry_text
   else
     brief_section_text "$brief" "Charter" | normalize_registry_text
   fi
@@ -73,8 +73,8 @@ registry_summary_for_brief() {
 
 registry_scope_for_brief() {
   local brief=$1
-  if [ -n "${FM_FIRSTMATE_SCOPE:-}" ]; then
-    printf '%s\n' "$FM_FIRSTMATE_SCOPE" | normalize_registry_text
+  if [ -n "${FM_SECONDMATE_SCOPE:-}" ]; then
+    printf '%s\n' "$FM_SECONDMATE_SCOPE" | normalize_registry_text
   else
     brief_section_text "$brief" "Routing scope" | normalize_registry_text
   fi
@@ -84,7 +84,7 @@ validate_registry_home_text() {
   local home=$1
   case "$home" in
     *';'*|*')'*|*$'\n'*)
-      echo "error: sub-firstmate home path contains registry delimiters: $home" >&2
+      echo "error: secondmate home path contains registry delimiters: $home" >&2
       return 1
       ;;
   esac
@@ -243,7 +243,7 @@ validate_registry() {
     END { exit bad ? 1 : 0 }
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
-    printf 'error: duplicate sub-firstmate home assignment:\n%s\n' "$duplicate_homes" >&2
+    printf 'error: duplicate secondmate home assignment:\n%s\n' "$duplicate_homes" >&2
     return 1
   }
   duplicate_ids=$(awk -F '\t' '
@@ -258,7 +258,7 @@ validate_registry() {
     END { exit bad ? 1 : 0 }
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
-    printf 'error: duplicate sub-firstmate id assignment:\n%s\n' "$duplicate_ids" >&2
+    printf 'error: duplicate secondmate id assignment:\n%s\n' "$duplicate_ids" >&2
     return 1
   }
   overlaps=$(awk -F '\t' '
@@ -280,7 +280,7 @@ validate_registry() {
     END { exit bad ? 1 : 0 }
   ' "$tmp" 2>/dev/null) || {
     rm -f "$tmp"
-    printf 'error: overlapping sub-firstmate home assignment:\n%s\n' "$overlaps" >&2
+    printf 'error: overlapping secondmate home assignment:\n%s\n' "$overlaps" >&2
     return 1
   }
   rm -f "$tmp"
@@ -309,31 +309,31 @@ refuse_active_home_path() {
   abs_active_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
   if [ "$abs_home" = "/" ]; then
-    echo "error: sub-firstmate home cannot be the filesystem root: $home" >&2
+    echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_active_home" ]; then
-    echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_root" ]; then
-    echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    echo "error: sub-firstmate home cannot be inside the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    echo "error: sub-firstmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    echo "error: sub-firstmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
 }
@@ -342,7 +342,7 @@ validate_operational_dir() {
   local home=$1 name=$2 dir abs_home abs_dir abs_active_home abs_root
   dir="$home/$name"
   if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-    echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+    echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
     return 1
   fi
   abs_home=$(resolved_path "$home")
@@ -350,15 +350,15 @@ validate_operational_dir() {
   abs_active_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
   if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-    echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+    echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
     return 1
   fi
   if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-    echo "error: sub-firstmate $name directory cannot be inside the active firstmate home: $dir" >&2
+    echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
     return 1
   fi
   if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-    echo "error: sub-firstmate $name directory cannot be inside the firstmate repo: $dir" >&2
+    echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
     return 1
   fi
 }
@@ -376,7 +376,7 @@ validate_seed_leaf_files() {
   for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
-      echo "error: sub-firstmate leaf file must not be a symlink: $path" >&2
+      echo "error: secondmate leaf file must not be a symlink: $path" >&2
       return 1
     fi
     [ -e "$path" ] || continue
@@ -384,7 +384,7 @@ validate_seed_leaf_files() {
     case "$abs_path" in
       "$abs_home"/*) ;;
       *)
-        echo "error: sub-firstmate leaf file must resolve inside the sub-firstmate home: $path" >&2
+        echo "error: secondmate leaf file must resolve inside the secondmate home: $path" >&2
         return 1
         ;;
     esac
@@ -401,11 +401,11 @@ validate_project_destination() {
   abs_active_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
   if ! path_is_ancestor_of "$abs_home" "$abs_projects"; then
-    echo "error: sub-firstmate projects directory must resolve inside the sub-firstmate home: $projects_dir" >&2
+    echo "error: secondmate projects directory must resolve inside the secondmate home: $projects_dir" >&2
     return 1
   fi
   if ! path_is_ancestor_of "$abs_projects" "$abs_dst"; then
-    echo "error: seeded project $project destination must resolve inside the sub-firstmate projects directory: $dst" >&2
+    echo "error: seeded project $project destination must resolve inside the secondmate projects directory: $dst" >&2
     return 1
   fi
   if [ "$abs_dst" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dst"; then
@@ -504,13 +504,13 @@ validate_home_assignment() {
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     marker_id=$(cat "$home/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$id" ]; then
-      echo "error: sub-firstmate home $home is already marked for ${marker_id:-unknown}" >&2
+      echo "error: secondmate home $home is already marked for ${marker_id:-unknown}" >&2
       return 1
     fi
   fi
   id_conflict=$(registry_id_conflict_for_assignment "$id" "$home" || true)
   if [ -n "$id_conflict" ]; then
-    echo "error: sub-firstmate id $id is already registered to home $id_conflict; retire it before assigning $home" >&2
+    echo "error: secondmate id $id is already registered to home $id_conflict; retire it before assigning $home" >&2
     return 1
   fi
   conflict=$(registry_home_conflict_for_assignment "$id" "$home" || true)
@@ -519,10 +519,10 @@ validate_home_assignment() {
 $conflict
 EOF
   if [ "$conflict_type" = exact ]; then
-    echo "error: sub-firstmate home $home is already registered to $owner" >&2
+    echo "error: secondmate home $home is already registered to $owner" >&2
     return 1
   fi
-  echo "error: sub-firstmate home $home overlaps registered sub-firstmate home $registered_home for $owner" >&2
+  echo "error: secondmate home $home overlaps registered secondmate home $registered_home for $owner" >&2
   return 1
 }
 
@@ -536,7 +536,7 @@ clone_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
   fi
   if [ -e "$dst" ]; then
@@ -563,7 +563,7 @@ validate_seed_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
   fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
@@ -648,11 +648,11 @@ seed_project_rollback_target() {
   abs_home=$(resolved_path "$SEED_HOME")
   abs_projects=$(resolved_path "$SEED_HOME/projects")
   if ! path_is_ancestor_of "$abs_home" "$abs_projects"; then
-    echo "REFUSED: unsafe created project rollback target $target has projects directory outside the sub-firstmate home" >&2
+    echo "REFUSED: unsafe created project rollback target $target has projects directory outside the secondmate home" >&2
     return 1
   fi
   if ! path_is_ancestor_of "$abs_projects" "$abs_target"; then
-    echo "REFUSED: unsafe created project rollback target $target is outside the sub-firstmate projects directory" >&2
+    echo "REFUSED: unsafe created project rollback target $target is outside the secondmate projects directory" >&2
     return 1
   fi
   printf '%s\n' "$abs_target"
@@ -704,7 +704,7 @@ seed_rollback() {
   fi
 
   if [ -n "${SEED_BACKUP_DIR:-}" ]; then
-    restore_seed_file "$SEED_PARENT_REG_EXISTED" "$SEED_BACKUP_DIR/parent-firstmates.md" "$REG"
+    restore_seed_file "$SEED_PARENT_REG_EXISTED" "$SEED_BACKUP_DIR/parent-secondmates.md" "$REG"
     rm -rf -- "$SEED_BACKUP_DIR" 2>/dev/null || true
   fi
 }
@@ -794,7 +794,7 @@ write_registry() {
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   shift 2
-  [ $# -gt 0 ] || { echo "error: sub-firstmate needs at least one project" >&2; return 1; }
+  [ $# -gt 0 ] || { echo "error: secondmate needs at least one project" >&2; return 1; }
 
   mkdir -p "$DATA"
   validate_registry
@@ -822,7 +822,7 @@ seed_home() {
   trap seed_rollback EXIT
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
-    cp "$REG" "$SEED_BACKUP_DIR/parent-firstmates.md"
+    cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
   fi
 
   if [ "$requested_home" = "-" ]; then
@@ -859,26 +859,26 @@ seed_home() {
   SEED_HOME_BACKED_UP=1
 
   if [ ! -f "$SEED_PARENT_BRIEF" ]; then
-    [ -n "${FM_FIRSTMATE_CHARTER:-}" ] || {
-      echo "error: no filled firstmate charter brief at $SEED_PARENT_BRIEF; set FM_FIRSTMATE_CHARTER or scaffold one and replace {TASK}" >&2
+    [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
+      echo "error: no filled secondmate charter brief at $SEED_PARENT_BRIEF; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
       return 1
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"
+    "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
     SEED_PARENT_BRIEF_CREATED=1
   fi
   if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
-    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
     return 1
   fi
   charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
   [ -n "$charter_summary" ] || {
-    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
     return 1
   }
   charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF")
   [ -n "$charter_scope" ] || {
-    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
     return 1
   }
 

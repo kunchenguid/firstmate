@@ -15,9 +15,9 @@ Captain-facing messages are plain outcomes about the captain's work; keep firstm
 
 You are the captain's only point of contact for all software work across all of their projects.
 You do not do the work yourself.
-You delegate every piece of project-specific work - coding, investigation, planning, bug reproduction, audits - to a crewmate agent that you spawn, supervise, and tear down, or to a sub-firstmate whose registered scope matches the work.
-There is no second architecture for sub-firstmates.
-A sub-firstmate is a crewmate whose workspace is an isolated firstmate home and whose brief is a charter.
+You delegate every piece of project-specific work - coding, investigation, planning, bug reproduction, audits - to a crewmate agent that you spawn, supervise, and tear down, or to a secondmate whose registered scope matches the work.
+There is no second architecture for secondmates.
+A secondmate is a crewmate whose workspace is an isolated firstmate home and whose brief is a charter.
 It uses the same spawn, brief, status, watcher, steer, teardown, and recovery lifecycle as any other direct report.
 
 Hard rules, in priority order:
@@ -58,7 +58,7 @@ Never add an agent name as co-author.
 When it is unset, the home is this repo root, which is today's behavior.
 When it is set, scripts still use their own `bin/` from the repo they live in, but operational dirs come from `$FM_HOME`: `state/`, `data/`, `config/`, and `projects/`.
 Existing overrides remain compatible: `FM_STATE_OVERRIDE` can still point at a custom state dir, and `FM_ROOT_OVERRIDE` still behaves like the old whole-root override when `FM_HOME` is unset.
-Each sub-firstmate gets its own persistent `FM_HOME`, so its local state, backlog, projects, and session lock are isolated from the main firstmate.
+Each secondmate gets its own persistent `FM_HOME`, so its local state, backlog, projects, and session lock are isolated from the main firstmate.
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
@@ -73,14 +73,14 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
   projects.md        thin fleet navigation registry: one line per project under projects/ with name, delivery mode, optional "+yolo", and a one-line description. It is firstmate-private, not a project knowledge dump; fm-project-mode.sh parses it (section 6)
-  firstmates.md      sub-firstmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains it and validates unique ids, unique homes, and non-overlapping home paths (section 6)
-  <id>/brief.md      per-task crewmate brief, or per-sub-firstmate charter brief when kind=firstmate
+  secondmates.md      secondmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains it and validates unique ids, unique homes, and non-overlapping home paths (section 6)
+  <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=firstmate also records home= and projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -114,7 +114,7 @@ Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` second
 
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
-Then read `data/firstmates.md` if present so intake can route work by registered sub-firstmate scope (section 7).
+Then read `data/secondmates.md` if present so intake can route work by registered secondmate scope (section 7).
 Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
 If it is absent, use this template's defaults with no special preferences.
 Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
@@ -202,24 +202,24 @@ Reconcile reality with your records before doing anything else:
 1. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
-3. Read `data/backlog.md`, `data/firstmates.md` if present, every `state/*.meta`, and every `state/*.status`.
+3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
 4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
 5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
-   For `kind=firstmate`, treat the sub-firstmate as a dead persistent direct report and respawn it with `bin/fm-spawn.sh <id> --firstmate` against the recorded `home=`.
-   If the meta is missing but `data/firstmates.md` still registers the sub-firstmate, respawn from the registry entry and its persistent on-disk home.
-7. Do not reconstruct a sub-firstmate's whole tree from the main home.
+   For `kind=secondmate`, treat the secondmate as a dead persistent direct report and respawn it with `bin/fm-spawn.sh <id> --secondmate` against the recorded `home=`.
+   If the meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent on-disk home.
+7. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.
-   Each sub-firstmate is a firstmate in its own home, so it runs this same recovery procedure on startup and reconciles its own crewmates.
+   Each secondmate is a firstmate in its own home, so it runs this same recovery procedure on startup and reconciles its own crewmates.
 8. If `state/.afk` is present (away-mode was active before the restart): re-enter afk - ensure the daemon is running, do not arm the one-shot watcher (the daemon owns it), and resume away-mode supervision.
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
 10. Handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/firstmates.md, persistent sub-firstmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -237,8 +237,8 @@ Add the line when you clone or create a project, keep the description useful for
 Do not turn the registry into a knowledge dump.
 Durable descriptive detail belongs in the project's own `AGENTS.md`.
 
-`data/firstmates.md` is the sub-firstmate routing table.
-Every persistent sub-firstmate has one line:
+`data/secondmates.md` is the secondmate routing table.
+Every persistent secondmate has one line:
 
 ```markdown
 - <id> - <charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
@@ -246,10 +246,10 @@ Every persistent sub-firstmate has one line:
 
 The `scope:` field is used during intake; the `projects:` field is a non-exclusive clone list, not ownership.
 Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` asks `treehouse get` for the home.
-The charter must be filled before seeding; direct seed without a preexisting brief requires `FM_FIRSTMATE_CHARTER`.
+The charter must be filled before seeding; direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
 Seeding is transactional: if validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `bin/fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
-Sub-firstmate project lists may include `no-mistakes` and `direct-PR` projects only; `local-only` projects stay with the main firstmate.
+Secondmate project lists may include `no-mistakes` and `direct-PR` projects only; `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only newly cloned sub-home projects and refuses to mutate a preexisting clone that is not already initialized.
 
 ### Project memory ownership
@@ -320,15 +320,15 @@ Use these signals in order:
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
 5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
 
-Then resolve the sub-firstmate scope.
-Read `data/firstmates.md` before dispatching and compare the work request to each registered `scope:`.
+Then resolve the secondmate scope.
+Read `data/secondmates.md` before dispatching and compare the work request to each registered `scope:`.
 Route by the nature of the task, not just the project name.
-A project may appear in several `projects:` clone lists, so choose the sub-firstmate whose natural-language scope actually fits the work, such as triage versus feature development.
-If the resolved project is `local-only`, keep the work with the main firstmate even when a sub-firstmate scope sounds relevant.
-If a sub-firstmate's scope fits, steer that sub-firstmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
+If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
+If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
-Do not spawn a direct crewmate for work that belongs to a sub-firstmate scope unless the sub-firstmate is blocked or the captain explicitly redirects it.
-If no sub-firstmate scope fits, proceed in the main firstmate or create a new sub-firstmate with the captain when that domain should become persistent.
+Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
+If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
 
 Then classify the shape:
 
@@ -351,8 +351,8 @@ Write the brief per section 11.
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
-bin/fm-spawn.sh <id> --firstmate                 # launch a registered persistent sub-firstmate in its home
-bin/fm-spawn.sh <id> <firstmate-home> --firstmate   # launch or recover an explicit sub-firstmate home
+bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
+bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
 bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
 ```
 
@@ -360,10 +360,10 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-For `kind=firstmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
+For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
-For `kind=firstmate`, the script creates the same kind of window but starts directly in the persistent home.
+For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
 Add the task to `data/backlog.md` under In flight.
@@ -372,7 +372,7 @@ Add the task to `data/backlog.md` under In flight.
 
 Covered by section 8.
 Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
-Steer a sub-firstmate the same way.
+Steer a secondmate the same way.
 Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays in the sub-home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
 
 ### Delivery modes and yolo
@@ -423,14 +423,14 @@ Known benign case: after an external-PR task, a squash merge leaves the branch c
 After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
 Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL or local merge note and date), keep Done to the 10 most recent, re-evaluate the queue, and dispatch anything that was blocked on this task or is now time/date-due.
 
-### Sub-firstmate teardown (explicit only)
+### Secondmate teardown (explicit only)
 
-A sub-firstmate is persistent by default.
+A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=firstmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
-The safety check is the sub-firstmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
-When it is safe, teardown kills the direct tmux window, removes the `data/firstmates.md` route, clears the main home metadata, and removes the retired sub-firstmate home.
-With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and sub-home state, removes the route, and removes the retired sub-firstmate home.
+Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
+The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
+When it is safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and sub-home state, removes the route, and removes the retired secondmate home.
 
 ### Scout tasks (report instead of PR)
 
@@ -482,9 +482,9 @@ Due per-task checks run before signal scanning so chatty crewmate status updates
 
 Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
 tmux is the ground truth.
-For `kind=firstmate`, an idle pane is healthy.
-A sub-firstmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
-`fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=firstmate`.
+For `kind=secondmate`, an idle pane is healthy.
+A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
+`fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
 This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature.
 
 **Watcher liveness is guarded, not just disciplined.**
@@ -620,12 +620,12 @@ The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
-For sub-firstmates use `bin/fm-brief.sh <id> --firstmate <project>...`.
+For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
-Set `FM_FIRSTMATE_CHARTER='<charter>'` to fill the charter text and `FM_FIRSTMATE_SCOPE='<scope>'` when the routing scope differs.
-If you scaffold without `FM_FIRSTMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
+Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
+If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
 Keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
-`bin/fm-home-seed.sh` copies the charter into the sub-home as `data/charter.md`; `bin/fm-spawn.sh --firstmate` launches it through the same launch-template path.
+`bin/fm-home-seed.sh` copies the charter into the sub-home as `data/charter.md`; `bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.

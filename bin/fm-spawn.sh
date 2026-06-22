@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse worktree, or a sub-firstmate in
+# Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --firstmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md section 7); --firstmate records kind=firstmate and launches in a
+#   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
@@ -23,9 +23,9 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|firstmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
-# firstmate spawns record mode=firstmate, yolo=off, home=, and projects=.
+# firstmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +33,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-SUB_HOME_MARKER=".fm-sub-firstmate-home"
+SUB_HOME_MARKER=".fm-secondmate-home"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -42,7 +42,7 @@ POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
-    --firstmate) KIND=firstmate ;;
+    --secondmate) KIND=secondmate ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -62,8 +62,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       *=*) : ;;
       *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
     esac
-    if [ "$KIND" = firstmate ]; then
-      echo "error: batch dispatch does not support --firstmate; spawn each sub-firstmate explicitly" >&2
+    if [ "$KIND" = secondmate ]; then
+      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
@@ -79,7 +79,7 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 
-if [ "$KIND" = firstmate ]; then
+if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi)
       ARG3=${POS[1]:-}
@@ -110,7 +110,7 @@ launch_template() {
   case "$harness" in
     claude) printf '%s' 'claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
     codex)
-      if [ "$kind" = firstmate ]; then
+      if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
@@ -118,7 +118,7 @@ launch_template() {
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
     pi)
-      if [ "$kind" = firstmate ]; then
+      if [ "$kind" = secondmate ]; then
         printf '%s' 'pi "$(cat __BRIEF__)"'
       else
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
@@ -146,9 +146,9 @@ case "$ARG3" in
     ;;
 esac
 
-firstmate_registry_value() {
+secondmate_registry_value() {
   local id=$1 key=$2 reg line value
-  reg="$DATA/firstmates.md"
+  reg="$DATA/secondmates.md"
   [ -f "$reg" ] || return 1
   line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
   [ -n "$line" ] || return 1
@@ -190,41 +190,41 @@ validate_firstmate_home_for_spawn() {
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
   if [ "$abs_home" = "/" ]; then
-    echo "error: sub-firstmate home cannot be the filesystem root: $home" >&2
+    echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_active_home" ]; then
-    echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_root" ]; then
-    echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    echo "error: sub-firstmate home cannot be inside the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    echo "error: sub-firstmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    echo "error: sub-firstmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
   validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
-    echo "error: firstmate home $home is not a seeded sub-firstmate home" >&2
+    echo "error: firstmate home $home is not a seeded secondmate home" >&2
     return 1
   fi
   marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
   if [ "$marker_id" != "$id" ]; then
-    echo "error: firstmate home $home is marked for sub-firstmate ${marker_id:-unknown}, expected $id" >&2
+    echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
     return 1
   fi
   if [ ! -f "$abs_home/AGENTS.md" ]; then
@@ -243,42 +243,42 @@ validate_firstmate_operational_dirs() {
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
       return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P)
     elif [ -e "$dir" ]; then
-      echo "error: sub-firstmate $name path is not a directory: $dir" >&2
+      echo "error: secondmate $name path is not a directory: $dir" >&2
       return 1
     else
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: sub-firstmate $name directory must resolve inside the sub-firstmate home: $dir" >&2
+      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: sub-firstmate $name directory cannot be inside the active firstmate home: $dir" >&2
+      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: sub-firstmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
       return 1
     fi
   done
 }
 
-if [ "$KIND" = firstmate ]; then
+if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
   fi
   if [ -z "$FIRSTMATE_HOME" ]; then
-    FIRSTMATE_HOME=$(firstmate_registry_value "$ID" home || true)
+    FIRSTMATE_HOME=$(secondmate_registry_value "$ID" home || true)
   fi
 fi
 
-if [ "$KIND" = firstmate ]; then
+if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
@@ -310,7 +310,7 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
 fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
-if [ "$KIND" != firstmate ]; then
+if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -339,7 +339,7 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
-if [ "$KIND" != firstmate ]; then
+if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
@@ -384,11 +384,11 @@ fi
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-FIRSTMATE_PROJECTS=
-if [ "$KIND" = firstmate ]; then
-  MODE=firstmate
+SECONDMATE_PROJECTS=
+if [ "$KIND" = secondmate ]; then
+  MODE=secondmate
   YOLO=off
-  FIRSTMATE_PROJECTS=$(firstmate_registry_value "$ID" projects || true)
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
@@ -405,9 +405,9 @@ mkdir -p "$STATE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
-  if [ "$KIND" = firstmate ]; then
+  if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
-    echo "projects=$FIRSTMATE_PROJECTS"
+    echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
 
@@ -417,7 +417,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-if [ "$KIND" = firstmate ]; then
+if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi

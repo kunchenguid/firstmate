@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scaffold a crewmate brief or persistent sub-firstmate charter at
+# Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Firstmate then replaces the {TASK} placeholder with the task
@@ -7,15 +7,15 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
-#        fm-brief.sh <task-id> --firstmate <project>...
+#        fm-brief.sh <task-id> --secondmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
-#   --firstmate writes a persistent sub-firstmate charter. The project list
-#   is cloned into the sub-firstmate home, while the natural-language scope
+#   --secondmate writes a persistent secondmate charter. The project list
+#   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   only captain-relevant escalations append to this home's status file.
-#   Set FM_FIRSTMATE_CHARTER='<charter>' to fill the charter text.
-#   Set FM_FIRSTMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
+#   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
@@ -38,7 +38,7 @@ POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
-    --firstmate) KIND=firstmate ;;
+    --secondmate) KIND=secondmate ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -48,25 +48,25 @@ BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
 
-if [ "$KIND" = firstmate ]; then
-FIRSTMATE_PROJECTS=""
+if [ "$KIND" = secondmate ]; then
+SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
-  FIRSTMATE_PROJECTS="${FIRSTMATE_PROJECTS}${FIRSTMATE_PROJECTS:+ }${POS[$idx]}"
+  SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
   idx=$((idx + 1))
 done
-[ -n "$FIRSTMATE_PROJECTS" ] || { echo "error: --firstmate requires at least one project" >&2; exit 1; }
-FIRSTMATE_CHARTER=${FM_FIRSTMATE_CHARTER:-"{TASK}"}
-FIRSTMATE_SCOPE=${FM_FIRSTMATE_SCOPE:-${FM_FIRSTMATE_CHARTER:-"{TASK}"}}
-PROJECT_LIST=$(printf '%s\n' "$FIRSTMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+[ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project" >&2; exit 1; }
+SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
+SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
+PROJECT_LIST=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
 cat > "$BRIEF" <<EOF
-You are a sub-firstmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
+You are a secondmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
-$FIRSTMATE_CHARTER
+$SECONDMATE_CHARTER
 
 # Routing scope
-$FIRSTMATE_SCOPE
+$SECONDMATE_SCOPE
 
 # Project clones
 $PROJECT_LIST
@@ -90,10 +90,10 @@ You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery for your own home, then supervise work that matches your scope.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
-if [ "$FIRSTMATE_CHARTER" = "{TASK}" ]; then
-  echo "scaffolded: $BRIEF (firstmate charter; replace {TASK})"
+if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
+  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
 else
-  echo "scaffolded: $BRIEF (firstmate charter)"
+  echo "scaffolded: $BRIEF (secondmate charter)"
 fi
 exit 0
 fi

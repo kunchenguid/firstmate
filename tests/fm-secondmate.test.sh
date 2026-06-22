@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for sub-firstmate home routing and lifecycle reuse.
+# Behavior tests for secondmate home routing and lifecycle reuse.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +22,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-sub-firstmate-tests.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-secondmate-tests.XXXXXX")
 
 make_git_project() {
   local dir=$1
@@ -46,10 +46,10 @@ add_file_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
-scaffold_firstmate_charter() {
+scaffold_secondmate_charter() {
   local home=$1 id=$2 charter=$3
   shift 3
-  FM_HOME="$home" FM_FIRSTMATE_CHARTER="$charter" "$ROOT/bin/fm-brief.sh" "$id" --firstmate "$@" >/dev/null
+  FM_HOME="$home" FM_SECONDMATE_CHARTER="$charter" "$ROOT/bin/fm-brief.sh" "$id" --secondmate "$@" >/dev/null
 }
 
 mark_firstmate_home() {
@@ -218,12 +218,12 @@ EOF
 
   fakebin=$(make_fake_no_mistakes "$TMP_ROOT/no-mistakes-fake")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
-    FM_FIRSTMATE_CHARTER='feature design and implementation for alpha beta gamma' \
-    FM_FIRSTMATE_SCOPE='feature design and implementation for alpha beta gamma' \
+    FM_SECONDMATE_CHARTER='feature design and implementation for alpha beta gamma' \
+    FM_SECONDMATE_SCOPE='feature design and implementation for alpha beta gamma' \
     "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report subhome"
-  [ -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed did not mark subhome as seeded"
+  [ -f "$subhome/.fm-secondmate-home" ] || fail "seed did not mark subhome as seeded"
   [ -f "$subhome/data/charter.md" ] || fail "seed did not write charter into subhome"
   grep -F 'feature design and implementation for alpha beta gamma' "$subhome/data/charter.md" >/dev/null \
     || fail "seeded charter did not record natural-language scope"
@@ -237,24 +237,24 @@ EOF
   [ "$out" = "direct-PR on" ] || fail "seed did not preserve alpha delivery mode in subhome registry"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" beta)
   [ "$out" = "direct-PR off" ] || fail "seed did not preserve beta delivery mode in subhome registry"
-  grep -F -- '- design - feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line was not written"
-  grep -F 'scope: feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record scope"
-  grep -F 'projects: alpha, beta, gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record project clone list"
-  grep -F 'owns:' "$home/data/firstmates.md" >/dev/null && fail "registry line still used owns field"
+  grep -F -- '- design - feature design and implementation for alpha beta gamma' "$home/data/secondmates.md" >/dev/null || fail "registry line was not written"
+  grep -F 'scope: feature design and implementation for alpha beta gamma' "$home/data/secondmates.md" >/dev/null || fail "registry line did not record scope"
+  grep -F 'projects: alpha, beta, gamma' "$home/data/secondmates.md" >/dev/null || fail "registry line did not record project clone list"
+  grep -F 'owns:' "$home/data/secondmates.md" >/dev/null && fail "registry line still used owns field"
 
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed"
 
-  FM_HOME="$home" FM_FIRSTMATE_CHARTER='issue triage and support for beta' \
-    FM_FIRSTMATE_SCOPE='issue triage and support for beta' \
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='issue triage and support for beta' \
+    FM_SECONDMATE_SCOPE='issue triage and support for beta' \
     "$ROOT/bin/fm-home-seed.sh" other "$otherhome" beta >/dev/null 2>&1 \
     || fail "seed refused overlapping project clones across different scopes"
-  grep -F -- '- other - issue triage and support for beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping registry line was not written"
-  grep -F 'projects: beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping project clone list was not recorded"
+  grep -F -- '- other - issue triage and support for beta' "$home/data/secondmates.md" >/dev/null || fail "overlapping registry line was not written"
+  grep -F 'projects: beta' "$home/data/secondmates.md" >/dev/null || fail "overlapping project clone list was not recorded"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation rejected overlapping projects"
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" owner alpha >/dev/null 2>&1; then
     fail "owner subcommand still succeeded after routing moved to scopes"
   fi
-  pass "firstmates registry records scopes and allows overlapping project clone lists"
+  pass "secondmates registry records scopes and allows overlapping project clone lists"
 }
 
 test_home_seed_registry_reads_scope_from_filled_brief() {
@@ -265,17 +265,17 @@ test_home_seed_registry_reads_scope_from_filled_brief() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/brief-scope-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_FIRSTMATE_SCOPE='customer onboarding from brief' \
-    scaffold_firstmate_charter "$home" design 'customer onboarding charter' alpha \
-    || fail "filled firstmate charter scaffold failed"
+  FM_SECONDMATE_SCOPE='customer onboarding from brief' \
+    scaffold_secondmate_charter "$home" design 'customer onboarding charter' alpha \
+    || fail "filled secondmate charter scaffold failed"
 
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
     || fail "seed failed with a filled charter brief"
-  grep -F -- '- design - customer onboarding charter' "$home/data/firstmates.md" >/dev/null \
+  grep -F -- '- design - customer onboarding charter' "$home/data/secondmates.md" >/dev/null \
     || fail "registry summary did not come from the filled charter"
-  grep -F 'scope: customer onboarding from brief' "$home/data/firstmates.md" >/dev/null \
+  grep -F 'scope: customer onboarding from brief' "$home/data/secondmates.md" >/dev/null \
     || fail "registry scope did not come from the filled charter brief"
-  grep -F 'sub-firstmate for alpha' "$home/data/firstmates.md" >/dev/null \
+  grep -F 'secondmate for alpha' "$home/data/secondmates.md" >/dev/null \
     && fail "registry fell back to a generic project-list scope"
   pass "home seeding records routing scope from filled charter briefs"
 }
@@ -287,15 +287,15 @@ test_home_seed_validate_rejects_duplicate_homes() {
   err="$TMP_ROOT/duplicate-home.err"
   mkdir -p "$home/data" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
-  cat > "$home/data/firstmates.md" <<EOF
+  cat > "$home/data/secondmates.md" <<EOF
 - design - design domain mentions home: $TMP_ROOT/ignored-summary-home (home: $subhome_abs; scope: design work mentions home: $TMP_ROOT/ignored-scope-home; projects: alpha; added 2026-06-22)
 - triage - triage domain (home: $subhome_abs; scope: issue triage; projects: beta; added 2026-06-22)
 EOF
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
-    fail "registry validation accepted two sub-firstmates with the same home"
+    fail "registry validation accepted two secondmates with the same home"
   fi
-  grep -F 'duplicate sub-firstmate home assignment' "$err" >/dev/null \
+  grep -F 'duplicate secondmate home assignment' "$err" >/dev/null \
     || fail "registry validation did not explain duplicate home assignment"
   pass "home seed validation rejects duplicate home routes"
 }
@@ -309,15 +309,15 @@ test_home_seed_validate_rejects_duplicate_ids() {
   mkdir -p "$home/data" "$first" "$second"
   first_abs=$(cd "$first" && pwd -P)
   second_abs=$(cd "$second" && pwd -P)
-  cat > "$home/data/firstmates.md" <<EOF
+  cat > "$home/data/secondmates.md" <<EOF
 - design - design domain (home: $first_abs; scope: design work; projects: alpha; added 2026-06-22)
 - design - design domain (home: $second_abs; scope: design work; projects: beta; added 2026-06-22)
 EOF
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
-    fail "registry validation accepted two homes for the same sub-firstmate id"
+    fail "registry validation accepted two homes for the same secondmate id"
   fi
-  grep -F 'duplicate sub-firstmate id assignment' "$err" >/dev/null \
+  grep -F 'duplicate secondmate id assignment' "$err" >/dev/null \
     || fail "registry validation did not explain duplicate id assignment"
   pass "home seed validation rejects duplicate id routes"
 }
@@ -331,15 +331,15 @@ test_home_seed_validate_rejects_nested_homes() {
   mkdir -p "$home/data" "$ancestor" "$descendant"
   ancestor_abs=$(cd "$ancestor" && pwd -P)
   descendant_abs=$(cd "$descendant" && pwd -P)
-  cat > "$home/data/firstmates.md" <<EOF
+  cat > "$home/data/secondmates.md" <<EOF
 - design - design domain (home: $ancestor_abs; scope: design work; projects: alpha; added 2026-06-22)
 - triage - triage domain (home: $descendant_abs; scope: issue triage; projects: beta; added 2026-06-22)
 EOF
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
-    fail "registry validation accepted nested sub-firstmate homes"
+    fail "registry validation accepted nested secondmate homes"
   fi
-  grep -F 'overlapping sub-firstmate home assignment' "$err" >/dev/null \
+  grep -F 'overlapping secondmate home assignment' "$err" >/dev/null \
     || fail "registry validation did not explain nested home assignment"
   pass "home seed validation rejects nested home routes"
 }
@@ -357,16 +357,16 @@ test_home_seed_uses_treehouse_acquired_home() {
   log="$TMP_ROOT/dash-fake/tmux.log"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
-    FM_FIRSTMATE_CHARTER='dash acquired scope' FM_FIRSTMATE_SCOPE='dash acquired scope' \
+    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
   grep -F 'treehouse get' "$log" >/dev/null || fail "seed did not ask treehouse for a home"
-  [ -f "$acquired/.fm-sub-firstmate-home" ] || fail "seed did not mark acquired home"
-  [ "$(cat "$acquired/.fm-sub-firstmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
+  [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
+  [ "$(cat "$acquired/.fm-secondmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
   [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
-  grep -F "home: $acquired_abs" "$home/data/firstmates.md" >/dev/null || fail "registry did not record acquired home"
+  grep -F "home: $acquired_abs" "$home/data/secondmates.md" >/dev/null || fail "registry did not record acquired home"
   pass "home seeding accepts treehouse-acquired dash homes"
 }
 
@@ -381,19 +381,19 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   git clone --quiet "$ROOT" "$acquired"
   acquired_abs=$(cd "$acquired" && pwd -P)
-  printf 'other\n' > "$acquired/.fm-sub-firstmate-home"
+  printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fail-fake")
   log="$TMP_ROOT/dash-fail-fake/tmux.log"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
-    FM_FIRSTMATE_CHARTER='dash acquired scope' FM_FIRSTMATE_SCOPE='dash acquired scope' \
+    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
-    fail "seed reused an acquired home marked for another sub-firstmate"
+    fail "seed reused an acquired home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
   grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
-  if [ -f "$home/data/firstmates.md" ] && grep -F -- '- dash ' "$home/data/firstmates.md" >/dev/null; then
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
   fi
   pass "home seeding returns rejected acquired homes through treehouse"
@@ -415,7 +415,7 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home matching the active firstmate home"
   fi
-  grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active acquired-home rejection"
   grep -F "treehouse return --force" "$log" >/dev/null \
     && fail "seed returned an unsafe acquired active home through treehouse"
@@ -426,7 +426,7 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home inside the active firstmate home"
   fi
-  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be inside the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active descendant acquired-home rejection"
   grep -F "treehouse return --force" "$log" >/dev/null \
     && fail "seed returned an unsafe acquired active descendant through treehouse"
@@ -450,18 +450,18 @@ test_home_seed_rolls_back_failed_clone() {
 - beta [direct-PR] - beta project (added 2026-06-22)
 EOF
 
-  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='rollback scope' FM_FIRSTMATE_SCOPE='rollback scope' \
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='rollback scope' FM_SECONDMATE_SCOPE='rollback scope' \
     "$ROOT/bin/fm-home-seed.sh" rollback "$subhome" alpha beta >/dev/null 2>"$err"; then
     fail "seed succeeded even though the second project clone failed"
   fi
   grep -F 'does not appear to be a git repository' "$err" >/dev/null \
     || grep -F 'repository' "$err" >/dev/null \
     || fail "seed failure did not include the clone error"
-  [ ! -e "$subhome" ] || fail "failed seed left the newly created sub-firstmate home behind"
-  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "failed seed left a subhome marker"
+  [ ! -e "$subhome" ] || fail "failed seed left the newly created secondmate home behind"
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "failed seed left a subhome marker"
   [ ! -e "$subhome/projects/alpha" ] || fail "failed seed left a previously cloned project"
   [ ! -e "$home/data/rollback/brief.md" ] || fail "failed seed left a generated charter brief"
-  if [ -f "$home/data/firstmates.md" ] && grep -F -- '- rollback ' "$home/data/firstmates.md" >/dev/null; then
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- rollback ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed seed left a registry route"
   fi
   pass "home seeding rolls back failed clone attempts without residue"
@@ -480,7 +480,7 @@ test_home_seed_refuses_missing_filled_charter() {
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a direct seed without a filled charter"
   fi
-  grep -F 'no filled firstmate charter brief' "$err" >/dev/null \
+  grep -F 'no filled secondmate charter brief' "$err" >/dev/null \
     || fail "seed did not explain missing filled charter refusal"
   [ ! -e "$subhome" ] || fail "missing charter seed left a generated subhome"
   [ ! -e "$home/data/design/brief.md" ] || fail "missing charter seed generated a placeholder charter"
@@ -496,7 +496,7 @@ test_home_seed_refuses_placeholder_charter() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/placeholder-charter-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --secondmate alpha >/dev/null \
     || fail "placeholder charter scaffold failed"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
@@ -519,7 +519,7 @@ test_home_seed_refuses_empty_charter_fields() {
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/empty-charter-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='   ' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='   ' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a whitespace-only charter"
   fi
   grep -F 'empty Charter section' "$err" >/dev/null \
@@ -527,7 +527,7 @@ test_home_seed_refuses_empty_charter_fields() {
   [ ! -e "$subhome" ] || fail "empty charter seed left a generated subhome"
 
   rm -rf "$home/data/design" "$subhome" "$err"
-  FM_FIRSTMATE_SCOPE='   ' scaffold_firstmate_charter "$home" design 'filled charter' alpha \
+  FM_SECONDMATE_SCOPE='   ' scaffold_secondmate_charter "$home" design 'filled charter' alpha \
     || fail "empty scope fixture scaffold failed"
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted an empty routing scope"
@@ -548,9 +548,9 @@ test_home_seed_refuses_local_only_project() {
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed a local-only project into a sub-firstmate home"
+    fail "seed allowed a local-only project into a secondmate home"
   fi
-  grep -F 'project alpha is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
+  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
@@ -566,13 +566,13 @@ test_home_seed_refuses_registry_delimiter_home() {
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/delimiter-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='delimiter charter' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='delimiter charter' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a home path with registry delimiters"
   fi
-  grep -F 'sub-firstmate home path contains registry delimiters' "$err" >/dev/null \
+  grep -F 'secondmate home path contains registry delimiters' "$err" >/dev/null \
     || fail "seed did not explain delimiter home refusal"
-  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "delimiter home seed wrote a marker"
-  if [ -f "$home/data/firstmates.md" ] && grep -F -- '- design ' "$home/data/firstmates.md" >/dev/null; then
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "delimiter home seed wrote a marker"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- design ' "$home/data/secondmates.md" >/dev/null; then
     fail "delimiter home seed wrote a registry route"
   fi
   pass "home seeding refuses registry delimiter home paths"
@@ -593,50 +593,50 @@ test_home_seed_refuses_active_home_and_root() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/active-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for active-home seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for active-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$home" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home to reuse active FM_HOME"
+    fail "seed allowed secondmate home to reuse active FM_HOME"
   fi
-  grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active FM_HOME rejection"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$active_descendant" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home inside active FM_HOME"
+    fail "seed allowed secondmate home inside active FM_HOME"
   fi
-  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be inside the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active FM_HOME descendant rejection"
   [ ! -e "$home/nested" ] || fail "seed created a directory inside active FM_HOME before descendant rejection"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$active_ancestor" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home to contain active FM_HOME"
+    fail "seed allowed secondmate home to contain active FM_HOME"
   fi
-  grep -F 'sub-firstmate home cannot be an ancestor of the active firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be an ancestor of the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active FM_HOME ancestor rejection"
-  [ ! -f "$active_ancestor/.fm-sub-firstmate-home" ] || fail "seed marked an ancestor of active FM_HOME"
+  [ ! -f "$active_ancestor/.fm-secondmate-home" ] || fail "seed marked an ancestor of active FM_HOME"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$ROOT" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home to reuse FM_ROOT"
+    fail "seed allowed secondmate home to reuse FM_ROOT"
   fi
-  grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be the firstmate repo' "$err" >/dev/null \
     || fail "seed did not explain FM_ROOT rejection"
 
   git clone --quiet "$ROOT" "$root_clone"
   if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_clone" "$ROOT/bin/fm-home-seed.sh" design "$root_descendant" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home inside FM_ROOT"
+    fail "seed allowed secondmate home inside FM_ROOT"
   fi
-  grep -F 'sub-firstmate home cannot be inside the firstmate repo' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be inside the firstmate repo' "$err" >/dev/null \
     || fail "seed did not explain FM_ROOT descendant rejection"
   [ ! -e "$root_clone/tmp" ] || fail "seed created a directory inside FM_ROOT before descendant rejection"
 
   git clone --quiet "$ROOT" "$root_ancestor"
   git clone --quiet "$ROOT" "$root_inside"
   if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_inside" "$ROOT/bin/fm-home-seed.sh" design "$root_ancestor" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed sub-firstmate home to contain FM_ROOT"
+    fail "seed allowed secondmate home to contain FM_ROOT"
   fi
-  grep -F 'sub-firstmate home cannot be an ancestor of the firstmate repo' "$err" >/dev/null \
+  grep -F 'secondmate home cannot be an ancestor of the firstmate repo' "$err" >/dev/null \
     || fail "seed did not explain FM_ROOT ancestor rejection"
-  [ ! -f "$root_ancestor/.fm-sub-firstmate-home" ] || fail "seed marked an ancestor of FM_ROOT"
+  [ ! -f "$root_ancestor/.fm-secondmate-home" ] || fail "seed marked an ancestor of FM_ROOT"
   pass "home seeding refuses active home and repo root"
 }
 
@@ -649,15 +649,15 @@ test_home_seed_refuses_home_marked_for_another_id() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/marked-alpha.git"
   git clone --quiet "$ROOT" "$subhome"
-  printf 'other\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'other\n' > "$subhome/.fm-secondmate-home"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for marked-home seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for marked-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed reused a home marked for another sub-firstmate"
+    fail "seed reused a home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain marked-home rejection"
-  [ "$(cat "$subhome/.fm-sub-firstmate-home")" = "other" ] || fail "seed overwrote another sub-firstmate marker"
+  [ "$(cat "$subhome/.fm-secondmate-home")" = "other" ] || fail "seed overwrote another secondmate marker"
   pass "home seeding refuses homes marked for another id"
 }
 
@@ -672,14 +672,14 @@ test_home_seed_refuses_home_registered_to_another_id() {
   git clone --quiet "$ROOT" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/firstmates.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for registered-home seed test"
+  printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/secondmates.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for registered-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed reused a home registered to another sub-firstmate"
+    fail "seed reused a home registered to another secondmate"
   fi
   grep -F 'already registered to other' "$err" >/dev/null || fail "seed did not explain registered-home rejection"
-  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "seed wrote a marker before rejecting a registered home"
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "seed wrote a marker before rejecting a registered home"
   pass "home seeding refuses homes registered to another id"
 }
 
@@ -694,23 +694,23 @@ test_home_seed_refuses_reassigning_existing_id_to_different_home() {
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/reassign-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' FM_FIRSTMATE_SCOPE='design domain' \
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' FM_SECONDMATE_SCOPE='design domain' \
     "$ROOT/bin/fm-home-seed.sh" design "$first" alpha >/dev/null \
     || fail "initial seed failed for reassigning-id test"
   first_abs=$(cd "$first" && pwd -P)
 
-  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' FM_FIRSTMATE_SCOPE='design domain' \
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' FM_SECONDMATE_SCOPE='design domain' \
     "$ROOT/bin/fm-home-seed.sh" design "$second" alpha >/dev/null 2>"$err"; then
-    fail "seed reassigned an existing sub-firstmate id to a different home"
+    fail "seed reassigned an existing secondmate id to a different home"
   fi
-  grep -F "sub-firstmate id design is already registered to home $first_abs" "$err" >/dev/null \
+  grep -F "secondmate id design is already registered to home $first_abs" "$err" >/dev/null \
     || fail "seed did not explain same-id different-home rejection"
   [ ! -e "$second" ] || fail "failed id reassignment created the new subhome"
-  [ "$(cat "$first/.fm-sub-firstmate-home")" = design ] || fail "failed id reassignment changed the original marker"
-  grep -F "home: $first_abs" "$home/data/firstmates.md" >/dev/null \
+  [ "$(cat "$first/.fm-secondmate-home")" = design ] || fail "failed id reassignment changed the original marker"
+  grep -F "home: $first_abs" "$home/data/secondmates.md" >/dev/null \
     || fail "failed id reassignment did not preserve the original registry route"
   second_abs=$(cd "$(dirname "$second")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$second")")
-  grep -F "home: $second_abs" "$home/data/firstmates.md" >/dev/null \
+  grep -F "home: $second_abs" "$home/data/secondmates.md" >/dev/null \
     && fail "failed id reassignment recorded the rejected home"
   pass "home seeding refuses same-id reassignment to a different home"
 }
@@ -729,24 +729,24 @@ test_home_seed_refuses_home_overlapping_registered_home() {
   git clone --quiet "$ROOT" "$registered_parent"
   git clone --quiet "$ROOT" "$registered_child"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  cat > "$home/data/firstmates.md" <<EOF
+  cat > "$home/data/secondmates.md" <<EOF
 - parent - parent domain (home: $registered_parent; scope: parent domain; projects: beta; added 2026-06-22)
 - child - child domain (home: $registered_child; scope: child domain; projects: gamma; added 2026-06-22)
 EOF
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
-    fail "seed accepted a home inside a registered sub-firstmate home"
+    fail "seed accepted a home inside a registered secondmate home"
   fi
-  grep -F 'overlaps registered sub-firstmate home' "$err" >/dev/null \
+  grep -F 'overlaps registered secondmate home' "$err" >/dev/null \
     || fail "seed did not explain registered ancestor overlap"
   [ ! -e "$nested" ] || fail "seed created a nested home inside a registered home"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$parent" alpha >/dev/null 2>"$err"; then
-    fail "seed accepted a home containing a registered sub-firstmate home"
+    fail "seed accepted a home containing a registered secondmate home"
   fi
-  grep -F 'overlaps registered sub-firstmate home' "$err" >/dev/null \
+  grep -F 'overlaps registered secondmate home' "$err" >/dev/null \
     || fail "seed did not explain registered descendant overlap"
-  [ ! -f "$parent/.fm-sub-firstmate-home" ] || fail "seed marked a home containing a registered home"
+  [ ! -f "$parent/.fm-secondmate-home" ] || fail "seed marked a home containing a registered home"
   pass "home seeding refuses registered home overlaps"
 }
 
@@ -758,7 +758,7 @@ test_home_seed_refuses_remote_backed_project_without_origin() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for no-origin seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for no-origin seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed allowed remote-backed project without origin"
@@ -780,7 +780,7 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   mkdir -p "$subhome/projects"
   git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for wrong-origin seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for wrong-origin seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted existing remote-backed project with wrong origin"
@@ -802,7 +802,7 @@ test_home_seed_resolves_relative_source_origins() {
   git clone --quiet --bare "$home/projects/alpha" "$home/remotes/relative-alpha.git"
   git -C "$home/projects/alpha" remote add origin ../../remotes/relative-alpha.git
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for relative origin seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for relative origin seed test"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha)
   subhome_abs=$(cd "$subhome" && pwd -P)
@@ -837,7 +837,7 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   : > "$log"
 
   if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_FAKE_NO_MISTAKES_FAIL_PROJECT=beta \
-    FM_HOME="$home" FM_FIRSTMATE_CHARTER='existing init rollback scope' FM_FIRSTMATE_SCOPE='existing init rollback scope' \
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='existing init rollback scope' FM_SECONDMATE_SCOPE='existing init rollback scope' \
     "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
     fail "seed succeeded even though later no-mistakes initialization failed"
   fi
@@ -869,7 +869,7 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
   : > "$log"
 
   if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
-    FM_HOME="$home" FM_FIRSTMATE_CHARTER='existing uninitialized scope' \
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='existing uninitialized scope' \
     "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed initialized a preexisting no-mistakes clone"
   fi
@@ -893,15 +893,15 @@ test_home_seed_refuses_project_destinations_outside_subhome() {
   rm -rf "$subhome/projects"
   ln -s "$sink" "$subhome/projects"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink destination seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink destination seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed followed a subhome projects symlink outside the subhome"
   fi
-  grep -F 'sub-firstmate projects directory must resolve inside the sub-firstmate home' "$err" >/dev/null \
+  grep -F 'secondmate projects directory must resolve inside the secondmate home' "$err" >/dev/null \
     || fail "seed did not explain unsafe project destination rejection"
   [ ! -e "$sink/alpha" ] || fail "seed cloned a project through an unsafe projects symlink"
-  [ ! -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed marked subhome after unsafe project destination rejection"
+  [ ! -f "$subhome/.fm-secondmate-home" ] || fail "seed marked subhome after unsafe project destination rejection"
   pass "home seeding refuses project destinations outside the subhome"
 }
 
@@ -913,7 +913,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-opdir-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink operational dir seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink operational dir seed test"
 
   for opdir in data state config; do
     subhome="$TMP_ROOT/symlink-opdir-subhome-$opdir"
@@ -926,9 +926,9 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
     if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
       fail "seed accepted a subhome with $opdir symlinked outside the subhome"
     fi
-    grep -F "sub-firstmate $opdir directory must resolve inside the sub-firstmate home" "$err" >/dev/null \
+    grep -F "secondmate $opdir directory must resolve inside the secondmate home" "$err" >/dev/null \
       || fail "seed did not explain unsafe $opdir directory rejection"
-    [ ! -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed marked subhome after unsafe $opdir directory rejection"
+    [ ! -f "$subhome/.fm-secondmate-home" ] || fail "seed marked subhome after unsafe $opdir directory rejection"
   done
   pass "home seeding refuses operational directories outside the subhome"
 }
@@ -941,16 +941,16 @@ test_home_seed_refuses_symlinked_leaf_files() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-leaf-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink leaf seed test"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink leaf seed test"
 
-  for leaf in data/projects.md data/charter.md .fm-sub-firstmate-home; do
+  for leaf in data/projects.md data/charter.md .fm-secondmate-home; do
     subhome="$TMP_ROOT/symlink-leaf-subhome-${leaf//\//-}"
     sink="$home/data/symlink-leaf-${leaf//\//-}"
     rm -rf "$subhome" "$sink"
     git clone --quiet "$ROOT" "$subhome"
     mkdir -p "$(dirname "$subhome/$leaf")" "$(dirname "$sink")"
     expected=outside
-    if [ "$leaf" = ".fm-sub-firstmate-home" ]; then
+    if [ "$leaf" = ".fm-secondmate-home" ]; then
       expected=design
     fi
     printf '%s\n' "$expected" > "$sink"
@@ -958,49 +958,49 @@ test_home_seed_refuses_symlinked_leaf_files() {
     if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
       fail "seed accepted symlinked leaf file $leaf"
     fi
-    grep -F 'sub-firstmate leaf file must not be a symlink:' "$err" >/dev/null \
+    grep -F 'secondmate leaf file must not be a symlink:' "$err" >/dev/null \
       || fail "seed did not explain symlinked leaf refusal for $leaf"
     target=$(cat "$sink")
     [ "$target" = "$expected" ] || fail "seed overwrote outside symlink target for $leaf"
-    [ ! -f "$subhome/.fm-sub-firstmate-home" ] || [ "$leaf" = ".fm-sub-firstmate-home" ] || fail "seed marked subhome after symlinked leaf refusal"
+    [ ! -f "$subhome/.fm-secondmate-home" ] || [ "$leaf" = ".fm-secondmate-home" ] || fail "seed marked subhome after symlinked leaf refusal"
   done
   pass "home seeding refuses symlinked leaf files"
 }
 
-test_firstmate_spawn_records_home_meta() {
+test_secondmate_spawn_records_home_meta() {
   local home subhome subhome_abs fakebin log meta
   home="$TMP_ROOT/spawn home"
   subhome="$TMP_ROOT/spawn subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
   mark_firstmate_home "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
-  printf 'spawn-sub\n' > "$subhome/.fm-sub-firstmate-home"
-  printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; scope: spawn domain; projects: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf 'spawn-sub\n' > "$subhome/.fm-secondmate-home"
+  printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; scope: spawn domain; projects: alpha, beta; added 2026-06-22)' > "$home/data/secondmates.md"
   printf 'stale parent charter\n' > "$home/data/spawn-sub/brief.md"
   printf 'current persistent charter\n' > "$subhome/data/charter.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-fake")
   log="$TMP_ROOT/spawn-fake/tmux.log"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/parent-config" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --firstmate >/dev/null \
-    || fail "firstmate spawn failed"
+    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --secondmate >/dev/null \
+    || fail "secondmate spawn failed"
 
   meta="$home/state/spawn-sub.meta"
-  grep -Fx 'kind=firstmate' "$meta" >/dev/null || fail "meta did not record kind=firstmate"
+  grep -Fx 'kind=secondmate' "$meta" >/dev/null || fail "meta did not record kind=secondmate"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record subhome"
   grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record project clone list"
-  grep -F 'treehouse get' "$log" >/dev/null && fail "firstmate spawn should not run project treehouse get"
-  grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "firstmate launch did not set FM_HOME to subhome"
-  grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear operational overrides"
-  grep -F 'FM_CONFIG_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear config override"
-  grep -F "$subhome_abs/data/charter.md" "$log" >/dev/null || fail "firstmate launch did not use persistent charter"
-  grep -F "$home/data/spawn-sub/brief.md" "$log" >/dev/null && fail "firstmate launch used stale parent brief"
-  grep -F 'notify=' "$log" >/dev/null && fail "firstmate codex launch should not install parent turn-end notify"
-  grep -F 'turn-ended' "$log" >/dev/null && fail "firstmate launch should not reference parent turn-end marker"
-  pass "kind=firstmate spawn launches in the home and records routing meta"
+  grep -F 'treehouse get' "$log" >/dev/null && fail "secondmate spawn should not run project treehouse get"
+  grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "secondmate launch did not set FM_HOME to subhome"
+  grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "secondmate launch did not clear operational overrides"
+  grep -F 'FM_CONFIG_OVERRIDE=' "$log" >/dev/null || fail "secondmate launch did not clear config override"
+  grep -F "$subhome_abs/data/charter.md" "$log" >/dev/null || fail "secondmate launch did not use persistent charter"
+  grep -F "$home/data/spawn-sub/brief.md" "$log" >/dev/null && fail "secondmate launch used stale parent brief"
+  grep -F 'notify=' "$log" >/dev/null && fail "secondmate codex launch should not install parent turn-end notify"
+  grep -F 'turn-ended' "$log" >/dev/null && fail "secondmate launch should not reference parent turn-end marker"
+  pass "kind=secondmate spawn launches in the home and records routing meta"
 }
 
-test_firstmate_spawn_requires_seeded_matching_home() {
+test_secondmate_spawn_requires_seeded_matching_home() {
   local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
   home="$TMP_ROOT/spawn-validate-home"
   subhome="$TMP_ROOT/spawn-validate-subhome"
@@ -1030,27 +1030,27 @@ SH
   err="$TMP_ROOT/spawn-validate.err"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted an unseeded home"
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted an unseeded home"
   fi
-  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "spawn did not explain missing seed marker"
+  grep -F 'not a seeded secondmate home' "$err" >/dev/null || fail "spawn did not explain missing seed marker"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before seed marker validation"
 
   : > "$log"
-  printf 'other\n' > "$wronghome/.fm-sub-firstmate-home"
+  printf 'other\n' > "$wronghome/.fm-secondmate-home"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$wronghome" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a home marked for another sub-firstmate"
+    "$ROOT/bin/fm-spawn.sh" domain "$wronghome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home marked for another secondmate"
   fi
-  grep -F 'marked for sub-firstmate other, expected domain' "$err" >/dev/null || fail "spawn did not explain marker mismatch"
+  grep -F 'marked for secondmate other, expected domain' "$err" >/dev/null || fail "spawn did not explain marker mismatch"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before marker mismatch validation"
 
   : > "$log"
-  printf 'domain\n' > "$marker_only/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$marker_only/.fm-secondmate-home"
   printf 'charter\n' > "$marker_only/data/charter.md"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a marked home missing AGENTS.md"
+    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a marked home missing AGENTS.md"
   fi
   grep -F 'not a firstmate home (missing AGENTS.md)' "$err" >/dev/null || fail "spawn did not explain missing AGENTS.md"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before AGENTS.md validation"
@@ -1058,73 +1058,73 @@ SH
   : > "$log"
   printf '# Firstmate\n' > "$marker_only/AGENTS.md"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a marked home missing bin"
+    "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a marked home missing bin"
   fi
   grep -F 'not a firstmate home (missing bin/)' "$err" >/dev/null || fail "spawn did not explain missing bin"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before bin validation"
 
   : > "$log"
-  printf 'domain\n' > "$home/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$home/.fm-secondmate-home"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$home" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted the active home"
+    "$ROOT/bin/fm-spawn.sh" domain "$home" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted the active home"
   fi
-  grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home"
+  grep -F 'secondmate home cannot be the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before active-home validation"
 
   : > "$log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$ROOT" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted the firstmate repo root"
+    "$ROOT/bin/fm-spawn.sh" domain "$ROOT" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted the firstmate repo root"
   fi
-  grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null || fail "spawn did not reject firstmate repo root"
+  grep -F 'secondmate home cannot be the firstmate repo' "$err" >/dev/null || fail "spawn did not reject firstmate repo root"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before root validation"
 
   : > "$log"
-  printf 'domain\n' > "$active_descendant/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$active_descendant/.fm-secondmate-home"
   printf 'charter\n' > "$active_descendant/data/charter.md"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$active_descendant" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a home inside the active firstmate home"
+    "$ROOT/bin/fm-spawn.sh" domain "$active_descendant" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home inside the active firstmate home"
   fi
-  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home descendant"
+  grep -F 'secondmate home cannot be inside the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home descendant"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before active descendant validation"
 
   : > "$log"
-  printf 'domain\n' > "$active_ancestor/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$active_ancestor/.fm-secondmate-home"
   printf 'charter\n' > "$active_ancestor/data/charter.md"
   if PATH="$fakebin:$PATH" FM_HOME="$ancestor_active_home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$active_ancestor" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a home containing the active firstmate home"
+    "$ROOT/bin/fm-spawn.sh" domain "$active_ancestor" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home containing the active firstmate home"
   fi
-  grep -F 'sub-firstmate home cannot be an ancestor of the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home ancestor"
+  grep -F 'secondmate home cannot be an ancestor of the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home ancestor"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before active ancestor validation"
 
   : > "$log"
-  printf 'domain\n' > "$root_descendant/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$root_descendant/.fm-secondmate-home"
   printf 'charter\n' > "$root_descendant/data/charter.md"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$root_descendant" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a home inside the firstmate repo"
+    "$ROOT/bin/fm-spawn.sh" domain "$root_descendant" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home inside the firstmate repo"
   fi
-  grep -F 'sub-firstmate home cannot be inside the firstmate repo' "$err" >/dev/null || fail "spawn did not reject repo root descendant"
+  grep -F 'secondmate home cannot be inside the firstmate repo' "$err" >/dev/null || fail "spawn did not reject repo root descendant"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before repo descendant validation"
 
   : > "$log"
-  printf 'domain\n' > "$root_ancestor/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$root_ancestor/.fm-secondmate-home"
   printf 'charter\n' > "$root_ancestor/data/charter.md"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root_inside" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$root_ancestor" codex --firstmate >/dev/null 2>"$err"; then
-    fail "firstmate spawn accepted a home containing the firstmate repo"
+    "$ROOT/bin/fm-spawn.sh" domain "$root_ancestor" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home containing the firstmate repo"
   fi
-  grep -F 'sub-firstmate home cannot be an ancestor of the firstmate repo' "$err" >/dev/null || fail "spawn did not reject repo ancestor"
+  grep -F 'secondmate home cannot be an ancestor of the firstmate repo' "$err" >/dev/null || fail "spawn did not reject repo ancestor"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before repo ancestor validation"
 
-  pass "firstmate spawn validates homes before launch"
+  pass "secondmate spawn validates homes before launch"
 }
 
-test_firstmate_spawn_refuses_operational_dirs_outside_subhome() {
+test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   local home subhome sink fakebin log err opdir
   home="$TMP_ROOT/spawn-opdir-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-opdir-fake")
@@ -1137,7 +1137,7 @@ test_firstmate_spawn_refuses_operational_dirs_outside_subhome() {
     sink="$home/data/spawn-opdir-$opdir"
     rm -rf "$subhome" "$sink"
     mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$sink"
-    printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
     printf 'charter\n' > "$subhome/data/charter.md"
     rm -rf "${subhome:?}/${opdir:?}"
     ln -s "$sink" "$subhome/$opdir"
@@ -1146,14 +1146,14 @@ test_firstmate_spawn_refuses_operational_dirs_outside_subhome() {
     fi
     : > "$log"
     if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-opdir-fake/pane.txt" \
-      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --firstmate >/dev/null 2>"$err"; then
-      fail "firstmate spawn accepted a subhome with $opdir symlinked outside the subhome"
+      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+      fail "secondmate spawn accepted a subhome with $opdir symlinked outside the subhome"
     fi
-    grep -F "sub-firstmate $opdir directory must resolve inside the sub-firstmate home" "$err" >/dev/null \
+    grep -F "secondmate $opdir directory must resolve inside the secondmate home" "$err" >/dev/null \
       || fail "spawn did not explain unsafe $opdir directory rejection"
     grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before unsafe $opdir directory validation"
   done
-  pass "firstmate spawn refuses operational directories outside the subhome"
+  pass "secondmate spawn refuses operational directories outside the subhome"
 }
 
 test_fm_send_resolves_bare_firstmate_window_from_home_meta() {
@@ -1163,7 +1163,7 @@ test_fm_send_resolves_bare_firstmate_window_from_home_meta() {
   touch "$home/state/.last-watcher-beat"
   cat > "$home/state/domain.meta" <<EOF
 window=current-session:fm-domain
-kind=firstmate
+kind=secondmate
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/send-fake")
   log="$TMP_ROOT/send-fake/tmux.log"
@@ -1197,51 +1197,51 @@ test_recovery_respawn_uses_persistent_home() {
   mkdir -p "$home/data" "$home/state" "$subhome/data"
   mark_firstmate_home "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
-  printf 'recover-sub\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'recover-sub\n' > "$subhome/.fm-secondmate-home"
   printf 'charter\n' > "$subhome/data/charter.md"
-  printf '%s\n' '- recover-sub - recovery domain mentions home: '"$TMP_ROOT/ignored-summary-home"' (home: '"$subhome"'; scope: recovery domain mentions home: '"$TMP_ROOT/ignored-scope-home"'; projects: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- recover-sub - recovery domain mentions home: '"$TMP_ROOT/ignored-summary-home"' (home: '"$subhome"'; scope: recovery domain mentions home: '"$TMP_ROOT/ignored-scope-home"'; projects: gamma; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/recovery-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/recovery-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" recover-sub "echo relaunch" --firstmate >/dev/null 2>/dev/null \
-    || fail "recovery firstmate respawn failed"
+    "$ROOT/bin/fm-spawn.sh" recover-sub "echo relaunch" --secondmate >/dev/null 2>/dev/null \
+    || fail "recovery secondmate respawn failed"
 
   meta="$home/state/recover-sub.meta"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "respawn did not preserve persistent home from meta/registry"
   grep -Fx 'projects=gamma' "$meta" >/dev/null || fail "respawn did not preserve project clone list from registry"
   grep -Fx 'window=firstmate:fm-recover-sub' "$meta" >/dev/null || fail "respawn did not reconstruct the direct report window"
-  pass "restart recovery can respawn a sub-firstmate from durable registry and charter"
+  pass "restart recovery can respawn a secondmate from durable registry and charter"
 }
 
-test_firstmate_teardown_retires_empty_home() {
+test_secondmate_teardown_retires_empty_home() {
   local home subhome fakebin
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   mkdir -p "$home/state" "$home/data" "$subhome/state"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
-    || fail "teardown failed for empty sub-firstmate home"
-  [ ! -d "$subhome" ] || fail "teardown did not remove the retired sub-firstmate home"
+    || fail "teardown failed for empty secondmate home"
+  [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
-  grep -F -- '- domain ' "$home/data/firstmates.md" >/dev/null && fail "teardown did not remove firstmate registry route"
-  pass "firstmate teardown retires empty homes and releases routing"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
+  pass "secondmate teardown retires empty homes and releases routing"
 }
 
-test_firstmate_force_teardown_discards_child_work() {
+test_secondmate_force_teardown_discards_child_work() {
   local home subhome childproj childwt fakebin log
   home="$TMP_ROOT/force-teardown-home"
   subhome="$TMP_ROOT/force-teardown-subhome"
@@ -1249,19 +1249,19 @@ test_firstmate_force_teardown_discards_child_work() {
   childwt="$TMP_ROOT/force-child-worktree"
   mkdir -p "$home/state" "$home/data" "$subhome/state"
   make_git_worktree "$childproj" "$childwt" force-child
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -1275,21 +1275,21 @@ EOF
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
-    fail "teardown allowed a sub-firstmate with in-flight child work"
+    fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
     || fail "force teardown failed to discard child work"
-  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired sub-firstmate home"
+  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
-  grep -F -- '- domain ' "$home/data/firstmates.md" >/dev/null && fail "force teardown did not remove firstmate registry route"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
   grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
-  pass "firstmate force teardown discards child work"
+  pass "secondmate force teardown discards child work"
 }
 
-test_firstmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
+test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data state config projects; do
     home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
@@ -1298,25 +1298,25 @@ test_firstmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
     err="$TMP_ROOT/symlink-inside-teardown-$opdir.err"
     rm -rf "$home" "$subhome"
     mkdir -p "$home/state" "$home/data" "$subhome" "$target"
-    printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
     ln -s "$target" "$subhome/$opdir"
     cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-    printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+    printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
     fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-inside-teardown-fake-$opdir")
     log="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/tmux.log"
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
       "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
-      || fail "force teardown refused $opdir symlinked inside the sub-firstmate home"
+      || fail "force teardown refused $opdir symlinked inside the secondmate home"
     [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
     grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
@@ -1324,42 +1324,42 @@ EOF
   pass "force teardown allows operational directory symlinks inside the subhome"
 }
 
-test_firstmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
+test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   local home subhome external_state fakebin err log
   home="$TMP_ROOT/symlink-state-teardown-home"
   subhome="$TMP_ROOT/symlink-state-teardown-subhome"
   external_state="$home/data/external-state"
   err="$TMP_ROOT/symlink-state-teardown.err"
   mkdir -p "$home/state" "$home/data" "$subhome" "$external_state"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   ln -s "$external_state" "$subhome/state"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-state-teardown-fake")
   log="$TMP_ROOT/symlink-state-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
-    fail "force teardown accepted a symlinked sub-firstmate state directory"
+    fail "force teardown accepted a symlinked secondmate state directory"
   fi
   [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
   [ -d "$external_state" ] || fail "force teardown removed external symlink target"
   grep -F 'state directory' "$err" >/dev/null || fail "teardown did not explain symlinked state refusal"
-  grep -F 'resolves outside the sub-firstmate home' "$err" >/dev/null || fail "teardown did not identify unsafe state symlink"
+  grep -F 'resolves outside the secondmate home' "$err" >/dev/null || fail "teardown did not identify unsafe state symlink"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before symlinked state refusal"
   pass "force teardown refuses operational directory symlinks outside the subhome"
 }
 
-test_firstmate_teardown_requires_seed_marker() {
+test_secondmate_teardown_requires_seed_marker() {
   local home subhome fakebin err log
   home="$TMP_ROOT/unmarked-teardown-home"
   subhome="$TMP_ROOT/unmarked-teardown-subhome"
@@ -1370,13 +1370,13 @@ window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/unmarked-teardown-fake")
   log="$TMP_ROOT/unmarked-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unmarked-teardown-fake/pane.txt" \
@@ -1385,26 +1385,26 @@ EOF
   fi
   [ -d "$subhome" ] || fail "teardown removed unmarked subhome after refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before seed marker validation"
-  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain missing seed marker"
-  pass "firstmate teardown requires seeded home marker"
+  grep -F 'not a seeded secondmate home' "$err" >/dev/null || fail "teardown did not explain missing seed marker"
+  pass "secondmate teardown requires seeded home marker"
 }
 
-test_firstmate_teardown_refuses_registered_nested_home() {
+test_secondmate_teardown_refuses_registered_nested_home() {
   local home subhome nested fakebin err log
   home="$TMP_ROOT/nested-teardown-home"
   subhome="$TMP_ROOT/nested-teardown-subhome"
   nested="$subhome/nested-domain"
   err="$TMP_ROOT/nested-teardown.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$nested/state"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
-  printf 'nested\n' > "$nested/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'nested\n' > "$nested/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
@@ -1414,13 +1414,13 @@ window=firstmate:fm-nested
 worktree=$nested
 project=$nested
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$nested
 projects=beta
 EOF
-  cat > "$home/data/firstmates.md" <<EOF
+  cat > "$home/data/secondmates.md" <<EOF
 - domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)
 - nested - nested domain mentions home: $TMP_ROOT/ignored-summary-home (home: $nested; scope: nested domain mentions home: $TMP_ROOT/ignored-scope-home; projects: beta; added 2026-06-22)
 EOF
@@ -1428,54 +1428,54 @@ EOF
   log="$TMP_ROOT/nested-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
-    fail "teardown removed a home containing another registered sub-firstmate home"
+    fail "teardown removed a home containing another registered secondmate home"
   fi
   [ -d "$subhome" ] || fail "teardown removed registered ancestor home after refusal"
   [ -d "$nested" ] || fail "teardown removed registered nested home after refusal"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared ancestor meta after nested-home refusal"
   [ -e "$home/state/nested.meta" ] || fail "teardown cleared nested meta after nested-home refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before nested-home refusal"
-  grep -F 'contains registered sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain registered nested-home refusal"
-  pass "firstmate teardown refuses homes containing registered nested homes"
+  grep -F 'contains registered secondmate home' "$err" >/dev/null || fail "teardown did not explain registered nested-home refusal"
+  pass "secondmate teardown refuses homes containing registered nested homes"
 }
 
-test_firstmate_teardown_refuses_child_registry_nested_home() {
+test_secondmate_teardown_refuses_child_registry_nested_home() {
   local home subhome nested fakebin err log
   home="$TMP_ROOT/child-registry-teardown-home"
   subhome="$TMP_ROOT/child-registry-teardown-subhome"
   nested="$subhome/nested-domain"
   err="$TMP_ROOT/child-registry-teardown.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data" "$nested/state"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
-  printf 'nested\n' > "$nested/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'nested\n' > "$nested/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
-  printf '%s\n' '- nested - nested domain (home: '"$nested"'; scope: nested domain; projects: beta; added 2026-06-22)' > "$subhome/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  printf '%s\n' '- nested - nested domain (home: '"$nested"'; scope: nested domain; projects: beta; added 2026-06-22)' > "$subhome/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-registry-teardown-fake")
   log="$TMP_ROOT/child-registry-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-registry-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
-    fail "teardown removed a home containing a child-registry sub-firstmate home"
+    fail "teardown removed a home containing a child-registry secondmate home"
   fi
   [ -d "$subhome" ] || fail "teardown removed ancestor home after child-registry refusal"
   [ -d "$nested" ] || fail "teardown removed child-registry nested home after refusal"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared parent meta after child-registry refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before child-registry refusal"
-  grep -F 'contains registered sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain child-registry nested-home refusal"
-  pass "firstmate teardown refuses nested homes from the child registry"
+  grep -F 'contains registered secondmate home' "$err" >/dev/null || fail "teardown did not explain child-registry nested-home refusal"
+  pass "secondmate teardown refuses nested homes from the child registry"
 }
 
-test_firstmate_force_teardown_prevalidates_before_child_cleanup() {
+test_secondmate_force_teardown_prevalidates_before_child_cleanup() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/prevalidate-teardown-home"
   subhome="$TMP_ROOT/prevalidate-teardown-subhome"
@@ -1488,13 +1488,13 @@ window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -1515,11 +1515,11 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta before validation"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta before validation"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before subhome validation"
-  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "force teardown did not explain missing seed marker"
+  grep -F 'not a seeded secondmate home' "$err" >/dev/null || fail "force teardown did not explain missing seed marker"
   pass "force teardown validates subhome before child cleanup"
 }
 
-test_firstmate_force_teardown_refuses_child_active_home_descendant() {
+test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/child-active-descendant-home"
   subhome="$TMP_ROOT/child-active-descendant-subhome"
@@ -1527,19 +1527,19 @@ test_firstmate_force_teardown_refuses_child_active_home_descendant() {
   childwt="$home/data"
   err="$TMP_ROOT/child-active-descendant.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -1564,7 +1564,7 @@ EOF
   pass "force teardown refuses child worktrees inside the active home"
 }
 
-test_firstmate_force_teardown_refuses_child_repo_descendant() {
+test_secondmate_force_teardown_refuses_child_repo_descendant() {
   local home subhome childproj childwt fakeroot fakebin err log
   home="$TMP_ROOT/child-repo-descendant-home"
   subhome="$TMP_ROOT/child-repo-descendant-subhome"
@@ -1578,19 +1578,19 @@ test_firstmate_force_teardown_refuses_child_repo_descendant() {
 exit 0
 SH
   chmod +x "$fakeroot/bin/fm-guard.sh"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -1615,7 +1615,7 @@ EOF
   pass "force teardown refuses child worktrees inside the firstmate repo"
 }
 
-test_firstmate_force_teardown_refuses_unregistered_child_worktree() {
+test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/unregistered-child-home"
   subhome="$TMP_ROOT/unregistered-child-subhome"
@@ -1623,19 +1623,19 @@ test_firstmate_force_teardown_refuses_unregistered_child_worktree() {
   childwt="$TMP_ROOT/unregistered-child-worktree"
   err="$TMP_ROOT/unregistered-child.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
-  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$subhome
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -1660,25 +1660,25 @@ EOF
   pass "force teardown refuses unregistered child worktree paths"
 }
 
-test_firstmate_teardown_refuses_home_ancestor() {
+test_secondmate_teardown_refuses_home_ancestor() {
   local danger home fakebin err
   danger="$TMP_ROOT/ancestor-teardown"
   home="$danger/main-home"
   err="$TMP_ROOT/ancestor-teardown.err"
   mkdir -p "$home/state" "$home/data" "$danger/state"
-  printf 'domain\n' > "$danger/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$danger/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$danger
 project=$danger
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$danger
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$danger"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$danger"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/ancestor-teardown-fake")
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/ancestor-teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/ancestor-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
@@ -1686,10 +1686,10 @@ EOF
   fi
   [ -d "$danger" ] || fail "teardown removed ancestor path after refusal"
   grep -F 'ancestor of the active firstmate home' "$err" >/dev/null || fail "teardown did not explain ancestor rejection"
-  pass "firstmate teardown refuses ancestor homes"
+  pass "secondmate teardown refuses ancestor homes"
 }
 
-test_firstmate_teardown_refuses_home_descendants() {
+test_secondmate_teardown_refuses_home_descendants() {
   local home active_descendant fakeroot root_descendant fakebin log err
   home="$TMP_ROOT/descendant-teardown-home"
   active_descendant="$home/data/domain-home"
@@ -1702,19 +1702,19 @@ test_firstmate_teardown_refuses_home_descendants() {
 exit 0
 SH
   chmod +x "$fakeroot/bin/fm-guard.sh"
-  printf 'domain\n' > "$active_descendant/.fm-sub-firstmate-home"
+  printf 'domain\n' > "$active_descendant/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$active_descendant
 project=$active_descendant
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$active_descendant
 projects=alpha
 EOF
-  printf '%s\n' '- domain - design domain (home: '"$active_descendant"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  printf '%s\n' '- domain - design domain (home: '"$active_descendant"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/descendant-teardown-fake")
   log="$TMP_ROOT/descendant-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/descendant-teardown-fake/pane.txt" \
@@ -1727,14 +1727,14 @@ EOF
   grep -F 'inside the active firstmate home' "$err" >/dev/null || fail "teardown did not explain active descendant rejection"
 
   : > "$log"
-  printf 'repo-domain\n' > "$root_descendant/.fm-sub-firstmate-home"
+  printf 'repo-domain\n' > "$root_descendant/.fm-secondmate-home"
   cat > "$home/state/repo-domain.meta" <<EOF
 window=firstmate:fm-repo-domain
 worktree=$root_descendant
 project=$root_descendant
 harness=echo
-kind=firstmate
-mode=firstmate
+kind=secondmate
+mode=secondmate
 yolo=off
 home=$root_descendant
 projects=alpha
@@ -1747,10 +1747,10 @@ EOF
   [ -e "$home/state/repo-domain.meta" ] || fail "teardown cleared parent meta after repo descendant refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before repo descendant refusal"
   grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "teardown did not explain repo descendant rejection"
-  pass "firstmate teardown refuses descendant homes"
+  pass "secondmate teardown refuses descendant homes"
 }
 
-test_firstmate_idle_pane_is_not_stale() {
+test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
   mkdir -p "$home/state"
@@ -1760,7 +1760,7 @@ window=$window
 worktree=$TMP_ROOT/watch-subhome
 project=$TMP_ROOT/watch-subhome
 harness=echo
-kind=firstmate
+kind=secondmate
 home=$TMP_ROOT/watch-subhome
 projects=alpha
 EOF
@@ -1771,13 +1771,13 @@ EOF
   pid=$!
   if ! wait_live "$pid" 25; then
     wait "$pid" || true
-    grep -F "stale: $window" "$out" >/dev/null && fail "idle sub-firstmate pane triggered stale wake"
-    fail "watcher exited unexpectedly while supervising idle sub-firstmate"
+    grep -F "stale: $window" "$out" >/dev/null && fail "idle secondmate pane triggered stale wake"
+    fail "watcher exited unexpectedly while supervising idle secondmate"
   fi
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  grep -F "stale: $window" "$out" >/dev/null && fail "idle sub-firstmate pane triggered stale wake"
-  pass "idle kind=firstmate pane is healthy and not stale"
+  grep -F "stale: $window" "$out" >/dev/null && fail "idle secondmate pane triggered stale wake"
+  pass "idle kind=secondmate pane is healthy and not stale"
 }
 
 test_fm_home_parameterization
@@ -1809,22 +1809,22 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
-test_firstmate_spawn_records_home_meta
-test_firstmate_spawn_requires_seeded_matching_home
-test_firstmate_spawn_refuses_operational_dirs_outside_subhome
+test_secondmate_spawn_records_home_meta
+test_secondmate_spawn_requires_seeded_matching_home
+test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
-test_firstmate_teardown_retires_empty_home
-test_firstmate_force_teardown_discards_child_work
-test_firstmate_force_teardown_allows_operational_dir_symlinks_inside_home
-test_firstmate_force_teardown_refuses_operational_dir_symlink_outside_home
-test_firstmate_teardown_requires_seed_marker
-test_firstmate_teardown_refuses_registered_nested_home
-test_firstmate_teardown_refuses_child_registry_nested_home
-test_firstmate_force_teardown_prevalidates_before_child_cleanup
-test_firstmate_force_teardown_refuses_child_active_home_descendant
-test_firstmate_force_teardown_refuses_child_repo_descendant
-test_firstmate_force_teardown_refuses_unregistered_child_worktree
-test_firstmate_teardown_refuses_home_ancestor
-test_firstmate_teardown_refuses_home_descendants
-test_firstmate_idle_pane_is_not_stale
+test_secondmate_teardown_retires_empty_home
+test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
+test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
+test_secondmate_teardown_requires_seed_marker
+test_secondmate_teardown_refuses_registered_nested_home
+test_secondmate_teardown_refuses_child_registry_nested_home
+test_secondmate_force_teardown_prevalidates_before_child_cleanup
+test_secondmate_force_teardown_refuses_child_active_home_descendant
+test_secondmate_force_teardown_refuses_child_repo_descendant
+test_secondmate_force_teardown_refuses_unregistered_child_worktree
+test_secondmate_teardown_refuses_home_ancestor
+test_secondmate_teardown_refuses_home_descendants
+test_secondmate_idle_pane_is_not_stale

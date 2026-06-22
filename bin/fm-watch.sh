@@ -218,9 +218,9 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale state is reported once (.stale-* remembers the hash already reported).
   while IFS= read -r w; do
-    # A sub-firstmate idling on its own watcher is healthy. Its parent supervises
+    # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = firstmate ] && continue
+    [ "$(window_kind "$w")" = secondmate ] && continue
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
