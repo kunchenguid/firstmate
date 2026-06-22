@@ -777,6 +777,20 @@ seed_home() {
   fi
   SEED_HOME_BACKED_UP=1
 
+  if [ ! -f "$SEED_PARENT_BRIEF" ]; then
+    [ -n "${FM_FIRSTMATE_CHARTER:-}" ] || {
+      echo "error: no filled firstmate charter brief at $SEED_PARENT_BRIEF; set FM_FIRSTMATE_CHARTER or scaffold one and replace {TASK}" >&2
+      return 1
+    }
+    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
+    "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"
+    SEED_PARENT_BRIEF_CREATED=1
+  fi
+  if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
+    echo "error: firstmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
+    return 1
+  fi
+
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
@@ -792,12 +806,7 @@ seed_home() {
     fi
   done
 
-  if [ ! -f "$DATA/$id/brief.md" ]; then
-    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"
-    SEED_PARENT_BRIEF_CREATED=1
-  fi
-  cp "$DATA/$id/brief.md" "$home/data/charter.md"
+  cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"

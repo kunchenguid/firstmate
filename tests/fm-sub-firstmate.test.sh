@@ -46,6 +46,12 @@ add_file_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
+scaffold_firstmate_charter() {
+  local home=$1 id=$2 charter=$3
+  shift 3
+  FM_HOME="$home" FM_FIRSTMATE_CHARTER="$charter" "$ROOT/bin/fm-brief.sh" "$id" --firstmate "$@" >/dev/null
+}
+
 make_fake_tmux() {
   local dir=$1 fakebin log capture
   fakebin="$dir/fakebin"
@@ -205,7 +211,10 @@ test_home_seed_registry_scope_and_overlapping_projects() {
 EOF
 
   fakebin=$(make_fake_no_mistakes "$TMP_ROOT/no-mistakes-fake")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FIRSTMATE_SCOPE='feature design and implementation for alpha beta gamma' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_FIRSTMATE_CHARTER='feature design and implementation for alpha beta gamma' \
+    FM_FIRSTMATE_SCOPE='feature design and implementation for alpha beta gamma' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report subhome"
   [ -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed did not mark subhome as seeded"
@@ -229,7 +238,9 @@ EOF
 
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed"
 
-  FM_HOME="$home" FM_FIRSTMATE_SCOPE='issue triage and support for beta' "$ROOT/bin/fm-home-seed.sh" other "$otherhome" beta >/dev/null 2>&1 \
+  FM_HOME="$home" FM_FIRSTMATE_CHARTER='issue triage and support for beta' \
+    FM_FIRSTMATE_SCOPE='issue triage and support for beta' \
+    "$ROOT/bin/fm-home-seed.sh" other "$otherhome" beta >/dev/null 2>&1 \
     || fail "seed refused overlapping project clones across different scopes"
   grep -F -- '- other - issue triage and support for beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping registry line was not written"
   grep -F 'projects: beta' "$home/data/firstmates.md" >/dev/null || fail "overlapping project clone list was not recorded"
@@ -317,7 +328,8 @@ test_home_seed_uses_treehouse_acquired_home() {
   log="$TMP_ROOT/dash-fake/tmux.log"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
-    FM_FIRSTMATE_SCOPE='dash acquired scope' "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
+    FM_FIRSTMATE_CHARTER='dash acquired scope' FM_FIRSTMATE_SCOPE='dash acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
@@ -345,7 +357,8 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   log="$TMP_ROOT/dash-fail-fake/tmux.log"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
-    FM_FIRSTMATE_SCOPE='dash acquired scope' "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    FM_FIRSTMATE_CHARTER='dash acquired scope' FM_FIRSTMATE_SCOPE='dash acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed reused an acquired home marked for another sub-firstmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
@@ -408,7 +421,8 @@ test_home_seed_rolls_back_failed_clone() {
 - beta [direct-PR] - beta project (added 2026-06-22)
 EOF
 
-  if FM_HOME="$home" FM_FIRSTMATE_SCOPE='rollback scope' "$ROOT/bin/fm-home-seed.sh" rollback "$subhome" alpha beta >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='rollback scope' FM_FIRSTMATE_SCOPE='rollback scope' \
+    "$ROOT/bin/fm-home-seed.sh" rollback "$subhome" alpha beta >/dev/null 2>"$err"; then
     fail "seed succeeded even though the second project clone failed"
   fi
   grep -F 'does not appear to be a git repository' "$err" >/dev/null \
@@ -422,6 +436,48 @@ EOF
     fail "failed seed left a registry route"
   fi
   pass "home seeding rolls back failed clone attempts without residue"
+}
+
+test_home_seed_refuses_missing_filled_charter() {
+  local home subhome err
+  home="$TMP_ROOT/missing-charter-home"
+  subhome="$TMP_ROOT/missing-charter-subhome"
+  err="$TMP_ROOT/missing-charter.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/missing-charter-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a direct seed without a filled charter"
+  fi
+  grep -F 'no filled firstmate charter brief' "$err" >/dev/null \
+    || fail "seed did not explain missing filled charter refusal"
+  [ ! -e "$subhome" ] || fail "missing charter seed left a generated subhome"
+  [ ! -e "$home/data/design/brief.md" ] || fail "missing charter seed generated a placeholder charter"
+  pass "home seeding refuses direct seed without filled charter text"
+}
+
+test_home_seed_refuses_placeholder_charter() {
+  local home subhome err
+  home="$TMP_ROOT/placeholder-charter-home"
+  subhome="$TMP_ROOT/placeholder-charter-subhome"
+  err="$TMP_ROOT/placeholder-charter.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/placeholder-charter-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null \
+    || fail "placeholder charter scaffold failed"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an unfilled placeholder charter"
+  fi
+  grep -F 'still contains {TASK}' "$err" >/dev/null \
+    || fail "seed did not explain placeholder charter refusal"
+  [ ! -e "$subhome" ] || fail "placeholder charter seed left a generated subhome"
+  [ ! -e "$subhome/projects/alpha" ] || fail "placeholder charter seed cloned before refusing"
+  pass "home seeding refuses unfilled placeholder charters"
 }
 
 test_home_seed_refuses_local_only_project() {
@@ -457,7 +513,7 @@ test_home_seed_refuses_active_home_and_root() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/active-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for active-home seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for active-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$home" alpha >/dev/null 2>"$err"; then
     fail "seed allowed sub-firstmate home to reuse active FM_HOME"
@@ -515,7 +571,7 @@ test_home_seed_refuses_home_marked_for_another_id() {
   git clone --quiet "$ROOT" "$subhome"
   printf 'other\n' > "$subhome/.fm-sub-firstmate-home"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for marked-home seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for marked-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed reused a home marked for another sub-firstmate"
@@ -537,7 +593,7 @@ test_home_seed_refuses_home_registered_to_another_id() {
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/firstmates.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for registered-home seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for registered-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed reused a home registered to another sub-firstmate"
@@ -558,11 +614,13 @@ test_home_seed_refuses_reassigning_existing_id_to_different_home() {
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/reassign-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  FM_HOME="$home" FM_FIRSTMATE_SCOPE='design domain' "$ROOT/bin/fm-home-seed.sh" design "$first" alpha >/dev/null \
+  FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' FM_FIRSTMATE_SCOPE='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$first" alpha >/dev/null \
     || fail "initial seed failed for reassigning-id test"
   first_abs=$(cd "$first" && pwd -P)
 
-  if FM_HOME="$home" FM_FIRSTMATE_SCOPE='design domain' "$ROOT/bin/fm-home-seed.sh" design "$second" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' FM_FIRSTMATE_SCOPE='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$second" alpha >/dev/null 2>"$err"; then
     fail "seed reassigned an existing sub-firstmate id to a different home"
   fi
   grep -F "sub-firstmate id design is already registered to home $first_abs" "$err" >/dev/null \
@@ -620,7 +678,7 @@ test_home_seed_refuses_remote_backed_project_without_origin() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for no-origin seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for no-origin seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed allowed remote-backed project without origin"
@@ -642,7 +700,7 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   mkdir -p "$subhome/projects"
   git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for wrong-origin seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for wrong-origin seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted existing remote-backed project with wrong origin"
@@ -664,7 +722,7 @@ test_home_seed_resolves_relative_source_origins() {
   git clone --quiet --bare "$home/projects/alpha" "$home/remotes/relative-alpha.git"
   git -C "$home/projects/alpha" remote add origin ../../remotes/relative-alpha.git
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for relative origin seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for relative origin seed test"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha)
   subhome_abs=$(cd "$subhome" && pwd -P)
@@ -699,7 +757,8 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   : > "$log"
 
   if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_FAKE_NO_MISTAKES_FAIL_PROJECT=beta \
-    FM_HOME="$home" FM_FIRSTMATE_SCOPE='existing init rollback scope' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
+    FM_HOME="$home" FM_FIRSTMATE_CHARTER='existing init rollback scope' FM_FIRSTMATE_SCOPE='existing init rollback scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
     fail "seed succeeded even though later no-mistakes initialization failed"
   fi
   grep -F 'failed to initialize no-mistakes for beta' "$err" >/dev/null \
@@ -730,7 +789,8 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
   : > "$log"
 
   if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
-    FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    FM_HOME="$home" FM_FIRSTMATE_CHARTER='existing uninitialized scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed initialized a preexisting no-mistakes clone"
   fi
   grep -F 'refusing to mutate preexisting clone' "$err" >/dev/null \
@@ -753,7 +813,7 @@ test_home_seed_refuses_project_destinations_outside_subhome() {
   rm -rf "$subhome/projects"
   ln -s "$sink" "$subhome/projects"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for symlink destination seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink destination seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed followed a subhome projects symlink outside the subhome"
@@ -773,7 +833,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-opdir-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for symlink operational dir seed test"
+  scaffold_firstmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink operational dir seed test"
 
   for opdir in data state config; do
     subhome="$TMP_ROOT/symlink-opdir-subhome-$opdir"
@@ -1523,6 +1583,8 @@ test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone
+test_home_seed_refuses_missing_filled_charter
+test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

@@ -246,6 +246,7 @@ Every persistent sub-firstmate has one line:
 
 The `scope:` field is used during intake; the `projects:` field is a non-exclusive clone list, not ownership.
 Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` asks `treehouse get` for the home.
+The charter must be filled before seeding; direct seed without a preexisting brief requires `FM_FIRSTMATE_CHARTER`.
 
 ### Project memory ownership
 
@@ -617,8 +618,11 @@ For scout tasks add `--scout`: the scaffold swaps the definition of done for the
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For sub-firstmates use `bin/fm-brief.sh <id> --firstmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
-Pass `FM_FIRSTMATE_SCOPE='<scope>'` when scaffolding, pass the same scope when seeding, and keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
+Set `FM_FIRSTMATE_CHARTER='<charter>'` to fill the charter text and `FM_FIRSTMATE_SCOPE='<scope>'` when the routing scope differs.
+If you scaffold without `FM_FIRSTMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
+Keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
 `bin/fm-home-seed.sh` copies the charter into the sub-home as `data/charter.md`; `bin/fm-spawn.sh --firstmate` launches it through the same launch-template path.
+`bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
-Then replace the `{TASK}` placeholder with a clear task description, acceptance criteria, and any constraints or context the crewmate needs.
+For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.

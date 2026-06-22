@@ -12,8 +12,8 @@
 #   is cloned into the sub-firstmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   only captain-relevant escalations append to this home's status file.
+#   Set FM_FIRSTMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_FIRSTMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
-#   FM_FIRSTMATE_CHARTER is a fallback routing scope for older callers; replace {TASK} manually.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
@@ -54,13 +54,14 @@ while [ "$idx" -lt "${#POS[@]}" ]; do
   idx=$((idx + 1))
 done
 [ -n "$FIRSTMATE_PROJECTS" ] || { echo "error: --firstmate requires at least one project" >&2; exit 1; }
+FIRSTMATE_CHARTER=${FM_FIRSTMATE_CHARTER:-"{TASK}"}
 FIRSTMATE_SCOPE=${FM_FIRSTMATE_SCOPE:-${FM_FIRSTMATE_CHARTER:-"{TASK}"}}
 PROJECT_LIST=$(printf '%s\n' "$FIRSTMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
 cat > "$BRIEF" <<EOF
 You are a sub-firstmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
-{TASK}
+$FIRSTMATE_CHARTER
 
 # Routing scope
 $FIRSTMATE_SCOPE
@@ -87,7 +88,11 @@ You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery for your own home, then supervise work that matches your scope.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
-echo "scaffolded: $BRIEF (firstmate charter; replace {TASK})"
+if [ "$FIRSTMATE_CHARTER" = "{TASK}" ]; then
+  echo "scaffolded: $BRIEF (firstmate charter; replace {TASK})"
+else
+  echo "scaffolded: $BRIEF (firstmate charter)"
+fi
 exit 0
 fi
 
