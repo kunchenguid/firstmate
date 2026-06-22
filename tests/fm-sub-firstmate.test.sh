@@ -251,6 +251,29 @@ EOF
   pass "firstmates registry records scopes and allows overlapping project clone lists"
 }
 
+test_home_seed_registry_reads_scope_from_filled_brief() {
+  local home subhome
+  home="$TMP_ROOT/brief-scope-home"
+  subhome="$TMP_ROOT/brief-scope-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/brief-scope-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_FIRSTMATE_SCOPE='customer onboarding from brief' \
+    scaffold_firstmate_charter "$home" design 'customer onboarding charter' alpha \
+    || fail "filled firstmate charter scaffold failed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "seed failed with a filled charter brief"
+  grep -F -- '- design - customer onboarding charter' "$home/data/firstmates.md" >/dev/null \
+    || fail "registry summary did not come from the filled charter"
+  grep -F 'scope: customer onboarding from brief' "$home/data/firstmates.md" >/dev/null \
+    || fail "registry scope did not come from the filled charter brief"
+  grep -F 'sub-firstmate for alpha' "$home/data/firstmates.md" >/dev/null \
+    && fail "registry fell back to a generic project-list scope"
+  pass "home seeding records routing scope from filled charter briefs"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -1576,6 +1599,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
+test_home_seed_registry_reads_scope_from_filled_brief
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

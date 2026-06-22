@@ -9,8 +9,8 @@
 #       That project list is non-exclusive provisioning data. The charter brief
 #       is copied to data/charter.md, no-mistakes projects are initialized,
 #       a .fm-sub-firstmate-home marker is written, and data/firstmates.md is updated.
-#       Set FM_FIRSTMATE_SCOPE='<scope>' to write the registry routing scope.
-#       FM_FIRSTMATE_CHARTER can provide the registry summary and fallback scope.
+#       Set FM_FIRSTMATE_SCOPE='<scope>' to override the registry routing scope.
+#       Otherwise the registry summary and scope are derived from the filled charter brief.
 #   fm-home-seed.sh validate
 #       Refuse duplicate home assignments in data/firstmates.md.
 set -eu
@@ -30,6 +30,30 @@ usage() {
 
 registry_home_for_line() {
   sed -n 's/.*home: \([^;)]*\).*/\1/p'
+}
+
+normalize_registry_text() {
+  awk '
+    {
+      gsub(/[;()]/, " ")
+      gsub(/[[:space:]]+/, " ")
+      sub(/^ /, "")
+      sub(/ $/, "")
+      if ($0 != "") {
+        out = out (out == "" ? "" : " ") $0
+      }
+    }
+    END { print out }
+  '
+}
+
+brief_section_text() {
+  local brief=$1 heading=$2
+  awk -v heading="# $heading" '
+    $0 == heading { in_section=1; next }
+    in_section && /^# / { exit }
+    in_section { print }
+  ' "$brief"
 }
 
 normalize_joined_path() {
@@ -697,10 +721,20 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
   mkdir -p "$DATA"
-  scope=${FM_FIRSTMATE_SCOPE:-${FM_FIRSTMATE_CHARTER:-"sub-firstmate for $projects_csv"}}
-  summary=${FM_FIRSTMATE_CHARTER:-$scope}
+  if [ -n "${FM_FIRSTMATE_SCOPE:-}" ]; then
+    scope=$(printf '%s\n' "$FM_FIRSTMATE_SCOPE" | normalize_registry_text)
+  else
+    scope=$(brief_section_text "$brief" "Routing scope" | normalize_registry_text)
+  fi
+  if [ -n "${FM_FIRSTMATE_CHARTER:-}" ]; then
+    summary=$(printf '%s\n' "$FM_FIRSTMATE_CHARTER" | normalize_registry_text)
+  else
+    summary=$(brief_section_text "$brief" "Charter" | normalize_registry_text)
+  fi
+  [ -n "$scope" ] || scope="sub-firstmate for $projects_csv"
+  [ -n "$summary" ] || summary=$scope
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
@@ -810,7 +844,7 @@ seed_home() {
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
-  write_registry "$id" "$home" "$projects_csv"
+  write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
   trap - EXIT
