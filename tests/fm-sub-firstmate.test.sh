@@ -65,8 +65,35 @@ case "${1:-}" in
 esac
 exit 1
 SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
+  rm -rf -- "$3"
+fi
+exit 0
+SH
   chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/treehouse"
   : > "$log"
+  printf '%s\n' "$fakebin"
+}
+
+make_fake_no_mistakes() {
+  local dir=$1 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  init) touch .no-mistakes-init ;;
+  doctor) touch .no-mistakes-doctor ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' "$fakebin"
 }
 
@@ -120,25 +147,31 @@ test_lock_status_is_per_home() {
 }
 
 test_home_seed_registry_and_disjoint_routing() {
-  local home subhome subhome_abs otherhome out
+  local home subhome subhome_abs otherhome fakebin out
   home="$TMP_ROOT/main-home"
   subhome="$TMP_ROOT/design-home"
   otherhome="$TMP_ROOT/other-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
   make_git_project "$home/projects/beta"
+  make_git_project "$home/projects/gamma"
   cat > "$home/data/projects.md" <<EOF
 - alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
 - beta [local-only] - beta project (added 2026-06-22)
+- gamma - gamma project (added 2026-06-22)
 EOF
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha beta >/dev/null || fail "charter scaffold failed"
-  out=$(FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta)
+  fakebin=$(make_fake_no_mistakes "$TMP_ROOT/no-mistakes-fake")
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha beta gamma >/dev/null || fail "charter scaffold failed"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
   subhome_abs=$(cd "$subhome" && pwd)
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report subhome"
   [ -f "$subhome/data/charter.md" ] || fail "seed did not write charter into subhome"
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
+  [ -d "$subhome/projects/gamma/.git" ] || fail "gamma was not cloned into subhome"
+  [ -f "$subhome/projects/gamma/.no-mistakes-init" ] || fail "no-mistakes project was not initialized"
+  [ -f "$subhome/projects/gamma/.no-mistakes-doctor" ] || fail "no-mistakes project was not checked"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" alpha)
   [ "$out" = "direct-PR on" ] || fail "seed did not preserve alpha delivery mode in subhome registry"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" beta)
@@ -206,11 +239,11 @@ test_recovery_respawn_uses_persistent_home() {
   pass "restart recovery can respawn a sub-firstmate from durable registry and charter"
 }
 
-test_firstmate_teardown_requires_empty_home() {
+test_firstmate_teardown_retires_empty_home() {
   local home subhome fakebin
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
-  mkdir -p "$home/state" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
@@ -222,19 +255,61 @@ yolo=off
 home=$subhome
 owned_projects=alpha
 EOF
-  printf 'window=x\n' > "$subhome/state/child.meta"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
-    fail "teardown allowed a sub-firstmate with in-flight child work"
-  fi
-  rm -f "$subhome/state/child.meta"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
     || fail "teardown failed for empty sub-firstmate home"
-  [ -d "$subhome" ] || fail "teardown removed the persistent sub-firstmate home"
+  [ ! -d "$subhome" ] || fail "teardown did not remove the retired sub-firstmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
-  pass "firstmate teardown is explicit and refuses homes with in-flight work"
+  grep -F -- '- domain ' "$home/data/firstmates.md" >/dev/null && fail "teardown did not remove firstmate registry route"
+  pass "firstmate teardown retires empty homes and releases routing"
+}
+
+test_firstmate_force_teardown_discards_child_work() {
+  local home subhome childproj childwt fakebin log
+  home="$TMP_ROOT/force-teardown-home"
+  subhome="$TMP_ROOT/force-teardown-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-child-worktree"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+owned_projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
+  log="$TMP_ROOT/force-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
+    fail "teardown allowed a sub-firstmate with in-flight child work"
+  fi
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    || fail "force teardown failed to discard child work"
+  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired sub-firstmate home"
+  [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
+  [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
+  grep -F -- '- domain ' "$home/data/firstmates.md" >/dev/null && fail "force teardown did not remove firstmate registry route"
+  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
+  grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
+  pass "firstmate force teardown discards child work"
 }
 
 test_firstmate_idle_pane_is_not_stale() {
@@ -293,6 +368,7 @@ test_lock_status_is_per_home
 test_home_seed_registry_and_disjoint_routing
 test_firstmate_spawn_records_home_meta
 test_recovery_respawn_uses_persistent_home
-test_firstmate_teardown_requires_empty_home
+test_firstmate_teardown_retires_empty_home
+test_firstmate_force_teardown_discards_child_work
 test_firstmate_idle_pane_is_not_stale
 test_watcher_ignores_foreign_tmux_windows

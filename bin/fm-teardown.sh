@@ -7,9 +7,9 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
-# Sub-firstmates (kind=firstmate in meta) are persistent homes, not returned
-# project worktrees. Teardown only kills their direct window after their own
-# home has no in-flight crewmate meta files.
+# Sub-firstmates (kind=firstmate in meta) are retired explicitly. Normal
+# teardown refuses while their home has in-flight crewmate meta files; --force
+# discards that child work, kills child windows, and removes the retired home.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check. Only use it when the captain has
 #   explicitly said to discard the work.
@@ -20,6 +20,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+FIRSTMATE_REG="$DATA/firstmates.md"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -52,6 +53,101 @@ default_branch() {
   return 1
 }
 
+meta_value() {
+  local meta=$1 key=$2
+  grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+safe_rm_rf() {
+  local target=$1 label=$2 abs_target abs_home abs_root
+  [ -n "$target" ] || return 0
+  [ -e "$target" ] || return 0
+  if [ -d "$target" ]; then
+    abs_target=$(cd "$target" && pwd)
+  else
+    abs_target=$(cd "$(dirname "$target")" && pwd)/$(basename "$target")
+  fi
+  abs_home=$(cd "$FM_HOME" && pwd 2>/dev/null || true)
+  abs_root=$(cd "$FM_ROOT" && pwd)
+  case "$abs_target" in
+    ''|/) echo "REFUSED: unsafe $label removal target $target" >&2; return 1 ;;
+  esac
+  if [ -n "$abs_home" ] && [ "$abs_target" = "$abs_home" ]; then
+    echo "REFUSED: unsafe $label removal target $target is the active firstmate home" >&2
+    return 1
+  fi
+  if [ "$abs_target" = "$abs_root" ]; then
+    echo "REFUSED: unsafe $label removal target $target is the firstmate repo" >&2
+    return 1
+  fi
+  rm -rf -- "$target"
+}
+
+remove_firstmate_home() {
+  local home=$1 label=$2 abs_home_path abs_active_home abs_root
+  [ -n "$home" ] || return 0
+  [ -e "$home" ] || return 0
+  abs_home_path=$(cd "$home" && pwd)
+  abs_active_home=$(cd "$FM_HOME" && pwd 2>/dev/null || true)
+  abs_root=$(cd "$FM_ROOT" && pwd)
+  case "$abs_home_path" in
+    ''|/) echo "REFUSED: unsafe $label removal target $home" >&2; return 1 ;;
+  esac
+  if [ -n "$abs_active_home" ] && [ "$abs_home_path" = "$abs_active_home" ]; then
+    echo "REFUSED: unsafe $label removal target $home is the active firstmate home" >&2
+    return 1
+  fi
+  if [ "$abs_home_path" = "$abs_root" ]; then
+    echo "REFUSED: unsafe $label removal target $home is the firstmate repo" >&2
+    return 1
+  fi
+  if command -v treehouse >/dev/null 2>&1; then
+    ( cd "$FM_ROOT" && treehouse return --force "$home" ) || safe_rm_rf "$home" "$label"
+  else
+    safe_rm_rf "$home" "$label"
+  fi
+}
+
+cleanup_firstmate_home_children() {
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    child_t=$(meta_value "$child_meta" window)
+    child_wt=$(meta_value "$child_meta" worktree)
+    child_proj=$(meta_value "$child_meta" project)
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    [ -n "$child_t" ] && tmux kill-window -t "$child_t" 2>/dev/null || true
+    if [ "$child_kind" = firstmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+        cleanup_firstmate_home_children "$child_home"
+        remove_firstmate_home "$child_home" "child firstmate home"
+      fi
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
+      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf "$child_wt" "child worktree"
+      else
+        safe_rm_rf "$child_wt" "child worktree"
+      fi
+    fi
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"
+  done
+}
+
+remove_firstmate_registry_entry() {
+  local id=$1 tmp
+  [ -f "$FIRSTMATE_REG" ] || return 0
+  tmp="$FIRSTMATE_REG.tmp.$$"
+  grep -vE "^- $id( |$)" "$FIRSTMATE_REG" > "$tmp" || true
+  mv "$tmp" "$FIRSTMATE_REG"
+}
+
 if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   SUB_STATE="$HOME_PATH/state"
@@ -63,6 +159,11 @@ if [ "$KIND" = firstmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
+fi
+
+if [ "$KIND" = firstmate ] && [ "$FORCE" = "--force" ]; then
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -120,11 +221,12 @@ if [ -d "$WT" ] && [ "$KIND" != firstmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-if [ "$KIND" = firstmate ] && [ -d "${HOME_PATH:-$WT}" ]; then
-  rm -f "${HOME_PATH:-$WT}/.claude/settings.local.json" "${HOME_PATH:-$WT}/.opencode/plugins/fm-turn-end.js"
-fi
-
 tmux kill-window -t "$T" 2>/dev/null || true
+if [ "$KIND" = firstmate ]; then
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  remove_firstmate_home "$HOME_PATH" "sub-firstmate home"
+  remove_firstmate_registry_entry "$ID"
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
 if [ "$KIND" != scout ] && [ "$KIND" != firstmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

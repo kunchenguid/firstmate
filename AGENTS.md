@@ -429,7 +429,8 @@ A sub-firstmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=firstmate` only when the captain or main firstmate explicitly decides to retire that domain owner.
 The safety check is the sub-firstmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
-When it is safe, teardown kills the direct tmux window and clears the main home metadata, but it leaves the sub-firstmate home on disk for audit or later reuse.
+When it is safe, teardown kills the direct tmux window, removes the `data/firstmates.md` route, clears the main home metadata, and removes the retired sub-firstmate home.
+With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and sub-home state, removes the route, and removes the retired sub-firstmate home.
 
 ### Scout tasks (report instead of PR)
 

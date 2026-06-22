@@ -178,6 +178,14 @@ registry_line_for_project() {
   printf '%s\n' "$line"
 }
 
+project_mode_in_home() {
+  local home=$1 project=$2 mode yolo
+  read -r mode yolo <<EOF
+$(FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+EOF
+  printf '%s\n' "$mode"
+}
+
 sync_project_registry() {
   local home=$1 sub_reg tmp project line today names
   shift
@@ -204,6 +212,21 @@ sync_project_registry() {
     printf '%s\n' "$line" >> "$tmp"
   done
   mv "$tmp" "$sub_reg"
+}
+
+initialize_no_mistakes_project() {
+  local home=$1 project=$2 mode dst
+  mode=$(project_mode_in_home "$home" "$project")
+  [ "$mode" = no-mistakes ] || return 0
+  command -v no-mistakes >/dev/null 2>&1 || {
+    echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
+    return 1
+  }
+  dst="$home/projects/$project"
+  ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
+    echo "error: failed to initialize no-mistakes for $project at $dst" >&2
+    return 1
+  }
 }
 
 write_registry() {
@@ -242,6 +265,9 @@ seed_home() {
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
+  for project in "$@"; do
+    initialize_no_mistakes_project "$home" "$project"
+  done
 
   if [ ! -f "$DATA/$id/brief.md" ]; then
     "$FM_ROOT/bin/fm-brief.sh" "$id" --firstmate "$@"
