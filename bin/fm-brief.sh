@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Scaffold a crewmate brief at data/<task-id>/brief.md with the standard
-# Setup/Rules/Definition-of-done contract filled in. Firstmate then replaces the
-# {TASK} placeholder with the task description, acceptance criteria, and context,
-# and may adjust other sections when the task genuinely deviates (e.g. working an
-# existing external PR instead of shipping a new one).
+# Scaffold a crewmate brief or persistent sub-firstmate charter at
+# data/<task-id>/brief.md under the active firstmate home.
+# For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
+# filled in. Firstmate then replaces the {TASK} placeholder with the task
+# description, acceptance criteria, and context, and may adjust other sections
+# when the task genuinely deviates (e.g. working an existing external PR instead
+# of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
 #        fm-brief.sh <task-id> --firstmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at

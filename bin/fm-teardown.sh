@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, kill the tmux window,
-# clear volatile state, refresh/prune the project's clone for PR-based ship tasks,
-# then print a backlog-refresh reminder.
+# Tear down a finished task: return the treehouse worktree or retire a
+# sub-firstmate home, kill the tmux window, clear volatile state, refresh/prune
+# the project's clone for PR-based ship tasks, then print a backlog-refresh
+# reminder.
 # REFUSES if the worktree holds work not on any remote, because treehouse return
 # hard-resets the worktree and kills its processes.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -9,9 +10,11 @@
 # product - teardown proceeds once the report exists, and refuses without it.
 # Sub-firstmates (kind=firstmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
-# discards that child work, kills child windows, and removes the retired home.
+# is the approved discard path that prevalidates child removal targets, discards
+# child work, kills child windows, and removes the retired home.
 # Usage: fm-teardown.sh <task-id> [--force]
-#   --force skips the unpushed-work check. Only use it when the captain has
+#   --force skips the unpushed-work check for ordinary tasks and discards
+#   sub-firstmate child work for kind=firstmate. Only use it when the captain has
 #   explicitly said to discard the work.
 set -eu
 

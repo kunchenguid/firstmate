@@ -121,7 +121,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Optional sub-firstmates** - `data/firstmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-  `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes listed `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --firstmate` launches it through the same tmux and status-file path as any direct report.
+  `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --firstmate` launches it through the same tmux and status-file path as any direct report.
+  Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
   `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
   The same project may appear in multiple sub-firstmate homes when their scopes differ, such as issue triage versus feature development.
   Idle sub-firstmate panes are healthy; teardown is explicit and refuses while the sub-home has in-flight work unless the captain has approved discard with `--force`.
@@ -144,7 +145,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`            | Scaffold a ship brief, a report-only scout brief with `--scout`, or a sub-firstmate charter with `--firstmate`      |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
-| `fm-home-seed.sh`        | Provision an isolated sub-firstmate home, clone listed projects, initialize gates, and maintain `data/firstmates.md`  |
+| `fm-home-seed.sh`        | Provision a sub-firstmate home transactionally, clone projects, initialize gates, and maintain `data/firstmates.md`  |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent sub-firstmate with `--firstmate`                            |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
@@ -165,9 +166,10 @@ The first mate drives these; you rarely need to, but they work by hand too.
 The shared orchestrator behavior lives in `AGENTS.md` - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/firstmates.md` during bootstrap.
 Persistent sub-firstmate routes live locally in `data/firstmates.md`.
-Each line records the sub-firstmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate home assignments.
+Each line records the sub-firstmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
 Sub-firstmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
+For `no-mistakes` projects, seeding initializes only newly cloned sub-home projects and refuses to mutate a preexisting clone that is not already initialized.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
@@ -210,6 +212,7 @@ shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, and /afk presence-gating tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
+tests/fm-sub-firstmate.test.sh            # persistent sub-firstmate routing, seeding, spawn, recovery, teardown, and FM_HOME tests
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

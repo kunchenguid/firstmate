@@ -73,7 +73,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
   projects.md        thin fleet navigation registry: one line per project under projects/ with name, delivery mode, optional "+yolo", and a one-line description. It is firstmate-private, not a project knowledge dump; fm-project-mode.sh parses it (section 6)
-  firstmates.md      sub-firstmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains and validates home uniqueness (section 6)
+  firstmates.md      sub-firstmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains it and validates unique ids, unique homes, and non-overlapping home paths (section 6)
   <id>/brief.md      per-task crewmate brief, or per-sub-firstmate charter brief when kind=firstmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
@@ -247,6 +247,10 @@ Every persistent sub-firstmate has one line:
 The `scope:` field is used during intake; the `projects:` field is a non-exclusive clone list, not ownership.
 Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` asks `treehouse get` for the home.
 The charter must be filled before seeding; direct seed without a preexisting brief requires `FM_FIRSTMATE_CHARTER`.
+Seeding is transactional: if validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
+`bin/fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
+Sub-firstmate project lists may include `no-mistakes` and `direct-PR` projects only; `local-only` projects stay with the main firstmate.
+For `no-mistakes` projects, seeding initializes only newly cloned sub-home projects and refuses to mutate a preexisting clone that is not already initialized.
 
 ### Project memory ownership
 

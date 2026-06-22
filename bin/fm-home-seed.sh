@@ -7,12 +7,18 @@
 #       a fresh firstmate worktree via treehouse get. Projects are cloned
 #       from this home into the sub-home's projects/ directory.
 #       That project list is non-exclusive provisioning data. The charter brief
-#       is copied to data/charter.md, no-mistakes projects are initialized,
-#       a .fm-sub-firstmate-home marker is written, and data/firstmates.md is updated.
+#       is copied to data/charter.md, newly cloned no-mistakes projects are
+#       initialized, a .fm-sub-firstmate-home marker is written, and
+#       data/firstmates.md is updated.
+#       Seeding is transactional: on validation, clone, init, or registry failure,
+#       generated briefs, new homes, new project clones, and registry edits are
+#       rolled back. Treehouse-acquired homes are returned only when the rollback
+#       target is safe.
 #       Set FM_FIRSTMATE_SCOPE='<scope>' to override the registry routing scope.
 #       Otherwise the registry summary and scope are derived from the filled charter brief.
 #   fm-home-seed.sh validate
-#       Refuse duplicate home assignments in data/firstmates.md.
+#       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
+#       data/firstmates.md.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

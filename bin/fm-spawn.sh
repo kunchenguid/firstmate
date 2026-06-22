@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Spawn a crewmate: tmux window -> treehouse worktree subshell -> agent launched with its brief.
+# Spawn a direct report: a crewmate in a treehouse worktree, or a sub-firstmate in
+# its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --firstmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
