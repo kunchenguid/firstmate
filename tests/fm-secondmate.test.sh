@@ -1790,6 +1790,139 @@ EOF
   pass "idle kind=secondmate pane is healthy and not stale"
 }
 
+seed_secondmate_home_marker() {
+  # Make a directory look like a genuine seeded secondmate home for handoff tests.
+  local home=$1 id=$2
+  mark_firstmate_home "$home"
+  mkdir -p "$home/data"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+}
+
+test_secondmate_charter_brief_is_idle_by_default() {
+  local home brief
+  home="$TMP_ROOT/idle-charter-home"
+  mkdir -p "$home/data" "$home/state"
+  scaffold_secondmate_charter "$home" idle-sm 'feature work for alpha' alpha
+  brief="$home/data/idle-sm/brief.md"
+  [ -f "$brief" ] || fail "secondmate charter brief was not scaffolded"
+  # Idle contract: waits for routed work, never self-initiates.
+  grep -F 'go idle and wait silently for the main firstmate' "$brief" >/dev/null \
+    || fail "charter brief does not tell the secondmate to go idle and wait for routed work"
+  grep -F 'Act only on tasks the main firstmate routes to you' "$brief" >/dev/null \
+    || fail "charter brief does not restrict work to routed tasks"
+  grep -F 'never spawn a survey, audit, or any self-directed' "$brief" >/dev/null \
+    || fail "charter brief does not forbid self-initiated survey/audit work"
+  # Reconcile-on-startup must remain: bootstrap and recovery still run, scoped to own work.
+  grep -F 'run normal firstmate bootstrap and recovery' "$brief" >/dev/null \
+    || fail "charter brief dropped the bootstrap/recovery reconciliation step"
+  grep -F 'only to RECONCILE work that is already yours' "$brief" >/dev/null \
+    || fail "charter brief does not scope startup work to reconciling existing work"
+  # Regression guard: the over-broad phrasing that got misread as "go find work" is gone.
+  if grep -F 'then supervise work that matches your scope' "$brief" >/dev/null; then
+    fail "charter brief still uses the over-broad 'supervise work that matches your scope' phrasing"
+  fi
+  pass "secondmate charter brief is idle by default and does not self-initiate work"
+}
+
+test_backlog_handoff_moves_in_scope_items() {
+  local home subhome subhome_abs out before
+  home="$TMP_ROOT/handoff-main"
+  subhome="$TMP_ROOT/handoff-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" design
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf -- '- design - feature work (home: %s; scope: feature work; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] live-task - active work (repo: alpha, since 2026-06-20)
+
+## Queued
+- [ ] feat-x - add feature x (repo: alpha)
+- [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits
+- [ ] bug-z - fix bug z (repo: gamma)
+
+## Done
+- [x] old-task - shipped thing - local main (merged 2026-06-19)
+EOF
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y) \
+    || fail "handoff failed for in-scope items"
+  printf '%s\n' "$out" | grep -F 'handed off 2 item(s) to design' >/dev/null \
+    || fail "handoff did not report the moved items"
+
+  # Moved items leave the main backlog; untouched items stay.
+  grep -F 'feat-x' "$home/data/backlog.md" >/dev/null && fail "feat-x was not removed from the main backlog"
+  grep -F 'feat-y' "$home/data/backlog.md" >/dev/null && fail "feat-y was not removed from the main backlog"
+  grep -F 'bug-z' "$home/data/backlog.md" >/dev/null || fail "out-of-scope bug-z was wrongly removed from the main backlog"
+  grep -F 'live-task' "$home/data/backlog.md" >/dev/null || fail "in-flight item was wrongly removed from the main backlog"
+
+  # Moved items arrive in the secondmate backlog, verbatim and under their section.
+  grep -F -- '- [ ] feat-x - add feature x (repo: alpha)' "$subhome/data/backlog.md" >/dev/null \
+    || fail "feat-x did not arrive verbatim in the secondmate backlog"
+  grep -F -- '- [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits' "$subhome/data/backlog.md" >/dev/null \
+    || fail "feat-y line was not preserved verbatim in the secondmate backlog"
+  awk '/^## Queued/{q=1;next} /^## /{q=0} q && /feat-x/{found=1} END{exit found?0:1}' "$subhome/data/backlog.md" \
+    || fail "feat-x did not land under the Queued section in the secondmate backlog"
+
+  # Idempotent re-run: no error, no duplication, main untouched.
+  before=$(cat "$home/data/backlog.md")
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y >/dev/null 2>&1 \
+    || fail "idempotent re-run failed"
+  [ "$(grep -cF -- '- [ ] feat-x - add feature x (repo: alpha)' "$subhome/data/backlog.md")" -eq 1 ] \
+    || fail "idempotent re-run duplicated feat-x in the secondmate backlog"
+  [ "$before" = "$(cat "$home/data/backlog.md")" ] || fail "idempotent re-run mutated the main backlog"
+
+  # A key matching neither backlog aborts atomically: nothing moves.
+  before=$(cat "$home/data/backlog.md")
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design bug-z no-such-key >/dev/null 2>&1; then
+    fail "handoff succeeded despite an unmatched key"
+  fi
+  [ "$before" = "$(cat "$home/data/backlog.md")" ] || fail "handoff with an unmatched key still mutated the main backlog"
+  grep -F 'bug-z' "$home/data/backlog.md" >/dev/null || fail "atomic abort lost the valid bug-z item from the main backlog"
+
+  # An unregistered secondmate is refused.
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" ghost bug-z >/dev/null 2>&1; then
+    fail "handoff accepted an unregistered secondmate id"
+  fi
+  pass "fm-backlog-handoff moves in-scope items, is idempotent, and aborts safely"
+}
+
+test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
+  local home subhome subhome_abs projhome projhome_abs
+  home="$TMP_ROOT/handoff-safety-main"
+  subhome="$TMP_ROOT/handoff-safety-sub"
+  projhome="$TMP_ROOT/handoff-safety-proj"
+  mkdir -p "$home/data" "$home/state"
+
+  # A Done item handed into a secondmate backlog lacking a Done section gets one.
+  seed_secondmate_home_marker "$subhome" archive
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf '## Queued\n- [ ] keep-me - stays (repo: alpha)\n' > "$subhome/data/backlog.md"
+  printf -- '- archive - archival (home: %s; scope: archival; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Done
+- [x] shipped-task - shipped thing - local main (merged 2026-06-19)
+EOF
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" archive shipped-task >/dev/null \
+    || fail "handoff of a Done item failed"
+  grep -F '## Done' "$subhome/data/backlog.md" >/dev/null \
+    || fail "handoff did not create the missing Done section in the secondmate backlog"
+  awk '/^## Done/{d=1;next} /^## /{d=0} d && /shipped-task/{found=1} END{exit found?0:1}' "$subhome/data/backlog.md" \
+    || fail "Done item did not land under the created Done section"
+  grep -F 'keep-me' "$subhome/data/backlog.md" >/dev/null || fail "handoff clobbered the existing secondmate backlog content"
+
+  # A registered home that is not a seeded secondmate home (e.g. a project clone)
+  # is refused, and nothing is written into it.
+  make_git_project "$projhome"
+  projhome_abs=$(cd "$projhome" && pwd -P)
+  printf -- '- proj-sm - bogus (home: %s; scope: bogus; projects: alpha; added 2026-06-22)\n' "$projhome_abs" >> "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" proj-sm shipped-task >/dev/null 2>&1; then
+    fail "handoff wrote into a destination that is not a seeded secondmate home"
+  fi
+  [ ! -e "$projhome/data/backlog.md" ] || fail "handoff created a backlog inside a non-secondmate home"
+  pass "fm-backlog-handoff creates absent sections and refuses non-secondmate homes"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
@@ -1838,3 +1971,6 @@ test_secondmate_force_teardown_refuses_unregistered_child_worktree
 test_secondmate_teardown_refuses_home_ancestor
 test_secondmate_teardown_refuses_home_descendants
 test_secondmate_idle_pane_is_not_stale
+test_secondmate_charter_brief_is_idle_by_default
+test_backlog_handoff_moves_in_scope_items
+test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home
