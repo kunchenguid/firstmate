@@ -294,7 +294,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$TURNEND}
 LAUNCH=${LAUNCH//__PIEXT__/$STATE/$ID.pi-ext.ts}
 if [ "$KIND" = firstmate ]; then
   sq_home=$(printf "'"; printf '%s' "$PROJ_ABS" | sed "s/'/'\\\\''/g"; printf "'")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3

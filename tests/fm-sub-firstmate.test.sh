@@ -166,7 +166,7 @@ test_firstmate_spawn_records_home_meta() {
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-fake")
   log="$TMP_ROOT/spawn-fake/tmux.log"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-fake/pane.txt" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/parent-config" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --firstmate >/dev/null \
     || fail "firstmate spawn failed"
 
@@ -177,6 +177,7 @@ test_firstmate_spawn_records_home_meta() {
   grep -F 'treehouse get' "$log" >/dev/null && fail "firstmate spawn should not run project treehouse get"
   grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "firstmate launch did not set FM_HOME to subhome"
   grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear operational overrides"
+  grep -F 'FM_CONFIG_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear config override"
   grep -F 'notify=' "$log" >/dev/null && fail "firstmate codex launch should not install parent turn-end notify"
   grep -F 'turn-ended' "$log" >/dev/null && fail "firstmate launch should not reference parent turn-end marker"
   pass "kind=firstmate spawn launches in the home and records routing meta"
@@ -263,6 +264,27 @@ EOF
   pass "idle kind=firstmate pane is healthy and not stale"
 }
 
+test_watcher_ignores_foreign_tmux_windows() {
+  local home fakebin out pid window
+  home="$TMP_ROOT/watch-foreign-home"
+  mkdir -p "$home/state"
+  window="firstmate:fm-sub-child"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/watch-foreign-fake")
+  out="$TMP_ROOT/watch-foreign-fake/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_LOG="$TMP_ROOT/watch-foreign-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/watch-foreign-fake/pane.txt" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    wait "$pid" || true
+    grep -F "stale: $window" "$out" >/dev/null && fail "foreign tmux window triggered stale wake"
+    fail "watcher exited unexpectedly while foreign window was present"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  grep -F "stale: $window" "$out" >/dev/null && fail "foreign tmux window triggered stale wake"
+  pass "watcher ignores fm windows not recorded in this home"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_and_disjoint_routing
@@ -270,3 +292,4 @@ test_firstmate_spawn_records_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_requires_empty_home
 test_firstmate_idle_pane_is_not_stale
+test_watcher_ignores_foreign_tmux_windows

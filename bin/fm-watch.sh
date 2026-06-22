@@ -87,6 +87,20 @@ window_kind() {
   echo unknown
 }
 
+recorded_windows() {
+  local meta w seen=
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    [ -n "$w" ] || continue
+    case "$seen" in
+      *"|$w|"*) continue ;;
+    esac
+    seen="$seen|$w|"
+    printf '%s\n' "$w"
+  done
+}
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
@@ -231,7 +245,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
     fi
-  done < <(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true)
+  done < <(recorded_windows)
 
   # Heartbeat: firstmate reviews the whole fleet at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

@@ -228,6 +228,7 @@ test_stale_enqueue_before_suppressor() {
   capture_file="$dir/pane.txt"
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
