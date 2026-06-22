@@ -125,6 +125,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
   `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
   The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
+  Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
+  After seeding a secondmate, `fm-backlog-handoff.sh` moves already-judged in-scope queued items from the main backlog into that secondmate home so the domain queue starts in the right place.
   Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
   `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
@@ -142,6 +144,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh`        | Detect missing toolchain pieces; refresh clones best-effort; install tools only after consent                       |
 | `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
+| `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
 | `fm-brief.sh`            | Scaffold a ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate`      |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
@@ -170,6 +173,7 @@ Each line records the secondmate id, charter summary, absolute home path, natura
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
@@ -213,7 +217,7 @@ shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, and /afk presence-gating tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
-tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, spawn, recovery, teardown, and FM_HOME tests
+tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh unpushed-work safety check: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
