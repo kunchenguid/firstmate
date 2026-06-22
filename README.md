@@ -121,7 +121,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Optional sub-firstmates** - `data/firstmates.md` records persistent domain owners with natural-language scopes, project clone lists, and home paths.
-  `fm-home-seed.sh` provisions the isolated home, clones the listed projects into it, initializes listed `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --firstmate` launches it through the same tmux and status-file path as any direct report.
+  `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes listed `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --firstmate` launches it through the same tmux and status-file path as any direct report.
+  `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
   The same project may appear in multiple sub-firstmate homes when their scopes differ, such as issue triage versus feature development.
   Idle sub-firstmate panes are healthy; teardown is explicit and refuses while the sub-home has in-flight work unless the captain has approved discard with `--force`.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
@@ -166,6 +167,7 @@ Personal preferences for one captain's fleet live locally in `data/captain.md`; 
 Persistent sub-firstmate routes live locally in `data/firstmates.md`.
 Each line records the sub-firstmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate home assignments.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
+Sub-firstmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.

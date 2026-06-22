@@ -170,10 +170,11 @@ test_home_seed_registry_scope_and_overlapping_projects() {
   make_git_project "$home/projects/beta"
   make_git_project "$home/projects/gamma"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/alpha.git"
+  add_file_origin "$home/projects/beta" "$TMP_ROOT/remotes/beta.git"
   add_file_origin "$home/projects/gamma" "$TMP_ROOT/remotes/gamma.git"
   cat > "$home/data/projects.md" <<EOF
 - alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
-- beta [local-only] - beta project (added 2026-06-22)
+- beta [direct-PR] - beta project (added 2026-06-22)
 - gamma - gamma project (added 2026-06-22)
 EOF
 
@@ -188,13 +189,13 @@ EOF
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
   [ -d "$subhome/projects/gamma/.git" ] || fail "gamma was not cloned into subhome"
-  git -C "$subhome/projects/beta" remote get-url origin >/dev/null 2>&1 && fail "local-only beta kept an origin remote"
+  git -C "$subhome/projects/beta" remote get-url origin >/dev/null 2>&1 || fail "direct-PR beta did not keep an origin remote"
   [ -f "$subhome/projects/gamma/.no-mistakes-init" ] || fail "no-mistakes project was not initialized"
   [ -f "$subhome/projects/gamma/.no-mistakes-doctor" ] || fail "no-mistakes project was not checked"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" alpha)
   [ "$out" = "direct-PR on" ] || fail "seed did not preserve alpha delivery mode in subhome registry"
   out=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" beta)
-  [ "$out" = "local-only off" ] || fail "seed did not preserve beta delivery mode in subhome registry"
+  [ "$out" = "direct-PR off" ] || fail "seed did not preserve beta delivery mode in subhome registry"
   grep -F -- '- design - feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line was not written"
   grep -F 'scope: feature design and implementation for alpha beta gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record scope"
   grep -F 'projects: alpha, beta, gamma' "$home/data/firstmates.md" >/dev/null || fail "registry line did not record project clone list"
@@ -213,13 +214,32 @@ EOF
   pass "firstmates registry records scopes and allows overlapping project clone lists"
 }
 
+test_home_seed_refuses_local_only_project() {
+  local home subhome err
+  home="$TMP_ROOT/local-only-seed-home"
+  subhome="$TMP_ROOT/local-only-seed-subhome"
+  err="$TMP_ROOT/local-only-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed a local-only project into a sub-firstmate home"
+  fi
+  grep -F 'project alpha is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
+    || fail "seed did not explain local-only project rejection"
+  [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
+  pass "home seeding refuses local-only projects"
+}
+
 test_home_seed_refuses_active_home_and_root() {
   local home err
   home="$TMP_ROOT/active-seed-home"
   err="$TMP_ROOT/active-seed.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
-  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/active-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for active-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$home" alpha >/dev/null 2>"$err"; then
@@ -243,9 +263,10 @@ test_home_seed_refuses_home_marked_for_another_id() {
   err="$TMP_ROOT/marked-seed.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/marked-alpha.git"
   git clone --quiet "$ROOT" "$subhome"
   printf 'other\n' > "$subhome/.fm-sub-firstmate-home"
-  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for marked-home seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
@@ -263,9 +284,10 @@ test_home_seed_refuses_home_registered_to_another_id() {
   err="$TMP_ROOT/registered-seed.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/registered-alpha.git"
   git clone --quiet "$ROOT" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
-  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/firstmates.md"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for registered-home seed test"
 
@@ -862,6 +884,7 @@ test_watcher_ignores_foreign_tmux_windows() {
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_scope_and_overlapping_projects
+test_home_seed_refuses_local_only_project
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id

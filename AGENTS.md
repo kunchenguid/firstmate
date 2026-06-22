@@ -251,6 +251,8 @@ It should be clear enough that the main firstmate can distinguish domains by the
 For example, one sub-firstmate may own GitHub issue triage across several repos while another owns feature development on some of the same repos.
 The `projects:` field is only the list of project clones to provision into that sub-firstmate home for local work and recovery.
 It is not an ownership claim, and project names may overlap across sub-firstmates.
+Sub-firstmate homes may only provision PR-based projects: `no-mistakes` and `direct-PR`.
+`local-only` projects stay with the main firstmate because their delivery path merges into the main local checkout.
 `bin/fm-home-seed.sh` validates that one home directory belongs to exactly one sub-firstmate; it does not decide where tasks route.
 Before every delegation, read the registered scopes and decide whether the work belongs to one of them using the same judgment you use to resolve the project during intake.
 If an existing sub-firstmate's scope fits, route the work to that sub-firstmate instead of improvising onto a convenient one.
@@ -260,7 +262,7 @@ It is an isolated firstmate home with its own `state/`, `data/`, `config/`, and 
 
 To create one, choose a clear natural-language scope, scaffold a charter with `bin/fm-brief.sh <id> --firstmate <project>...`, replace `{TASK}` with the charter, seed the home with `FM_FIRSTMATE_SCOPE='<scope>' bin/fm-home-seed.sh <id> <home|-> <project>...`, then launch it with `bin/fm-spawn.sh <id> --firstmate`.
 Using `-` as the home asks `fm-home-seed.sh` to acquire a clean firstmate worktree through `treehouse get`; passing a path creates or reuses that home.
-The seed copies the charter into the sub-home as `data/charter.md`, clones each listed project into its `projects/`, initializes no-mistakes for listed `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
+The seed refuses `local-only` projects, copies the charter into the sub-home as `data/charter.md`, clones each listed PR-based project into its `projects/`, initializes no-mistakes for listed `no-mistakes` projects, writes the sub-home marker used by teardown safety checks, and records the route in `data/firstmates.md`.
 
 ### Project memory ownership
 
@@ -334,6 +336,7 @@ Then resolve the sub-firstmate scope.
 Read `data/firstmates.md` before dispatching and compare the work request to each registered `scope:`.
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the sub-firstmate whose natural-language scope actually fits the work, such as triage versus feature development.
+If the resolved project is `local-only`, keep the work with the main firstmate even when a sub-firstmate scope sounds relevant.
 If a sub-firstmate's scope fits, steer that sub-firstmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 Do not spawn a direct crewmate for work that belongs to a sub-firstmate scope unless the sub-firstmate is blocked or the captain explicitly redirects it.

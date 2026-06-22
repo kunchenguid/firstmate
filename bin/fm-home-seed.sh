@@ -209,33 +209,42 @@ clone_project() {
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
+  if [ "$mode" = local-only ]; then
+    echo "error: project $project is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects" >&2
+    return 1
+  fi
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
-    if [ "$mode" = local-only ]; then
-      git -C "$dst" remote remove origin 2>/dev/null || true
-    else
-      url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-      [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
-      dst_url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
-      [ -n "$dst_url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $url" >&2; return 1; }
-      [ "$dst_url" = "$url" ] || {
-        echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
-        return 1
-      }
-    fi
-    return 0
-  fi
-  if [ "$mode" = local-only ]; then
-    git clone --quiet "$src" "$dst"
-  else
     url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
     [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
-    git clone --quiet "$url" "$dst"
+    dst_url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+    [ -n "$dst_url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $url" >&2; return 1; }
+    [ "$dst_url" = "$url" ] || {
+      echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
+      return 1
+    }
+    return 0
   fi
+  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+  git clone --quiet "$url" "$dst"
+}
+
+validate_seed_project() {
+  local project=$1 src mode url
+  src="$PROJECTS/$project"
+  [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
+  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  read -r mode _ <<EOF
+$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+EOF
   if [ "$mode" = local-only ]; then
-    git -C "$dst" remote remove origin 2>/dev/null || true
+    echo "error: project $project is local-only; sub-firstmate routes support only no-mistakes and direct-PR projects" >&2
+    return 1
   fi
+  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
 registry_line_for_project() {
@@ -320,6 +329,9 @@ seed_home() {
 
   mkdir -p "$DATA"
   validate_registry
+  for project in "$@"; do
+    validate_seed_project "$project"
+  done
 
   home=$(ensure_home "$requested_home")
   validate_home_assignment "$id" "$home"
