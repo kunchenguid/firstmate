@@ -21,6 +21,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 FIRSTMATE_REG="$DATA/firstmates.md"
+SUB_HOME_MARKER=".fm-sub-firstmate-home"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -58,17 +59,33 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
-safe_rm_rf() {
+path_is_ancestor_of() {
+  local ancestor=$1 path=$2
+  [ -n "$ancestor" ] || return 1
+  [ -n "$path" ] || return 1
+  [ "$ancestor" != "$path" ] || return 1
+  case "$path" in
+    "$ancestor"/*) return 0 ;;
+  esac
+  return 1
+}
+
+removal_target_abs_path() {
+  local target=$1
+  if [ -d "$target" ]; then
+    cd "$target" && pwd -P
+  else
+    cd "$(dirname "$target")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$target")"
+  fi
+}
+
+validate_removal_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
-  if [ -d "$target" ]; then
-    abs_target=$(cd "$target" && pwd)
-  else
-    abs_target=$(cd "$(dirname "$target")" && pwd)/$(basename "$target")
-  fi
-  abs_home=$(cd "$FM_HOME" && pwd 2>/dev/null || true)
-  abs_root=$(cd "$FM_ROOT" && pwd)
+  abs_target=$(removal_target_abs_path "$target")
+  abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P || true)
+  abs_root=$(cd "$FM_ROOT" && pwd -P)
   case "$abs_target" in
     ''|/) echo "REFUSED: unsafe $label removal target $target" >&2; return 1 ;;
   esac
@@ -80,31 +97,36 @@ safe_rm_rf() {
     echo "REFUSED: unsafe $label removal target $target is the firstmate repo" >&2
     return 1
   fi
+  if [ -n "$abs_home" ] && path_is_ancestor_of "$abs_target" "$abs_home"; then
+    echo "REFUSED: unsafe $label removal target $target is an ancestor of the active firstmate home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_target" "$abs_root"; then
+    echo "REFUSED: unsafe $label removal target $target is an ancestor of the firstmate repo" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_target"
+}
+
+safe_rm_rf() {
+  local target=$1 label=$2
+  validate_removal_target "$target" "$label" >/dev/null || return 1
   rm -rf -- "$target"
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 abs_home_path abs_active_home abs_root
+  local home=$1 label=$2 abs_home_path
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
-  abs_home_path=$(cd "$home" && pwd)
-  abs_active_home=$(cd "$FM_HOME" && pwd 2>/dev/null || true)
-  abs_root=$(cd "$FM_ROOT" && pwd)
-  case "$abs_home_path" in
-    ''|/) echo "REFUSED: unsafe $label removal target $home" >&2; return 1 ;;
-  esac
-  if [ -n "$abs_active_home" ] && [ "$abs_home_path" = "$abs_active_home" ]; then
-    echo "REFUSED: unsafe $label removal target $home is the active firstmate home" >&2
-    return 1
-  fi
-  if [ "$abs_home_path" = "$abs_root" ]; then
-    echo "REFUSED: unsafe $label removal target $home is the firstmate repo" >&2
+  abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
+    echo "REFUSED: unsafe $label removal target $home is not a seeded sub-firstmate home" >&2
     return 1
   fi
   if command -v treehouse >/dev/null 2>&1; then
-    ( cd "$FM_ROOT" && treehouse return --force "$home" ) || safe_rm_rf "$home" "$label"
+    ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || safe_rm_rf "$abs_home_path" "$label"
   else
-    safe_rm_rf "$home" "$label"
+    safe_rm_rf "$abs_home_path" "$label"
   fi
 }
 

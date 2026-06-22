@@ -157,7 +157,7 @@ fi
 
 if [ "$KIND" = firstmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
-  PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd)"
+  PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd -P)"
   WT="$PROJ_ABS"
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"

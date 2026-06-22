@@ -19,6 +19,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/firstmates.md"
+SUB_HOME_MARKER=".fm-sub-firstmate-home"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> <owned-project>..." >&2
@@ -116,8 +117,35 @@ abs_path_for_new() {
   parent=$(dirname "$path")
   base=$(basename "$path")
   mkdir -p "$parent"
-  parent=$(cd "$parent" && pwd)
+  parent=$(cd "$parent" && pwd -P)
   printf '%s/%s\n' "$parent" "$base"
+}
+
+resolved_path() {
+  local path=$1 parent base
+  if [ -d "$path" ]; then
+    cd "$path" && pwd -P
+    return
+  fi
+  parent=$(dirname "$path")
+  base=$(basename "$path")
+  parent=$(cd "$parent" && pwd -P)
+  printf '%s/%s\n' "$parent" "$base"
+}
+
+refuse_active_home_path() {
+  local home=$1 abs_home abs_active_home abs_root
+  abs_home=$(resolved_path "$home")
+  abs_active_home=$(resolved_path "$FM_HOME")
+  abs_root=$(resolved_path "$FM_ROOT")
+  if [ "$abs_home" = "$abs_active_home" ]; then
+    echo "error: sub-firstmate home cannot be the active firstmate home: $home" >&2
+    return 1
+  fi
+  if [ "$abs_home" = "$abs_root" ]; then
+    echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    return 1
+  fi
 }
 
 acquire_treehouse_home() {
@@ -140,11 +168,14 @@ SH
 ensure_home() {
   local requested=$1 home
   if [ "$requested" = "-" ]; then
-    acquire_treehouse_home
+    home=$(acquire_treehouse_home)
+    refuse_active_home_path "$home" || return 1
+    printf '%s\n' "$home"
     return
   fi
 
   home=$(abs_path_for_new "$requested")
+  refuse_active_home_path "$home" || return 1
   if [ -e "$home" ]; then
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
@@ -152,7 +183,7 @@ ensure_home() {
   fi
   [ -f "$home/AGENTS.md" ] || { echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2; return 1; }
   [ -d "$home/bin" ] || { echo "error: $home is not a firstmate home (missing bin/)" >&2; return 1; }
-  printf '%s\n' "$(cd "$home" && pwd)"
+  printf '%s\n' "$(cd "$home" && pwd -P)"
 }
 
 clone_project() {
@@ -284,6 +315,7 @@ seed_home() {
 
   home=$(ensure_home "$requested_home")
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   for project in "$@"; do
     clone_project "$project" "$home"
   done

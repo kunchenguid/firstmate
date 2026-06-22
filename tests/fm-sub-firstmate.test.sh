@@ -173,8 +173,9 @@ EOF
   fakebin=$(make_fake_no_mistakes "$TMP_ROOT/no-mistakes-fake")
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha beta gamma >/dev/null || fail "charter scaffold failed"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FIRSTMATE_CHARTER='design domain' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta gamma)
-  subhome_abs=$(cd "$subhome" && pwd)
+  subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report subhome"
+  [ -f "$subhome/.fm-sub-firstmate-home" ] || fail "seed did not mark subhome as seeded"
   [ -f "$subhome/data/charter.md" ] || fail "seed did not write charter into subhome"
   [ -d "$subhome/projects/alpha/.git" ] || fail "alpha was not cloned into subhome"
   [ -d "$subhome/projects/beta/.git" ] || fail "beta was not cloned into subhome"
@@ -196,6 +197,29 @@ EOF
     fail "seed allowed duplicate ownership of beta"
   fi
   pass "firstmates registry routes owners and refuses duplicate project scope"
+}
+
+test_home_seed_refuses_active_home_and_root() {
+  local home err
+  home="$TMP_ROOT/active-seed-home"
+  err="$TMP_ROOT/active-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" design --firstmate alpha >/dev/null || fail "charter scaffold failed for active-home seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$home" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed sub-firstmate home to reuse active FM_HOME"
+  fi
+  grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain active FM_HOME rejection"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$ROOT" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed sub-firstmate home to reuse FM_ROOT"
+  fi
+  grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null \
+    || fail "seed did not explain FM_ROOT rejection"
+  pass "home seeding refuses active home and repo root"
 }
 
 test_home_seed_refuses_remote_backed_project_without_origin() {
@@ -224,7 +248,7 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/wrong-alpha.git"
   git clone --quiet "$ROOT" "$subhome"
-  subhome_abs=$(cd "$subhome" && pwd)
+  subhome_abs=$(cd "$subhome" && pwd -P)
   mkdir -p "$subhome/projects"
   git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
@@ -246,7 +270,7 @@ test_firstmate_spawn_records_home_meta() {
   home="$TMP_ROOT/spawn-home"
   subhome="$TMP_ROOT/spawn-subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
-  subhome_abs=$(cd "$subhome" && pwd)
+  subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; owns: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
   printf 'stale parent charter\n' > "$home/data/spawn-sub/brief.md"
   printf 'current persistent charter\n' > "$subhome/data/charter.md"
@@ -277,7 +301,7 @@ test_recovery_respawn_uses_persistent_home() {
   home="$TMP_ROOT/recovery-home"
   subhome="$TMP_ROOT/recovery-subhome"
   mkdir -p "$home/data" "$home/state" "$subhome/data"
-  subhome_abs=$(cd "$subhome" && pwd)
+  subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'charter\n' > "$subhome/data/charter.md"
   printf '%s\n' '- recover-sub - recovery domain (home: '"$subhome"'; owns: gamma; added 2026-06-22)' > "$home/data/firstmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/recovery-fake")
@@ -297,6 +321,7 @@ test_firstmate_teardown_retires_empty_home() {
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
@@ -326,6 +351,7 @@ test_firstmate_force_teardown_discards_child_work() {
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/force-child-worktree"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
@@ -363,6 +389,63 @@ EOF
   grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "firstmate force teardown discards child work"
+}
+
+test_firstmate_teardown_requires_seed_marker() {
+  local home subhome fakebin err
+  home="$TMP_ROOT/unmarked-teardown-home"
+  subhome="$TMP_ROOT/unmarked-teardown-subhome"
+  err="$TMP_ROOT/unmarked-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+owned_projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unmarked-teardown-fake")
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/unmarked-teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unmarked-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed an unmarked firstmate home"
+  fi
+  [ -d "$subhome" ] || fail "teardown removed unmarked subhome after refusal"
+  grep -F 'not a seeded sub-firstmate home' "$err" >/dev/null || fail "teardown did not explain missing seed marker"
+  pass "firstmate teardown requires seeded home marker"
+}
+
+test_firstmate_teardown_refuses_home_ancestor() {
+  local danger home fakebin err
+  danger="$TMP_ROOT/ancestor-teardown"
+  home="$danger/main-home"
+  err="$TMP_ROOT/ancestor-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$danger/state"
+  printf 'domain\n' > "$danger/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$danger
+project=$danger
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$danger
+owned_projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$danger"'; owns: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/ancestor-teardown-fake")
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/ancestor-teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/ancestor-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed an ancestor of active FM_HOME"
+  fi
+  [ -d "$danger" ] || fail "teardown removed ancestor path after refusal"
+  grep -F 'ancestor of the active firstmate home' "$err" >/dev/null || fail "teardown did not explain ancestor rejection"
+  pass "firstmate teardown refuses ancestor homes"
 }
 
 test_firstmate_idle_pane_is_not_stale() {
@@ -419,11 +502,14 @@ test_watcher_ignores_foreign_tmux_windows() {
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_home_seed_registry_and_disjoint_routing
+test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
+test_firstmate_teardown_requires_seed_marker
+test_firstmate_teardown_refuses_home_ancestor
 test_firstmate_idle_pane_is_not_stale
 test_watcher_ignores_foreign_tmux_windows
