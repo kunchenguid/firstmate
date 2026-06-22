@@ -246,7 +246,8 @@ Every persistent secondmate has one line:
 ```
 
 The `scope:` field is used during intake; the `projects:` field is a non-exclusive clone list, not ownership.
-Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` asks `treehouse get` for the home.
+Use `bin/fm-home-seed.sh <id> <home|-> <project>...` after scaffolding the charter to provision the persistent home and registry entry; `-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
+A leased home survives with no live process and is never recycled by a later `treehouse get` or `prune`, so the secondmate's slot stays reserved across restarts until the lease is released; that release happens only on explicit retirement or seed rollback, never on a routine restart or recovery.
 The charter must be filled before seeding; direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
 Seeding is transactional: if validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `bin/fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
@@ -445,7 +446,8 @@ An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
 When it is safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
-With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and state inside the secondmate home, removes the route, and removes the retired secondmate home.
+Removing a leased home releases its durable treehouse lease (via `treehouse return`) so the pool slot is freed for reuse rather than left leased forever; a plain-clone home with no pool slot is simply removed.
+With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
 
 ### Scout tasks (report instead of PR)
 

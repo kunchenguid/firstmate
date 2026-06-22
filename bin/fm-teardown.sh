@@ -15,7 +15,9 @@
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
-# child work, kills child windows, and removes the retired home.
+# child work, kills child windows, and removes the retired home. Removing a
+# leased home releases its durable treehouse lease so the pool slot is freed,
+# never left leased forever.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check for ordinary tasks and discards
 #   secondmate child work for kind=secondmate. Only use it when the captain has
@@ -271,6 +273,10 @@ remove_firstmate_home() {
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  # Retiring a leased secondmate home: treehouse return releases the durable lease
+  # and frees the pool slot for reuse. treehouse resolves the pool from the home
+  # path, so run it from FM_ROOT. A plain-clone home (no pool slot) falls back to
+  # safe removal.
   if command -v treehouse >/dev/null 2>&1; then
     ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || safe_rm_rf "$abs_home_path" "$label"
   else

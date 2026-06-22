@@ -95,14 +95,44 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
-if [ "${1:-}" = get ] && [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
-  mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
-  ( cd "$FM_FAKE_TREEHOUSE_HOME" && "$SHELL" )
-  exit $?
-fi
-if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
-  rm -rf -- "$3"
-fi
+case "${1:-}" in
+  get)
+    # Durable lease: print only the worktree path to stdout (banners to stderr),
+    # and record the lease holder so tests can assert it is set and later cleared.
+    shift
+    holder=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --lease) ;;
+        --lease-holder) shift; holder=${1:-} ;;
+        --lease-holder=*) holder=${1#--lease-holder=} ;;
+      esac
+      shift
+    done
+    if [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
+      mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
+      [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+      printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
+      printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
+    fi
+    exit 0
+    ;;
+  return)
+    # Release the lease and return/remove the worktree slot the home occupied.
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+    [ -n "$target" ] && rm -rf -- "$target"
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -355,7 +385,7 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log out
+  local home acquired acquired_abs fakebin log lease out
   home="$TMP_ROOT/dash-home"
   acquired="$TMP_ROOT/dash-acquired-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -365,19 +395,23 @@ test_home_seed_uses_treehouse_acquired_home() {
   git clone --quiet "$ROOT" "$acquired"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
   log="$TMP_ROOT/dash-fake/tmux.log"
+  lease="$TMP_ROOT/dash-fake/lease"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
-  grep -F 'treehouse get' "$log" >/dev/null || fail "seed did not ask treehouse for a home"
+  grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  [ -f "$lease" ] || fail "seed did not record a treehouse lease"
+  [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
   [ "$(cat "$acquired/.fm-secondmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
   [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
   grep -F "home: $acquired_abs" "$home/data/secondmates.md" >/dev/null || fail "registry did not record acquired home"
-  pass "home seeding accepts treehouse-acquired dash homes"
+  pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
@@ -1224,11 +1258,12 @@ test_recovery_respawn_uses_persistent_home() {
 }
 
 test_secondmate_teardown_retires_empty_home() {
-  local home subhome fakebin
+  local home subhome subhome_abs fakebin log lease
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   mkdir -p "$home/state" "$home/data" "$subhome/state"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
 worktree=$subhome
@@ -1242,9 +1277,15 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
+  log="$TMP_ROOT/teardown-fake/tmux.log"
+  lease="$TMP_ROOT/teardown-fake/lease"
+  printf 'domain\n' > "$lease"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
     || fail "teardown failed for empty secondmate home"
+  grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
+  [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
