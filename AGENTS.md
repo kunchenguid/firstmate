@@ -262,7 +262,8 @@ This idle contract is encoded in the charter brief (section 11), so it travels w
 When a secondmate is created for a domain, the existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule: read `data/backlog.md`, pick the queued items that fit the new scope, and move them with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
 The helper resolves the secondmate home from `data/secondmates.md` and mechanically moves each named item from the main `data/backlog.md` into the secondmate home's `data/backlog.md`, preserving the line and its section, so the item is neither duplicated nor lost.
-It is idempotent (an item already in the secondmate backlog is skipped) and refuses any destination that is not a genuine seeded secondmate home (it checks the home's `.fm-secondmate-home` marker), so a move can never land in a project.
+It refuses `## In flight` entries because active task ownership also lives in tmux and `state/`.
+It is idempotent (an item already in the secondmate backlog is skipped) and refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items: that work stays with the main firstmate (section 7).
 
 ### Project memory ownership

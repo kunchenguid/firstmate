@@ -1880,6 +1880,14 @@ EOF
   [ "$before" = "$(cat "$home/data/backlog.md")" ] || fail "handoff with an unmatched key still mutated the main backlog"
   grep -F 'bug-z' "$home/data/backlog.md" >/dev/null || fail "atomic abort lost the valid bug-z item from the main backlog"
 
+  before=$(cat "$home/data/backlog.md")
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design live-task >/dev/null 2>&1; then
+    fail "handoff accepted an in-flight backlog item"
+  fi
+  [ "$before" = "$(cat "$home/data/backlog.md")" ] || fail "handoff with an in-flight key mutated the main backlog"
+  grep -F 'live-task' "$home/data/backlog.md" >/dev/null || fail "in-flight refusal lost the live task"
+  grep -F 'live-task' "$subhome/data/backlog.md" >/dev/null && fail "in-flight refusal copied the live task"
+
   # An unregistered secondmate is refused.
   if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" ghost bug-z >/dev/null 2>&1; then
     fail "handoff accepted an unregistered secondmate id"
@@ -1888,10 +1896,13 @@ EOF
 }
 
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
-  local home subhome subhome_abs projhome projhome_abs
+  local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
   home="$TMP_ROOT/handoff-safety-main"
   subhome="$TMP_ROOT/handoff-safety-sub"
   projhome="$TMP_ROOT/handoff-safety-proj"
+  markerhome="$TMP_ROOT/handoff-safety-marker"
+  symlinkhome="$TMP_ROOT/handoff-safety-symlink"
+  outside="$TMP_ROOT/handoff-safety-outside"
   mkdir -p "$home/data" "$home/state"
 
   # A Done item handed into a secondmate backlog lacking a Done section gets one.
@@ -1920,7 +1931,37 @@ EOF
     fail "handoff wrote into a destination that is not a seeded secondmate home"
   fi
   [ ! -e "$projhome/data/backlog.md" ] || fail "handoff created a backlog inside a non-secondmate home"
-  pass "fm-backlog-handoff creates absent sections and refuses non-secondmate homes"
+
+  mkdir -p "$markerhome/data"
+  markerhome_abs=$(cd "$markerhome" && pwd -P)
+  printf 'marker-sm\n' > "$markerhome/.fm-secondmate-home"
+  printf -- '- marker-sm - bogus (home: %s; scope: bogus; projects: alpha; added 2026-06-22)\n' "$markerhome_abs" >> "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] marker-task - should not move (repo: alpha)
+EOF
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" marker-sm marker-task >/dev/null 2>&1; then
+    fail "handoff accepted a marker-only directory as a secondmate home"
+  fi
+  [ ! -e "$markerhome/data/backlog.md" ] || fail "handoff wrote into a marker-only directory"
+  grep -F 'marker-task' "$home/data/backlog.md" >/dev/null || fail "marker-only refusal lost the main backlog item"
+
+  seed_secondmate_home_marker "$symlinkhome" symlink-sm
+  symlinkhome_abs=$(cd "$symlinkhome" && pwd -P)
+  mkdir -p "$outside"
+  rm -rf "$symlinkhome/data"
+  ln -s "$outside" "$symlinkhome/data"
+  printf -- '- symlink-sm - bogus (home: %s; scope: bogus; projects: alpha; added 2026-06-22)\n' "$symlinkhome_abs" >> "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] symlink-task - should not move (repo: alpha)
+EOF
+  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" symlink-sm symlink-task >/dev/null 2>&1; then
+    fail "handoff accepted a secondmate home with data outside the home"
+  fi
+  [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
+  grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
+  pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
 }
 
 test_fm_home_parameterization
