@@ -177,6 +177,21 @@ Keep the brief as ONE positional argument - multiple positional args become sepa
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory (observed even on clean worktrees); accept with Enter - the decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
 
+### cb (ADDED 2026-06-22 — needs smoke-test spawn)
+
+`cb` is a shell function wrapping `~/bin/claude-rollover run b --dangerously-skip-permissions`.
+Since it launches the same Claude Code CLI under account B, it inherits all claude adapter facts:
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to interrupt` |
+| Exit command | `/exit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+
+Turn-end hook and trust dialog behavior are identical to `claude`.
+Needs a smoke-test spawn to empirically confirm (first spawn in a fresh worktree may show a trust/bypass-permissions dialog; follow the claude spawn protocol from section 4).
+
 ## 5. Recovery (run at every session start, after bootstrap)
 
 You may have been restarted mid-flight.
