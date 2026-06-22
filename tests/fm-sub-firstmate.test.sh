@@ -159,10 +159,11 @@ test_firstmate_spawn_records_home_meta() {
   local home subhome subhome_abs fakebin log meta
   home="$TMP_ROOT/spawn-home"
   subhome="$TMP_ROOT/spawn-subhome"
-  mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome"
+  mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd)
   printf '%s\n' '- spawn-sub - spawn domain (home: '"$subhome"'; owns: alpha, beta; added 2026-06-22)' > "$home/data/firstmates.md"
-  printf 'charter\n' > "$home/data/spawn-sub/brief.md"
+  printf 'stale parent charter\n' > "$home/data/spawn-sub/brief.md"
+  printf 'current persistent charter\n' > "$subhome/data/charter.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-fake")
   log="$TMP_ROOT/spawn-fake/tmux.log"
 
@@ -178,6 +179,8 @@ test_firstmate_spawn_records_home_meta() {
   grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "firstmate launch did not set FM_HOME to subhome"
   grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear operational overrides"
   grep -F 'FM_CONFIG_OVERRIDE=' "$log" >/dev/null || fail "firstmate launch did not clear config override"
+  grep -F "$subhome_abs/data/charter.md" "$log" >/dev/null || fail "firstmate launch did not use persistent charter"
+  grep -F "$home/data/spawn-sub/brief.md" "$log" >/dev/null && fail "firstmate launch used stale parent brief"
   grep -F 'notify=' "$log" >/dev/null && fail "firstmate codex launch should not install parent turn-end notify"
   grep -F 'turn-ended' "$log" >/dev/null && fail "firstmate launch should not reference parent turn-end marker"
   pass "kind=firstmate spawn launches in the home and records routing meta"

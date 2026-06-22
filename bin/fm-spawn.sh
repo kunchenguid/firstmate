@@ -155,22 +155,21 @@ if [ "$KIND" = firstmate ]; then
   fi
 fi
 
-BRIEF="$DATA/$ID/brief.md"
-if [ "$KIND" = firstmate ] && [ ! -f "$BRIEF" ]; then
-  if [ -n "${FIRSTMATE_HOME:-}" ] && [ -f "$FIRSTMATE_HOME/data/charter.md" ]; then
-    BRIEF="$FIRSTMATE_HOME/data/charter.md"
-  fi
-fi
-[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-
 if [ "$KIND" = firstmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS="$(cd "$FIRSTMATE_HOME" && pwd)"
   WT="$PROJ_ABS"
+  if [ -f "$PROJ_ABS/data/charter.md" ]; then
+    BRIEF="$PROJ_ABS/data/charter.md"
+  else
+    BRIEF="$DATA/$ID/brief.md"
+  fi
 else
   PROJ_ABS="$(cd "$PROJ" && pwd)"
   WT=""
+  BRIEF="$DATA/$ID/brief.md"
 fi
+[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
