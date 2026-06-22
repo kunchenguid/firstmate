@@ -167,6 +167,24 @@ registered_descendant_home_for_removal() {
   return 1
 }
 
+validate_firstmate_operational_dirs_for_removal() {
+  local home=$1 label=$2 name dir abs_home abs_dir
+  abs_home=$(removal_target_abs_path "$home")
+  for name in data state config projects; do
+    dir="$home/$name"
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ -L "$dir" ]; then
+      echo "REFUSED: unsafe $label $name directory $dir must not be a symlink" >&2
+      return 1
+    fi
+    abs_dir=$(removal_target_abs_path "$dir" 2>/dev/null || true)
+    if [ -z "$abs_dir" ] || ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
+      echo "REFUSED: unsafe $label $name directory $dir resolves outside the sub-firstmate home" >&2
+      return 1
+    fi
+  done
+}
+
 validate_child_worktree_for_removal() {
   local target=$1 project=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -218,6 +236,7 @@ validate_firstmate_home_for_removal() {
       return 1
     fi
   fi
+  validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   conflict=$(registered_descendant_home_for_removal "$FIRSTMATE_REG" "$abs_home_path" || true)
   if [ -z "$conflict" ]; then
     conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/firstmates.md" "$abs_home_path" || true)

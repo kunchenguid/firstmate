@@ -74,6 +74,16 @@ registry_scope_for_brief() {
   fi
 }
 
+validate_registry_home_text() {
+  local home=$1
+  case "$home" in
+    *';'*|*')'*|*$'\n'*)
+      echo "error: sub-firstmate home path contains registry delimiters: $home" >&2
+      return 1
+      ;;
+  esac
+}
+
 normalize_joined_path() {
   local prefix=$1 tail=$2 component out old_ifs
   out=${prefix%/}
@@ -823,6 +833,7 @@ seed_home() {
     home=$(ensure_home "$requested_abs")
   fi
   SEED_HOME="$home"
+  validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   validate_operational_dirs "$home" || return 1

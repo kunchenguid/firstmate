@@ -80,8 +80,16 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = firstmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|*' '*)
+    ''|claude|codex|opencode|pi)
       ARG3=${POS[1]:-}
+      ;;
+    *' '*)
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+      else
+        ARG3=${POS[1]}
+      fi
       ;;
     *)
       FIRSTMATE_HOME=${POS[1]}
@@ -150,6 +158,12 @@ firstmate_registry_value() {
   esac
   [ -n "$value" ] || return 1
   printf '%s\n' "$value"
+}
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
 }
 
 resolved_existing_dir() {
@@ -388,11 +402,14 @@ mkdir -p "$STATE"
   fi
 } > "$STATE/$ID.meta"
 
-LAUNCH=${LAUNCH//__BRIEF__/$BRIEF}
-LAUNCH=${LAUNCH//__TURNEND__/$TURNEND}
-LAUNCH=${LAUNCH//__PIEXT__/$STATE/$ID.pi-ext.ts}
+sq_brief=$(shell_quote "$BRIEF")
+sq_turnend=$(shell_quote "$TURNEND")
+sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = firstmate ]; then
-  sq_home=$(printf "'"; printf '%s' "$PROJ_ABS" | sed "s/'/'\\\\''/g"; printf "'")
+  sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 tmux send-keys -t "$T" -l "$LAUNCH"

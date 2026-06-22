@@ -550,6 +550,28 @@ test_home_seed_refuses_local_only_project() {
   pass "home seeding refuses local-only projects"
 }
 
+test_home_seed_refuses_registry_delimiter_home() {
+  local home subhome err
+  home="$TMP_ROOT/delimiter-home"
+  subhome="$TMP_ROOT/delimiter)subhome"
+  err="$TMP_ROOT/delimiter-home.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/delimiter-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_FIRSTMATE_CHARTER='delimiter charter' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a home path with registry delimiters"
+  fi
+  grep -F 'sub-firstmate home path contains registry delimiters' "$err" >/dev/null \
+    || fail "seed did not explain delimiter home refusal"
+  [ ! -e "$subhome/.fm-sub-firstmate-home" ] || fail "delimiter home seed wrote a marker"
+  if [ -f "$home/data/firstmates.md" ] && grep -F -- '- design ' "$home/data/firstmates.md" >/dev/null; then
+    fail "delimiter home seed wrote a registry route"
+  fi
+  pass "home seeding refuses registry delimiter home paths"
+}
+
 test_home_seed_refuses_active_home_and_root() {
   local home err active_ancestor active_descendant root_clone root_descendant root_ancestor root_inside
   active_ancestor="$TMP_ROOT/active-seed-ancestor"
@@ -941,8 +963,8 @@ test_home_seed_refuses_symlinked_leaf_files() {
 
 test_firstmate_spawn_records_home_meta() {
   local home subhome subhome_abs fakebin log meta
-  home="$TMP_ROOT/spawn-home"
-  subhome="$TMP_ROOT/spawn-subhome"
+  home="$TMP_ROOT/spawn home"
+  subhome="$TMP_ROOT/spawn subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf 'spawn-sub\n' > "$subhome/.fm-sub-firstmate-home"
@@ -1237,6 +1259,41 @@ EOF
   grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "firstmate force teardown discards child work"
+}
+
+test_firstmate_force_teardown_refuses_symlinked_state_dir() {
+  local home subhome external_state fakebin err log
+  home="$TMP_ROOT/symlink-state-teardown-home"
+  subhome="$TMP_ROOT/symlink-state-teardown-subhome"
+  external_state="$home/data/external-state"
+  err="$TMP_ROOT/symlink-state-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome" "$external_state"
+  printf 'domain\n' > "$subhome/.fm-sub-firstmate-home"
+  ln -s "$external_state" "$subhome/state"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-state-teardown-fake")
+  log="$TMP_ROOT/symlink-state-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown accepted a symlinked sub-firstmate state directory"
+  fi
+  [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
+  [ -d "$external_state" ] || fail "force teardown removed external symlink target"
+  grep -F 'state directory' "$err" >/dev/null || fail "teardown did not explain symlinked state refusal"
+  grep -F 'must not be a symlink' "$err" >/dev/null || fail "teardown did not identify state symlink"
+  grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before symlinked state refusal"
+  pass "force teardown refuses symlinked sub-firstmate state dirs"
 }
 
 test_firstmate_teardown_requires_seed_marker() {
@@ -1675,6 +1732,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_refuses_local_only_project
+test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
@@ -1695,6 +1753,7 @@ test_fm_send_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work
+test_firstmate_force_teardown_refuses_symlinked_state_dir
 test_firstmate_teardown_requires_seed_marker
 test_firstmate_teardown_refuses_registered_nested_home
 test_firstmate_teardown_refuses_child_registry_nested_home
