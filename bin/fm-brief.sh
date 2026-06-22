@@ -48,6 +48,14 @@ BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -80,7 +88,7 @@ Do not invent a second delegation system.
 # Escalation to main firstmate
 Handle routine work yourself.
 Escalate only true captain-relevant outcomes by appending one line:
-   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, done, failed.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -118,7 +126,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/done/failed states. No step-by-step
@@ -200,7 +208,7 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATE/$ID.status\`
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

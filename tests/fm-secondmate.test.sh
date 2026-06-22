@@ -162,8 +162,8 @@ wait_live() {
 }
 
 test_fm_home_parameterization() {
-  local home_one home_two out
-  home_one="$TMP_ROOT/home-one"
+  local brief home_one home_two out
+  home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
   printf '%s\n' '- app [local-only +yolo] - test app (added 2026-06-22)' > "$home_one/data/projects.md"
@@ -174,8 +174,18 @@ test_fm_home_parameterization() {
   [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app >/dev/null || fail "brief scaffold failed under FM_HOME"
-  [ -f "$home_one/data/task-a/brief.md" ] || fail "brief was not written under FM_HOME/data"
-  grep -F "$home_one/state/task-a.status" "$home_one/data/task-a/brief.md" >/dev/null || fail "brief did not embed FM_HOME state path"
+  brief="$home_one/data/task-a/brief.md"
+  [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
+  grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
+
+  FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout >/dev/null || fail "scout brief scaffold failed under FM_HOME"
+  brief="$home_one/data/task-b/brief.md"
+  grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
+
+  FM_HOME="$home_one" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" task-c --secondmate app >/dev/null \
+    || fail "secondmate brief scaffold failed under FM_HOME"
+  brief="$home_one/data/task-c/brief.md"
+  grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
   FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
