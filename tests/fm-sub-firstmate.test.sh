@@ -344,6 +344,40 @@ test_firstmate_spawn_records_home_meta() {
   pass "kind=firstmate spawn launches in the home and records routing meta"
 }
 
+test_fm_send_resolves_bare_firstmate_window_from_home_meta() {
+  local home fakebin log err
+  home="$TMP_ROOT/send-home"
+  mkdir -p "$home/state"
+  touch "$home/state/.last-watcher-beat"
+  cat > "$home/state/domain.meta" <<EOF
+window=current-session:fm-domain
+kind=firstmate
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/send-fake")
+  log="$TMP_ROOT/send-fake/tmux.log"
+  err="$TMP_ROOT/send-fake/send.err"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-domain" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/send-fake/pane.txt" \
+    "$ROOT/bin/fm-send.sh" fm-domain 'route this work' >/dev/null 2>"$err" \
+    || fail "fm-send failed for a bare firstmate window with home metadata"
+
+  grep -F 'send-keys -t current-session:fm-domain -l route this work' "$log" >/dev/null \
+    || fail "fm-send did not use the window recorded in this home's meta"
+  grep -F 'send-keys -t other-session:fm-domain' "$log" >/dev/null \
+    && fail "fm-send targeted a foreign window with the same bare name"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-missing" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/send-fake/pane.txt" \
+    "$ROOT/bin/fm-send.sh" fm-missing 'wrong home' >/dev/null 2>"$err"; then
+    fail "fm-send sent to a bare firstmate window without home metadata"
+  fi
+  grep -F "no metadata for fm-missing in $home/state" "$err" >/dev/null \
+    || fail "fm-send did not explain missing home metadata"
+  grep -F 'send-keys -t other-session:fm-missing' "$log" >/dev/null \
+    && fail "fm-send fell back to a foreign same-name window"
+
+  pass "fm-send resolves bare firstmate windows through this home"
+}
+
 test_recovery_respawn_uses_persistent_home() {
   local home subhome subhome_abs fakebin meta
   home="$TMP_ROOT/recovery-home"
@@ -602,6 +636,7 @@ test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_firstmate_spawn_records_home_meta
+test_fm_send_resolves_bare_firstmate_window_from_home_meta
 test_recovery_respawn_uses_persistent_home
 test_firstmate_teardown_retires_empty_home
 test_firstmate_force_teardown_discards_child_work

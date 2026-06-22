@@ -335,6 +335,7 @@ Read `data/firstmates.md` before dispatching and compare the work request to eac
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the sub-firstmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If a sub-firstmate's scope fits, steer that sub-firstmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 Do not spawn a direct crewmate for work that belongs to a sub-firstmate scope unless the sub-firstmate is blocked or the captain explicitly redirects it.
 If no sub-firstmate scope fits, proceed in the main firstmate or create a new sub-firstmate with the captain when that domain should become persistent.
 
