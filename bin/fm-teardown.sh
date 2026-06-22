@@ -129,6 +129,14 @@ validate_removal_target() {
     echo "REFUSED: unsafe $label removal target $target is an ancestor of the firstmate repo" >&2
     return 1
   fi
+  if [ -n "$abs_home" ] && path_is_ancestor_of "$abs_home" "$abs_target"; then
+    echo "REFUSED: unsafe $label removal target $target is inside the active firstmate home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_root" "$abs_target"; then
+    echo "REFUSED: unsafe $label removal target $target is inside the firstmate repo" >&2
+    return 1
+  fi
   printf '%s\n' "$abs_target"
 }
 

@@ -293,8 +293,9 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
 }
 
 test_home_seed_does_not_return_unsafe_acquired_home() {
-  local home fakebin log err
+  local home descendant fakebin log err
   home="$TMP_ROOT/dash-active-home"
+  descendant="$home/data/dash-descendant-home"
   err="$TMP_ROOT/dash-active.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
@@ -312,6 +313,17 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
   grep -F "treehouse return --force" "$log" >/dev/null \
     && fail "seed returned an unsafe acquired active home through treehouse"
   [ -d "$home/projects/alpha" ] || fail "unsafe acquired-home rollback removed the active home"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an acquired home inside the active firstmate home"
+  fi
+  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain active descendant acquired-home rejection"
+  grep -F "treehouse return --force" "$log" >/dev/null \
+    && fail "seed returned an unsafe acquired active descendant through treehouse"
+  [ -d "$descendant" ] || fail "unsafe acquired-home rollback removed the active descendant"
   pass "home seeding leaves unsafe acquired active homes untouched"
 }
 
@@ -366,9 +378,12 @@ test_home_seed_refuses_local_only_project() {
 }
 
 test_home_seed_refuses_active_home_and_root() {
-  local home err
+  local home err active_descendant root_clone root_descendant
   home="$TMP_ROOT/active-seed-home"
   err="$TMP_ROOT/active-seed.err"
+  active_descendant="$home/nested/design-home"
+  root_clone="$TMP_ROOT/active-seed-root"
+  root_descendant="$root_clone/tmp/design-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   make_git_project "$home/projects/alpha"
   add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/active-alpha.git"
@@ -381,11 +396,26 @@ test_home_seed_refuses_active_home_and_root() {
   grep -F 'sub-firstmate home cannot be the active firstmate home' "$err" >/dev/null \
     || fail "seed did not explain active FM_HOME rejection"
 
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$active_descendant" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed sub-firstmate home inside active FM_HOME"
+  fi
+  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null \
+    || fail "seed did not explain active FM_HOME descendant rejection"
+  [ ! -e "$home/nested" ] || fail "seed created a directory inside active FM_HOME before descendant rejection"
+
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$ROOT" alpha >/dev/null 2>"$err"; then
     fail "seed allowed sub-firstmate home to reuse FM_ROOT"
   fi
   grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null \
     || fail "seed did not explain FM_ROOT rejection"
+
+  git clone --quiet "$ROOT" "$root_clone"
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_clone" "$ROOT/bin/fm-home-seed.sh" design "$root_descendant" alpha >/dev/null 2>"$err"; then
+    fail "seed allowed sub-firstmate home inside FM_ROOT"
+  fi
+  grep -F 'sub-firstmate home cannot be inside the firstmate repo' "$err" >/dev/null \
+    || fail "seed did not explain FM_ROOT descendant rejection"
+  [ ! -e "$root_clone/tmp" ] || fail "seed created a directory inside FM_ROOT before descendant rejection"
   pass "home seeding refuses active home and repo root"
 }
 
@@ -508,11 +538,19 @@ test_firstmate_spawn_records_home_meta() {
 }
 
 test_firstmate_spawn_requires_seeded_matching_home() {
-  local home subhome wronghome fakebin log err
+  local home subhome wronghome active_descendant fakeroot root_descendant fakebin log err
   home="$TMP_ROOT/spawn-validate-home"
   subhome="$TMP_ROOT/spawn-validate-subhome"
   wronghome="$TMP_ROOT/spawn-validate-wronghome"
-  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data"
+  active_descendant="$home/data/spawn-descendant-home"
+  fakeroot="$TMP_ROOT/spawn-validate-root"
+  root_descendant="$fakeroot/tmp/spawn-descendant-home"
+  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin"
+  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakeroot/bin/fm-guard.sh"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-validate-fake")
   log="$TMP_ROOT/spawn-validate-fake/tmux.log"
   err="$TMP_ROOT/spawn-validate.err"
@@ -549,6 +587,26 @@ test_firstmate_spawn_requires_seeded_matching_home() {
   fi
   grep -F 'sub-firstmate home cannot be the firstmate repo' "$err" >/dev/null || fail "spawn did not reject firstmate repo root"
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before root validation"
+
+  : > "$log"
+  printf 'domain\n' > "$active_descendant/.fm-sub-firstmate-home"
+  printf 'charter\n' > "$active_descendant/data/charter.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$active_descendant" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted a home inside the active firstmate home"
+  fi
+  grep -F 'sub-firstmate home cannot be inside the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home descendant"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before active descendant validation"
+
+  : > "$log"
+  printf 'domain\n' > "$root_descendant/.fm-sub-firstmate-home"
+  printf 'charter\n' > "$root_descendant/data/charter.md"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$root_descendant" codex --firstmate >/dev/null 2>"$err"; then
+    fail "firstmate spawn accepted a home inside the firstmate repo"
+  fi
+  grep -F 'sub-firstmate home cannot be inside the firstmate repo' "$err" >/dev/null || fail "spawn did not reject repo root descendant"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before repo descendant validation"
 
   pass "firstmate spawn validates homes before launch"
 }
@@ -928,6 +986,67 @@ EOF
   pass "firstmate teardown refuses ancestor homes"
 }
 
+test_firstmate_teardown_refuses_home_descendants() {
+  local home active_descendant fakeroot root_descendant fakebin log err
+  home="$TMP_ROOT/descendant-teardown-home"
+  active_descendant="$home/data/domain-home"
+  fakeroot="$TMP_ROOT/descendant-teardown-root"
+  root_descendant="$fakeroot/tmp/domain-home"
+  err="$TMP_ROOT/descendant-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$active_descendant/state" "$root_descendant/state" "$fakeroot/bin"
+  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakeroot/bin/fm-guard.sh"
+  printf 'domain\n' > "$active_descendant/.fm-sub-firstmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$active_descendant
+project=$active_descendant
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$active_descendant
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$active_descendant"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/firstmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/descendant-teardown-fake")
+  log="$TMP_ROOT/descendant-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/descendant-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed a home inside active FM_HOME"
+  fi
+  [ -d "$active_descendant" ] || fail "teardown removed active-home descendant after refusal"
+  [ -e "$home/state/domain.meta" ] || fail "teardown cleared parent meta after active descendant refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before active descendant refusal"
+  grep -F 'inside the active firstmate home' "$err" >/dev/null || fail "teardown did not explain active descendant rejection"
+
+  : > "$log"
+  printf 'repo-domain\n' > "$root_descendant/.fm-sub-firstmate-home"
+  cat > "$home/state/repo-domain.meta" <<EOF
+window=firstmate:fm-repo-domain
+worktree=$root_descendant
+project=$root_descendant
+harness=echo
+kind=firstmate
+mode=firstmate
+yolo=off
+home=$root_descendant
+projects=alpha
+EOF
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/descendant-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" repo-domain >/dev/null 2>"$err"; then
+    fail "teardown removed a home inside FM_ROOT"
+  fi
+  [ -d "$root_descendant" ] || fail "teardown removed repo descendant after refusal"
+  [ -e "$home/state/repo-domain.meta" ] || fail "teardown cleared parent meta after repo descendant refusal"
+  grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before repo descendant refusal"
+  grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "teardown did not explain repo descendant rejection"
+  pass "firstmate teardown refuses descendant homes"
+}
+
 test_firstmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
@@ -984,4 +1103,5 @@ test_firstmate_force_teardown_refuses_child_active_home_descendant
 test_firstmate_force_teardown_refuses_child_repo_descendant
 test_firstmate_force_teardown_refuses_unregistered_child_worktree
 test_firstmate_teardown_refuses_home_ancestor
+test_firstmate_teardown_refuses_home_descendants
 test_firstmate_idle_pane_is_not_stale

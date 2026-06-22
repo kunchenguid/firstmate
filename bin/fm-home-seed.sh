@@ -47,6 +47,81 @@ path_key() {
   printf '%s\n' "$path"
 }
 
+normalize_joined_path() {
+  local prefix=$1 tail=$2 component out old_ifs
+  out=${prefix%/}
+  [ -n "$out" ] || out=/
+  old_ifs=$IFS
+  IFS=/
+  for component in $tail; do
+    case "$component" in
+      ''|.) ;;
+      ..)
+        if [ "$out" != "/" ]; then
+          out=${out%/*}
+          [ -n "$out" ] || out=/
+        fi
+        ;;
+      *)
+        if [ "$out" = "/" ]; then
+          out="/$component"
+        else
+          out="$out/$component"
+        fi
+        ;;
+    esac
+  done
+  IFS=$old_ifs
+  printf '%s\n' "$out"
+}
+
+canonical_path_for_check() {
+  local path=$1 probe tail prefix parent base
+  case "$path" in
+    /*) probe=$path ;;
+    *) probe="$(pwd -P)/$path" ;;
+  esac
+  while [ "$probe" != "/" ] && [ "${probe%/}" != "$probe" ]; do
+    probe=${probe%/}
+  done
+  if [ -e "$probe" ]; then
+    if [ -d "$probe" ]; then
+      cd "$probe" && pwd -P
+    else
+      parent=$(dirname "$probe")
+      base=$(basename "$probe")
+      cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base"
+    fi
+    return
+  fi
+  tail=
+  while [ ! -e "$probe" ] && [ "$probe" != "/" ]; do
+    tail="$(basename "$probe")${tail:+/$tail}"
+    probe=$(dirname "$probe")
+  done
+  if [ -d "$probe" ]; then
+    prefix=$(cd "$probe" && pwd -P)
+  elif [ -e "$probe" ]; then
+    parent=$(dirname "$probe")
+    base=$(basename "$probe")
+    prefix=$(cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base")
+  else
+    prefix=/
+  fi
+  normalize_joined_path "$prefix" "$tail"
+}
+
+path_is_ancestor_of() {
+  local ancestor=$1 path=$2
+  [ -n "$ancestor" ] || return 1
+  [ -n "$path" ] || return 1
+  [ "$ancestor" != "$path" ] || return 1
+  case "$path" in
+    "$ancestor"/*) return 0 ;;
+  esac
+  return 1
+}
+
 owner_for_home() {
   local home=$1 target line id registered_home registered_key
   [ -f "$REG" ] || return 1
@@ -114,24 +189,11 @@ join_projects() {
 }
 
 abs_path_for_new() {
-  local path=$1 parent base
-  parent=$(dirname "$path")
-  base=$(basename "$path")
-  mkdir -p "$parent"
-  parent=$(cd "$parent" && pwd -P)
-  printf '%s/%s\n' "$parent" "$base"
+  canonical_path_for_check "$1"
 }
 
 resolved_path() {
-  local path=$1 parent base
-  if [ -d "$path" ]; then
-    cd "$path" && pwd -P
-    return
-  fi
-  parent=$(dirname "$path")
-  base=$(basename "$path")
-  parent=$(cd "$parent" && pwd -P)
-  printf '%s/%s\n' "$parent" "$base"
+  canonical_path_for_check "$1"
 }
 
 refuse_active_home_path() {
@@ -145,6 +207,14 @@ refuse_active_home_path() {
   fi
   if [ "$abs_home" = "$abs_root" ]; then
     echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
+    echo "error: sub-firstmate home cannot be inside the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_root" "$abs_home"; then
+    echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
 }
@@ -175,9 +245,11 @@ ensure_home() {
   fi
 
   home=$(abs_path_for_new "$requested")
+  refuse_active_home_path "$home" || return 1
   if [ -e "$home" ]; then
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
+    mkdir -p "$(dirname "$home")"
     git clone --quiet "$FM_ROOT" "$home"
   fi
   verify_firstmate_home "$home"
@@ -280,27 +352,11 @@ restore_seed_file() {
   fi
 }
 
-seed_path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
-}
-
 seed_rollback_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 1
   [ "$target" != "/" ] || { echo "REFUSED: unsafe $label rollback target $target" >&2; return 1; }
-  if [ -d "$target" ]; then
-    abs_target=$(cd "$target" && pwd -P)
-  else
-    [ -d "$(dirname "$target")" ] || { echo "REFUSED: unsafe $label rollback target $target" >&2; return 1; }
-    abs_target=$(cd "$(dirname "$target")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$target")")
-  fi
+  abs_target=$(resolved_path "$target")
   abs_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
   if [ "$abs_target" = "$abs_home" ]; then
@@ -311,12 +367,20 @@ seed_rollback_target() {
     echo "REFUSED: unsafe $label rollback target $target is the firstmate repo" >&2
     return 1
   fi
-  if seed_path_is_ancestor_of "$abs_target" "$abs_home"; then
+  if path_is_ancestor_of "$abs_target" "$abs_home"; then
     echo "REFUSED: unsafe $label rollback target $target is an ancestor of the active firstmate home" >&2
     return 1
   fi
-  if seed_path_is_ancestor_of "$abs_target" "$abs_root"; then
+  if path_is_ancestor_of "$abs_target" "$abs_root"; then
     echo "REFUSED: unsafe $label rollback target $target is an ancestor of the firstmate repo" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home" "$abs_target"; then
+    echo "REFUSED: unsafe $label rollback target $target is inside the active firstmate home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_root" "$abs_target"; then
+    echo "REFUSED: unsafe $label rollback target $target is inside the firstmate repo" >&2
     return 1
   fi
   printf '%s\n' "$abs_target"
@@ -488,6 +552,7 @@ seed_home() {
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
+    refuse_active_home_path "$requested_abs" || return 1
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
     home=$(ensure_home "$requested_abs")

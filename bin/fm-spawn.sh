@@ -154,6 +154,17 @@ resolved_existing_dir() {
   cd "$path" && pwd -P
 }
 
+path_is_ancestor_of() {
+  local ancestor=$1 path=$2
+  [ -n "$ancestor" ] || return 1
+  [ -n "$path" ] || return 1
+  [ "$ancestor" != "$path" ] || return 1
+  case "$path" in
+    "$ancestor"/*) return 0 ;;
+  esac
+  return 1
+}
+
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -165,6 +176,14 @@ validate_firstmate_home_for_spawn() {
   fi
   if [ "$abs_home" = "$abs_root" ]; then
     echo "error: sub-firstmate home cannot be the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
+    echo "error: sub-firstmate home cannot be inside the active firstmate home: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_root" "$abs_home"; then
+    echo "error: sub-firstmate home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
