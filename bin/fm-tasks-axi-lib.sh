@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared tasks-axi compatibility probe for bootstrap and teardown.
 # Usage: . bin/fm-tasks-axi-lib.sh
 # Compatible means tasks-axi --version reports 0.1.1 or newer.
@@ -12,13 +13,13 @@ fm_tasks_axi_version_parts() {
 }
 
 fm_tasks_axi_compatible() {
-  local parts major minor patch
+  local parts major minor patch rest
   parts=$(fm_tasks_axi_version_parts) || return 1
   [ -n "$parts" ] || return 1
-  set -- $parts
-  major=$1
-  minor=$2
-  patch=$3
+  major=${parts%% *}
+  rest=${parts#* }
+  minor=${rest%% *}
+  patch=${rest##* }
 
   [ "$major" -gt 0 ] && return 0
   [ "$major" -eq 0 ] && [ "$minor" -gt 1 ] && return 0
