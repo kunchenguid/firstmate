@@ -3,6 +3,7 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per problem and exits 0. Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
+#                 "HOST_GH_ACCESS_REQUIRED",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>".
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
@@ -57,6 +58,10 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
+running_in_codex_sandbox() {
+  [ -n "${CODEX_SANDBOX:-}" ] || [ "${CODEX_SANDBOX_NETWORK_DISABLED:-}" = 1 ]
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
@@ -91,7 +96,13 @@ done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+if ! gh auth status >/dev/null 2>&1; then
+  if running_in_codex_sandbox; then
+    echo "HOST_GH_ACCESS_REQUIRED"
+  else
+    echo "NEEDS_GH_AUTH"
+  fi
+fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

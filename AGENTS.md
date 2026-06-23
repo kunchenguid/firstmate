@@ -108,6 +108,7 @@ Otherwise it prints one line per problem; handle each:
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `HOST_GH_ACCESS_REQUIRED` - the current harness sandbox cannot verify or use host GitHub credentials directly; verify host access with an unsandboxed `gh auth status`/`gh-axi` check if needed, then use approved unsandboxed GitHub command prefixes for GitHub operations. Do not ask the captain to re-authenticate unless the unsandboxed host check also fails.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
 
