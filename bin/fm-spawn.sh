@@ -375,6 +375,9 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   # Poll for worktree-ready: lease a worktree (non-interactive; prints only its path,
   # banners to stderr). The lease is durable, so the slot survives until teardown
   # releases it with 'treehouse return', and its path is recorded for teardown safety.
+  # Retry relies on 'treehouse get --lease' being idempotent per --lease-holder (the
+  # same holder fm-$ID is returned the same worktree on repeat), so a parse miss on a
+  # banner-only line re-acquires the same lease rather than leaking a fresh one.
   _CS_WT=
   for _ in $(seq 1 "${FM_CODESPACE_WT_RETRIES:-10}"); do
     _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')

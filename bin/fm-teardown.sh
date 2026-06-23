@@ -458,8 +458,19 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
       elif [ -z "$REMOTE_WT" ]; then
         echo "warn: no remote_worktree recorded for codespace task $ID; skipping unpushed-work check" >&2
       else
-        cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain 2>/dev/null" 2>/dev/null || true)
-        cs_unpushed=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT log --oneline HEAD --not --remotes -- 2>/dev/null | head -5" 2>/dev/null || true)
+        # Capture each remote check's exit status separately. A non-zero status
+        # (SSH failure, or a wrong/stale $REMOTE_WT where 'git -C' cannot run)
+        # must REFUSE teardown, not be masked to an empty/"clean" result that
+        # lets the destructive 'treehouse return --force' discard unpushed work.
+        # The unpushed check limits with 'git log -n 5' rather than piping to
+        # 'head', so the pipeline's exit status is git's, not head's.
+        cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain" 2>/dev/null) && cs_dirty_rc=0 || cs_dirty_rc=$?
+        cs_unpushed=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT log --oneline -n 5 HEAD --not --remotes --" 2>/dev/null) && cs_unpushed_rc=0 || cs_unpushed_rc=$?
+        if [ "$cs_dirty_rc" -ne 0 ] || [ "$cs_unpushed_rc" -ne 0 ]; then
+          echo "REFUSED: could not verify codespace worktree $REMOTE_WT is clean (SSH or git check failed; status rc=$cs_dirty_rc, unpushed rc=$cs_unpushed_rc)." >&2
+          echo "Refusing rather than infer 'clean' from a check that did not run, which could discard unpushed work. Restore connectivity / confirm the remote worktree path and retry (or get the captain's explicit OK to discard, then --force)." >&2
+          exit 1
+        fi
         if [ -n "$cs_dirty" ] || [ -n "$cs_unpushed" ]; then
           echo "REFUSED: codespace worktree $REMOTE_WT has work not on any remote." >&2
           [ -n "$cs_dirty" ] && echo "uncommitted changes present" >&2

@@ -348,6 +348,7 @@ test_codespace_scout_brief() {
 #   unpushed    -> contents returned by `git log ... --not --remotes`
 #   report      -> contents returned by `cat <remote>/<id>-report.md` (empty = absent)
 #   return-fail -> if present, `treehouse return` exits non-zero
+#   check-fail  -> if present, the git status/log checks exit non-zero (check could not run)
 # Echoes the sandbox dir.
 make_teardown_case() {
   local name=$1 kind=$2 id=${3:-task-cs1}
@@ -381,8 +382,8 @@ SH
 md="$dir/mock-data"
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "ssh" ]; then
   case "\$*" in
-    *"status --porcelain"*) cat "\$md/dirty" 2>/dev/null; exit 0 ;;
-    *"log --oneline HEAD --not --remotes"*) cat "\$md/unpushed" 2>/dev/null; exit 0 ;;
+    *"status --porcelain"*) [ -f "\$md/check-fail" ] && exit 1; cat "\$md/dirty" 2>/dev/null; exit 0 ;;
+    *"--not --remotes"*) [ -f "\$md/check-fail" ] && exit 1; cat "\$md/unpushed" 2>/dev/null; exit 0 ;;
     *-report.md*)
       if [ -s "\$md/report" ]; then cat "\$md/report"; exit 0; else exit 1; fi ;;
     *"treehouse return"*)
@@ -469,6 +470,24 @@ test_ship_dirty_refuses() {
   pass "ship teardown refuses when the codespace worktree is dirty"
 }
 
+# ── (n2) ship teardown refuses when the unpushed-work check cannot run ──────
+
+test_ship_check_failure_refuses() {
+  local dir rc out
+  dir=$(make_teardown_case "ship-checkfail" ship)
+  touch "$dir/mock-data/check-fail"   # SSH/git check exits non-zero (could not run)
+
+  set +e
+  out=$(run_teardown "$dir" task-cs1 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "ship-checkfail: teardown should refuse when the check cannot run"
+  printf '%s\n' "$out" | grep -qi 'could not verify' || fail "ship-checkfail: missing refusal message"
+  [ -f "$dir/state/task-cs1.meta" ] || fail "ship-checkfail: meta should remain on refusal (lease still held)"
+  pass "ship teardown refuses when the unpushed-work check cannot run"
+}
+
 # ── (o) teardown stops with state intact when treehouse return fails ────────
 
 test_return_failure_stops() {
@@ -518,5 +537,6 @@ test_codespace_scout_brief
 test_scout_report_copyback
 test_scout_no_report_refuses
 test_ship_dirty_refuses
+test_ship_check_failure_refuses
 test_return_failure_stops
 test_clean_teardown_succeeds
