@@ -406,7 +406,7 @@ Its charter retargets escalation to the main firstmate's status file, so routine
 
 A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
 
-- **no-mistakes** - the stages below as written: no-mistakes validation pipeline through lint with `--skip=push,pr,ci` -> captain pushes and opens the PR manually -> captain merge.
+- **no-mistakes** - the stages below as written: no-mistakes validation pipeline through push with `--skip=pr,ci` -> captain opens the PR manually -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
 - **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
 
@@ -418,23 +418,23 @@ Pooled clones keep their local default refs frozen at clone time and can lag `or
 ### Validate
 
 For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
-Every instruction to a crewmate to run the no-mistakes pipeline must include `--skip=push,pr,ci`.
-Use `/no-mistakes --skip=push,pr,ci` for claude, `$no-mistakes --skip=push,pr,ci` for codex; natural language also works if it explicitly includes `--skip=push,pr,ci`.
+Every instruction to a crewmate to run the no-mistakes pipeline must include `--skip=pr,ci`.
+Use `/no-mistakes --skip=pr,ci` for claude, `$no-mistakes --skip=pr,ci` for codex; natural language also works if it explicitly includes `--skip=pr,ci`.
 For example, with claude:
 
 ```sh
-bin/fm-send.sh fm-<id> '/no-mistakes --skip=push,pr,ci'
+bin/fm-send.sh fm-<id> '/no-mistakes --skip=pr,ci'
 ```
 
-The crewmate drives the no-mistakes pipeline through local validation itself (review, test, document, lint), while no-mistakes skips branch push, PR creation, and PR-based CI monitoring.
+The crewmate drives the no-mistakes pipeline through branch push itself (review, test, document, lint, push), while no-mistakes skips PR creation and PR-based CI monitoring.
 It fixes auto-fix findings on its own.
 When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 ### PR ready
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: validated with --skip=push,pr,ci; branch ready for captain/manual push+PR` after local validation, while `direct-PR` reports `done: PR <url>` after opening the PR.
-For `no-mistakes`, tell the captain the branch is locally validated and ready for them to push and open the PR manually. If this repo's required workflow checks look for a no-mistakes marker in the PR body, preserve that marker in the manual PR body or the workflow may fail.
+For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: validated with --skip=pr,ci; branch pushed and ready for captain/manual PR` after validation, while `direct-PR` reports `done: PR <url>` after opening the PR.
+For `no-mistakes`, tell the captain the branch is validated, pushed, and ready for them to open the PR manually. If this repo's required workflow checks look for a no-mistakes marker in the PR body, preserve that marker in the manual PR body or the workflow may fail.
 Once a PR URL exists, run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)

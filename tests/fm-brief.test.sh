@@ -33,14 +33,18 @@ test_no_mistakes_brief_uses_manual_pr_validation_contract() {
     || fail "brief scaffold failed"
   brief="$home/data/ship-test/brief.md"
 
-  grep -F 'Never push to any remote. Never open or merge a PR.' "$brief" >/dev/null \
-    || fail "no-mistakes brief permits push or PR creation"
-  grep -F 'no-mistakes validation pipeline with `--skip=push,pr,ci`' "$brief" >/dev/null \
+  grep -F 'Never push to the default branch. Never open or merge a PR. Push only your `fm/ship-test` branch, and only as part of the no-mistakes validation pipeline.' "$brief" >/dev/null \
+    || fail "no-mistakes brief permits unsafe push or PR creation"
+  grep -F 'no-mistakes validation pipeline with `--skip=pr,ci`' "$brief" >/dev/null \
     || fail "no-mistakes brief omits skip flags"
-  grep -F 'No-mistakes does not push, open a PR, or monitor CI in this workflow.' "$brief" >/dev/null \
+  grep -F 'No-mistakes may push your branch, but does not open a PR or monitor CI in this workflow.' "$brief" >/dev/null \
     || fail "no-mistakes brief omits manual workflow boundary"
-  grep -F 'done: validated with --skip=push,pr,ci; branch ready for captain/manual push+PR' "$brief" >/dev/null \
+  grep -F 'done: validated with --skip=pr,ci; branch pushed and ready for captain/manual PR' "$brief" >/dev/null \
     || fail "no-mistakes brief omits manual PR-ready status"
+
+  if grep -F -- '--skip=push,pr,ci' "$brief" >/dev/null; then
+    fail "no-mistakes brief still skips branch push"
+  fi
 
   if grep -F 'validate and ship a PR' "$brief" >/dev/null; then
     fail "no-mistakes brief still says validation ships a PR"
