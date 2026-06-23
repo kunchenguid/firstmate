@@ -166,7 +166,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
-| `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, and checks child work |
+| `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
 
@@ -238,7 +238,7 @@ tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only comp
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
-tests/fm-teardown.test.sh                 # fm-teardown.sh unpushed-work safety check: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, --force override
+tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

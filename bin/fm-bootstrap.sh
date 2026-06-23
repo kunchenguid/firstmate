@@ -8,8 +8,9 @@
 #                 "TASKS_AXI: available".
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          tasks-axi is an OPTIONAL backlog-management capability, never a
-#          required tool: it is never a MISSING line and never prompts an install.
+#          tasks-axi is an OPTIONAL backlog-management capability reported only
+#          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
+#          line and never prompts an install.
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
