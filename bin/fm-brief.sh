@@ -157,6 +157,56 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
 case "$MODE" in
+  codespace)
+    CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
+    STATUS_FILE_CS="$CODESPACE_REMOTE_STATE/$ID.status"
+    DOD_CS=$(cat <<CSEOF
+# Definition of done
+This project ships from a **codespace**: your work happens inside the GitHub Codespace where you are running.
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
+After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+CSEOF
+)
+    cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+{TASK}
+
+# Setup
+You are inside a GitHub Codespace working on $REPO, at a detached HEAD on a clean default branch.
+1. First action: \`mkdir -p $CODESPACE_REMOTE_STATE\` (create the status directory for firstmate polling).
+2. Create your branch: \`git checkout -b fm/$ID\`
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+
+# Rules
+1. Never push to the default branch. Never merge a PR.
+2. Stay inside this worktree; modify nothing outside it.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE_CS\`
+   States: working, needs-decision, blocked, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on (setup done, bug reproduced, fix implemented, validation passed) and the
+   needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
+   firstmate reads your pane for that.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Project memory
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$DOD_CS
+EOF
+    echo "scaffolded: $BRIEF (ship, mode=codespace; replace {TASK})"
+    exit 0
+    ;;
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'

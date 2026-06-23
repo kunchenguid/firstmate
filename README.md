@@ -134,7 +134,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   After seeding a secondmate, `fm-backlog-handoff.sh` moves already-judged in-scope queued items from the main backlog into that secondmate home so the domain queue starts in the right place.
   Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 - **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
-  `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+  `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, `local-only` projects stay local until firstmate performs an approved fast-forward merge, and `codespace` projects run their crewmate inside a GitHub Codespace via SSH.
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
@@ -190,6 +190,10 @@ Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` pro
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
+`codespace` mode registers a project whose crewmates work inside a GitHub Codespace instead of a local treehouse worktree.
+Add it to `data/projects.md` with `[codespace]` in the registry line, for example: `- my-proj [codespace] - my description (added 2026-06-22)`.
+`fm-spawn.sh` discovers the Codespace automatically via `gh codespace list --repo <owner/repo>` and requires exactly one Available Codespace per repo at spawn time; zero or more than one both error out with a clear message.
+The crewmate's status writes go to `~/firstmate-state/<id>.status` inside the Codespace; `fm-spawn.sh` generates a `state/<id>.check.sh` that SSHes in to read that file, so the watcher's `FM_CHECK_INTERVAL` poll drives supervision.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
@@ -211,6 +215,7 @@ FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shar
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
+FM_CODESPACE_REMOTE_STATE=~/firstmate-state        # remote path inside codespaces where crewmates write status
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

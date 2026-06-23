@@ -12,6 +12,7 @@
 #   no-mistakes  full pipeline -> PR -> captain merge (default)
 #   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
 #   local-only   local branch, no remote/PR -> firstmate review -> captain approve -> local merge
+#   codespace    crewmate SSH-es into the project's GitHub Codespace; no local worktree
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
 #   ask-user findings, local-only merge approval) without checking the captain - except
 #   anything destructive/irreversible/security-sensitive, which still escalates.
@@ -59,7 +60,7 @@ fi
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only) ;;
+  no-mistakes|direct-PR|local-only|codespace) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac

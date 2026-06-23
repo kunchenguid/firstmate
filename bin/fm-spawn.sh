@@ -312,6 +312,101 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
+# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
+# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
+# merge, so scout teardown ignores mode.
+SECONDMATE_PROJECTS=
+if [ "$KIND" = secondmate ]; then
+  MODE=secondmate
+  YOLO=off
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+fi
+
+# Codespace spawn path: SSH into the project's GitHub Codespace, run treehouse
+# and claude there. Status is polled via a generated check.sh; no local worktree.
+if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
+  CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
+
+  # Derive owner/repo from the local clone's origin remote.
+  _CS_ORIGIN=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
+  if [ -z "$_CS_ORIGIN" ]; then
+    echo "error: codespace mode requires an origin remote in $PROJ_ABS" >&2
+    exit 1
+  fi
+  _CS_SLUG=$(printf '%s\n' "$_CS_ORIGIN" | sed 's|.*github\.com[:/]\(.*\)|\1|; s|\.git$||')
+  if [ -z "$_CS_SLUG" ] || [ "$_CS_SLUG" = "$_CS_ORIGIN" ]; then
+    echo "error: cannot parse owner/repo from origin remote: $_CS_ORIGIN" >&2
+    exit 1
+  fi
+
+  # Discover Available codespaces for this repo (exactly one required).
+  _CS_LINES=$(gh codespace list --repo "$_CS_SLUG" --json name,state \
+    --jq '.[] | select(.state == "Available") | .name' 2>/dev/null || true)
+  if [ -z "$_CS_LINES" ]; then
+    echo "error: no Available codespace found for $_CS_SLUG (run: gh codespace list --repo $_CS_SLUG)" >&2
+    exit 1
+  fi
+  _CS_NAME=$(printf '%s\n' "$_CS_LINES" | head -1)
+  _cs_count=$(printf '%s\n' "$_CS_LINES" | wc -l | tr -d '[:space:]')
+  if [ "$_cs_count" -gt 1 ]; then
+    echo "error: $_cs_count Available codespaces found for $_CS_SLUG; expected exactly one (run: gh codespace list --repo $_CS_SLUG)" >&2
+    exit 1
+  fi
+
+  # Copy brief into the codespace before opening the window.
+  gh codespace cp "$BRIEF" "remote:/tmp/$ID-brief.md" -c "$_CS_NAME"
+
+  if [ -n "${TMUX:-}" ]; then
+    SES=$(tmux display-message -p '#S')
+  else
+    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    SES=firstmate
+  fi
+  W="fm-$ID"
+  T="$SES:$W"
+  if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
+    echo "error: window $T already exists" >&2
+    exit 1
+  fi
+  tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+  tmux send-keys -t "$T" "gh codespace ssh -c $(shell_quote "$_CS_NAME")" Enter
+  sleep 8
+  tmux send-keys -t "$T" "treehouse get" Enter
+  sleep 8
+  # shellcheck disable=SC2016  # single quotes deliberate: cat expands inside the codespace
+  tmux send-keys -t "$T" 'claude --dangerously-skip-permissions "$(cat '"$(shell_quote "/tmp/$ID-brief.md")"')"' Enter
+
+  mkdir -p "$STATE"
+  {
+    echo "window=$T"
+    echo "worktree="
+    echo "project=$PROJ_ABS"
+    echo "harness=claude"
+    echo "kind=$KIND"
+    echo "mode=codespace"
+    echo "yolo=$YOLO"
+    echo "codespace=$_CS_NAME"
+  } > "$STATE/$ID.meta"
+
+  # Poll script: pull the last status line from the remote state file.
+  _CS_NAME_Q=$(shell_quote "$_CS_NAME")
+  cat > "$STATE/$ID.check.sh" <<CHECKEOF
+#!/usr/bin/env bash
+out=\$(gh codespace ssh -c ${_CS_NAME_Q} -- "cat ${CODESPACE_REMOTE_STATE}/${ID}.status 2>/dev/null | tail -1" 2>/dev/null)
+[ -n "\$out" ] && echo "\$out"
+CHECKEOF
+  chmod +x "$STATE/$ID.check.sh"
+
+  echo "spawned $ID harness=claude kind=$KIND mode=codespace yolo=$YOLO window=$T worktree="
+  exit 0
+fi
+
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
@@ -396,22 +491,6 @@ EOF
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
   esac
-fi
-
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
-if [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
 fi
 
 mkdir -p "$STATE"

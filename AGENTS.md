@@ -311,6 +311,7 @@ Do not eagerly backfill every project.
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
 - `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
+- `codespace` - crewmate SSH-es into the project's GitHub Codespace via `gh codespace ssh`, runs treehouse worktrees inside it; no local clone needed.
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 

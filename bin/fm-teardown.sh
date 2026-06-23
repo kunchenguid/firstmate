@@ -50,6 +50,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+CODESPACE=$(grep '^codespace=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
@@ -415,6 +416,22 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
+if [ "$MODE" = codespace ] && [ "$FORCE" != "--force" ]; then
+  REMOTE_WT=$(grep '^remote_worktree=' "$META" | cut -d= -f2- || true)
+  if [ -z "$CODESPACE" ]; then
+    echo "warn: no codespace name in meta for task $ID; skipping unpushed-work check" >&2
+  elif [ -z "$REMOTE_WT" ]; then
+    echo "warn: no remote_worktree recorded for codespace task $ID; skipping unpushed-work check" >&2
+  else
+    cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain 2>/dev/null" 2>/dev/null || true)
+    if [ -n "$cs_dirty" ]; then
+      echo "REFUSED: codespace worktree $REMOTE_WT has uncommitted changes." >&2
+      echo "Commit or stash in the codespace, or get the captain's explicit OK to discard, then --force." >&2
+      exit 1
+    fi
+  fi
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
@@ -480,7 +497,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] && [ "$MODE" != codespace ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
