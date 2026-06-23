@@ -252,6 +252,8 @@ The registry line records the project name, delivery mode, optional `+yolo` post
 Add the line when you clone or create a project, keep the description useful for identifying the project, and drop the line if a project is ever removed from `projects/`.
 Do not turn the registry into a knowledge dump.
 Durable descriptive detail belongs in the project's own `AGENTS.md`.
+A `codespace` project carries its `owner/repo` inside the brackets, because it has no local clone to read an origin remote from: `- <name> [codespace owner/repo] - <desc> (added <date>)`.
+`fm-spawn.sh` reads that slug (via `fm-project-mode.sh --slug`) to discover the project's Codespace; a `codespace` line without an `owner/repo` is an error at spawn time.
 
 `data/secondmates.md` is the secondmate routing table.
 Every persistent secondmate has one line:
@@ -311,11 +313,12 @@ Do not eagerly backfill every project.
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
 - `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
-- `codespace` - crewmate SSH-es into the project's GitHub Codespace via `gh codespace ssh`, runs treehouse worktrees inside it; no local clone needed.
+- `codespace` - crewmate SSH-es into the project's GitHub Codespace via `gh codespace ssh`, leases a treehouse worktree inside it, and runs there; no local clone at all. The registry line carries the `owner/repo`; spawn discovers the single Available Codespace, leases a worktree (recording its remote path for teardown safety), copies the brief in, and launches the crewmate over SSH. Scout and ship both work; the scout's report is copied back over SSH at teardown.
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
 **Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
+A `codespace` project is the exception: do not clone it at all - just add the registry line with `[codespace owner/repo]`, since all work happens inside the Codespace.
 
 **Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.
 Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, visibility (default private), and delivery mode, and create with `gh-axi` only after the captain confirms.

@@ -113,6 +113,54 @@ fi
 
 REPO=${POS[1]}
 
+# Resolve the project's delivery mode (discarding yolo, which the brief never uses).
+# Scout is mode-agnostic except for codespace, where the worktree and report live
+# inside the Codespace and the report is copied back at teardown.
+read -r MODE _ <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
+EOF
+
+if [ "$KIND" = scout ] && [ "$MODE" = codespace ]; then
+CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
+STATUS_FILE_CS="$CODESPACE_REMOTE_STATE/$ID.status"
+REPORT_FILE_CS="$CODESPACE_REMOTE_STATE/$ID-report.md"
+cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+{TASK}
+
+# Setup
+You are inside a GitHub Codespace, in a disposable treehouse worktree of $REPO at a detached HEAD on a clean default branch.
+This is a SCOUT task: the deliverable is a written report, not a PR.
+First action: \`mkdir -p $CODESPACE_REMOTE_STATE\` (the directory firstmate polls and copies your report back from).
+The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
+The report is the only thing that survives, so anything worth keeping must be in it.
+
+# Rules
+1. Never push to any remote and never open a PR.
+2. Stay inside this worktree; the only files you may write outside it are the report and status file below (both under $CODESPACE_REMOTE_STATE).
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE_CS\`
+   States: working, needs-decision, blocked, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on and the needs-decision/blocked/done/failed states. No step-by-step
+   FYI progress lines; firstmate reads your pane for that.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. If a decision belongs to a human (product choices, destructive actions),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Definition of done
+Write your findings to \`$REPORT_FILE_CS\` (firstmate copies this back to its local data/$ID/report.md at teardown).
+The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive ship instructions as a follow-up message.
+EOF
+echo "scaffolded: $BRIEF (scout, mode=codespace; replace {TASK})"
+exit 0
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -151,11 +199,8 @@ exit 0
 fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
-# yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
-read -r MODE _ <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
-EOF
-
+# MODE was already resolved above (yolo discarded; it governs firstmate's approval
+# behaviour, not the brief).
 case "$MODE" in
   codespace)
     CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"

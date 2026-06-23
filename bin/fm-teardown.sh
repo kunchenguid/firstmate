@@ -12,6 +12,10 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
+# Codespace tasks (mode=codespace) have no local worktree: teardown SSHes into the
+# Codespace to check for unpushed ship work (ship only) or to copy the scout report
+# back (scout), then releases the durable treehouse lease with 'treehouse return'.
+# A failed return STOPS with state intact rather than leaking the lease.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -416,20 +420,74 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
-if [ "$MODE" = codespace ] && [ "$FORCE" != "--force" ]; then
+# Codespace teardown: a self-contained path. There is no local worktree, so the
+# WT-based checks further down are skipped (worktree= is empty in meta). For ship
+# tasks, SSH in and refuse if the codespace worktree has uncommitted or unpushed
+# work. For scout tasks, copy the report back and apply the report-exists contract
+# regardless of mode. Then release the durable worktree lease inside the codespace;
+# like secondmate teardown, a failed return STOPS with state intact rather than
+# leaking the lease.
+if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   REMOTE_WT=$(grep '^remote_worktree=' "$META" | cut -d= -f2- || true)
-  if [ -z "$CODESPACE" ]; then
-    echo "warn: no codespace name in meta for task $ID; skipping unpushed-work check" >&2
-  elif [ -z "$REMOTE_WT" ]; then
-    echo "warn: no remote_worktree recorded for codespace task $ID; skipping unpushed-work check" >&2
-  else
-    cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain 2>/dev/null" 2>/dev/null || true)
-    if [ -n "$cs_dirty" ]; then
-      echo "REFUSED: codespace worktree $REMOTE_WT has uncommitted changes." >&2
-      echo "Commit or stash in the codespace, or get the captain's explicit OK to discard, then --force." >&2
+  REMOTE_STATE=$(grep '^remote_state=' "$META" | cut -d= -f2- || true)
+  # The tilde is deliberately literal: it is sent to the codespace's shell over SSH,
+  # which expands it to the remote user's home (not the local one).
+  # shellcheck disable=SC2088
+  [ -n "$REMOTE_STATE" ] || REMOTE_STATE='~/firstmate-state'
+
+  if [ "$FORCE" != "--force" ]; then
+    if [ "$KIND" = scout ]; then
+      REPORT="$DATA/$ID/report.md"
+      if [ ! -f "$REPORT" ] && [ -n "$CODESPACE" ]; then
+        mkdir -p "$DATA/$ID"
+        if gh codespace ssh -c "$CODESPACE" -- "cat $REMOTE_STATE/$ID-report.md" > "$REPORT.tmp" 2>/dev/null && [ -s "$REPORT.tmp" ]; then
+          mv "$REPORT.tmp" "$REPORT"
+        else
+          rm -f "$REPORT.tmp"
+        fi
+      fi
+      if [ ! -f "$REPORT" ]; then
+        echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+        echo "The report is the work product. Have the crewmate write it to $REMOTE_STATE/$ID-report.md (or get the captain's explicit OK to discard, then --force)." >&2
+        exit 1
+      fi
+    else
+      # Ship: refuse if the codespace worktree holds work not on any remote.
+      if [ -z "$CODESPACE" ]; then
+        echo "warn: no codespace name in meta for task $ID; skipping unpushed-work check" >&2
+      elif [ -z "$REMOTE_WT" ]; then
+        echo "warn: no remote_worktree recorded for codespace task $ID; skipping unpushed-work check" >&2
+      else
+        cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain 2>/dev/null" 2>/dev/null || true)
+        cs_unpushed=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT log --oneline HEAD --not --remotes -- 2>/dev/null | head -5" 2>/dev/null || true)
+        if [ -n "$cs_dirty" ] || [ -n "$cs_unpushed" ]; then
+          echo "REFUSED: codespace worktree $REMOTE_WT has work not on any remote." >&2
+          [ -n "$cs_dirty" ] && echo "uncommitted changes present" >&2
+          [ -n "$cs_unpushed" ] && printf 'unpushed commits:\n%s\n' "$cs_unpushed" >&2
+          echo "Push the branch in the codespace, or get the captain's explicit OK to discard, then --force." >&2
+          exit 1
+        fi
+      fi
+    fi
+  fi
+
+  # Release the durable worktree lease inside the codespace.
+  if [ -n "$CODESPACE" ] && [ -n "$REMOTE_WT" ]; then
+    if gh codespace ssh -c "$CODESPACE" -- "treehouse return --force $REMOTE_WT"; then
+      :
+    elif [ "$FORCE" = "--force" ]; then
+      echo "warn: treehouse return failed in codespace $CODESPACE for $REMOTE_WT; continuing due to --force (lease may still be held)" >&2
+    else
+      echo "error: treehouse return failed in codespace $CODESPACE for $REMOTE_WT; lease may still be held. State left intact." >&2
       exit 1
     fi
   fi
+
+  tmux kill-window -t "$T" 2>/dev/null || true
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
+  echo "teardown $ID complete (codespace ${CODESPACE:-unknown}, worktree ${REMOTE_WT:-unknown})"
+  printf '%s\n' "🌱 Backlog: $ID just finished. Update data/backlog.md - move $ID to Done (keep Done to the 10 most recent), then re-scan Queued for items now unblocked (a \"blocked-by: $ID\" may have just cleared) or now time-due, and dispatch what's ready."
+  exit 0
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then

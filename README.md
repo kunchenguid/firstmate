@@ -190,10 +190,11 @@ Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` pro
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
-`codespace` mode registers a project whose crewmates work inside a GitHub Codespace instead of a local treehouse worktree.
-Add it to `data/projects.md` with `[codespace]` in the registry line, for example: `- my-proj [codespace] - my description (added 2026-06-22)`.
-`fm-spawn.sh` discovers the Codespace automatically via `gh codespace list --repo <owner/repo>` and requires exactly one Available Codespace per repo at spawn time; zero or more than one both error out with a clear message.
-The crewmate's status writes go to `~/firstmate-state/<id>.status` inside the Codespace; `fm-spawn.sh` generates a `state/<id>.check.sh` that SSHes in to read that file, so the watcher's `FM_CHECK_INTERVAL` poll drives supervision.
+`codespace` mode registers a project whose crewmates work inside a GitHub Codespace instead of a local treehouse worktree, with no local clone at all.
+The registry line carries the `owner/repo` inside the brackets, since there is no clone to read an origin remote from: `- my-proj [codespace owner/my-proj] - my description (added 2026-06-22)`.
+`fm-spawn.sh` reads that slug, discovers the Codespace via `gh codespace list --repo <owner/repo>` (requiring exactly one Available Codespace; zero or more than one both error out clearly), polls for SSH-ready, then leases a treehouse worktree inside the Codespace with `treehouse get --lease` and records its remote path so teardown can check for unpushed work and release the lease.
+The crewmate's status (and, for a scout, its report) write to `~/firstmate-state/` inside the Codespace; `fm-spawn.sh` generates a `state/<id>.check.sh` that SSHes in to read the status file, so the watcher's `FM_CHECK_INTERVAL` poll drives supervision, and scout teardown copies the report back over SSH to `data/<id>/report.md`.
+`fm-teardown.sh` releases the worktree lease with `treehouse return`; if that fails it stops with state intact rather than leaking the lease.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.

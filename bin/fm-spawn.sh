@@ -306,42 +306,44 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_ABS=""
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+  PROJ_NAME=$(basename "$PROJ")
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
+# merge, so scout teardown ignores mode. Mode is resolved BEFORE the local clone is
+# required, because codespace mode has no local clone at all.
 SECONDMATE_PROJECTS=
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
+  if [ "$MODE" != codespace ]; then
+    PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+    PROJ_NAME=$(basename "$PROJ_ABS")
+  fi
 fi
 
-# Codespace spawn path: SSH into the project's GitHub Codespace, run treehouse
-# and claude there. Status is polled via a generated check.sh; no local worktree.
+# Codespace spawn path: no local clone. owner/repo comes from the registry line;
+# discover the project's single Available codespace, lease a worktree inside it
+# (non-interactive, capturing its path for teardown safety), copy the brief in, and
+# launch claude over SSH in a tmux window. Status is polled via a generated check.sh.
 if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
 
-  # Derive owner/repo from the local clone's origin remote.
-  _CS_ORIGIN=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
-  if [ -z "$_CS_ORIGIN" ]; then
-    echo "error: codespace mode requires an origin remote in $PROJ_ABS" >&2
-    exit 1
-  fi
-  _CS_SLUG=$(printf '%s\n' "$_CS_ORIGIN" | sed 's|.*github\.com[:/]\(.*\)|\1|; s|\.git$||')
-  if [ -z "$_CS_SLUG" ] || [ "$_CS_SLUG" = "$_CS_ORIGIN" ]; then
-    echo "error: cannot parse owner/repo from origin remote: $_CS_ORIGIN" >&2
+  # owner/repo comes from the registry ([codespace owner/repo]); no clone required.
+  _CS_SLUG=$("$FM_ROOT/bin/fm-project-mode.sh" --slug "$PROJ_NAME" 2>/dev/null || true)
+  if [ -z "$_CS_SLUG" ]; then
+    echo "error: codespace project $PROJ_NAME has no owner/repo in its registry line; expected '- $PROJ_NAME [codespace owner/repo] - ...'" >&2
     exit 1
   fi
 
@@ -356,6 +358,31 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   _cs_count=$(printf '%s\n' "$_CS_LINES" | wc -l | tr -d '[:space:]')
   if [ "$_cs_count" -gt 1 ]; then
     echo "error: $_cs_count Available codespaces found for $_CS_SLUG; expected exactly one (run: gh codespace list --repo $_CS_SLUG)" >&2
+    exit 1
+  fi
+
+  # Poll for shell-ready: a freshly Available codespace can still refuse SSH briefly.
+  _cs_ready=
+  for _ in $(seq 1 "${FM_CODESPACE_SSH_RETRIES:-30}"); do
+    if gh codespace ssh -c "$_CS_NAME" -- true >/dev/null 2>&1; then _cs_ready=1; break; fi
+    sleep 2
+  done
+  if [ -z "$_cs_ready" ]; then
+    echo "error: codespace $_CS_NAME did not accept SSH within the retry window" >&2
+    exit 1
+  fi
+
+  # Poll for worktree-ready: lease a worktree (non-interactive; prints only its path,
+  # banners to stderr). The lease is durable, so the slot survives until teardown
+  # releases it with 'treehouse return', and its path is recorded for teardown safety.
+  _CS_WT=
+  for _ in $(seq 1 "${FM_CODESPACE_WT_RETRIES:-10}"); do
+    _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')
+    [ -n "$_CS_WT" ] && break
+    sleep 2
+  done
+  if [ -z "$_CS_WT" ]; then
+    echo "error: could not lease a treehouse worktree in codespace $_CS_NAME" >&2
     exit 1
   fi
 
@@ -374,24 +401,30 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     echo "error: window $T already exists" >&2
     exit 1
   fi
-  tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
-  tmux send-keys -t "$T" "gh codespace ssh -c $(shell_quote "$_CS_NAME")" Enter
-  sleep 8
-  tmux send-keys -t "$T" "treehouse get" Enter
-  sleep 8
-  # shellcheck disable=SC2016  # single quotes deliberate: cat expands inside the codespace
-  tmux send-keys -t "$T" 'claude --dangerously-skip-permissions "$(cat '"$(shell_quote "/tmp/$ID-brief.md")"')"' Enter
+  tmux new-window -d -t "$SES" -n "$W" -c "$FM_HOME"
+
+  # One self-contained line: SSH with a forced PTY (-t), cd into the leased worktree,
+  # exec claude. A single command avoids inter-step timing; $(cat ...) expands on the
+  # remote. The remote paths are quoted for the remote shell, then the whole remote
+  # command is quoted again for the local pane shell.
+  _CS_REMOTE_CMD="cd $(shell_quote "$_CS_WT") && exec claude --dangerously-skip-permissions \"\$(cat $(shell_quote "/tmp/$ID-brief.md"))\""
+  _CS_PANE_LINE="gh codespace ssh -c $(shell_quote "$_CS_NAME") -- -t $(shell_quote "$_CS_REMOTE_CMD")"
+  tmux send-keys -t "$T" -l "$_CS_PANE_LINE"
+  sleep 0.3
+  tmux send-keys -t "$T" Enter
 
   mkdir -p "$STATE"
   {
     echo "window=$T"
     echo "worktree="
-    echo "project=$PROJ_ABS"
+    echo "project="
     echo "harness=claude"
     echo "kind=$KIND"
     echo "mode=codespace"
     echo "yolo=$YOLO"
     echo "codespace=$_CS_NAME"
+    echo "remote_worktree=$_CS_WT"
+    echo "remote_state=$CODESPACE_REMOTE_STATE"
   } > "$STATE/$ID.meta"
 
   # Poll script: pull the last status line from the remote state file.
@@ -403,7 +436,7 @@ out=\$(gh codespace ssh -c ${_CS_NAME_Q} -- "cat ${CODESPACE_REMOTE_STATE}/${ID}
 CHECKEOF
   chmod +x "$STATE/$ID.check.sh"
 
-  echo "spawned $ID harness=claude kind=$KIND mode=codespace yolo=$YOLO window=$T worktree="
+  echo "spawned $ID harness=claude kind=$KIND mode=codespace yolo=$YOLO window=$T worktree=$_CS_WT codespace=$_CS_NAME"
   exit 0
 fi
 
