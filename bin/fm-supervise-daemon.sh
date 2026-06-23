@@ -498,7 +498,7 @@ housekeeping() {  # <state>
   # but only after MAX_DEFER_SECS of failure and only while afk is active (the
   # captain is away) — far better than the 9.5h silent no-op of afk-invx-i5.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the force to once per max-defer window (the wedge marker doubles
     # as the throttle): on a persistently wedged pane we must not retype the

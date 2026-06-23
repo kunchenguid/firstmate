@@ -55,8 +55,15 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  if [ "$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")" = pending ]; then
-    echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
-    exit 1
-  fi
+  verdict=$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")
+  case "$verdict" in
+    pending)
+      echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+      exit 1
+      ;;
+    send-failed)
+      echo "error: text not sent to $T (tmux send-keys failed)" >&2
+      exit 1
+      ;;
+  esac
 fi

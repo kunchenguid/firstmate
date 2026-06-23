@@ -76,11 +76,14 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
       case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
+      [ "$_a" = "-p" ] && _print=1
     done
-    printf 'fakepane\n'; exit 0 ;;
+    [ "$_print" = 1 ] && printf 'fakepane\n'
+    exit 0 ;;
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
@@ -999,8 +1002,11 @@ set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
+    print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
+    for a in "$@"; do [ "$a" = "-p" ] && print=1; done
+    [ "$print" = 1 ] && printf 'fakepane\n'
+    exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
@@ -1023,6 +1029,7 @@ case "${1:-}" in
         printf '│ > │\n' > "$COMPOSER"
       fi
     elif [ "$lit" = 1 ]; then
+      [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
       printf '│ > %s │\n' "$text" > "$COMPOSER"
     fi
@@ -1182,6 +1189,22 @@ test_below_max_defer_does_not_force() {
   pass "below MAX_DEFER: no forced inject, no alarm, buffer preserved"
 }
 
+test_max_defer_afk_inactive_does_not_force_or_alarm() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case maxdefer-inactive)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  escalate_add "$state" "needs-decision: pick B"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    housekeeping "$state"
+  [ ! -s "$sent" ] || fail "forced an inject while afk was inactive"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired while afk was inactive"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer dropped while afk was inactive"
+  pass "max-defer does not force or alarm while afk is inactive"
+}
+
 test_fm_send_exits_nonzero_on_confirmed_swallow() {
   # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
   # (text left in the composer), so firstmate learns the instruction did not land
@@ -1203,6 +1226,19 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
   fi
   grep -F 'not submitted' "$err" >/dev/null || fail "fm-send did not explain the swallowed submit: $(cat "$err")"
   pass "fm-send exits non-zero on a confirmed swallow, zero on a clean submit"
+}
+
+test_fm_send_exits_nonzero_on_initial_send_failure() {
+  local dir fakebin err
+  dir=$(make_bordered_case send-type-failure)
+  fakebin="$dir/fakebin"; err="$dir/send.err"
+  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+    FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
+    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err"; then
+    fail "fm-send exited zero despite initial tmux send-keys failure"
+  fi
+  grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"
+  pass "fm-send exits non-zero when initial text send fails"
 }
 
 test_daemon_state_root_uses_fm_home
@@ -1262,4 +1298,6 @@ test_max_defer_forces_then_alarms_on_stuck_pane
 test_max_defer_force_recovers_on_idle_pane
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_not_force
+test_max_defer_afk_inactive_does_not_force_or_alarm
 test_fm_send_exits_nonzero_on_confirmed_swallow
+test_fm_send_exits_nonzero_on_initial_send_failure
