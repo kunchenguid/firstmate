@@ -71,9 +71,9 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 
 ```sh
 # 1. a verified agent harness - claude, codex, opencode, or pi
-# 2. git + GitHub auth
+# 2. git + GitHub auth visible through gh-axi
 # 3. tmux - the default crew backend uses tmux windows (firstmate offers to install it if missing)
-gh auth login
+gh-axi api user
 ```
 
 **Get firstmate:**
@@ -197,7 +197,7 @@ FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both
 FM_OPENCODE_DESKTOP_APP=          # optional path to OpenCode.exe for desktop visibility
 FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; {url}, {session}, {worktree}, {title}, {task}, {brief}
 FM_OPENCODE_DESKTOP_COMMAND=      # optional custom command template for desktop visibility
-FM_OPENCODE_SERVER_HOST=          # optional bind/connect host override
+FM_OPENCODE_SERVER_HOST=          # optional bind/connect host override; non-loopback hosts require or get generated auth
 FM_OPENCODE_SERVER_PORT=0         # optional fixed server port; 0 means choose a free port
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle

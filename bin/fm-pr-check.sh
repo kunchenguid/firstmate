@@ -20,7 +20,10 @@ if [ -f "$META" ] && ! grep -qxF "pr=$URL" "$META"; then
 fi
 
 cat > "$STATE/$ID.check.sh" <<EOF
-state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
-[ "\$state" = "MERGED" ] && echo "merged"
+api_path=\$(printf '%s\n' "$URL" | sed -E 's#^https://github.com/([^/]+)/([^/]+)/pull/([0-9]+).*#/repos/\1/\2/pulls/\3#')
+merged=\$(gh-axi api "\$api_path" 2>/dev/null | awk -F': ' '
+  /^merged:/ { gsub(/"/, "", \$2); print tolower(\$2); exit }
+')
+[ "\$merged" = "true" ] && echo "merged"
 EOF
 echo "armed: state/$ID.check.sh polls $URL"

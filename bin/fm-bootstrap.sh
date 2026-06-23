@@ -58,7 +58,7 @@ fleet_sync() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node) echo "brew install $1  # or the platform's package manager" ;;
     opencode) echo "npm install -g opencode-ai" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -90,8 +90,8 @@ backend_name() {
 
 BACKEND=$(backend_name)
 case "$BACKEND" in
-  opencode-server) TOOLS="opencode node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  opencode-server) TOOLS="opencode node no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  *) TOOLS="tmux node treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 
 if [ "${1:-}" = "install" ]; then
@@ -109,7 +109,7 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh-axi api user >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

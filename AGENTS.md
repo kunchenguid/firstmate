@@ -108,7 +108,7 @@ Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
-- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `NEEDS_GH_AUTH` - `gh-axi api user` could not authenticate. Report that exact `gh-axi` limitation; if the captain authorizes the underlying GitHub CLI login for this setup task, ask them to run `! gh auth login` interactively because `gh-axi` has no login subcommand.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
 
@@ -381,6 +381,7 @@ If one pair fails, the rest still run and the batch exits non-zero.
 The script resolves the backend (`FM_BACKEND` or local `config/backend`, default `tmux`), resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `backend=`, `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command on the tmux backend only (only for verifying new adapters).
 `opencode-server` supports ordinary OpenCode ship/scout tasks only: it creates a firstmate-owned git worktree under `state/opencode-server-worktrees/`, starts one OpenCode server for that worktree, sends the brief through the OpenCode HTTP API, and records server/session metadata in the task meta.
 Set `FM_OPENCODE_VISIBILITY=headless` (default), `web`, `desktop`, or `both`; `desktop` uses OpenCode Desktop's `opencode://new-session` deep link, and `terminal`/`attach`/`tui`/`app`/`chat` are aliases for that Desktop path rather than external terminal launchers.
+If `FM_OPENCODE_SERVER_HOST` binds to a non-loopback host, the helper uses `OPENCODE_SERVER_PASSWORD` when present or generates per-task basic auth; never expose an unauthenticated OpenCode server.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For tmux ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
