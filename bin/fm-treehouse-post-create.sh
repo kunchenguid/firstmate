@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Treehouse post_create hook: run a firstmate per-project worktree setup
 # script (data/<project>-setup.sh) when a worktree is provisioned or reset.
+# Usage: fm-treehouse-post-create.sh
+#   Invoked by Treehouse from the new worktree directory, not by hand during
+#   normal firstmate operation.
 #
 # Treehouse >= v1.8.0 fires post_create in the worktree directory, right
 # before `treehouse get` hands the worktree over. That is the natural place
@@ -9,7 +12,8 @@
 # firstmate; this hook bridges the two by locating firstmate's operational
 # directories from its own location (it lives in firstmate's bin/).
 #
-# Wiring (machine-level, one-time): add to ~/.config/treehouse/config.toml
+# Wiring (machine-level, one-time): add to the Treehouse user config
+# (${TREEHOUSE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/treehouse/config.toml})
 #   [hooks]
 #   post_create = ["<absolute path to this script>"]
 # Treehouse ignores repo-level treehouse.toml hooks for safety, so the user
@@ -19,21 +23,23 @@
 #   - project name = basename of the worktree directory, which matches the
 #     repo basename and the data/projects.md registry convention (projects
 #     are cloned as projects/<repo-basename>). Before running setup, the hook
-#     verifies this worktree belongs to that firstmate project clone.
+#     verifies this worktree belongs to the matching firstmate project clone
+#     under ${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}.
 #   - firstmate home = $FM_HOME if set, else derived from this script's
 #     location (../ from bin/). Secondmates never use treehouse worktrees,
 #     so the main firstmate home is the only relevant one.
-#   - runs ${FM_DATA_OVERRIDE:-$FM_HOME/data}/<project>-setup.sh if it exists,
-#     synchronously.
+#   - runs ${FM_DATA_OVERRIDE:-$FM_HOME/data}/<project>-setup.sh
+#     synchronously if it exists.
 #   - non-fatal: a failing setup script is logged but does not block the
 #     worktree handoff. Treehouse continues on hook failure by design, so
 #     this script exits with the setup script's code to surface the failure
 #     in treehouse's own logs without aborting the get.
-#   - output is logged to $FM_HOME/state/treehouse-setup-<project>.log so
+#   - output is logged to
+#     ${FM_STATE_OVERRIDE:-$FM_HOME/state}/treehouse-setup-<project>.log so
 #     firstmate can inspect it. The log is worktree-keyed (not task-keyed)
-#     because post_create fires at worktree creation time, before any task
-#     is assigned to the worktree; a reused worktree's log is overwritten
-#     on each reset, which is the right freshness behavior.
+#     because post_create fires at worktree creation time, before any task is
+#     assigned to the worktree; a reused worktree's log is overwritten on each
+#     reset, which is the right freshness behavior.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

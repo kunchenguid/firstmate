@@ -119,6 +119,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
+  A Treehouse `post_create` hook can run local `data/<project>-setup.sh` scripts as each worktree is provisioned, so per-project dependency installs, builds, or env-file copies happen before the crewmate launches.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
@@ -153,6 +154,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
+| `fm-treehouse-post-create.sh` | Treehouse `post_create` hook that runs local `data/<project>-setup.sh` scripts in matching project worktrees |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
@@ -184,6 +186,8 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
+Optional per-project worktree setup scripts live locally as `data/<project>-setup.sh`.
+After bootstrap wires the Treehouse `post_create` hook into the Treehouse user config, `treehouse get` runs the matching setup script in each new or reset worktree, logs output to `state/treehouse-setup-<project>.log`, and continues even if the setup exits non-zero.
 
 Runtime tuning via environment variables (defaults shown):
 
@@ -224,6 +228,8 @@ for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, 
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, and /afk presence-gating tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-spawn-treehouse-env.test.sh      # spawn passes active firstmate home/override context into treehouse get
+tests/fm-treehouse-post-create.test.sh    # treehouse post_create per-project setup hook behavior
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh unpushed-work safety check: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
