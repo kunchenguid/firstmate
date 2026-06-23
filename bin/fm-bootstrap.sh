@@ -104,12 +104,11 @@ treehouse_hook_path() {
 
 treehouse_post_create_hook_configured() {
   config=$(treehouse_config_path)
-  hook=$(treehouse_hook_path) || return 1
   [ -f "$config" ] || return 1
-  awk -v hook="$hook" '
+  awk '
     /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/); in_post_create = 0 }
     in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { in_post_create = 1 }
-    in_hooks && in_post_create && index($0, hook) { found = 1 }
+    in_hooks && in_post_create && index($0, "fm-treehouse-post-create.sh") { found = 1 }
     in_hooks && in_post_create && /\]/ { in_post_create = 0 }
     END { exit found ? 0 : 1 }
   ' "$config"
@@ -125,6 +124,96 @@ treehouse_config_has_post_create() {
     in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { found = 1 }
     END { exit found ? 0 : 1 }
   ' "$1"
+}
+
+append_treehouse_post_create_hook() {
+  config=$1
+  hook=$2
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-config.XXXXXX") || return 1
+  if awk -v hook="$hook" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function append_to_single_line(line, hook,    open, rel_close, close_pos, inside, prefix, suffix) {
+      open = index(line, "[")
+      rel_close = index(substr(line, open + 1), "]")
+      if (!open || !rel_close) {
+        return line
+      }
+      close_pos = open + rel_close
+      inside = trim(substr(line, open + 1, close_pos - open - 1))
+      prefix = substr(line, 1, close_pos - 1)
+      suffix = substr(line, close_pos)
+      if (inside == "") {
+        return prefix "\"" hook "\"" suffix
+      }
+      return prefix ", \"" hook "\"" suffix
+    }
+    function add_comma_before_comment(line,    hash, body, comment) {
+      hash = index(line, "#")
+      if (hash) {
+        body = substr(line, 1, hash - 1)
+        comment = substr(line, hash)
+      } else {
+        body = line
+        comment = ""
+      }
+      if (body ~ /,[[:space:]]*$/) {
+        return line
+      }
+      sub(/[[:space:]]*$/, "", body)
+      return body "," (comment == "" ? "" : " " comment)
+    }
+    {
+      lines[NR] = $0
+      if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
+        if (in_post_create && !pc_end) {
+          pc_end = NR - 1
+        }
+        in_post_create = 0
+      }
+      if (in_hooks && $0 ~ /^[[:space:]]*post_create[[:space:]]*=/) {
+        pc_start = NR
+        in_post_create = 1
+      }
+      if (in_post_create && $0 ~ /\]/) {
+        pc_end = NR
+        in_post_create = 0
+      }
+    }
+    END {
+      if (!pc_start || !pc_end) {
+        exit 1
+      }
+      if (pc_start == pc_end) {
+        lines[pc_start] = append_to_single_line(lines[pc_start], hook)
+      } else {
+        last_value = 0
+        for (i = pc_start + 1; i < pc_end; i++) {
+          candidate = lines[i]
+          sub(/[[:space:]]*#.*/, "", candidate)
+          if (trim(candidate) != "") {
+            last_value = i
+          }
+        }
+        if (last_value) {
+          lines[last_value] = add_comma_before_comment(lines[last_value])
+        }
+      }
+      for (i = 1; i <= NR; i++) {
+        if (i == pc_end && pc_start != pc_end) {
+          indent = lines[pc_end]
+          sub(/[^[:space:]].*$/, "", indent)
+          printf "%s\"%s\"\n", indent "  ", hook
+        }
+        print lines[i]
+      }
+    }
+  ' "$config" >"$tmp" && mv "$tmp" "$config"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 install_treehouse_hook() {
@@ -157,8 +246,7 @@ install_treehouse_hook() {
     rm -f "$tmp"
     return 1
   fi
-  echo "error: treehouse post_create is already configured without $hook; add it to $config" >&2
-  return 1
+  append_treehouse_post_create_hook "$config" "$hook"
 }
 
 if [ "${1:-}" = "install" ]; then
