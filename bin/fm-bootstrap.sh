@@ -102,16 +102,101 @@ treehouse_hook_path() {
   cd "$FM_ROOT/bin" 2>/dev/null && printf '%s/fm-treehouse-post-create.sh\n' "$(pwd -P)"
 }
 
+treehouse_hook_command_usable() {
+  command=$1
+  case "$command" in
+    *fm-treehouse-post-create.sh*) ;;
+    *) return 1 ;;
+  esac
+  hook_path=$(printf '%s\n' "$command" | awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /(^|\/)fm-treehouse-post-create\.sh$/) {
+          print $i
+          exit
+        }
+      }
+    }
+  ')
+  [ -n "$hook_path" ] || return 1
+  case "$hook_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -x "$hook_path" ]
+}
+
 treehouse_post_create_hook_configured() {
   config=$(treehouse_config_path)
   [ -f "$config" ] || return 1
-  awk '
-    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/); in_post_create = 0 }
-    in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { in_post_create = 1 }
-    in_hooks && in_post_create && index($0, "fm-treehouse-post-create.sh") { found = 1 }
-    in_hooks && in_post_create && /\]/ { in_post_create = 0 }
-    END { exit found ? 0 : 1 }
-  ' "$config"
+  while IFS= read -r command; do
+    treehouse_hook_command_usable "$command" && return 0
+  done < <(awk '
+    function strip_comment(line,    i, c, prev, quote, out) {
+      quote = ""
+      out = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        prev = i > 1 ? substr(line, i - 1, 1) : ""
+        if (quote == "" && c == "#") {
+          break
+        }
+        out = out c
+        if ((c == "\"" || c == "'\''") && prev != "\\") {
+          if (quote == "") {
+            quote = c
+          } else if (quote == c) {
+            quote = ""
+          }
+        }
+      }
+      return out
+    }
+    function emit_strings(line,    i, c, prev, quote, value) {
+      quote = ""
+      value = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        prev = i > 1 ? substr(line, i - 1, 1) : ""
+        if ((c == "\"" || c == "'\''") && prev != "\\") {
+          if (quote == "") {
+            quote = c
+            value = ""
+            continue
+          }
+          if (quote == c) {
+            print value
+            quote = ""
+            value = ""
+            continue
+          }
+        }
+        if (quote != "") {
+          value = value c
+        }
+      }
+    }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      clean = strip_comment($0)
+      in_hooks = (clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
+      in_post_create = 0
+    }
+    {
+      clean = strip_comment($0)
+      post_create_line = 0
+      if (in_hooks && clean ~ /^[[:space:]]*post_create[[:space:]]*=/) {
+        in_post_create = 1
+        post_create_line = 1
+      }
+      if (in_hooks && in_post_create) {
+        emit_strings(clean)
+      }
+      if (in_hooks && in_post_create && (clean ~ /\]/ || (post_create_line && clean !~ /\[/))) {
+        in_post_create = 0
+      }
+    }
+  ' "$config")
+  return 1
 }
 
 treehouse_config_has_hooks_section() {

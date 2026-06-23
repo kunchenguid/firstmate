@@ -325,7 +325,11 @@ if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
+  TREEHOUSE_GET_TIMEOUT=${FM_TREEHOUSE_GET_TIMEOUT:-300}
+  case "$TREEHOUSE_GET_TIMEOUT" in ''|*[!0-9]*) TREEHOUSE_GET_TIMEOUT=300 ;; esac
+  [ "$TREEHOUSE_GET_TIMEOUT" -gt 0 ] || TREEHOUSE_GET_TIMEOUT=300
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$TREEHOUSE_GET_TIMEOUT" ]; do
     p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
@@ -334,7 +338,7 @@ if [ "$KIND" != secondmate ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${TREEHOUSE_GET_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 fi

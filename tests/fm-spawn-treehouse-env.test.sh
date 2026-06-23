@@ -84,4 +84,45 @@ test_spawn_passes_home_context_to_treehouse_get() {
   pass "spawn passes active home context to treehouse get"
 }
 
+test_spawn_uses_configurable_treehouse_get_timeout() {
+  local case_dir fakebin home data state projects config project project_abs id log err rc
+  case_dir="$TMP_ROOT/treehouse timeout"
+  fakebin="$case_dir/fakebin"
+  home="$case_dir/home"
+  data="$case_dir/data"
+  state="$case_dir/state"
+  projects="$case_dir/projects"
+  config="$case_dir/config"
+  project="$projects/app"
+  id=timeout-z1
+  log="$case_dir/tmux.log"
+  err="$case_dir/stderr.log"
+
+  make_fake_tmux "$fakebin"
+  mkdir -p "$data/$id" "$state" "$config" "$project"
+  project_abs="$(cd "$project" && pwd)"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf '%s\n' '- app [direct-PR] - test app (added 2026-06-23)' > "$data/projects.md"
+
+  set +e
+  PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$data" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_PROJECTS_OVERRIDE="$projects" \
+    FM_CONFIG_OVERRIDE="$config" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_WORKTREE="$project_abs" \
+    FM_TREEHOUSE_GET_TIMEOUT=1 \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" projects/app codex >/dev/null 2>"$err"
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "spawn succeeded despite treehouse cwd never changing"
+  grep -F "treehouse get did not enter a worktree within 1s" "$err" >/dev/null \
+    || fail "spawn did not use configured treehouse timeout: $(cat "$err")"
+  pass "spawn uses configurable treehouse get timeout"
+}
+
 test_spawn_passes_home_context_to_treehouse_get
+test_spawn_uses_configurable_treehouse_get_timeout

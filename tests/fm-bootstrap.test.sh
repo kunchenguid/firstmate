@@ -95,12 +95,59 @@ test_bootstrap_accepts_treehouse_hook_from_another_firstmate_root() {
   case_dir="$TMP_ROOT/other-root-hook"
   other_root="$case_dir/other-firstmate"
   mkdir -p "$case_dir/home" "$other_root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$other_root/bin/fm-treehouse-post-create.sh"
+  chmod +x "$other_root/bin/fm-treehouse-post-create.sh"
   fakebin=$(make_fake_toolchain "$case_dir")
   write_treehouse_hook_config "$case_dir/home" "$other_root"
 
   out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
   [ -z "$out" ] || fail "bootstrap rejected configured treehouse hook from another firstmate root: $out"
   pass "bootstrap accepts treehouse hook from another firstmate root"
+}
+
+test_bootstrap_ignores_commented_treehouse_hook_config() {
+  local case_dir fakebin out expected_config expected
+  case_dir="$TMP_ROOT/commented-hook"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks]\n# post_create = ["%s/bin/fm-treehouse-post-create.sh"]\n' "$ROOT" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  expected="MISSING: treehouse-post-create-hook (install: $ROOT/bin/fm-bootstrap.sh install treehouse-post-create-hook)"
+  printf '%s\n' "$out" | grep -Fx "$expected" >/dev/null \
+    || fail "bootstrap accepted commented treehouse hook config: $out"
+  pass "bootstrap ignores commented treehouse hook config"
+}
+
+test_bootstrap_ignores_stale_treehouse_hook_config() {
+  local case_dir fakebin out expected_config expected
+  case_dir="$TMP_ROOT/stale-hook"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks]\npost_create = ["%s/missing/bin/fm-treehouse-post-create.sh"]\n' "$case_dir" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  expected="MISSING: treehouse-post-create-hook (install: $ROOT/bin/fm-bootstrap.sh install treehouse-post-create-hook)"
+  printf '%s\n' "$out" | grep -Fx "$expected" >/dev/null \
+    || fail "bootstrap accepted stale treehouse hook config: $out"
+  pass "bootstrap ignores stale treehouse hook config"
+}
+
+test_bootstrap_does_not_match_other_hook_commands() {
+  local case_dir fakebin out expected_config expected
+  case_dir="$TMP_ROOT/other-hook-command"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks]\npost_create = ["existing-hook"]\npre_create = ["%s/bin/fm-treehouse-post-create.sh"]\n' "$ROOT" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  expected="MISSING: treehouse-post-create-hook (install: $ROOT/bin/fm-bootstrap.sh install treehouse-post-create-hook)"
+  printf '%s\n' "$out" | grep -Fx "$expected" >/dev/null \
+    || fail "bootstrap matched a non-post_create treehouse hook command: $out"
+  pass "bootstrap does not match other hook commands"
 }
 
 test_bootstrap_reports_treehouse_without_lease_support() {
@@ -176,6 +223,9 @@ test_bootstrap_appends_treehouse_post_create_hook_config() {
 
 test_bootstrap_accepts_treehouse_lease_and_hook_support
 test_bootstrap_accepts_treehouse_hook_from_another_firstmate_root
+test_bootstrap_ignores_commented_treehouse_hook_config
+test_bootstrap_ignores_stale_treehouse_hook_config
+test_bootstrap_does_not_match_other_hook_commands
 test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_treehouse_without_post_create_support
 test_bootstrap_reports_treehouse_without_post_create_hook_config
