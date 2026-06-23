@@ -87,7 +87,7 @@ state/               volatile runtime signals; gitignored
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
-  .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, seen-status dedup, log, lock, pid); never touch
+  .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -136,7 +136,7 @@ Each adapter splits into mechanics and knowledge.
 The mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks) lives in the tables below.
 **Never dispatch a crewmate on an unverified adapter.**
 If `config/crew-harness` names an unverified one, tell the captain and fall back to your own harness until it is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using fm-spawn's raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in fm-spawn, the busy signature in fm-watch's `FM_BUSY_REGEX` default, and the knowledge here, and commit.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using fm-spawn's raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in fm-spawn, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the knowledge here, and commit.
 
 ### Detecting harnesses
 
@@ -563,17 +563,25 @@ The single-line format and the marker solve the same problem as the busy-guard (
 This is why fewer, cheaper firstmate turns handle the same fleet.
 
 **Injection hardening (the fixes):**
-- **Single-line digest** — embedded newlines are collapsed to a literal separator before injection, so submission is unambiguous regardless of harness.
-- **Composer guard on the supervisor pane** — before injecting, the daemon checks both `pane_is_busy` (harness busy footer = agent mid-turn) and `pane_input_pending` (real unsubmitted text on the cursor line = human mid-typing or previous injection with swallowed Enter). Either condition **defers** the injection (buffer preserved for retry). This is the human-in-the-pane safety property: the daemon never merges its digest into the captain's half-typed line. The composer detector (shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`) **strips the harness's composer box borders first**, so an idle *bordered* composer (claude draws `│ > … │`) reads as empty, not pending — without this, every idle claude pane looked like pending input and the daemon deferred 100% of escalations (incident afk-invx-i5).
+- **Single-line digest** - embedded newlines are collapsed to a literal separator before injection, so submission is unambiguous regardless of harness.
+- **Composer guard on the supervisor pane** - before injecting, the daemon checks both `pane_is_busy` (harness busy footer = agent mid-turn) and `pane_input_pending` (real unsubmitted text on the cursor line = human mid-typing or previous injection with swallowed Enter).
+  Either condition **defers** the injection (buffer preserved for retry).
+  This is the human-in-the-pane safety property: the daemon never merges its digest into the captain's half-typed line.
+  The composer detector (shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`) **strips the harness's composer box borders first**, so an idle *bordered* composer (claude draws `│ > … │`) reads as empty, not pending.
+  Without this, every idle claude pane looked like pending input and the daemon deferred 100% of escalations (incident afk-invx-i5).
+  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border stripping, and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge.
-If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
-If that cannot confirm a submit, it raises a loud, rate-limited wedge alarm (ERROR log + durable `state/.subsuper-inject-wedged` marker + a status-line flash).
-A composer false-positive is then surfaced as a visible stall, never an unbounded silent no-op.
-- **Verified type-once submit model** — the digest is typed once via `send-keys -l`, then submitted with Enter and **verified**: Enter is retried (Enter only, never a retype) until the composer is confirmed empty, which is the acknowledgement that the submit landed (the same border-aware detector, so a bordered-empty claude composer counts as submitted rather than a false "swallowed Enter"). `fm-send.sh` shares this primitive and exits non-zero on a positively-confirmed swallow, so firstmate learns a steer did not land instead of leaving it unsubmitted.
-- **Marker strip** — `strip_injection_marker` removes the sentinel prefix before classification/relay, so the digest text firstmate sees is clean.
-- **Portable singleton lock** — the daemon uses the repo's mkdir-based lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** — `classify_signal` and `classify_stale` both check the seen-status marker before escalating, so a status escalated by one path is not re-escalated by another in the same digest.
-- **Auto-discovered supervisor pane** — the daemon resolves its injection target from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE` (inherited from the pane that launched it), then a `firstmate:0` fallback with a warning; the resolution source is logged at startup so a wrong-but-resolving fallback is detectable.
+  If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
+  If that cannot confirm a submit, it raises a loud, rate-limited wedge alarm (ERROR log + durable `state/.subsuper-inject-wedged` marker + a status-line flash).
+  A composer false-positive is then surfaced as a visible stall, never an unbounded silent no-op.
+- **Verified type-once submit model** - the digest is typed once via `send-keys -l`, then submitted with Enter and **verified**.
+  Enter is retried, Enter only and never a retype, until the composer is confirmed empty.
+  That empty composer is the acknowledgement that the submit landed, using the same border-aware detector so a bordered-empty claude composer counts as submitted rather than a false "swallowed Enter".
+  `fm-send.sh` shares this primitive and exits non-zero on a positively-confirmed swallow, so firstmate learns a steer did not land instead of leaving it unsubmitted.
+- **Marker strip** - `strip_injection_marker` removes the sentinel prefix before classification/relay, so the digest text firstmate sees is clean.
+- **Portable singleton lock** - the daemon uses the repo's mkdir-based lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
+- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale` both check the seen-status marker before escalating, so a status escalated by one path is not re-escalated by another in the same digest.
+- **Auto-discovered supervisor pane** - the daemon resolves its injection target from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE` (inherited from the pane that launched it), then a `firstmate:0` fallback with a warning; the resolution source is logged at startup so a wrong-but-resolving fallback is detectable.
 
 **Reliability properties (must hold):** nothing is lost (the #29 queue plus `fm-wake-drain.sh` recover any missed/crashed injection); wedge detection is bounded-latency, not lossy; the catch-all scan backs up the keyword classifier; the daemon preserves single-instance portable lock, crash-loop backoff, a pane-gone guard, and a signal-trapped shutdown that flushes buffered escalations before exit.
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds, overriding classification - use sparingly.

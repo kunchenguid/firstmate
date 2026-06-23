@@ -40,6 +40,9 @@
 #     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
 #     lost. Crewmates are autonomous, so a delayed stale response does not stall
 #     a healthy crewmate's own progress.
+#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
+#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
+#     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -69,6 +72,9 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
+#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after structural
+#                                   border stripping (default: bare prompt
+#                                   glyphs plus busy footers)
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
@@ -80,6 +86,8 @@
 #                                   harness's box borders before deciding, so a
 #                                   bordered-but-empty composer is not misread as
 #                                   pending input.
+#          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
+#                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -558,20 +566,20 @@ window_for_task() {  # <task-key>
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the turn-started
-# confirmation fails after bounded retries. On non-zero the caller preserves
+# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
+# be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
-# Submit model (the two HIGH fixes from the maintainer's review):
+# Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the composer is empty after Enter. pane_input_pending checks
-#     the cursor line: empty means the text was consumed (submit succeeded);
-#     non-empty means Enter was swallowed (retry Enter only, not retype).
+#   - SUBMIT ACK = the border-aware composer detector reports empty after Enter.
+#     Empty means the text was consumed; pending means Enter was swallowed; unknown
+#     is treated as undelivered by this strict daemon path.
 #   - COMPOSER GUARD before typing: if the cursor line already has content (a
 #     human's half-typed line, or a previous injection's unsent text), defer
-#     entirely — injecting would merge with the human's text.
+#     entirely - injecting would merge with the human's text.
 inject_msg() {  # <message> [state]
   local msg=$1 state target retries sleep_s verdict
   state="${2:-$(_state_root)}"

@@ -9,8 +9,8 @@
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
 # Enter is positively confirmed (the text is still sitting in the composer after
 # all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
-# — rather than silently leaving an unsubmitted instruction (incident
-# afk-invx-i5). The composer/submit logic is shared with the away-mode daemon via
+# instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
+# The composer/submit logic is shared with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 set -eu
 

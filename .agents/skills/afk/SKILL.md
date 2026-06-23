@@ -86,6 +86,8 @@ injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
   *bordered* composer (claude draws `│ > … │`) is correctly read as empty, not
   pending. Without this, every idle claude pane looked like pending input and
   the daemon deferred 100% of escalations (incident afk-invx-i5).
+  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border
+  stripping.
 
 Either condition defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
@@ -94,7 +96,8 @@ protects against the race window between the captain returning and their
 message landing, and against the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
-If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
+If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
+attempts one normal flush, which still requires an idle pane and empty composer.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
@@ -105,9 +108,11 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 
 The digest is typed **once** via `send-keys -l`, then submitted with Enter and
 **verified**: Enter is retried (Enter only, never a retype) until the composer
-clears. A submit "landed" only when the composer is confirmed empty afterward —
-the same corrected, border-aware detector as the composer guard, so a
-bordered-empty claude composer is recognized as submitted rather than mistaken
-for a swallowed Enter. `fm-send.sh` uses the same primitive and exits non-zero
+clears.
+A submit "landed" only when the composer is confirmed empty afterward, using
+the same corrected, border-aware detector as the composer guard.
+A bordered-empty claude composer is recognized as submitted rather than
+mistaken for a swallowed Enter.
+`fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
