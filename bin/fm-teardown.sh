@@ -17,7 +17,8 @@
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child windows, and removes the retired home. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever.
+# never left leased forever. If the treehouse return fails, teardown leaves the
+# leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check for ordinary tasks and discards
 #   secondmate child work for kind=secondmate. Only use it when the captain has

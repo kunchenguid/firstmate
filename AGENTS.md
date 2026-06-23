@@ -106,6 +106,7 @@ Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
+  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
@@ -447,6 +448,7 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
 When it is safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 Removing a leased home releases its durable treehouse lease (via `treehouse return`) so the pool slot is freed for reuse rather than left leased forever; a plain-clone home with no pool slot is simply removed.
+If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
 With `--force`, teardown is the explicit discard path: it kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
 
 ### Scout tasks (report instead of PR)
