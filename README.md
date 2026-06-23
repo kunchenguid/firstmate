@@ -198,6 +198,7 @@ Runtime tuning via environment variables (defaults shown):
 FM_HOME=                 # optional operational home; unset means this repo root
 FM_BACKEND=tmux          # tmux or opencode-server; config/backend(.env) is also supported
 FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both; FM_OPENCODE_SERVER_VISIBILITY is an alias
+FM_OPENCODE_MODEL=       # optional provider/model override passed to opencode serve, e.g. openai/gpt-5.5
 FM_OPENCODE_DESKTOP_APP=          # optional path to OpenCode.exe for desktop visibility
 FM_OPENCODE_DESKTOP_OPEN=0        # set to 1 to auto-open the fallback Desktop new-session link
 FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; unset means no Desktop model call; {url}, {session}, {worktree}, {title}, {task}, {brief}

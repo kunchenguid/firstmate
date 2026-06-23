@@ -57,14 +57,15 @@ meta_for_selector() {
 }
 
 opencode_helper() {
-  local meta=$1 username password
+  local meta=$1 model username password
   shift
+  model=$(meta_value "$meta" opencode_server_model)
   username=$(meta_value "$meta" opencode_server_username)
   password=$(meta_value "$meta" opencode_server_password)
   if [ -n "$password" ]; then
-    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password "$FM_ROOT/bin/fm-opencode-server" "$@"
+    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password FM_OPENCODE_MODEL=$model "$FM_ROOT/bin/fm-opencode-server" "$@"
   else
-    "$FM_ROOT/bin/fm-opencode-server" "$@"
+    FM_OPENCODE_MODEL=$model "$FM_ROOT/bin/fm-opencode-server" "$@"
   fi
 }
 

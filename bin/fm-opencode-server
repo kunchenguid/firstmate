@@ -153,6 +153,20 @@ function serverAuth(hybrid, hosts = serverHosts(hybrid)) {
   return { username, password: crypto.randomBytes(18).toString("base64url"), generated: true };
 }
 
+function serverModel() {
+  return process.env.FM_OPENCODE_MODEL || process.env.FM_OPENCODE_SERVER_MODEL || "";
+}
+
+function promptModel() {
+  const model = serverModel();
+  if (!model) return undefined;
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1) {
+    throw new Error(`FM_OPENCODE_MODEL must be provider/model, got '${model}'`);
+  }
+  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
+}
+
 function urlWithAuth(raw, auth) {
   if (!auth?.generated) return raw;
   const url = new URL(raw);
@@ -228,10 +242,13 @@ function sessionRoute(sessionId, suffix = "") {
 }
 
 function promptBody(text) {
-  return {
+  const body = {
     agent: "build",
     parts: [{ type: "text", text }],
   };
+  const model = promptModel();
+  if (model) body.model = model;
+  return body;
 }
 
 function windowsPath(value) {
@@ -459,6 +476,7 @@ async function start(taskId, title, worktree, briefFile) {
   ensureState();
   const logFile = path.join(STATE, `${taskId}.opencode-server.log`);
   const mode = visibility();
+  const model = serverModel();
 
   if (MOCK) {
     const auth = serverAuth(false, serverHosts(false));
@@ -470,6 +488,7 @@ async function start(taskId, title, worktree, briefFile) {
     console.log(`opencode_session_title=${title}`);
     console.log("opencode_session_state=active");
     console.log(`opencode_visibility=${mode.value}`);
+    if (model) console.log(`opencode_server_model=${model}`);
     if (auth) {
       console.log(`opencode_server_username=${auth.username}`);
       console.log(`opencode_server_password=${auth.password}`);
@@ -540,6 +559,7 @@ async function start(taskId, title, worktree, briefFile) {
   console.log(`opencode_session_title=${title}`);
   console.log("opencode_session_state=active");
   console.log(`opencode_visibility=${mode.value}`);
+  if (model) console.log(`opencode_server_model=${model}`);
   if (auth) {
     console.log(`opencode_server_username=${auth.username}`);
     console.log(`opencode_server_password=${auth.password}`);

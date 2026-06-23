@@ -364,6 +364,7 @@ esac
 OPENCODE_SERVER_URL=""
 OPENCODE_SERVER_PID=""
 OPENCODE_SERVER_LOG=""
+OPENCODE_SERVER_MODEL=""
 OPENCODE_SERVER_USERNAME=""
 OPENCODE_SERVER_PASSWORD=""
 OPENCODE_SESSION_ID=""
@@ -508,6 +509,7 @@ if [ "$BACKEND" = opencode-server ]; then
   OPENCODE_SERVER_URL=$(opencode_value opencode_server_url)
   OPENCODE_SERVER_PID=$(opencode_value opencode_server_pid)
   OPENCODE_SERVER_LOG=$(opencode_value opencode_server_log)
+  OPENCODE_SERVER_MODEL=$(opencode_value opencode_server_model)
   OPENCODE_SERVER_USERNAME=$(opencode_value opencode_server_username)
   OPENCODE_SERVER_PASSWORD=$(opencode_value opencode_server_password)
   OPENCODE_SESSION_ID=$(opencode_value opencode_session_id)
@@ -541,6 +543,7 @@ mkdir -p "$STATE"
   [ -n "$OPENCODE_SERVER_URL" ] && echo "opencode_server_url=$OPENCODE_SERVER_URL"
   [ -n "$OPENCODE_SERVER_PID" ] && echo "opencode_server_pid=$OPENCODE_SERVER_PID"
   [ -n "$OPENCODE_SERVER_LOG" ] && echo "opencode_server_log=$OPENCODE_SERVER_LOG"
+  [ -n "$OPENCODE_SERVER_MODEL" ] && echo "opencode_server_model=$OPENCODE_SERVER_MODEL"
   [ -n "$OPENCODE_SERVER_USERNAME" ] && echo "opencode_server_username=$OPENCODE_SERVER_USERNAME"
   [ -n "$OPENCODE_SERVER_PASSWORD" ] && echo "opencode_server_password=$OPENCODE_SERVER_PASSWORD"
   [ -n "$OPENCODE_SESSION_ID" ] && echo "opencode_session_id=$OPENCODE_SESSION_ID"

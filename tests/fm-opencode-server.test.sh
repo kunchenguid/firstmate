@@ -95,8 +95,10 @@ test_helper_visibility_modes() {
     || fail "explicit desktop open did not report a dry-run launch in mock mode"
 
   out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=desktop \
-    FM_OPENCODE_DESKTOP_PROMPT='Task {title}' "$HELPER" start helper-x1c fm-helper-x1c "$worktree" "$brief") \
+    FM_OPENCODE_MODEL=openai/gpt-5.5 FM_OPENCODE_DESKTOP_PROMPT='Task {title}' "$HELPER" start helper-x1c fm-helper-x1c "$worktree" "$brief") \
     || fail "mock helper start failed for explicit desktop prompt"
+  printf '%s\n' "$out" | grep -F 'opencode_server_model=openai/gpt-5.5' >/dev/null \
+    || fail "OpenCode model override was not recorded"
   printf '%s\n' "$out" | grep -F 'prompt=Task+fm-helper-x1c' >/dev/null \
     || fail "explicit desktop prompt was not encoded into the deep link"
 
@@ -135,9 +137,10 @@ test_spawn_send_peek_teardown_backend() {
   local home project fakebin log out meta wt peek_out
   home="$TMP_ROOT/home"
   project="$TMP_ROOT/project"
-  mkdir -p "$home/data/opencode-task-x1" "$home/state" "$home/config"
+  mkdir -p "$home/data/opencode-task-x1" "$home/data/opencode-task-model" "$home/state" "$home/config"
   touch "$home/state/.last-watcher-beat"
   printf 'do the task\n' > "$home/data/opencode-task-x1/brief.md"
+  printf 'do the model task\n' > "$home/data/opencode-task-model/brief.md"
   printf '%s\n' '- project [local-only] - test project (added 2026-06-23)' > "$home/data/projects.md"
   make_project "$project"
   fakebin=$(make_fakebin "$TMP_ROOT/runtime")
@@ -157,6 +160,12 @@ test_spawn_send_peek_teardown_backend() {
   grep -qx 'window=fm-opencode-task-x1' "$meta" || fail "meta did not record synthetic window name"
   grep -qx 'opencode_session_id=mock-opencode-task-x1' "$meta" || fail "meta missing mock OpenCode session id"
   grep -qx 'opencode_visibility=desktop' "$meta" || fail "meta missing desktop visibility"
+  PATH="$fakebin:$PATH" FM_BACKEND_TOOL_LOG="$log" FM_HOME="$home" FM_BACKEND=opencode-server \
+    FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_MODEL=openai/gpt-5.5 FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" opencode-task-model "$project" >/dev/null \
+    || fail "opencode-server model override spawn failed"
+  grep -qx 'opencode_server_model=openai/gpt-5.5' "$home/state/opencode-task-model.meta" \
+    || fail "spawn meta missing OpenCode model override"
   grep -q '^opencode_desktop_deeplink=opencode://new-session?' "$meta" \
     || fail "meta missing desktop deep link"
   wt=$(grep '^worktree=' "$meta" | cut -d= -f2-)
@@ -180,6 +189,9 @@ test_spawn_send_peek_teardown_backend() {
   PATH="$fakebin:$PATH" FM_BACKEND_TOOL_LOG="$log" FM_HOME="$home" FM_OPENCODE_SERVER_MOCK=1 \
     "$TEARDOWN" opencode-task-x1 --force >/dev/null \
     || fail "opencode-server teardown failed"
+  PATH="$fakebin:$PATH" FM_BACKEND_TOOL_LOG="$log" FM_HOME="$home" FM_OPENCODE_SERVER_MOCK=1 \
+    "$TEARDOWN" opencode-task-model --force >/dev/null \
+    || fail "opencode-server model teardown failed"
   [ ! -e "$wt" ] || fail "teardown did not remove the OpenCode server worktree"
   [ ! -e "$meta" ] || fail "teardown did not remove meta"
   [ ! -s "$log" ] || fail "opencode-server path called tmux/treehouse: $(cat "$log")"
