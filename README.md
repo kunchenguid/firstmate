@@ -200,6 +200,7 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_TREEHOUSE_GET_TIMEOUT=300   # seconds allowed for treehouse get to enter a worktree
+TREEHOUSE_CONFIG=       # optional Treehouse config path for hook wiring
 FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh

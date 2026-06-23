@@ -10,6 +10,8 @@
 #          to firstmate's global post_create hook.
 #          Installing treehouse-post-create-hook edits the Treehouse user
 #          config and stores the hook path as a shell-quoted command string.
+#          That config path follows TREEHOUSE_CONFIG, then XDG_CONFIG_HOME,
+#          then ~/.config/treehouse/config.toml.
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
