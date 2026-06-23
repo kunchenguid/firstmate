@@ -385,6 +385,8 @@ Project worktrees start at detached HEAD on a clean default branch; ship briefs 
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
 Add the task to `data/backlog.md` under In flight.
 
+Per-project worktree setup runs via a treehouse `post_create` hook (`bin/fm-treehouse-post-create.sh`), not inside fm-spawn: treehouse >= v1.8.0 fires the hook in the worktree right before handing it over, which is earlier and simpler than waiting inside fm-spawn. The hook is a single global script wired in `~/.config/treehouse/config.toml` (`post_create = ["<abs path>/bin/fm-treehouse-post-create.sh"]`); it locates firstmate's `data/` from its own location and runs `data/<project>-setup.sh` if it exists (project name = worktree directory basename, matching the `data/projects.md` convention). Output is logged to `state/treehouse-setup-<project>.log`. A failing setup script is non-fatal (treehouse continues on hook failure by design); the hook exits with the setup script's code so the failure surfaces in treehouse's own logs. Secondmates have no project worktree, so the hook is irrelevant to them. Any project can get a `data/<name>-setup.sh` and the hook picks it up automatically.
+
 ### Supervise
 
 Covered by section 8.
