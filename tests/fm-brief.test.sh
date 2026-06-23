@@ -33,9 +33,9 @@ test_no_mistakes_brief_uses_manual_pr_validation_contract() {
     || fail "brief scaffold failed"
   brief="$home/data/ship-test/brief.md"
 
-  grep -F 'Never push to the default branch. Never open or merge a PR. Push only your `fm/ship-test` branch, and only as part of the no-mistakes validation pipeline.' "$brief" >/dev/null \
+  grep -F "Never push to the default branch. Never open or merge a PR. Push only your \`fm/ship-test\` branch, and only as part of the no-mistakes validation pipeline." "$brief" >/dev/null \
     || fail "no-mistakes brief permits unsafe push or PR creation"
-  grep -F 'no-mistakes validation pipeline with `--skip=pr,ci`' "$brief" >/dev/null \
+  grep -F "no-mistakes validation pipeline with \`--skip=pr,ci\`" "$brief" >/dev/null \
     || fail "no-mistakes brief omits skip flags"
   grep -F 'No-mistakes may push your branch, but does not open a PR or monitor CI in this workflow.' "$brief" >/dev/null \
     || fail "no-mistakes brief omits manual workflow boundary"
