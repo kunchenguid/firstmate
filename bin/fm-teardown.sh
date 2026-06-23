@@ -112,6 +112,11 @@ EOF
   return 1
 }
 
+firstmate_home_has_treehouse_slot() {
+  local home=$1
+  worktree_registered_for_project "$FM_ROOT" "$home"
+}
+
 validate_removal_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -273,15 +278,18 @@ remove_firstmate_home() {
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
-  # Retiring a leased secondmate home: treehouse return releases the durable lease
-  # and frees the pool slot for reuse. treehouse resolves the pool from the home
-  # path, so run it from FM_ROOT. A plain-clone home (no pool slot) falls back to
-  # safe removal.
-  if command -v treehouse >/dev/null 2>&1; then
-    ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || safe_rm_rf "$abs_home_path" "$label"
-  else
-    safe_rm_rf "$abs_home_path" "$label"
+  if firstmate_home_has_treehouse_slot "$abs_home_path"; then
+    command -v treehouse >/dev/null 2>&1 || {
+      echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
+      return 1
+    }
+    ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || {
+      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      return 1
+    }
+    return 0
   fi
+  safe_rm_rf "$abs_home_path" "$label"
 }
 
 validate_firstmate_home_children_removal() {

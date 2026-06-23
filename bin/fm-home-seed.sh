@@ -635,7 +635,14 @@ seed_rollback_target() {
 seed_return_treehouse_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" ) >/dev/null 2>&1 || true
+  if ! command -v treehouse >/dev/null 2>&1; then
+    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
+    return 0
+  fi
+  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
+    return 0
+  }
 }
 
 seed_remove_created_home() {
