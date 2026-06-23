@@ -105,6 +105,15 @@ test_helper_visibility_modes() {
   printf '%s\n' "$out" | grep -F 'opencode_server_password=' >/dev/null \
     || fail "non-loopback host did not generate a password"
 
+  out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_SERVER_HOST=0.0.0.0 \
+    OPENCODE_SERVER_USERNAME=crew OPENCODE_SERVER_PASSWORD=local-secret \
+    "$HELPER" start helper-x4 fm-helper-x4 "$worktree" "$brief") \
+    || fail "mock helper start failed for provided non-loopback auth"
+  printf '%s\n' "$out" | grep -F 'opencode_server_username=crew' >/dev/null \
+    || fail "provided non-loopback auth did not persist a username"
+  printf '%s\n' "$out" | grep -F 'opencode_server_password=local-secret' >/dev/null \
+    || fail "provided non-loopback auth did not persist a password"
+
   pass "OpenCode helper records desktop deep links and web URLs without shell openers"
 }
 
@@ -122,7 +131,7 @@ test_spawn_send_peek_teardown_backend() {
 
   out=$(PATH="$fakebin:$PATH" FM_BACKEND_TOOL_LOG="$log" FM_HOME="$home" FM_BACKEND=opencode-server \
     FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=desktop FM_OPENCODE_VISIBILITY_DRY_RUN=1 \
-    FM_SPAWN_NO_GUARD=1 "$SPAWN" opencode-task-x1 "$project" opencode) \
+    FM_SPAWN_NO_GUARD=1 "$SPAWN" opencode-task-x1 "$project") \
     || fail "opencode-server spawn failed: $out"
   printf '%s\n' "$out" | grep -F 'backend=opencode-server' >/dev/null \
     || fail "spawn output did not identify opencode-server backend"
@@ -130,6 +139,7 @@ test_spawn_send_peek_teardown_backend() {
   meta="$home/state/opencode-task-x1.meta"
   [ -f "$meta" ] || fail "spawn did not write meta"
   grep -qx 'backend=opencode-server' "$meta" || fail "meta missing backend=opencode-server"
+  grep -qx 'harness=opencode' "$meta" || fail "opencode-server spawn did not default to opencode harness"
   grep -qx 'window=fm-opencode-task-x1' "$meta" || fail "meta did not record synthetic window name"
   grep -qx 'opencode_session_id=mock-opencode-task-x1' "$meta" || fail "meta missing mock OpenCode session id"
   grep -qx 'opencode_visibility=desktop' "$meta" || fail "meta missing desktop visibility"

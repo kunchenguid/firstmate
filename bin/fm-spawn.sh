@@ -3,10 +3,11 @@
 # worktree, or a secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
-#   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
-#   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
-#   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   With no harness arg, opencode-server uses opencode; otherwise the harness comes
+#   from fm-harness.sh crew (config/crew-harness, falling back to firstmate's own
+#   harness). A bare adapter name (claude|codex|opencode|pi) overrides it for this
+#   spawn. A non-flag string containing whitespace is treated as a RAW launch
+#   command - the escape hatch for verifying new adapters.
 #   Set FM_BACKEND=opencode-server (or config/backend) to run ordinary opencode
 #   tasks through an API-backed OpenCode server instead of a tmux pane. The default
 #   backend is tmux, and secondmates always use tmux.
@@ -133,6 +134,30 @@ launch_template() {
   esac
 }
 
+backend_name() {
+  local line cfg
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s\n' "$FM_BACKEND"
+    return 0
+  fi
+  if [ -f "$CONFIG/backend" ]; then
+    cfg=$(tr -d '[:space:]' < "$CONFIG/backend" || true)
+    [ -n "$cfg" ] && { printf '%s\n' "$cfg"; return 0; }
+  fi
+  if [ -f "$CONFIG/backend.env" ]; then
+    line=$(grep -E '^[[:space:]]*FM_BACKEND=' "$CONFIG/backend.env" 2>/dev/null | tail -1 || true)
+    line=${line#*=}
+    line=${line%\"}; line=${line#\"}
+    line=${line%\'}; line=${line#\'}
+    line=$(printf '%s' "$line" | tr -d '[:space:]')
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  fi
+  printf '%s\n' tmux
+}
+
+BACKEND=$(backend_name)
+[ "$KIND" = secondmate ] && BACKEND=tmux
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -142,7 +167,11 @@ case "$ARG3" in
     done
     ;;
   '')
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+    if [ "$BACKEND" = opencode-server ]; then
+      HARNESS=opencode
+    else
+      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+    fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
@@ -184,27 +213,6 @@ resolve_project_dir_arg() {
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     *) printf '%s\n' "$path" ;;
   esac
-}
-
-backend_name() {
-  local line cfg
-  if [ -n "${FM_BACKEND:-}" ]; then
-    printf '%s\n' "$FM_BACKEND"
-    return 0
-  fi
-  if [ -f "$CONFIG/backend" ]; then
-    cfg=$(tr -d '[:space:]' < "$CONFIG/backend" || true)
-    [ -n "$cfg" ] && { printf '%s\n' "$cfg"; return 0; }
-  fi
-  if [ -f "$CONFIG/backend.env" ]; then
-    line=$(grep -E '^[[:space:]]*FM_BACKEND=' "$CONFIG/backend.env" 2>/dev/null | tail -1 || true)
-    line=${line#*=}
-    line=${line%\"}; line=${line#\"}
-    line=${line%\'}; line=${line#\'}
-    line=$(printf '%s' "$line" | tr -d '[:space:]')
-    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
-  fi
-  printf '%s\n' tmux
 }
 
 git_worktree_base() {
@@ -348,8 +356,6 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-BACKEND=$(backend_name)
-[ "$KIND" = secondmate ] && BACKEND=tmux
 case "$BACKEND" in
   tmux|opencode-server) ;;
   *) echo "error: unknown FM_BACKEND '$BACKEND' (expected tmux or opencode-server)" >&2; exit 1 ;;

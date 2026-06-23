@@ -462,7 +462,7 @@ async function start(taskId, title, worktree, briefFile) {
     console.log(`opencode_session_title=${title}`);
     console.log("opencode_session_state=active");
     console.log(`opencode_visibility=${mode.value}`);
-    if (auth?.generated) {
+    if (auth) {
       console.log(`opencode_server_username=${auth.username}`);
       console.log(`opencode_server_password=${auth.password}`);
     }
@@ -532,7 +532,7 @@ async function start(taskId, title, worktree, briefFile) {
   console.log(`opencode_session_title=${title}`);
   console.log("opencode_session_state=active");
   console.log(`opencode_visibility=${mode.value}`);
-  if (auth?.generated) {
+  if (auth) {
     console.log(`opencode_server_username=${auth.username}`);
     console.log(`opencode_server_password=${auth.password}`);
   }
