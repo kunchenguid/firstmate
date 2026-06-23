@@ -9,6 +9,8 @@
 #   FM_BACKEND=codex-app supports only the codex harness and prepares app-owned
 #   visible thread metadata; the firstmate must create/fork/send through Codex
 #   Desktop host tools, then record the returned thread id.
+#   FM_BACKEND=opencode-server supports only the opencode harness and starts one
+#   headless OpenCode server per task worktree.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); the default is kind=ship.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -83,6 +85,12 @@ ORCA_TERMINAL=""
 CODEX_APP_THREAD_ID=""
 CODEX_APP_TURN_ID=""
 CODEX_APP_PENDING_ACTION=""
+OPENCODE_SERVER_URL=""
+OPENCODE_SERVER_PID=""
+OPENCODE_SERVER_LOG=""
+OPENCODE_SESSION_ID=""
+OPENCODE_SESSION_TITLE=""
+OPENCODE_SESSION_STATE=""
 TURNEND="$FM_ROOT/state/$ID.turn-ended"
 PIEXT="$FM_ROOT/state/$ID.pi-ext.ts"
 
@@ -174,7 +182,23 @@ EOF
     WT=""
     CODEX_APP_PENDING_ACTION=create_thread_or_fork_thread
     ;;
-  *) echo "error: unknown FM_BACKEND '$BACKEND' (expected tmux, orca, or codex-app)" >&2; exit 1 ;;
+  opencode-server)
+    command -v opencode >/dev/null || { echo "error: FM_BACKEND=opencode-server but opencode is not installed" >&2; exit 1; }
+    case "$ARG3" in
+      *' '*) echo "error: FM_BACKEND=opencode-server does not support raw launch commands; use the opencode harness" >&2; exit 1 ;;
+    esac
+    case "$HARNESS" in
+      opencode*) ;;
+      *) echo "error: FM_BACKEND=opencode-server supports only the opencode harness (got '$HARNESS')" >&2; exit 1 ;;
+    esac
+    mkdir -p "$FM_ROOT/state/opencode-server-worktrees"
+    WT="$FM_ROOT/state/opencode-server-worktrees/$ID"
+    [ ! -e "$WT" ] || { echo "error: OpenCode server worktree already exists: $WT" >&2; exit 1; }
+    BASE=$(git_worktree_base "$PROJ_ABS")
+    git -C "$PROJ_ABS" worktree add --detach "$WT" "$BASE" >/dev/null
+    T="$W"
+    ;;
+  *) echo "error: unknown FM_BACKEND '$BACKEND' (expected tmux, orca, codex-app, or opencode-server)" >&2; exit 1 ;;
 esac
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -196,15 +220,17 @@ EOF
     exclude_path '.claude/settings.local.json'
     ;;
   opencode*)
-    mkdir -p "$WT/.opencode/plugins"
-    cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
+    if [ "$BACKEND" != opencode-server ]; then
+      mkdir -p "$WT/.opencode/plugins"
+      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
   },
 })
 EOF
-    exclude_path '.opencode/plugins/fm-turn-end.js'
+      exclude_path '.opencode/plugins/fm-turn-end.js'
+    fi
     ;;
   pi*)
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -258,6 +284,22 @@ EOF
   [ -n "$ORCA_TERMINAL" ] || { echo "error: Orca did not return a terminal handle" >&2; exit 1; }
 fi
 
+if [ "$BACKEND" = opencode-server ]; then
+  if ! opencode_start=$("$FM_ROOT/bin/fm-opencode-server" start "$ID" "$W" "$WT" "$BRIEF"); then
+    git -C "$PROJ_ABS" worktree remove --force "$WT" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  opencode_value() { printf '%s\n' "$opencode_start" | grep "^$1=" | tail -1 | cut -d= -f2-; }
+  OPENCODE_SERVER_URL=$(opencode_value opencode_server_url)
+  OPENCODE_SERVER_PID=$(opencode_value opencode_server_pid)
+  OPENCODE_SERVER_LOG=$(opencode_value opencode_server_log)
+  OPENCODE_SESSION_ID=$(opencode_value opencode_session_id)
+  OPENCODE_SESSION_TITLE=$(opencode_value opencode_session_title)
+  OPENCODE_SESSION_STATE=$(opencode_value opencode_session_state)
+  [ -n "$OPENCODE_SERVER_URL" ] || { echo "error: OpenCode server helper did not return opencode_server_url" >&2; exit 1; }
+  [ -n "$OPENCODE_SESSION_ID" ] || { echo "error: OpenCode server helper did not return opencode_session_id" >&2; exit 1; }
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -285,6 +327,12 @@ mkdir -p "$FM_ROOT/state"
   [ "$BACKEND" = codex-app ] && echo "codex_app_pending_action=$CODEX_APP_PENDING_ACTION"
   [ "$BACKEND" = codex-app ] && echo "codex_app_transport=visible-thread"
   [ "$BACKEND" = codex-app ] && echo "codex_app_brief=$BRIEF"
+  [ -n "$OPENCODE_SERVER_URL" ] && echo "opencode_server_url=$OPENCODE_SERVER_URL"
+  [ -n "$OPENCODE_SERVER_PID" ] && echo "opencode_server_pid=$OPENCODE_SERVER_PID"
+  [ -n "$OPENCODE_SERVER_LOG" ] && echo "opencode_server_log=$OPENCODE_SERVER_LOG"
+  [ -n "$OPENCODE_SESSION_ID" ] && echo "opencode_session_id=$OPENCODE_SESSION_ID"
+  [ -n "$OPENCODE_SESSION_TITLE" ] && echo "opencode_session_title=$OPENCODE_SESSION_TITLE"
+  [ -n "$OPENCODE_SESSION_STATE" ] && echo "opencode_session_state=$OPENCODE_SESSION_STATE"
 } > "$FM_ROOT/state/$ID.meta"
 
 if [ "$BACKEND" = tmux ]; then
@@ -316,6 +364,8 @@ if [ "$BACKEND" = codex-app ]; then
   echo "prepared $ID backend=$BACKEND harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T"
   echo "next: use Codex App create_thread or fork_thread for $W, send the brief at $BRIEF, then run:"
   echo "      bin/fm-codex-app record-thread $ID <thread-id> [--worktree <path>] [--pending-worktree-id <id>]"
+elif [ "$BACKEND" = opencode-server ]; then
+  echo "spawned $ID backend=$BACKEND harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT session=$OPENCODE_SESSION_ID server=$OPENCODE_SERVER_URL"
 else
   echo "spawned $ID backend=$BACKEND harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
 fi

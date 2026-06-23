@@ -20,6 +20,8 @@ printf 'orca\n' > "$TMP/config/backend"
 printf 'FM_BACKEND="codex-app"\n' > "$TMP/config/backend.env"
 [ "$(backend_name)" = orca ]
 FM_BACKEND=codex-app FM_ROOT="$TMP" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_name' bash "$ROOT" | grep -qx codex-app
+printf 'opencode-server\n' > "$TMP/config/backend"
+[ "$(backend_name)" = opencode-server ]
 
 mkdir -p "$ROOT/data/$ID" "$ROOT/state" "$TMP/project"
 printf 'brief\n' > "$ROOT/data/$ID/brief.md"

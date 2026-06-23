@@ -31,6 +31,10 @@ ORCA_WORKTREE_ID=$(grep '^orca_worktree_id=' "$META" | cut -d= -f2- || true)
 ORCA_TERMINAL=$(grep '^terminal=' "$META" | cut -d= -f2- || true)
 CODEX_APP_THREAD_ID=$(grep '^thread_id=' "$META" | cut -d= -f2- || true)
 CODEX_APP_ARCHIVED=$(grep '^codex_app_archived=' "$META" | cut -d= -f2- || true)
+OPENCODE_SERVER_URL=$(grep '^opencode_server_url=' "$META" | cut -d= -f2- || true)
+OPENCODE_SERVER_PID=$(grep '^opencode_server_pid=' "$META" | cut -d= -f2- || true)
+OPENCODE_SESSION_ID=$(grep '^opencode_session_id=' "$META" | cut -d= -f2- || true)
+OPENCODE_CLOSED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -120,7 +124,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     # The work is safe once it is merged into the local default branch (firstmate
     # does that merge on the captain's approval). Refuse until then.
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.opencode/plugins/fm-turn-end\.js$)' | head -1 || true)
     unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT." >&2
@@ -131,7 +135,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.opencode/plugins/fm-turn-end\.js$)' | head -1 || true)
     unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
     if [ -n "$dirty" ] || [ -n "$unpushed" ]; then
       echo "REFUSED: worktree $WT has work not on any remote." >&2
@@ -182,6 +186,16 @@ if [ -d "$WT" ]; then
         *) : ;; # App-owned worktrees are managed by Codex App, not this shell helper.
       esac
       ;;
+    opencode-server)
+      if [ -n "$OPENCODE_SERVER_URL" ] && [ -n "$OPENCODE_SESSION_ID" ]; then
+        "$FM_ROOT/bin/fm-opencode-server" close "$OPENCODE_SERVER_URL" "$OPENCODE_SESSION_ID" "$OPENCODE_SERVER_PID" >/dev/null 2>&1 || true
+        OPENCODE_CLOSED=1
+      fi
+      case "$WT" in
+        "$FM_ROOT/state/opencode-server-worktrees/"*) git -C "$PROJ" worktree remove --force "$WT" >/dev/null ;;
+        *) echo "REFUSED: OpenCode server worktree is not firstmate-owned: $WT" >&2; exit 1 ;;
+      esac
+      ;;
     *) echo "REFUSED: unknown backend '$BACKEND' for task $ID." >&2; exit 1 ;;
   esac
 fi
@@ -189,8 +203,12 @@ fi
 if [ "$BACKEND" = tmux ]; then
   tmux kill-window -t "$T" 2>/dev/null || true
 fi
+if [ "$BACKEND" = opencode-server ] && [ "$OPENCODE_CLOSED" != 1 ] && [ ! -d "$WT" ] && [ -n "$OPENCODE_SERVER_URL" ] && [ -n "$OPENCODE_SESSION_ID" ]; then
+  "$FM_ROOT/bin/fm-opencode-server" close "$OPENCODE_SERVER_URL" "$OPENCODE_SESSION_ID" "$OPENCODE_SERVER_PID" >/dev/null 2>&1 || true
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" \
-  "$STATE/$ID.codex-app.env" "$STATE/$ID.codex-app.log" "$STATE/$ID.codex-app.capture" "$STATE/$ID.codex-app-send."*
+  "$STATE/$ID.codex-app.env" "$STATE/$ID.codex-app.log" "$STATE/$ID.codex-app.capture" "$STATE/$ID.codex-app-send."* \
+  "$STATE/$ID.opencode-server.log" "$STATE/$ID.opencode-server.capture"
 if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

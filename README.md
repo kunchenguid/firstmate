@@ -68,7 +68,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 ```sh
 # 1. a verified agent harness - claude, codex, opencode, or pi
 # 2. git + GitHub auth
-# 3. tmux by default, Orca CLI when FM_BACKEND=orca, or Codex Desktop when FM_BACKEND=codex-app
+# 3. tmux by default, Orca CLI when FM_BACKEND=orca, Codex Desktop when FM_BACKEND=codex-app, or OpenCode when FM_BACKEND=opencode-server
 gh auth login
 ```
 
@@ -80,7 +80,7 @@ cd firstmate && claude
 ```
 
 That is the whole install.
-On first launch the first mate detects what its toolchain is missing (tmux/treehouse by default, Orca CLI when `FM_BACKEND=orca`, plus no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On first launch the first mate detects what its toolchain is missing (tmux/treehouse by default, Orca CLI when `FM_BACKEND=orca`, OpenCode when `FM_BACKEND=opencode-server`, plus no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
 Codex App mode requires running firstmate inside Codex Desktop so the first mate can use the app-owned thread tools.
 For `FM_BACKEND=codex-app`, bootstrap checks only the shell-side shared tools; Codex Desktop itself is the visible thread host.
 
@@ -99,6 +99,11 @@ If the captain already has a visible thread on deck, firstmate can adopt it with
 This is intentionally not `codex app-server`: app-server can complete headless turns without creating visible, persisted Desktop threads.
 `fm-peek` can show cached `read_thread` captures, `fm-send` refuses with the host-tool action to take, `fm-watch` still wakes on status files, and `fm-teardown` requires app archive plus the usual work-safety proof.
 This backend runs the Codex harness only; use Orca or tmux for mixed harness fleets.
+
+**Or use OpenCode's native server.**
+Set `FM_BACKEND=opencode-server` and dispatch with the `opencode` harness.
+In OpenCode server mode, `fm-spawn` creates a disposable git worktree, starts a task-local `opencode serve`, creates or reuses the `fm-<id>` session through the HTTP API, and sends the brief asynchronously.
+`fm-peek`, `fm-send`, interrupt, status, and teardown use the same server API; teardown aborts/deletes the session, disposes the server, and removes the firstmate-owned worktree after the normal work-safety checks pass.
 
 ## How It Works
 
@@ -149,8 +154,9 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`            | Scaffold a ship brief, or a report-only scout brief with `--scout`                                                  |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but the watcher liveness beacon is stale or missing                                   |
-| `fm-backend.sh`          | Shared backend helpers for tmux, Orca, and Codex App runtime operations                                            |
+| `fm-backend.sh`          | Shared backend helpers for tmux, Orca, Codex App, and OpenCode server runtime operations                            |
 | `fm-codex-app`           | Dependency-free Codex App visible-thread ledger used to record thread ids, captures, pending worktrees, and archive state |
+| `fm-opencode-server`     | Dependency-free OpenCode server helper used to start task servers and drive session HTTP APIs                       |
 | `fm-codex-app-smoke-check.sh` | Validate visible-thread smoke evidence so headless app-server turns cannot pass as Codex App backend success    |
 | `fm-spawn.sh`            | Create a backend session/worktree, or prepare a Codex App visible-thread handoff; records ship/scout task kind     |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
@@ -184,8 +190,10 @@ FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard wa
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BACKEND=tmux          # visible crew backend: tmux (default), orca, or codex-app
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|codex-app status: active'   # busy signatures
+FM_BACKEND=tmux          # visible crew backend: tmux (default), orca, codex-app, or opencode-server
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|codex-app status: active|opencode-server status: busy'   # busy signatures
+FM_OPENCODE_SERVER_HOST=127.0.0.1   # host for task-local opencode serve instances
+FM_OPENCODE_SERVER_PORT=0           # 0 picks a free port per task; set only for smoke/debug work
 FM_ORCA_CODEX_AUTO_TRUST=0  # set to 1 to pre-trust Orca+Codex worktrees instead of handling the prompt
 FM_ORCA_CODEX_CONFIG="$HOME/Library/Application Support/orca/codex-runtime-home/home/config.toml"  # Orca+Codex trust config path
 ```
@@ -199,7 +207,7 @@ Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistak
 
 ```sh
 bash -n bin/*.sh test/*.test.sh            # syntax-check the toolbelt and shell tests
-node --check bin/fm-codex-app             # syntax-check the Codex App ledger
+node --check bin/fm-codex-app bin/fm-opencode-server  # syntax-check Node helpers
 shellcheck bin/*.sh                       # lint the toolbelt; CI enforces this
 for t in test/*.test.sh; do "$t"; done    # run backend and smoke-contract tests
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]

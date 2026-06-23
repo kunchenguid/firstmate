@@ -60,8 +60,8 @@ README.md            public overview and development notes
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
 docs/plans/          shared implementation plans for non-trivial repo changes, committed
 test/                dependency-light regression and smoke-contract tests, committed
-config/backend       optional crew runtime backend; LOCAL, gitignored; absent = tmux, "orca" = Orca worktrees/terminals, "codex-app" = visible Codex Desktop threads
-config/backend.env   optional shell-style backend config, e.g. FM_BACKEND=orca or FM_BACKEND=codex-app; LOCAL, gitignored
+config/backend       optional crew runtime backend; LOCAL, gitignored; absent = tmux, "orca" = Orca worktrees/terminals, "codex-app" = visible Codex Desktop threads, "opencode-server" = task-local OpenCode server/API sessions
+config/backend.env   optional shell-style backend config, e.g. FM_BACKEND=orca, FM_BACKEND=codex-app, or FM_BACKEND=opencode-server; LOCAL, gitignored
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -73,16 +73,17 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: backend=, window=, worktree=, project=, harness=, kind=, mode=, yolo= (fm-pr-check appends pr=; Orca tasks also record terminal= and orca_worktree_id=; Codex App tasks record thread_id= once visible, plus codex_app_thread_state= and any pending worktree id)
+  <id>.meta          written by fm-spawn: backend=, window=, worktree=, project=, harness=, kind=, mode=, yolo= (fm-pr-check appends pr=; Orca tasks also record terminal= and orca_worktree_id=; Codex App tasks record thread_id= once visible, plus codex_app_thread_state= and any pending worktree id; OpenCode server tasks record opencode_session_id=, opencode_server_url=, and opencode_server_pid=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   codex-app-worktrees/<id>/ legacy/headless Codex scratch worktrees; visible Codex App mode is app-owned
+  opencode-server-worktrees/<id>/ firstmate-owned task worktrees for the OpenCode server backend
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The visible crew handle for a task is always named `fm-<id>`: a tmux window by default, an Orca worktree/terminal when `FM_BACKEND=orca`, or a Codex App thread when `FM_BACKEND=codex-app`.
+The visible crew handle for a task is always named `fm-<id>`: a tmux window by default, an Orca worktree/terminal when `FM_BACKEND=orca`, a Codex App thread when `FM_BACKEND=codex-app`, or an OpenCode server session when `FM_BACKEND=opencode-server`.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -91,7 +92,7 @@ Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
 Bootstrap reads backend selection before tool detection: `FM_BACKEND` wins over `config/backend`, then `config/backend.env`, with `tmux` as the default.
-It checks only the selected backend's shell-side tools: tmux/treehouse for `tmux`, Orca CLI for `orca`, and the shared shell tools for `codex-app`; visible Codex App thread operations still require running inside Codex Desktop.
+It checks only the selected backend's shell-side tools: tmux/treehouse for `tmux`, Orca CLI for `orca`, OpenCode CLI for `opencode-server`, and the shared shell tools for `codex-app`; visible Codex App thread operations still require running inside Codex Desktop.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Silence means all good: say nothing and move on.
@@ -313,7 +314,7 @@ bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scou
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`), and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; on the tmux backend only, a non-flag third argument containing whitespace is treated as a raw launch command for verifying new adapters.
 
-The script creates the visible crew session through the configured backend. In tmux mode it creates a tmux window, runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief. In Orca mode it creates an Orca-managed worktree and launches the agent with the brief, recording the Orca worktree id and terminal handle in meta. In Codex App mode, shell cannot create the visible Desktop thread by itself: `fm-spawn` prepares `state/<id>.meta`, prints the host-tool action to take, and the firstmate must use Codex App thread tools to create or fork the visible thread, send the brief, and then record the returned `thread_id` with `bin/fm-codex-app record-thread`.
+The script creates the visible crew session through the configured backend. In tmux mode it creates a tmux window, runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief. In Orca mode it creates an Orca-managed worktree and launches the agent with the brief, recording the Orca worktree id and terminal handle in meta. In Codex App mode, shell cannot create the visible Desktop thread by itself: `fm-spawn` prepares `state/<id>.meta`, prints the host-tool action to take, and the firstmate must use Codex App thread tools to create or fork the visible thread, send the brief, and then record the returned `thread_id` with `bin/fm-codex-app record-thread`. In OpenCode server mode it creates a firstmate-owned git worktree, starts task-local `opencode serve`, creates or reuses the `fm-<id>` session through the HTTP API, sends the brief asynchronously, and records the server URL, server PID, and session id in meta.
 Worktrees start from a clean default-branch base. The exact attachment is backend-specific: tmux/treehouse may use detached HEAD, Orca creates an attached task branch, and Codex App owns its own visible thread/worktree state through the Desktop app. Ship briefs tell the crewmate to create or reset its `fm/<id>` branch, while scout briefs keep the worktree scratch. For Codex App ship tasks, record the app-owned worktree path if it is available; teardown refuses ship cleanup unless that path belongs to the project, is on `fm/<id>`, and passes the usual landed-work checks, unless the captain explicitly approves discard.
 After spawning, peek or read the visible session to confirm the crewmate is processing the brief (and handle any trust dialog per section 4). For Codex App tasks, use `read_thread` rather than app-server output.
 Add the task to `data/backlog.md` under In flight.
