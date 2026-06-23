@@ -320,7 +320,9 @@ fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  TREEHOUSE_LAUNCH="FM_ROOT_OVERRIDE=$(shell_quote "${FM_ROOT_OVERRIDE:-}") FM_STATE_OVERRIDE=$(shell_quote "${FM_STATE_OVERRIDE:-}") FM_DATA_OVERRIDE=$(shell_quote "${FM_DATA_OVERRIDE:-}") FM_PROJECTS_OVERRIDE=$(shell_quote "${FM_PROJECTS_OVERRIDE:-}") FM_CONFIG_OVERRIDE=$(shell_quote "${FM_CONFIG_OVERRIDE:-}") FM_HOME=$(shell_quote "$FM_HOME") treehouse get"
+  tmux send-keys -t "$T" -l "$TREEHOUSE_LAUNCH"
+  tmux send-keys -t "$T" Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
