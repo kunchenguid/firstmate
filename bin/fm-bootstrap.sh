@@ -5,7 +5,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>".
 #          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          "treehouse get --lease" support or post_create hook support.
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -73,6 +73,24 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+treehouse_supports_post_create() {
+  version=$(treehouse --version 2>/dev/null) || return 1
+  version=${version#treehouse }
+  version=${version#v}
+  case "$version" in
+    [0-9]*.[0-9]*.[0-9]*)
+      major=${version%%.*}
+      rest=${version#*.}
+      minor=${rest%%.*}
+      patch=${rest#*.}
+      patch=${patch%%[!0-9]*}
+      [ -n "$patch" ] || patch=0
+      [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -gt 8 ]; } || { [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -ge 0 ]; }
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -88,7 +106,7 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
-if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+if command -v treehouse >/dev/null 2>&1 && { ! treehouse_supports_lease || ! treehouse_supports_post_create; }; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"

@@ -52,6 +52,10 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-v1.8.0}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -69,9 +73,9 @@ test_bootstrap_accepts_treehouse_lease_support() {
   mkdir -p "$case_dir/home"
   fakebin=$(make_fake_toolchain "$case_dir")
 
-  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_bootstrap "$case_dir/home" "$fakebin")
-  [ -z "$out" ] || fail "bootstrap reported problems despite treehouse lease support: $out"
-  pass "bootstrap accepts treehouse get --lease support"
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap reported problems despite treehouse lease and post_create support: $out"
+  pass "bootstrap accepts treehouse get --lease and post_create support"
 }
 
 test_bootstrap_reports_treehouse_without_lease_support() {
@@ -87,5 +91,18 @@ test_bootstrap_reports_treehouse_without_lease_support() {
   pass "bootstrap reports treehouse without get --lease support"
 }
 
+test_bootstrap_reports_treehouse_without_post_create_support() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/post-create-missing"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.7.9 run_bootstrap "$case_dir/home" "$fakebin")
+  printf '%s\n' "$out" | grep -Fx 'MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)' >/dev/null \
+    || fail "bootstrap did not report treehouse upgrade instruction for missing post_create support"
+  pass "bootstrap reports treehouse without post_create support"
+}
+
 test_bootstrap_accepts_treehouse_lease_support
 test_bootstrap_reports_treehouse_without_lease_support
+test_bootstrap_reports_treehouse_without_post_create_support
