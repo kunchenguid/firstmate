@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Send one line of literal text to a crewmate window, then Enter.
-# Usage: fm-send.sh <window> <text...>
-#   <window> may be a bare firstmate window name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or explicit session:window.
+# Send one line of literal text to a crewmate session, then Enter.
+# Usage: fm-send.sh <selector> <text...>
+#   <selector> may be a bare firstmate window name (fm-xyz), explicit
+#   session:window, or an OpenCode server session id recorded in this home's
+#   state/<id>.meta.
 # Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
 set -eu
 
@@ -31,7 +32,69 @@ resolve() {
   esac
 }
 
-T=$(resolve "$1")
+meta_value() {
+  local meta=$1 key=$2
+  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+meta_for_selector() {
+  local selector=$1 base meta win opencode_session_id
+  base=${selector#fm-}
+  if [ -f "$STATE/$base.meta" ]; then
+    printf '%s\n' "$STATE/$base.meta"
+    return 0
+  fi
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    win=$(meta_value "$meta" window)
+    opencode_session_id=$(meta_value "$meta" opencode_session_id)
+    case "$selector" in
+      "$win"|fm-"$(basename "$meta" .meta)"|"$opencode_session_id") printf '%s\n' "$meta"; return 0 ;;
+      *) case "$win" in *:"$selector"|"$selector") printf '%s\n' "$meta"; return 0 ;; esac ;;
+    esac
+  done
+  return 1
+}
+
+opencode_helper() {
+  local meta=$1 username password
+  shift
+  username=$(meta_value "$meta" opencode_server_username)
+  password=$(meta_value "$meta" opencode_server_password)
+  if [ -n "$password" ]; then
+    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password "$FM_ROOT/bin/fm-opencode-server" "$@"
+  else
+    "$FM_ROOT/bin/fm-opencode-server" "$@"
+  fi
+}
+
+SELECTOR=$1
+META=$(meta_for_selector "$SELECTOR" || true)
+if [ -n "$META" ]; then
+  BACKEND=$(meta_value "$META" backend)
+  [ -n "$BACKEND" ] || BACKEND=tmux
+  if [ "$BACKEND" = opencode-server ]; then
+    SERVER_URL=$(meta_value "$META" opencode_server_url)
+    SESSION_ID=$(meta_value "$META" opencode_session_id)
+    [ -n "$SERVER_URL" ] || { echo "error: no opencode_server_url= in $META" >&2; exit 1; }
+    [ -n "$SESSION_ID" ] || { echo "error: no opencode_session_id= in $META" >&2; exit 1; }
+    shift
+    if [ "${1:-}" = "--key" ]; then
+      case "${2:-}" in
+        Escape|C-c) opencode_helper "$META" interrupt "$SERVER_URL" "$SESSION_ID" >/dev/null ;;
+        Enter) opencode_helper "$META" send "$SERVER_URL" "$SESSION_ID" "" >/dev/null ;;
+        *) echo "error: unsupported OpenCode server key '${2:-}'" >&2; exit 1 ;;
+      esac
+    else
+      opencode_helper "$META" send "$SERVER_URL" "$SESSION_ID" "$*" >/dev/null
+    fi
+    exit 0
+  fi
+  T=$(meta_value "$META" window)
+  [ -n "$T" ] || { echo "error: no window recorded in $META" >&2; exit 1; }
+else
+  T=$(resolve "$SELECTOR")
+fi
 shift
 
 if [ "${1:-}" = "--key" ]; then

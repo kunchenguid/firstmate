@@ -39,6 +39,12 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
+BACKEND=$(grep '^backend=' "$META" | cut -d= -f2- || true)
+[ -n "$BACKEND" ] || BACKEND=tmux
+OPENCODE_SERVER_URL=$(grep '^opencode_server_url=' "$META" | cut -d= -f2- || true)
+OPENCODE_SERVER_PID=$(grep '^opencode_server_pid=' "$META" | cut -d= -f2- || true)
+OPENCODE_SESSION_ID=$(grep '^opencode_session_id=' "$META" | cut -d= -f2- || true)
+OPENCODE_CLOSED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -64,6 +70,18 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+opencode_helper() {
+  local meta=$1 username password
+  shift
+  username=$(meta_value "$meta" opencode_server_username)
+  password=$(meta_value "$meta" opencode_server_password)
+  if [ -n "$password" ]; then
+    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password "$FM_ROOT/bin/fm-opencode-server" "$@"
+  else
+    "$FM_ROOT/bin/fm-opencode-server" "$@"
+  fi
 }
 
 registry_home_for_line() {
@@ -301,7 +319,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_server_url child_server_pid child_session_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -312,7 +330,9 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    if [ -n "$child_t" ]; then
+    child_backend=$(meta_value "$child_meta" backend)
+    [ -n "$child_backend" ] || child_backend=tmux
+    if [ -n "$child_t" ] && [ "$child_backend" != opencode-server ]; then
       tmux kill-window -t "$child_t" 2>/dev/null || true
     fi
     if [ "$child_kind" = secondmate ]; then
@@ -325,13 +345,25 @@ cleanup_firstmate_home_children() {
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if [ "$child_backend" = opencode-server ]; then
+        child_server_url=$(meta_value "$child_meta" opencode_server_url)
+        child_server_pid=$(meta_value "$child_meta" opencode_server_pid)
+        child_session_id=$(meta_value "$child_meta" opencode_session_id)
+        if [ -n "$child_server_url" ] && [ -n "$child_session_id" ]; then
+          opencode_helper "$child_meta" close "$child_server_url" "$child_session_id" "$child_server_pid" >/dev/null 2>&1 || true
+        fi
+        case "$child_wt" in
+          "$sub_state/opencode-server-worktrees/"*) git -C "$child_proj" worktree remove --force "$child_wt" >/dev/null ;;
+          *) echo "REFUSED: child OpenCode server worktree is not firstmate-owned: $child_wt" >&2; return 1 ;;
+        esac
+      elif [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.opencode-server.log" "$sub_state/$child_id.opencode-server.capture"
   done
 }
 
@@ -380,7 +412,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.opencode/plugins/fm-turn-end\.js$)' | head -1 || true)
     # A worktree's work is "safely on a remote" once HEAD is reachable from ANY
     # remote-tracking branch (empty result here). A fork is a remote too, so
     # upstream-contribution PRs pushed to a fork satisfy this regardless of mode.
@@ -419,21 +451,38 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project.
-  ( cd "$PROJ" && treehouse return --force "$WT" )
+  if [ "$BACKEND" = opencode-server ]; then
+    if [ -n "$OPENCODE_SERVER_URL" ] && [ -n "$OPENCODE_SESSION_ID" ]; then
+      opencode_helper "$META" close "$OPENCODE_SERVER_URL" "$OPENCODE_SESSION_ID" "$OPENCODE_SERVER_PID" >/dev/null 2>&1 || true
+      OPENCODE_CLOSED=1
+    fi
+    case "$WT" in
+      "$STATE/opencode-server-worktrees/"*) git -C "$PROJ" worktree remove --force "$WT" >/dev/null ;;
+      *) echo "REFUSED: OpenCode server worktree is not firstmate-owned: $WT" >&2; exit 1 ;;
+    esac
+  else
+    # Kills remaining processes in the worktree (including the agent), resets, returns
+    # to pool. treehouse resolves the pool from the working directory, so run it from
+    # the project.
+    ( cd "$PROJ" && treehouse return --force "$WT" )
+  fi
 fi
 
-tmux kill-window -t "$T" 2>/dev/null || true
+if [ "$BACKEND" != opencode-server ]; then
+  tmux kill-window -t "$T" 2>/dev/null || true
+fi
+if [ "$BACKEND" = opencode-server ] && [ "$OPENCODE_CLOSED" != 1 ] && [ ! -d "$WT" ] && [ -n "$OPENCODE_SERVER_URL" ] && [ -n "$OPENCODE_SESSION_ID" ]; then
+  opencode_helper "$META" close "$OPENCODE_SERVER_URL" "$OPENCODE_SESSION_ID" "$OPENCODE_SERVER_PID" >/dev/null 2>&1 || true
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" \
+  "$STATE/$ID.opencode-server.log" "$STATE/$ID.opencode-server.capture"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+echo "teardown $ID complete (backend $BACKEND, window $T, worktree $WT)"
 printf '%s\n' "🌱 Backlog: $ID just finished. Update data/backlog.md - move $ID to Done (keep Done to the 10 most recent), then re-scan Queued for items now unblocked (a \"blocked-by: $ID\" may have just cleared) or now time-due, and dispatch what's ready."

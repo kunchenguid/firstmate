@@ -68,6 +68,7 @@ README.md            public overview and development notes
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
+config/backend       optional crew backend override; LOCAL, gitignored; absent = tmux; currently supports tmux and opencode-server for ordinary tasks
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -80,7 +81,7 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: backend=, window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects=; opencode-server tasks also record opencode_server_url=, opencode_server_pid=, opencode_server_log=, opencode_session_id=, opencode_visibility=, and optional web/desktop metadata (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -102,6 +103,7 @@ Never install anything the captain has not approved in this session.
 Run `bin/fm-bootstrap.sh`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
+Tool detection is backend-specific: the default `tmux` backend needs tmux and treehouse, while `opencode-server` needs the OpenCode CLI and uses git worktrees directly for ordinary tasks.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
@@ -123,6 +125,7 @@ Do not dispatch any work until the tools that work needs are present and GitHub 
 Use `gh-axi` for all GitHub operations, `chrome-devtools-axi` for all browser operations, and `lavish-axi` when a decision or report is complex enough to deserve a rich review surface.
 Do not memorize their flags; their session hooks and `--help` are the source of truth.
 If the captain names a different crewmate harness at bootstrap or later, write it to `config/crew-harness` (local, gitignored); that is the whole switch.
+If the captain names a different crew backend, write it to `config/backend` (local, gitignored); absent means `tmux`.
 
 ## 4. Harness adapters
 
@@ -203,9 +206,9 @@ Reconcile reality with your records before doing anything else:
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
-4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
+4. Use this home's `state/*.meta` files as the live direct-report set, then check each recorded backend surface (`tmux` panes via `window=`, `opencode-server` sessions via `opencode_session_id=`).
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
-5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
+5. If a recorded direct-report surface is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
    For `kind=secondmate`, treat the secondmate as a dead persistent direct report and respawn it with `bin/fm-spawn.sh <id> --secondmate` against the recorded `home=`.
@@ -366,6 +369,7 @@ Write the brief per section 11.
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
+FM_BACKEND=opencode-server bin/fm-spawn.sh <id> projects/<repo> opencode   # ordinary OpenCode task via API-backed server
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
 bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
@@ -374,13 +378,16 @@ bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batc
 Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` applies to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 
-The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
+The script resolves the backend (`FM_BACKEND` or local `config/backend`, default `tmux`), resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `backend=`, `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command on the tmux backend only (only for verifying new adapters).
+`opencode-server` supports ordinary OpenCode ship/scout tasks only: it creates a firstmate-owned git worktree under `state/opencode-server-worktrees/`, starts one OpenCode server for that worktree, sends the brief through the OpenCode HTTP API, and records server/session metadata in the task meta.
+Set `FM_OPENCODE_VISIBILITY=headless` (default), `web`, `desktop`, or `both`; `desktop` uses OpenCode Desktop's `opencode://new-session` deep link, and `terminal`/`attach`/`tui`/`app`/`chat` are aliases for that Desktop path rather than external terminal launchers.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For tmux ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For `opencode-server` ship and scout tasks, the OpenCode server session is the visible surface; `fm-peek.sh` and `fm-send.sh` route through `bin/fm-opencode-server` instead of tmux.
 For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
-After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
+After spawning, peek the session to confirm the crewmate is processing the brief (and handle any trust dialog per section 4 when a pane exists).
 Add the task to `data/backlog.md` under In flight.
 
 ### Supervise
@@ -436,6 +443,7 @@ bin/fm-teardown.sh <id>
 The script refuses if the worktree holds unpushed work; treat a refusal as a stop-and-investigate, not an obstacle.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
+For `opencode-server` tasks, teardown also closes the OpenCode session/server and removes only the firstmate-owned git worktree under `state/opencode-server-worktrees/`.
 Then move the task to Done in `data/backlog.md` (with the full `https://...` PR URL or local merge note and date), keep Done to the 10 most recent, re-evaluate the queue, and dispatch anything that was blocked on this task or is now time/date-due.
 
 ### Secondmate teardown (explicit only)
@@ -487,16 +495,16 @@ On wake, in order of cheapness:
 
 1. Read the reason line and drain queued wake records with `bin/fm-wake-drain.sh`.
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
-3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
+3. `stale:` the crewmate stopped without reporting; peek the recorded session (`bin/fm-peek.sh <window-or-session>`) to diagnose.
 4. `check:` a per-task poll fired (usually a merge); act on it.
-5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
+5. `heartbeat:` review the whole fleet: skim each task's status file, peek sessions that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
-Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
-tmux is the ground truth.
+Never rely on hooks or status files alone; the heartbeat review of every recorded backend surface is mandatory and unconditional.
+The recorded backend surface is the ground truth: tmux panes for `backend=tmux`, OpenCode server captures for `backend=opencode-server`.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
@@ -515,7 +523,7 @@ Whenever one or more tasks are in flight, do not run long foreground-blocking op
 This includes your own no-mistakes pipeline, long builds, and any other multi-minute command.
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 
-Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+Token discipline: status files before panes; default peeks to 40 lines; never stream a pane or API capture repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 

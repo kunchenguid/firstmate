@@ -4,6 +4,7 @@
 #          Detect: prints one line per problem and exits 0. Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>".
+#          Tool detection is backend-specific from FM_BACKEND/config/backend(.env).
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -58,6 +59,7 @@ fleet_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
+    opencode) echo "npm install -g opencode-ai" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -65,7 +67,32 @@ install_cmd() {
   esac
 }
 
-TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+backend_name() {
+  local line cfg
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s\n' "$FM_BACKEND"
+    return 0
+  fi
+  if [ -f "$CONFIG/backend" ]; then
+    cfg=$(tr -d '[:space:]' < "$CONFIG/backend" || true)
+    [ -n "$cfg" ] && { printf '%s\n' "$cfg"; return 0; }
+  fi
+  if [ -f "$CONFIG/backend.env" ]; then
+    line=$(grep -E '^[[:space:]]*FM_BACKEND=' "$CONFIG/backend.env" 2>/dev/null | tail -1 || true)
+    line=${line#*=}
+    line=${line%\"}; line=${line#\"}
+    line=${line%\'}; line=${line#\'}
+    line=$(printf '%s' "$line" | tr -d '[:space:]')
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  fi
+  printf '%s\n' tmux
+}
+
+BACKEND=$(backend_name)
+case "$BACKEND" in
+  opencode-server) TOOLS="opencode node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+esac
 
 if [ "${1:-}" = "install" ]; then
   shift

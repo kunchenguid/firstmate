@@ -28,14 +28,15 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows (or OpenCode server sessions when configured), giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
 - **One liaison** - you never talk to a worker agent.
   The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
-- **A visible crew** - every crewmate lives in a tmux window.
+- **A visible crew** - by default every crewmate lives in a tmux window.
   Watch any of them work, or type into their window to intervene; the first mate reconciles.
+  OpenCode users can opt into `FM_BACKEND=opencode-server` for API-backed OpenCode sessions, with optional OpenCode Desktop new-chat visibility.
 - **Persistent domain supervisors** - route natural-language scopes through `data/secondmates.md` when a domain deserves its own long-lived supervisor.
   Each secondmate has a separate `FM_HOME`, local state, local projects, and its own session lock, while the main first mate still supervises it like any other direct report.
 - **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
@@ -71,7 +72,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 ```sh
 # 1. a verified agent harness - claude, codex, opencode, or pi
 # 2. git + GitHub auth
-# 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
+# 3. tmux - the default crew backend uses tmux windows (firstmate offers to install it if missing)
 gh auth login
 ```
 
@@ -99,14 +100,14 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
-    │ tmux send-keys / status files │
+    │ tmux/API send + status files  │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows or OpenCode sessions
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
-  treehouse worktree or isolated secondmate home
+  treehouse/OpenCode worktree or isolated secondmate home
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │
@@ -149,6 +150,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending or the watcher liveness beacon is stale or missing      |
 | `fm-home-seed.sh`        | Provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md`  |
+| `fm-opencode-server`     | Start, capture, send to, interrupt, and close one OpenCode server session for `FM_BACKEND=opencode-server` tasks  |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
@@ -179,10 +181,23 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
+The default crew backend is `tmux`.
+Set `FM_BACKEND=opencode-server`, or write `opencode-server` to local `config/backend`, to run ordinary OpenCode tasks through one OpenCode server per task worktree instead of a tmux pane.
+Secondmates still use the tmux path.
+`FM_OPENCODE_VISIBILITY=headless` is the default and starts no UI; `web` records the local server URL without opening a browser; `desktop` opens OpenCode Desktop through `opencode://new-session`; `both` records the web URL and opens Desktop.
+The aliases `terminal`, `attach`, `tui`, `app`, and `chat` intentionally map to Desktop new-chat visibility, not an external terminal.
+
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root
+FM_BACKEND=tmux          # tmux or opencode-server; config/backend is also supported
+FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both
+FM_OPENCODE_DESKTOP_APP=          # optional path to OpenCode.exe for desktop visibility
+FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; {url}, {session}, {worktree}, {title}, {task}, {brief}
+FM_OPENCODE_DESKTOP_COMMAND=      # optional custom command template for desktop visibility
+FM_OPENCODE_SERVER_HOST=          # optional bind/connect host override
+FM_OPENCODE_SERVER_PORT=0         # optional fixed server port; 0 means choose a free port
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -213,12 +228,14 @@ The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proact
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
+node --check bin/fm-opencode-server       # syntax-check the OpenCode server helper
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, and /afk presence-gating tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh unpushed-work safety check: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, --force override
+tests/fm-opencode-server.test.sh          # OpenCode server visibility, spawn/send/peek routing, and owned-worktree teardown
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

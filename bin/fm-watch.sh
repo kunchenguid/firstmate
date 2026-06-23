@@ -66,39 +66,65 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working..."
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
+# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
+# API-backed captures may include backend-specific status lines.
+BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|opencode-server status: busy'}
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-window_kind() {
-  local w=$1 meta mw kind
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
-    [ "$mw" = "$w" ] || continue
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
-    return 0
-  done
-  echo unknown
+meta_value() {
+  local meta=$1 key=$2
+  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-recorded_windows() {
+recorded_sessions() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    w=$(meta_value "$meta" window)
+    [ -n "$w" ] || w=$(basename "$meta" .meta)
     [ -n "$w" ] || continue
     case "$seen" in
       *"|$w|"*) continue ;;
     esac
     seen="$seen|$w|"
-    printf '%s\n' "$w"
+    printf '%s\t%s\n' "$meta" "$w"
   done
+}
+
+opencode_helper() {
+  local meta=$1 username password
+  shift
+  username=$(meta_value "$meta" opencode_server_username)
+  password=$(meta_value "$meta" opencode_server_password)
+  if [ -n "$password" ]; then
+    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password "$FM_ROOT/bin/fm-opencode-server" "$@"
+  else
+    "$FM_ROOT/bin/fm-opencode-server" "$@"
+  fi
+}
+
+capture_meta() {
+  local meta=$1 lines=${2:-40} backend target server_url session_id
+  backend=$(meta_value "$meta" backend)
+  [ -n "$backend" ] || backend=tmux
+  case "$backend" in
+    tmux)
+      target=$(meta_value "$meta" window)
+      [ -n "$target" ] || return 1
+      tmux capture-pane -p -t "$target" -S -"$lines" 2>/dev/null
+      ;;
+    opencode-server)
+      server_url=$(meta_value "$meta" opencode_server_url)
+      session_id=$(meta_value "$meta" opencode_session_id)
+      [ -n "$server_url" ] || return 1
+      [ -n "$session_id" ] || return 1
+      opencode_helper "$meta" capture "$server_url" "$session_id" "$lines" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
@@ -217,11 +243,14 @@ EOF
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale state is reported once (.stale-* remembers the hash already reported).
-  while IFS= read -r w; do
+  while IFS=$(printf '\t') read -r meta w; do
+    [ -n "$meta" ] || continue
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    [ "$kind" = secondmate ] && continue
+    tail40=$(capture_meta "$meta" 40) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -245,7 +274,9 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
     fi
-  done < <(recorded_windows)
+  done <<EOF
+$(recorded_sessions)
+EOF
 
   # Heartbeat: firstmate reviews the whole fleet at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

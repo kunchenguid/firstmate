@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
-# its isolated firstmate home.
+# Spawn a direct report: a crewmate in a treehouse worktree or OpenCode server
+# worktree, or a secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   Set FM_BACKEND=opencode-server (or config/backend) to run ordinary opencode
+#   tasks through an API-backed OpenCode server instead of a tmux pane. The default
+#   backend is tmux, and secondmates always use tmux.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -34,6 +37,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
@@ -182,6 +186,47 @@ resolve_project_dir_arg() {
   esac
 }
 
+backend_name() {
+  local line cfg
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s\n' "$FM_BACKEND"
+    return 0
+  fi
+  if [ -f "$CONFIG/backend" ]; then
+    cfg=$(tr -d '[:space:]' < "$CONFIG/backend" || true)
+    [ -n "$cfg" ] && { printf '%s\n' "$cfg"; return 0; }
+  fi
+  if [ -f "$CONFIG/backend.env" ]; then
+    line=$(grep -E '^[[:space:]]*FM_BACKEND=' "$CONFIG/backend.env" 2>/dev/null | tail -1 || true)
+    line=${line#*=}
+    line=${line%\"}; line=${line#\"}
+    line=${line%\'}; line=${line#\'}
+    line=$(printf '%s' "$line" | tr -d '[:space:]')
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  fi
+  printf '%s\n' tmux
+}
+
+git_worktree_base() {
+  local repo=$1 ref branch
+  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      printf 'origin/%s\n' "$branch"
+      return 0
+    fi
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  git -C "$repo" rev-parse --verify HEAD 2>/dev/null
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -303,37 +348,78 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-if [ -n "${TMUX:-}" ]; then
-  SES=$(tmux display-message -p '#S')
-else
-  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-  SES=firstmate
-fi
+BACKEND=$(backend_name)
+[ "$KIND" = secondmate ] && BACKEND=tmux
+case "$BACKEND" in
+  tmux|opencode-server) ;;
+  *) echo "error: unknown FM_BACKEND '$BACKEND' (expected tmux or opencode-server)" >&2; exit 1 ;;
+esac
+
+OPENCODE_SERVER_URL=""
+OPENCODE_SERVER_PID=""
+OPENCODE_SERVER_LOG=""
+OPENCODE_SERVER_USERNAME=""
+OPENCODE_SERVER_PASSWORD=""
+OPENCODE_SESSION_ID=""
+OPENCODE_SESSION_TITLE=""
+OPENCODE_SESSION_STATE=""
+OPENCODE_VISIBILITY=""
+OPENCODE_WEB=""
+OPENCODE_WEB_URL=""
+OPENCODE_DESKTOP=""
+OPENCODE_DESKTOP_DEEPLINK=""
+OPENCODE_DESKTOP_APP=""
+OPENCODE_DESKTOP_COMMAND=""
 
 W="fm-$ID"
-T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
-  echo "error: window $T already exists" >&2
-  exit 1
-fi
+T=""
+if [ "$BACKEND" = opencode-server ]; then
+  command -v opencode >/dev/null || { echo "error: FM_BACKEND=opencode-server but opencode is not installed" >&2; exit 1; }
+  case "$ARG3" in
+    *' '*) echo "error: FM_BACKEND=opencode-server does not support raw launch commands; use the opencode harness" >&2; exit 1 ;;
+  esac
+  case "$HARNESS" in
+    opencode*) ;;
+    *) echo "error: FM_BACKEND=opencode-server supports only the opencode harness (got '$HARNESS')" >&2; exit 1 ;;
+  esac
+  mkdir -p "$STATE/opencode-server-worktrees"
+  WT="$STATE/opencode-server-worktrees/$ID"
+  [ ! -e "$WT" ] || { echo "error: OpenCode server worktree already exists: $WT" >&2; exit 1; }
+  BASE=$(git_worktree_base "$PROJ_ABS")
+  git -C "$PROJ_ABS" worktree add --detach "$WT" "$BASE" >/dev/null
+  T="$W"
+else
+  # Same session when firstmate already runs inside tmux; dedicated session otherwise.
+  if [ -n "${TMUX:-}" ]; then
+    SES=$(tmux display-message -p '#S')
+  else
+    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    SES=firstmate
+  fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
-if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  T="$SES:$W"
+  if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
+    echo "error: window $T already exists" >&2
     exit 1
+  fi
+
+  tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+  if [ "$KIND" != secondmate ]; then
+    tmux send-keys -t "$T" 'treehouse get' Enter
+
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    for _ in $(seq 1 60); do
+      p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+      if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
+        WT="$p"
+        break
+      fi
+      sleep 1
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -358,15 +444,17 @@ EOF
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
-      mkdir -p "$WT/.opencode/plugins"
-      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
+      if [ "$BACKEND" != opencode-server ]; then
+        mkdir -p "$WT/.opencode/plugins"
+        cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
   },
 })
 EOF
-      exclude_path '.opencode/plugins/fm-turn-end.js'
+        exclude_path '.opencode/plugins/fm-turn-end.js'
+      fi
       ;;
     pi*)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -405,8 +493,34 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+if [ "$BACKEND" = opencode-server ]; then
+  if ! opencode_start=$("$FM_ROOT/bin/fm-opencode-server" start "$ID" "$W" "$WT" "$BRIEF"); then
+    git -C "$PROJ_ABS" worktree remove --force "$WT" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  opencode_value() { printf '%s\n' "$opencode_start" | grep "^$1=" | tail -1 | cut -d= -f2- || true; }
+  OPENCODE_SERVER_URL=$(opencode_value opencode_server_url)
+  OPENCODE_SERVER_PID=$(opencode_value opencode_server_pid)
+  OPENCODE_SERVER_LOG=$(opencode_value opencode_server_log)
+  OPENCODE_SERVER_USERNAME=$(opencode_value opencode_server_username)
+  OPENCODE_SERVER_PASSWORD=$(opencode_value opencode_server_password)
+  OPENCODE_SESSION_ID=$(opencode_value opencode_session_id)
+  OPENCODE_SESSION_TITLE=$(opencode_value opencode_session_title)
+  OPENCODE_SESSION_STATE=$(opencode_value opencode_session_state)
+  OPENCODE_VISIBILITY=$(opencode_value opencode_visibility)
+  OPENCODE_WEB=$(opencode_value opencode_web)
+  OPENCODE_WEB_URL=$(opencode_value opencode_web_url)
+  OPENCODE_DESKTOP=$(opencode_value opencode_desktop)
+  OPENCODE_DESKTOP_DEEPLINK=$(opencode_value opencode_desktop_deeplink)
+  OPENCODE_DESKTOP_APP=$(opencode_value opencode_desktop_app)
+  OPENCODE_DESKTOP_COMMAND=$(opencode_value opencode_desktop_command)
+  [ -n "$OPENCODE_SERVER_URL" ] || { echo "error: OpenCode server helper did not return opencode_server_url" >&2; exit 1; }
+  [ -n "$OPENCODE_SESSION_ID" ] || { echo "error: OpenCode server helper did not return opencode_session_id" >&2; exit 1; }
+fi
+
 mkdir -p "$STATE"
 {
+  echo "backend=$BACKEND"
   echo "window=$T"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -418,6 +532,21 @@ mkdir -p "$STATE"
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  [ -n "$OPENCODE_SERVER_URL" ] && echo "opencode_server_url=$OPENCODE_SERVER_URL"
+  [ -n "$OPENCODE_SERVER_PID" ] && echo "opencode_server_pid=$OPENCODE_SERVER_PID"
+  [ -n "$OPENCODE_SERVER_LOG" ] && echo "opencode_server_log=$OPENCODE_SERVER_LOG"
+  [ -n "$OPENCODE_SERVER_USERNAME" ] && echo "opencode_server_username=$OPENCODE_SERVER_USERNAME"
+  [ -n "$OPENCODE_SERVER_PASSWORD" ] && echo "opencode_server_password=$OPENCODE_SERVER_PASSWORD"
+  [ -n "$OPENCODE_SESSION_ID" ] && echo "opencode_session_id=$OPENCODE_SESSION_ID"
+  [ -n "$OPENCODE_SESSION_TITLE" ] && echo "opencode_session_title=$OPENCODE_SESSION_TITLE"
+  [ -n "$OPENCODE_SESSION_STATE" ] && echo "opencode_session_state=$OPENCODE_SESSION_STATE"
+  [ -n "$OPENCODE_VISIBILITY" ] && echo "opencode_visibility=$OPENCODE_VISIBILITY"
+  [ -n "$OPENCODE_WEB" ] && echo "opencode_web=$OPENCODE_WEB"
+  [ -n "$OPENCODE_WEB_URL" ] && echo "opencode_web_url=$OPENCODE_WEB_URL"
+  [ -n "$OPENCODE_DESKTOP" ] && echo "opencode_desktop=$OPENCODE_DESKTOP"
+  [ -n "$OPENCODE_DESKTOP_DEEPLINK" ] && echo "opencode_desktop_deeplink=$OPENCODE_DESKTOP_DEEPLINK"
+  [ -n "$OPENCODE_DESKTOP_APP" ] && echo "opencode_desktop_app=$OPENCODE_DESKTOP_APP"
+  [ -n "$OPENCODE_DESKTOP_COMMAND" ] && echo "opencode_desktop_command=$OPENCODE_DESKTOP_COMMAND"
 } > "$STATE/$ID.meta"
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -430,8 +559,14 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
-sleep 0.3
-tmux send-keys -t "$T" Enter
+if [ "$BACKEND" = tmux ]; then
+  tmux send-keys -t "$T" -l "$LAUNCH"
+  sleep 0.3
+  tmux send-keys -t "$T" Enter
+fi
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
+if [ "$BACKEND" = opencode-server ]; then
+  echo "spawned $ID backend=$BACKEND harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT session=$OPENCODE_SESSION_ID server=$OPENCODE_SERVER_URL"
+else
+  echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
+fi

@@ -1,0 +1,602 @@
+#!/usr/bin/env node
+// Firstmate OpenCode server backend helper.
+// Owns one OpenCode server per task worktree and talks to its HTTP API.
+
+const fs = require("node:fs");
+const http = require("node:http");
+const https = require("node:https");
+const net = require("node:net");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { spawn, spawnSync } = require("node:child_process");
+
+const ROOT = process.env.FM_ROOT_OVERRIDE || process.env.FM_ROOT || path.resolve(__dirname, "..");
+const HOME = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || ROOT;
+const STATE = process.env.FM_STATE_OVERRIDE || path.join(HOME, "state");
+const MOCK = process.env.FM_OPENCODE_SERVER_MOCK === "1";
+let HYBRID_OPENCODE;
+let REQUEST_AUTH;
+
+function usage() {
+  console.error(`usage:
+  fm-opencode-server start <task-id> <session-title> <worktree> <brief-file>
+  fm-opencode-server capture <server-url> <session-id> [lines]
+  fm-opencode-server send <server-url> <session-id> <text>
+  fm-opencode-server interrupt <server-url> <session-id>
+  fm-opencode-server status <server-url> <session-id>
+  fm-opencode-server close <server-url> <session-id> [server-pid]`);
+  process.exit(2);
+}
+
+function ensureState() {
+  fs.mkdirSync(STATE, { recursive: true });
+}
+
+function isWindows() {
+  return process.platform === "win32";
+}
+
+function requireOpenCode() {
+  const result = spawnSync("opencode", ["--version"], {
+    stdio: "ignore",
+    shell: isWindows(),
+    windowsHide: true,
+  });
+  if (result.error && result.error.code === "ENOENT") {
+    throw new Error("FM_BACKEND=opencode-server but opencode is not installed");
+  }
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error("FM_BACKEND=opencode-server but opencode --version failed");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function findFreePort(host) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.on("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      server.close(() => resolve(address.port));
+    });
+  });
+}
+
+function commandPath(command) {
+  if (process.platform === "win32") {
+    const result = spawnSync("where", [command], { encoding: "utf8", windowsHide: true });
+    return result.status === 0 ? result.stdout.split(/\r?\n/)[0].trim() : "";
+  }
+  const result = spawnSync("sh", ["-lc", `command -v ${command}`], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim().split(/\r?\n/)[0] : "";
+}
+
+function isWslWindowsOpenCode() {
+  if (HYBRID_OPENCODE !== undefined) return HYBRID_OPENCODE;
+  HYBRID_OPENCODE = false;
+  if (process.platform !== "linux") return false;
+  const opencodePath = commandPath("opencode");
+  if (!opencodePath.startsWith("/mnt/")) return false;
+  try {
+    HYBRID_OPENCODE = fs.readFileSync(opencodePath, "utf8").includes("opencode.exe");
+  } catch {
+    HYBRID_OPENCODE = false;
+  }
+  return HYBRID_OPENCODE;
+}
+
+function windowsEnv(name) {
+  if (!isWslWindowsOpenCode()) return "";
+  const result = spawnSync("cmd.exe", ["/d", "/s", "/c", `set ${name}`], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) return "";
+  const prefix = `${name}=`;
+  const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(prefix));
+  return line ? line.slice(prefix.length) : "";
+}
+
+function wslGatewayAddress() {
+  try {
+    const route = fs.readFileSync("/proc/net/route", "utf8").split(/\r?\n/);
+    for (const line of route.slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields[1] !== "00000000" || !fields[2]) continue;
+      const hex = fields[2].match(/../g);
+      if (!hex) continue;
+      return hex.reverse().map((part) => parseInt(part, 16)).join(".");
+    }
+  } catch {
+    // Fall through to localhost below.
+  }
+  return "127.0.0.1";
+}
+
+function serverHosts(hybrid = isWslWindowsOpenCode()) {
+  if (process.env.FM_OPENCODE_SERVER_HOST) {
+    return { bind: process.env.FM_OPENCODE_SERVER_HOST, connect: process.env.FM_OPENCODE_SERVER_HOST, visible: process.env.FM_OPENCODE_SERVER_HOST };
+  }
+  if (hybrid) {
+    return { bind: "0.0.0.0", connect: wslGatewayAddress(), visible: "127.0.0.1" };
+  }
+  return { bind: "127.0.0.1", connect: "127.0.0.1", visible: "127.0.0.1" };
+}
+
+function authHeaders(headers = {}) {
+  const password = REQUEST_AUTH?.password || process.env.OPENCODE_SERVER_PASSWORD || windowsEnv("OPENCODE_SERVER_PASSWORD");
+  if (!password) return headers;
+  const username = REQUEST_AUTH?.username || process.env.OPENCODE_SERVER_USERNAME || windowsEnv("OPENCODE_SERVER_USERNAME") || "opencode";
+  return {
+    ...headers,
+    Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+  };
+}
+
+function serverAuth(hybrid) {
+  const password = process.env.OPENCODE_SERVER_PASSWORD || windowsEnv("OPENCODE_SERVER_PASSWORD");
+  const username = process.env.OPENCODE_SERVER_USERNAME || windowsEnv("OPENCODE_SERVER_USERNAME") || "opencode";
+  if (password) return { username, password, generated: false };
+  if (!hybrid) return undefined;
+  return { username, password: crypto.randomBytes(18).toString("base64url"), generated: true };
+}
+
+function urlWithAuth(raw, auth) {
+  if (!auth?.generated) return raw;
+  const url = new URL(raw);
+  url.username = auth.username;
+  url.password = auth.password;
+  return url.toString();
+}
+
+function request(method, serverUrl, route, body, ok = [200]) {
+  const url = new URL(route, serverUrl.endsWith("/") ? serverUrl : `${serverUrl}/`);
+  const transport = url.protocol === "https:" ? https : http;
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const headers = authHeaders(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {});
+
+  return new Promise((resolve, reject) => {
+    const req = transport.request(
+      url,
+      {
+        method,
+        headers,
+        timeout: Number(process.env.FM_OPENCODE_SERVER_HTTP_TIMEOUT_MS || 10000),
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          if (!ok.includes(res.statusCode)) {
+            reject(new Error(`${method} ${route} failed with HTTP ${res.statusCode}: ${text}`));
+            return;
+          }
+          if (!text.trim()) {
+            resolve(undefined);
+            return;
+          }
+          try {
+            resolve(JSON.parse(text));
+          } catch {
+            resolve(text);
+          }
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`${method} ${route} timed out`)));
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function waitForHealth(serverUrl, child) {
+  const deadline = Date.now() + Number(process.env.FM_OPENCODE_SERVER_START_TIMEOUT_MS || 30000);
+  let exit = null;
+  let lastError = "";
+  child.once("exit", (code, signal) => {
+    exit = signal || String(code);
+  });
+  while (Date.now() < deadline) {
+    if (exit !== null) throw new Error(`opencode serve exited before becoming healthy (${exit})`);
+    try {
+      const health = await request("GET", serverUrl, "/global/health", undefined, [200]);
+      if (health && health.healthy) return health;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await sleep(250);
+  }
+  throw new Error(`opencode serve did not become healthy at ${serverUrl}${lastError ? ` (${lastError})` : ""}`);
+}
+
+function sessionRoute(sessionId, suffix = "") {
+  return `/session/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
+function promptBody(text) {
+  return {
+    agent: "build",
+    parts: [{ type: "text", text }],
+  };
+}
+
+function windowsPath(value) {
+  if (process.platform !== "linux" || !String(value).startsWith("/mnt/")) return value;
+  const result = spawnSync("wslpath", ["-w", value], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : value;
+}
+
+function wslPath(value) {
+  if (process.platform !== "linux" || !/^[A-Za-z]:\\/.test(String(value))) return value;
+  const result = spawnSync("wslpath", ["-u", value], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : value;
+}
+
+function visibility() {
+  const raw = String(process.env.FM_OPENCODE_VISIBILITY || process.env.FM_OPENCODE_SERVER_VISIBILITY || "headless").toLowerCase();
+  switch (raw) {
+    case "":
+    case "0":
+    case "false":
+    case "off":
+    case "none":
+    case "api":
+    case "server":
+    case "headless":
+      return { value: "headless", web: false, desktop: false };
+    case "web":
+    case "browser":
+      return { value: "web", web: true, desktop: false };
+    case "desktop":
+    case "app":
+    case "chat":
+    case "terminal":
+    case "attach":
+    case "tui":
+      return { value: "desktop", web: false, desktop: true };
+    case "both":
+    case "all":
+      return { value: "both", web: true, desktop: true };
+    default:
+      throw new Error(`unknown FM_OPENCODE_VISIBILITY '${raw}' (expected headless, web, desktop, or both)`);
+  }
+}
+
+function expandCommandTemplate(template, values) {
+  return template.replace(/\{(url|session|worktree|title|task|brief)\}/g, (_, key) => values[key] || "");
+}
+
+function openWebSurface({ webUrl, dryRun = process.env.FM_OPENCODE_VISIBILITY_DRY_RUN === "1" }) {
+  const mode = visibility();
+  if (!mode.web) return null;
+  if (dryRun) return { opened: "dry-run", url: webUrl };
+  return { opened: "recorded", url: webUrl };
+}
+
+function desktopAppPath() {
+  if (process.env.FM_OPENCODE_DESKTOP_APP) return wslPath(process.env.FM_OPENCODE_DESKTOP_APP);
+  const localAppData = process.env.LOCALAPPDATA || windowsEnv("LOCALAPPDATA");
+  if (!localAppData) return "";
+  return wslPath(path.win32.join(localAppData, "Programs", "@opencode-aidesktop", "OpenCode.exe"));
+}
+
+function desktopPrompt({ title, sessionId, worktree, taskId, briefFile, webUrl }) {
+  const values = {
+    url: webUrl,
+    session: sessionId,
+    worktree: windowsPath(worktree),
+    title,
+    task: taskId,
+    brief: windowsPath(briefFile),
+  };
+  const template = process.env.FM_OPENCODE_DESKTOP_PROMPT;
+  if (template && ["0", "false", "off", "none"].includes(template.toLowerCase())) return "";
+  if (template) return expandCommandTemplate(template, values);
+  return `FirstMate task ${title} is running in this worktree. Use this chat for visibility and questions about the task. Do not modify files unless explicitly instructed.`;
+}
+
+function desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile }) {
+  const url = new URL("opencode://new-session");
+  url.searchParams.set("directory", windowsPath(worktree));
+  const prompt = desktopPrompt({ title, webUrl, sessionId, worktree, taskId, briefFile });
+  if (prompt) url.searchParams.set("prompt", prompt);
+  return url.toString();
+}
+
+function launchDesktop({ title, webUrl, sessionId, worktree, taskId, briefFile, dryRun = process.env.FM_OPENCODE_VISIBILITY_DRY_RUN === "1" }) {
+  const mode = visibility();
+  if (!mode.desktop) return null;
+  const template = process.env.FM_OPENCODE_DESKTOP_COMMAND;
+  const deeplink = desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile });
+  const app = desktopAppPath();
+  if (!template) {
+    if (dryRun) return { launched: "dry-run", deeplink, app };
+    if (!app || !fs.existsSync(app)) {
+      throw new Error("FM_OPENCODE_VISIBILITY=desktop requested, but OpenCode Desktop was not found. Set FM_OPENCODE_DESKTOP_APP to OpenCode.exe, or use headless/web visibility.");
+    }
+    const child = spawn(app, [deeplink], { detached: true, stdio: "ignore", windowsHide: false });
+    child.on("error", () => undefined);
+    child.unref();
+    return { launched: "opencode-desktop", deeplink, app };
+  }
+  const command = expandCommandTemplate(template, {
+    url: webUrl,
+    session: sessionId,
+    worktree: windowsPath(worktree),
+    title,
+    task: taskId,
+    brief: windowsPath(briefFile),
+  });
+  if (dryRun) {
+    return { launched: "dry-run", command, deeplink, app };
+  }
+  const child = spawn(command, { shell: true, detached: true, stdio: "ignore", windowsHide: false });
+  child.on("error", () => undefined);
+  child.unref();
+  return { launched: "custom-command" };
+}
+
+async function ensureSession(serverUrl, title) {
+  const sessions = await request("GET", serverUrl, "/session", undefined, [200]);
+  const existing = Array.isArray(sessions) ? sessions.find((session) => session.title === title) : undefined;
+  if (existing && existing.id) return existing;
+  const created = await request("POST", serverUrl, "/session", { title }, [200]);
+  if (!created || !created.id) throw new Error("opencode server did not return a session id");
+  return created;
+}
+
+async function sendPrompt(serverUrl, sessionId, text) {
+  await request("POST", serverUrl, sessionRoute(sessionId, "/prompt_async"), promptBody(text), [200, 204]);
+}
+
+function killPid(pid) {
+  const parsed = Number(pid || 0);
+  if (!Number.isFinite(parsed) || parsed <= 0) return;
+  if (isWindows()) {
+    spawnSync("taskkill", ["/PID", String(parsed), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-parsed, "SIGTERM");
+  } catch {
+    try {
+      process.kill(parsed, "SIGTERM");
+    } catch {
+      return;
+    }
+  }
+}
+
+async function closeServer(serverUrl, sessionId, pid) {
+  if (MOCK) {
+    console.log(`closed_session_id=${sessionId}`);
+    return;
+  }
+  if (serverUrl && sessionId) {
+    await request("POST", serverUrl, sessionRoute(sessionId, "/abort"), undefined, [200, 404]).catch(() => undefined);
+    await request("DELETE", serverUrl, sessionRoute(sessionId), undefined, [200, 404]).catch(() => undefined);
+  }
+  if (serverUrl) {
+    await request("POST", serverUrl, "/instance/dispose", undefined, [200, 404]).catch(() => undefined);
+  }
+  await sleep(500);
+  killPid(pid);
+}
+
+function partText(part) {
+  if (!part || typeof part !== "object") return "";
+  if (part.type === "text" || part.type === "reasoning") return part.text || "";
+  if (part.type === "tool") {
+    const state = part.state && part.state.status ? part.state.status : "unknown";
+    const title = part.state && part.state.title ? ` ${part.state.title}` : "";
+    return `[tool:${part.tool} ${state}${title}]`;
+  }
+  if (part.type === "step-finish") return `[step-finish:${part.reason}]`;
+  if (part.type === "file") return `[file:${part.filename || part.url || "attachment"}]`;
+  if (part.type === "agent") return `[agent:${part.name}]`;
+  return `[${part.type || "part"}]`;
+}
+
+function lastLines(text, limit) {
+  const lines = String(text || "").replace(/\r?\n$/, "").split(/\r?\n/);
+  return lines.slice(Math.max(0, lines.length - limit)).join("\n");
+}
+
+async function statusLine(serverUrl, sessionId) {
+  const statuses = await request("GET", serverUrl, "/session/status", undefined, [200]);
+  const status = statuses && statuses[sessionId] ? statuses[sessionId] : { type: "unknown" };
+  return `opencode-server status: ${status.type || "unknown"}`;
+}
+
+async function capture(serverUrl, sessionId, linesArg) {
+  const limit = Number(linesArg || 40);
+  if (MOCK) {
+    console.log(lastLines(`opencode-server status: idle\nsession=${sessionId}`, Number.isFinite(limit) && limit > 0 ? limit : 40));
+    return;
+  }
+  const messageLimit = Math.max(10, Math.min(100, Number.isFinite(limit) && limit > 0 ? limit : 40));
+  const status = await statusLine(serverUrl, sessionId).catch((error) => `opencode-server status: unknown (${error.message})`);
+  const messages = await request("GET", serverUrl, `${sessionRoute(sessionId, "/message")}?limit=${messageLimit}`, undefined, [200]);
+  const out = [status];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const role = message.info && message.info.role ? message.info.role : "message";
+    const id = message.info && message.info.id ? message.info.id : "unknown";
+    out.push(`[${role} ${id}]`);
+    for (const part of message.parts || []) {
+      const text = partText(part);
+      if (text) out.push(text);
+    }
+  }
+  console.log(lastLines(out.join("\n"), Number.isFinite(limit) && limit > 0 ? limit : 40));
+}
+
+async function start(taskId, title, worktree, briefFile) {
+  if (!MOCK) requireOpenCode();
+  if (!fs.existsSync(worktree)) throw new Error(`worktree not found: ${worktree}`);
+  if (!fs.existsSync(briefFile)) throw new Error(`brief not found: ${briefFile}`);
+  ensureState();
+  const logFile = path.join(STATE, `${taskId}.opencode-server.log`);
+  const mode = visibility();
+
+  if (MOCK) {
+    fs.writeFileSync(logFile, `mock opencode-server start ${title}\n`);
+    console.log("opencode_server_url=http://127.0.0.1:0");
+    console.log("opencode_server_pid=0");
+    console.log(`opencode_server_log=${logFile}`);
+    console.log(`opencode_session_id=mock-${taskId}`);
+    console.log(`opencode_session_title=${title}`);
+    console.log("opencode_session_state=active");
+    console.log(`opencode_visibility=${mode.value}`);
+    const web = openWebSurface({ webUrl: "http://127.0.0.1:0", dryRun: true });
+    if (web) {
+      console.log(`opencode_web=${web.opened}`);
+      console.log(`opencode_web_url=${web.url}`);
+    }
+    const desktop = launchDesktop({ title, webUrl: "http://127.0.0.1:0", sessionId: `mock-${taskId}`, worktree, taskId, briefFile, dryRun: true });
+    if (desktop) {
+      console.log(`opencode_desktop=${desktop.launched}`);
+      if (desktop.deeplink) console.log(`opencode_desktop_deeplink=${desktop.deeplink}`);
+      if (desktop.app) console.log(`opencode_desktop_app=${desktop.app}`);
+      if (desktop.command) console.log(`opencode_desktop_command=${desktop.command}`);
+    }
+    return;
+  }
+
+  const hybrid = isWslWindowsOpenCode();
+  const hosts = serverHosts(hybrid);
+  const auth = serverAuth(hybrid);
+  REQUEST_AUTH = auth;
+  const port = Number(process.env.FM_OPENCODE_SERVER_PORT || 0) || (await findFreePort(hosts.connect === "127.0.0.1" ? hosts.connect : "127.0.0.1"));
+  const serverUrl = `http://${hosts.connect}:${port}`;
+  const visibleUrl = `http://${hosts.visible}:${port}`;
+  const webUrl = urlWithAuth(visibleUrl, auth);
+  const fd = fs.openSync(logFile, "a");
+  const env = {
+    ...process.env,
+    OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT || '{"permission":{"*":"allow"}}',
+    OPENCODE_DISABLE_AUTOUPDATE: process.env.OPENCODE_DISABLE_AUTOUPDATE || "1",
+  };
+  if (auth) {
+    env.OPENCODE_SERVER_USERNAME = auth.username;
+    env.OPENCODE_SERVER_PASSWORD = auth.password;
+  }
+  const child = spawn("opencode", ["serve", "--hostname", hosts.bind, "--port", String(port)], {
+    cwd: worktree,
+    env,
+    detached: true,
+    shell: isWindows(),
+    stdio: ["ignore", fd, fd],
+    windowsHide: true,
+  });
+  fs.closeSync(fd);
+
+  let sessionId = "";
+  let web = null;
+  let desktop = null;
+  try {
+    await waitForHealth(serverUrl, child);
+    const session = await ensureSession(serverUrl, title);
+    sessionId = session.id;
+    web = openWebSurface({ webUrl });
+    desktop = launchDesktop({ title, webUrl, sessionId, worktree, taskId, briefFile });
+    await sendPrompt(serverUrl, sessionId, fs.readFileSync(briefFile, "utf8"));
+  } catch (error) {
+    await closeServer(serverUrl, sessionId, child.pid).catch(() => undefined);
+    throw error;
+  }
+
+  child.unref();
+  console.log(`opencode_server_url=${serverUrl}`);
+  console.log(`opencode_server_pid=${child.pid}`);
+  console.log(`opencode_server_log=${logFile}`);
+  console.log(`opencode_session_id=${sessionId}`);
+  console.log(`opencode_session_title=${title}`);
+  console.log("opencode_session_state=active");
+  console.log(`opencode_visibility=${mode.value}`);
+  if (auth?.generated) {
+    console.log(`opencode_server_username=${auth.username}`);
+    console.log(`opencode_server_password=${auth.password}`);
+  }
+  if (web) {
+    console.log(`opencode_web=${web.opened}`);
+    console.log(`opencode_web_url=${web.url}`);
+    if (web.command) console.log(`opencode_web_command=${web.command}`);
+  }
+  if (desktop) {
+    console.log(`opencode_desktop=${desktop.launched}`);
+    if (desktop.deeplink) console.log(`opencode_desktop_deeplink=${desktop.deeplink}`);
+    if (desktop.app) console.log(`opencode_desktop_app=${desktop.app}`);
+    if (desktop.command) console.log(`opencode_desktop_command=${desktop.command}`);
+  }
+}
+
+async function main() {
+  const [cmd, ...args] = process.argv.slice(2);
+  if (!cmd) usage();
+
+  if (cmd === "start") {
+    const [taskId, title, worktree, briefFile] = args;
+    if (!taskId || !title || !worktree || !briefFile) usage();
+    await start(taskId, title, worktree, briefFile);
+    return;
+  }
+
+  if (cmd === "capture") {
+    const [serverUrl, sessionId, lines] = args;
+    if (!serverUrl || !sessionId) usage();
+    await capture(serverUrl, sessionId, lines);
+    return;
+  }
+
+  if (cmd === "send") {
+    const [serverUrl, sessionId, ...textParts] = args;
+    if (!serverUrl || !sessionId) usage();
+    const text = textParts.join(" ");
+    if (MOCK) {
+      console.log(`sent_session_id=${sessionId}`);
+      return;
+    }
+    await sendPrompt(serverUrl, sessionId, text);
+    console.log(`sent_session_id=${sessionId}`);
+    return;
+  }
+
+  if (cmd === "interrupt") {
+    const [serverUrl, sessionId] = args;
+    if (!serverUrl || !sessionId) usage();
+    if (MOCK) {
+      console.log(`aborted_session_id=${sessionId}`);
+      return;
+    }
+    await request("POST", serverUrl, sessionRoute(sessionId, "/abort"), undefined, [200]);
+    console.log(`aborted_session_id=${sessionId}`);
+    return;
+  }
+
+  if (cmd === "status") {
+    const [serverUrl, sessionId] = args;
+    if (!serverUrl || !sessionId) usage();
+    if (MOCK) {
+      console.log("status=idle");
+      return;
+    }
+    const line = await statusLine(serverUrl, sessionId);
+    console.log(`status=${line.replace(/^opencode-server status: /, "")}`);
+    return;
+  }
+
+  if (cmd === "close") {
+    const [serverUrl, sessionId, pid] = args;
+    if (!serverUrl || !sessionId) usage();
+    await closeServer(serverUrl, sessionId, pid);
+    return;
+  }
+
+  usage();
+}
+
+main().catch((error) => {
+  console.error(`error: ${error.message}`);
+  process.exit(1);
+});

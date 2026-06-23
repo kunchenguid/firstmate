@@ -6,3 +6,5 @@ data/
 .DS_Store
 .env
 config/crew-harness
+config/backend
+config/backend.env
