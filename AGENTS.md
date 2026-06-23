@@ -105,8 +105,8 @@ Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
-- `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
-  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease` or whose version lacks `post_create` hooks; treat it as an upgrade request.
+- `MISSING: <tool> (install: <command>)` - list the missing tools or setup steps to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
+  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease` or whose version lacks `post_create` hooks; treat it as an upgrade request. For `treehouse-post-create-hook`, this wires firstmate's global Treehouse hook into the machine-level Treehouse config.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.

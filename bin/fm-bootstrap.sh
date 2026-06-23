@@ -6,6 +6,8 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>".
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support or post_create hook support.
+#          treehouse-post-create-hook is MISSING when Treehouse is not wired
+#          to firstmate's global post_create hook.
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -61,6 +63,7 @@ install_cmd() {
   case "$1" in
     tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
+    treehouse-post-create-hook) printf '%q install treehouse-post-create-hook\n' "$FM_ROOT/bin/fm-bootstrap.sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     *) return 1 ;;
@@ -91,11 +94,83 @@ treehouse_supports_post_create() {
   esac
 }
 
+treehouse_config_path() {
+  printf '%s\n' "${TREEHOUSE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/treehouse/config.toml}"
+}
+
+treehouse_hook_path() {
+  cd "$FM_ROOT/bin" 2>/dev/null && printf '%s/fm-treehouse-post-create.sh\n' "$(pwd -P)"
+}
+
+treehouse_post_create_hook_configured() {
+  config=$(treehouse_config_path)
+  hook=$(treehouse_hook_path) || return 1
+  [ -f "$config" ] || return 1
+  awk -v hook="$hook" '
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/); in_post_create = 0 }
+    in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { in_post_create = 1 }
+    in_hooks && in_post_create && index($0, hook) { found = 1 }
+    in_hooks && in_post_create && /\]/ { in_post_create = 0 }
+    END { exit found ? 0 : 1 }
+  ' "$config"
+}
+
+treehouse_config_has_hooks_section() {
+  grep -Eq '^[[:space:]]*\[hooks\][[:space:]]*$' "$1"
+}
+
+treehouse_config_has_post_create() {
+  awk '
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/) }
+    in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+install_treehouse_hook() {
+  config=$(treehouse_config_path)
+  hook=$(treehouse_hook_path) || return 1
+  if treehouse_post_create_hook_configured; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$config")"
+  if [ ! -f "$config" ]; then
+    printf '[hooks]\npost_create = ["%s"]\n' "$hook" >"$config"
+    return 0
+  fi
+  if ! treehouse_config_has_hooks_section "$config"; then
+    printf '\n[hooks]\npost_create = ["%s"]\n' "$hook" >>"$config"
+    return 0
+  fi
+  if ! treehouse_config_has_post_create "$config"; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-config.XXXXXX") || return 1
+    if awk -v hook="$hook" '
+      { print }
+      !inserted && /^[[:space:]]*\[hooks\][[:space:]]*$/ {
+        printf "post_create = [\"%s\"]\n", hook
+        inserted = 1
+      }
+    ' "$config" >"$tmp" && mv "$tmp" "$config"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp"
+    return 1
+  fi
+  echo "error: treehouse post_create is already configured without $hook; add it to $config" >&2
+  return 1
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
     cmd=$(install_cmd "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+    if [ "$t" = treehouse-post-create-hook ]; then
+      echo "installing $t: $cmd"
+      install_treehouse_hook || exit 1
+      continue
+    fi
     cmd=${cmd%%  #*}
     echo "installing $t: $cmd"
     eval "$cmd"
@@ -108,6 +183,9 @@ for t in $TOOLS; do
 done
 if command -v treehouse >/dev/null 2>&1 && { ! treehouse_supports_lease || ! treehouse_supports_post_create; }; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+fi
+if command -v treehouse >/dev/null 2>&1 && treehouse_supports_lease && treehouse_supports_post_create && ! treehouse_post_create_hook_configured; then
+  echo "MISSING: treehouse-post-create-hook (install: $(install_cmd treehouse-post-create-hook))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 crew=
