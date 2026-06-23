@@ -93,14 +93,13 @@ afk mode the composer guard is belt-and-suspenders (no human is typing), but it
 protects against the race window between the captain returning and their
 message landing, and against the daemon's own previous injection sitting unsent.
 
-**Max-defer escape (the daemon must never silently wedge).** If anything stays
-buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon **forces** one
-delivery that bypasses the composer guard on an idle pane (the busy-guard still
-holds). If even the forced submit cannot be confirmed, it raises a loud,
-rate-limited wedge alarm: an ERROR in the daemon log, a durable
+**Max-defer escape (the daemon must never silently wedge).**
+If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
+If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
+an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
-catch-up if present), and a flash on the supervisor client's status line. So a
-guard false-positive becomes a bounded delay, never an unbounded silent no-op.
+catch-up if present), and a flash on the supervisor client's status line.
+So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ## Submit model
 
