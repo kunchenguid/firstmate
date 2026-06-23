@@ -9,7 +9,7 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # mode = how a finished change reaches main:
-#   no-mistakes  full pipeline -> PR -> captain merge (default)
+#   no-mistakes  validation pipeline + branch push with --skip=pr,ci -> manual PR -> captain merge (default)
 #   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
 #   local-only   local branch, no remote/PR -> firstmate review -> captain approve -> local merge
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,

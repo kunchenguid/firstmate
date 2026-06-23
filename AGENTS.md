@@ -49,7 +49,8 @@ Hands-on firstmate work competes with live supervision for the same single threa
 This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+This repo is itself behind the no-mistakes gate: ship shared, tracked material by branching, committing, running the no-mistakes validation pipeline with `--skip=pr,ci`, and opening the PR manually afterward.
+The captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -295,7 +296,7 @@ Do not eagerly backfill every project.
 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
-- `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
+- `no-mistakes` (default; `[...]` may be omitted) - validation pipeline through branch push with `--skip=pr,ci` -> manual PR -> captain merge. Highest assurance.
 - `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
 
