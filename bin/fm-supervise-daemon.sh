@@ -97,8 +97,9 @@ ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
 # Busy signatures per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; API-backed
+# captures may include backend-specific status lines.
+BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|opencode-server status: busy'
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Patterns that indicate an EMPTY composer (idle pane, no pending input). Used by
 # pane_input_pending to distinguish "bare prompt, nothing typed" from "human
@@ -243,6 +244,11 @@ last_status_line() {
   local f=$1
   [ -e "$f" ] || return 0
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+}
+
+meta_value() {
+  local meta=$1 key=$2
+  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 # 0 if the given (last) status line matches a captain-relevant verb.
@@ -392,6 +398,48 @@ pane_is_busy() {  # <window>
     | grep -qiE "${FM_BUSY_REGEX:-$BUSY_REGEX_DEFAULT}"
 }
 
+opencode_helper() {
+  local meta=$1 username password
+  shift
+  username=$(meta_value "$meta" opencode_server_username)
+  password=$(meta_value "$meta" opencode_server_password)
+  if [ -n "$password" ]; then
+    OPENCODE_SERVER_USERNAME=${username:-opencode} OPENCODE_SERVER_PASSWORD=$password "$FM_ROOT/bin/fm-opencode-server" "$@"
+  else
+    "$FM_ROOT/bin/fm-opencode-server" "$@"
+  fi
+}
+
+opencode_capture() {
+  local meta=$1 lines=${2:-40} server_url session_id
+  server_url=$(meta_value "$meta" opencode_server_url)
+  session_id=$(meta_value "$meta" opencode_session_id)
+  [ -n "$server_url" ] || return 1
+  [ -n "$session_id" ] || return 1
+  opencode_helper "$meta" capture "$server_url" "$session_id" "$lines" 2>/dev/null
+}
+
+meta_for_window() {
+  local win=$1 state=$2 task
+  task=$(window_to_task "$win")
+  [ -f "$state/$task.meta" ] && { printf '%s\n' "$state/$task.meta"; return 0; }
+  return 1
+}
+
+surface_is_busy() {  # <window-or-session-name> <state>
+  local win=$1 state=$2 meta backend tail40
+  meta=$(meta_for_window "$win" "$state" || true)
+  backend=$(meta_value "$meta" backend)
+  [ -n "$backend" ] || backend=tmux
+  if [ "$backend" = opencode-server ]; then
+    tail40=$(opencode_capture "$meta" 40) || return 1
+    printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+      | grep -qiE "${FM_BUSY_REGEX:-$BUSY_REGEX_DEFAULT}"
+    return
+  fi
+  pane_is_busy "$win"
+}
+
 # pane_input_pending: detect non-empty text on the cursor/input line. Returns 0
 # (pending) if the cursor line has non-whitespace content that is NOT a
 # recognized idle pattern (bare prompt, busy footer).
@@ -482,14 +530,14 @@ housekeeping() {  # <state>
     key="${marker##*.subsuper-stale-}"
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    # Reconstruct the window name from the key (best-effort: session is unknown,
-    # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
+    # Reconstruct the recorded surface from the key: prefer live tmux windows,
+    # then metadata-backed sessions such as opencode-server.
+    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker, nothing to escalate.
+      # Surface gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
-    if pane_is_busy "$win"; then
+    if surface_is_busy "$win" "$state"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
       escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
@@ -515,12 +563,21 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
+# Find a recorded surface whose task id matches the given marker key.
+window_for_task() {  # <task-key> [state]
+  local key=$1 state=${2:-$(_state_root)} w t meta
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+  done
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    t=$(basename "$meta" .meta)
+    [ "$(_stale_key "$t")" = "$key" ] || continue
+    w=$(meta_value "$meta" window)
+    [ -n "$w" ] || w="fm-$t"
+    printf '%s' "$w"
+    return 0
   done
   return 1
 }

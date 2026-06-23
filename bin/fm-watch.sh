@@ -250,7 +250,12 @@ EOF
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = secondmate ] && continue
-    tail40=$(capture_meta "$meta" 40) || continue
+    if ! tail40=$(capture_meta "$meta" 40); then
+      backend=$(meta_value "$meta" backend)
+      [ "$backend" = opencode-server ] || continue
+      tail40="opencode-server status: missing
+capture failed for $(basename "$meta" .meta)"
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

@@ -258,6 +258,40 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
+test_opencode_capture_failure_becomes_stale() {
+  local dir state fake_root out drain_out window key pane_hash
+  dir=$(make_case opencode-capture-fail)
+  state="$dir/state"
+  fake_root="$dir/root"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  window="fm-api-dead"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-opencode-server" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fake_root/bin/fm-opencode-server"
+  cat > "$state/api-dead.meta" <<EOF
+backend=opencode-server
+window=$window
+opencode_server_url=http://127.0.0.1:9
+opencode_session_id=dead-session
+EOF
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "opencode-server status: missing
+capture failed for api-dead")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for OpenCode capture failure"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "OpenCode capture failure did not print stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after OpenCode stale wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "OpenCode capture failure stale wake was not queued"
+  pass "OpenCode server capture failures become reportable stale wakes"
+}
+
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
@@ -485,6 +519,36 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+test_housekeeping_opencode_stale_uses_meta() {
+  local dir state fake_root old_root key
+  dir=$(make_supercase opencode-stale-meta)
+  state="$dir/state"
+  fake_root="$dir/root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-opencode-server" <<'SH'
+#!/usr/bin/env bash
+printf 'opencode-server status: idle\n'
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-opencode-server"
+  cat > "$state/api-wedge.meta" <<EOF
+backend=opencode-server
+window=fm-api-wedge
+opencode_server_url=http://127.0.0.1:0
+opencode_session_id=api-wedge-session
+EOF
+  key=$(printf '%s' "api-wedge" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  old_root=$FM_ROOT
+  FM_ROOT="$fake_root" FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  FM_ROOT=$old_root
+  [ -s "$state/.subsuper-escalations" ] || fail "OpenCode stale marker was dropped instead of escalated"
+  grep -F 'stale persisted' "$state/.subsuper-escalations" | grep -F 'fm-api-wedge' >/dev/null \
+    || fail "OpenCode stale escalation did not name the metadata surface"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "OpenCode stale marker not cleared after escalation"
+  pass "persistent OpenCode server stale markers recheck through metadata"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -965,6 +1029,7 @@ test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
+test_opencode_capture_failure_becomes_stale
 test_check_output_is_queued
 test_singleton_start
 test_atomic_double_drain
@@ -980,6 +1045,7 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_opencode_stale_uses_meta
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
