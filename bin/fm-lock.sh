@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
 # Writes the harness (agent) process PID found by walking the shell's ancestry.
-# API-launched WSL shells may expose only /init above the helper; in that case
-# the lock falls back to the transient helper PID so startup can continue, while
-# status still reports the lock stale after the helper exits.
+# API-launched WSL shells may expose only /init above the helper. In that case
+# acquisition fails by default because a transient helper PID does not preserve
+# the single-supervisor invariant. Set FM_LOCK_ALLOW_TRANSIENT=1 only when that
+# weaker lock is an explicitly accepted local risk.
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -50,7 +51,15 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(harness_pid) || me=$$
+if ! me=$(harness_pid); then
+  if [ "${FM_LOCK_ALLOW_TRANSIENT:-}" = 1 ]; then
+    me=$$
+  else
+    echo "error: could not find a durable live harness owner for the session lock; refusing transient helper PID fallback" >&2
+    echo "set FM_LOCK_ALLOW_TRANSIENT=1 only if you accept that another session may treat this lock as stale after startup" >&2
+    exit 1
+  fi
+fi
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")
   if [ "$old" != "$me" ] && holder_alive "$old"; then

@@ -218,6 +218,64 @@ test_lock_status_is_per_home() {
   pass "fm-lock status is scoped per home"
 }
 
+make_fake_ps_without_harness() {
+  local dir=$1 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=${2:-}; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf 'bash\n' ;;
+  args=) printf 'bash fm-lock-test\n' ;;
+  ppid=) printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+test_lock_refuses_transient_owner_without_override() {
+  local fakebin home out status
+  home="$TMP_ROOT/lock-no-harness"
+  mkdir -p "$home/state"
+  fakebin=$(make_fake_ps_without_harness "$TMP_ROOT/lock-no-harness-fake")
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-lock accepted a transient owner without override"
+  printf '%s\n' "$out" | grep -F 'could not find a durable live harness owner' >/dev/null \
+    || fail "fm-lock did not explain transient owner refusal"
+  [ ! -e "$home/state/.lock" ] || fail "fm-lock wrote lock after refusing transient owner"
+  pass "fm-lock refuses transient owner without override"
+}
+
+test_lock_allows_transient_owner_with_explicit_override() {
+  local fakebin home out status_out
+  home="$TMP_ROOT/lock-transient-override"
+  mkdir -p "$home/state"
+  fakebin=$(make_fake_ps_without_harness "$TMP_ROOT/lock-transient-override-fake")
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_LOCK_ALLOW_TRANSIENT=1 "$ROOT/bin/fm-lock.sh" 2>&1) \
+    || fail "fm-lock refused explicit transient override"
+  printf '%s\n' "$out" | grep -F 'lock acquired: transient pid' >/dev/null \
+    || fail "fm-lock did not report transient lock under override"
+  [ -f "$home/state/.lock" ] || fail "fm-lock did not write transient lock under override"
+  status_out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  printf '%s\n' "$status_out" | grep -F 'lock: stale' >/dev/null \
+    || fail "transient lock did not remain visibly stale after owner exited"
+  pass "fm-lock allows transient owner only with explicit override"
+}
+
 test_home_seed_registry_scope_and_overlapping_projects() {
   local home subhome subhome_abs otherhome fakebin out
   home="$TMP_ROOT/main-home"
@@ -1976,6 +2034,8 @@ EOF
 
 test_fm_home_parameterization
 test_lock_status_is_per_home
+test_lock_refuses_transient_owner_without_override
+test_lock_allows_transient_owner_with_explicit_override
 test_home_seed_registry_scope_and_overlapping_projects
 test_home_seed_registry_reads_scope_from_filled_brief
 test_home_seed_validate_rejects_duplicate_homes
