@@ -101,6 +101,14 @@ test_strip_ghost_keeps_colored_text_with_2_payloads() {
   [ "$out" = "truecolor typed" ] || fail "truecolor payload 2 was treated as dim: '$out'"
   out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "background typed" ] || fail "background truecolor payload was treated as dim: '$out'"
+  out=$(printf '\033[58;5;2munderline-color typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "underline-color typed" ] || fail "underline color payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[38:2::1:2:3mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "colon truecolor typed" ] || fail "colon truecolor payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[58::5::2mcolon underline typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "colon underline typed" ] || fail "colon underline SGR leaked or dimmed text: '$out'"
+  out=$(printf '\033[4:2mnot dim underline\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "not dim underline" ] || fail "colon subparameter 2 was treated as dim: '$out'"
   pass "fm_tmux_strip_ghost keeps colored text with 2 payloads"
 }
 
@@ -160,6 +168,14 @@ test_colored_text_with_2_payload_still_pending() {
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
     || fail "truecolor typed text was not detected as pending"
+  printf '\xe2\x9d\xaf \033[58;5;2munderline-color typed\033[0m\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "underline-colored typed text was not detected as pending"
+  printf '\xe2\x9d\xaf \033[58::5::2mcolon underline typed\033[0m\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "colon underline typed text was not detected as pending"
   pass "fm_pane_input_pending: colored text with 2 payloads is still pending"
 }
 

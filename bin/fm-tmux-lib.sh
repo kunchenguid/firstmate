@@ -50,6 +50,22 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
 # left to right within a sequence so "ESC[0;2m" (reset then dim) reads as dim.
 fm_tmux_strip_ghost() {
   LC_ALL=C awk '
+    function sgr_code(v, b) {
+      b = v
+      sub(/:.*/, "", b)
+      if (b == "") b = "0"
+      return b
+    }
+    function skip_color_payload(a, p, k, mode, code) {
+      if (index(a[p], ":") > 0) return p
+      if (p >= k) return p
+      mode = a[p + 1]
+      code = sgr_code(mode)
+      if (index(mode, ":") > 0) return p + 1
+      if (code == "5") return p + 2
+      if (code == "2") return p + 4
+      return p + 1
+    }
     {
       line = $0; out = ""; dim = 0; n = length(line); i = 1
       while (i <= n) {
@@ -60,23 +76,21 @@ fm_tmux_strip_ghost() {
             j++; params = ""
             while (j <= n) {
               cc = substr(line, j, 1)
-              if (cc ~ /[0-9;]/) { params = params cc; j++ } else break
+              if (cc ~ /[@-~]/) break
+              params = params cc; j++
             }
-            if (substr(line, j, 1) == "m") {   # SGR: update dim/faint state
+            if (j <= n && substr(line, j, 1) == "m") {   # SGR: update dim/faint state
               if (params == "") params = "0"
               k = split(params, a, ";")
               for (p = 1; p <= k; p++) {
-                v = a[p]; if (v == "") v = "0"
-                if (v == "38" || v == "48") {
-                  mode = a[p + 1]
-                  if (mode == "5") p += 2
-                  else if (mode == "2") p += 4
-                  else if (mode != "") p += 1
-                } else if (v == "2") dim = 1
-                else if (v == "0" || v == "22") dim = 0
+                v = a[p]; code = sgr_code(v)
+                if (code == "38" || code == "48" || code == "58") {
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "2") dim = 1
+                else if (code == "0" || code == "22") dim = 0
               }
             }
-            i = j + 1; continue
+            if (j <= n) { i = j + 1; continue }
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
