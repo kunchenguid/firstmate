@@ -1153,6 +1153,26 @@ test_max_defer_force_recovers_on_idle_pane() {
   pass "max-defer force recovers and clears the buffer on an idle (bordered) pane"
 }
 
+test_max_defer_force_submits_pending_digest_without_retyping() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case maxdefer-pending-digest)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  printf '│ > %sSupervisor escalate (1 event(s)): done: PR https://x/y/pull/3 (pre-read; re-arm not needed - watcher daemon-managed) │\n' "$FM_INJECT_MARK" > "$dir/composer"
+  escalate_add "$state" "done: PR https://x/y/pull/3"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    housekeeping "$state"
+  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 0 ] \
+    || fail "forced pending digest was typed again"
+  [ "$(grep -c '^\[ENTER\]$' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "forced pending digest was not submitted with exactly one Enter"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after pending digest submit"
+  pass "max-defer force submits an existing pending digest without retyping"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -1296,6 +1316,7 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_forces_then_alarms_on_stuck_pane
 test_max_defer_force_recovers_on_idle_pane
+test_max_defer_force_submits_pending_digest_without_retyping
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_not_force
 test_max_defer_afk_inactive_does_not_force_or_alarm

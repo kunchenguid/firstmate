@@ -582,7 +582,7 @@ window_for_task() {  # <task-key>
 #     human's half-typed line, or a previous injection's unsent text), defer
 #     entirely — injecting would merge with the human's text.
 inject_msg() {  # <message> [state] [force]
-  local msg=$1 state force target retries sleep_s verdict
+  local msg=$1 state force target retries sleep_s verdict pending
   state="${2:-$(_state_root)}"
   force="${3:-}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
@@ -608,18 +608,32 @@ inject_msg() {  # <message> [state] [force]
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
-  if [ -z "$force" ] && pane_input_pending "$target"; then
+  pending=
+  if pane_input_pending "$target"; then
+    pending=1
+  fi
+  if [ -z "$force" ] && [ -n "$pending" ]; then
     log "inject deferred: supervisor pane has pending input (non-empty composer)"
     return 1
   fi
-  [ -n "$force" ] && log "inject FORCED: max-defer exceeded; injecting on an idle pane despite the composer guard"
+  if [ -n "$force" ]; then
+    if [ -n "$pending" ]; then
+      log "inject FORCED: max-defer exceeded; submitting pending composer with Enter only"
+    else
+      log "inject FORCED: max-defer exceeded; injecting on an idle pane despite the composer guard"
+    fi
+  fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the composer is confirmed
   # EMPTY afterward (the text was consumed). An unconfirmed/unknown pane does NOT
   # count as delivered, so the buffer is preserved (strict) rather than cleared.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  if [ -n "$force" ] && [ -n "$pending" ]; then
+    verdict=$(fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s")
+  else
+    verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  fi
   if [ "$verdict" = empty ]; then
     return 0  # Composer cleared → submit confirmed.
   fi
