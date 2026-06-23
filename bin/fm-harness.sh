@@ -16,6 +16,9 @@ detect_own() {
   # Layer 1: environment markers for verified harnesses.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
+  # cursor-agent's launcher exports CURSOR_INVOKED_AS (the basename it was
+  # invoked as) before exec'ing node; its presence marks a cursor-agent child.
+  [ -n "${CURSOR_INVOKED_AS:-}" ] && { echo cursor; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -24,6 +27,7 @@ detect_own() {
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
+      *cursor*) echo cursor; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -32,6 +36,7 @@ detect_own() {
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
+          *cursor-agent*|*cursor*) echo cursor; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

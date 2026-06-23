@@ -210,6 +210,22 @@ fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
 
+### cursor (VERIFIED 2026-06-23, cursor-agent 2026.01.28)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (shown as the composer's right-side hint while generating) |
+| Exit command | Ctrl-C twice when idle (`bin/fm-send.sh <window> --key C-c` twice); shows "Press Ctrl+C again to exit". No slash exit command. |
+| Interrupt | single Ctrl-C (`--key C-c`) stops generation; a second Ctrl-C when idle exits |
+| Skill invocation | natural language (cursor-agent supports `/<command>` slash commands; for the no-mistakes pipeline, a plain-language "run the no-mistakes pipeline" is the reliable path) |
+
+Launch form: `cursor-agent --force "$(cat <brief>)"` - `--force` is cursor's autonomous flag (force-allow commands unless explicitly denied); the brief is a single positional prompt.
+Auth: cursor-agent needs a logged-in account (`cursor-agent login`, or `CURSOR_API_KEY`); an unauthenticated launch shows a full-screen "Press any key to log in" gate instead of processing the brief.
+First run in a not-yet-trusted directory can show a trust prompt; accept with Enter, then verify the brief started.
+No turn-end hook mechanism (no `notify` flag, no extension loader), so supervision relies on the busy signature, pane staleness, and status writes - there is no `__TURNEND__`/`__PIEXT__` wiring for cursor.
+Environment marker for harness detection: cursor-agent's launcher exports `CURSOR_INVOKED_AS` (the basename it was invoked as) for its children.
+Verification method: the busy/exit/interrupt facts and the env marker were confirmed against the shipped cursor-agent CLI (launcher script + TUI source strings) plus a live launch; because the local CLI was not logged in, do a quick live confirm of the busy footer on the first authenticated dispatch.
+
 ## 5. Recovery (run at every session start, after bootstrap)
 
 You may have been restarted mid-flight.
@@ -253,8 +269,9 @@ The registry line records the project name, delivery mode, optional `+yolo` post
 Add the line when you clone or create a project, keep the description useful for identifying the project, and drop the line if a project is ever removed from `projects/`.
 Do not turn the registry into a knowledge dump.
 Durable descriptive detail belongs in the project's own `AGENTS.md`.
-A `codespace` project carries its `owner/repo` inside the brackets, because it has no local clone to read an origin remote from: `- <name> [codespace owner/repo] - <desc> (added <date>)`.
+A `codespace` project carries its `owner/repo` inside the brackets, because it has no local clone to read an origin remote from, and may name an optional harness after it: `- <name> [codespace <owner/repo> [<harness>]] - <desc> (added <date>)` (e.g. `[codespace acme/widget cursor]`).
 `fm-spawn.sh` reads that slug (via `fm-project-mode.sh --slug`) to discover the project's Codespace; a `codespace` line without an `owner/repo` is an error at spawn time.
+The optional harness token (read via `fm-project-mode.sh --codespace-harness`, default `claude`) selects which agent the codespace crewmate runs over SSH; that agent must already be installed in the Codespace, since firstmate only launches it.
 
 `data/secondmates.md` is the secondmate routing table.
 Every persistent secondmate has one line:
@@ -314,12 +331,12 @@ Do not eagerly backfill every project.
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
 - `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
-- `codespace` - crewmate SSH-es into the project's GitHub Codespace via `gh codespace ssh`, leases a treehouse worktree inside it, and runs there; no local clone at all. The registry line carries the `owner/repo`; spawn discovers the single Available Codespace, leases a worktree (recording its remote path for teardown safety), copies the brief in, and launches the crewmate over SSH. The codespace crewmate always runs on `claude` regardless of `config/crew-harness` or any per-task harness override. Scout and ship both work; the scout's report is copied back over SSH at teardown.
+- `codespace` - crewmate SSH-es into the project's GitHub Codespace via `gh codespace ssh`, leases a treehouse worktree inside it, and runs there; no local clone at all. The registry line carries the `owner/repo` and an optional harness (`[codespace <owner/repo> [<harness>]]`); spawn discovers the single Available Codespace, ensures prerequisites in it (creates the remote state dir and installs `treehouse` if missing - company-managed Codespaces often cannot run personal dotfiles, so setup is not assumed; if `treehouse` cannot be installed, spawn fails with the one-time command to run), leases a worktree (recording its remote path for teardown safety), copies the brief in, and launches the crewmate over SSH. The codespace crewmate runs the harness named in the bracket (default `claude`), independent of `config/crew-harness`; that agent must already be installed in the Codespace. Scout and ship both work; the scout's report is copied back over SSH at teardown.
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
 **Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
-A `codespace` project is the exception: do not clone it at all - just add the registry line with `[codespace owner/repo]`, since all work happens inside the Codespace.
+A `codespace` project is the exception: do not clone it at all - just add the registry line with `[codespace <owner/repo> [<harness>]]`, since all work happens inside the Codespace.
 
 **Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.
 Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, visibility (default private), and delivery mode, and create with `gh-axi` only after the captain confirms.
@@ -399,7 +416,7 @@ The script resolves the harness (`fm-harness.sh crew`), owns the verified launch
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
-For `mode=codespace` ship and scout tasks there is no local clone: instead the script reads the `owner/repo` slug from the registry, discovers the single Available Codespace, polls for SSH-ready and then leases a remote worktree over SSH, records `codespace=`/`remote_worktree=`/`remote_state=` in meta, copies the brief in, generates a polling `state/<id>.check.sh`, and launches the crewmate over SSH.
+For `mode=codespace` ship and scout tasks there is no local clone: instead the script reads the `owner/repo` slug and the optional harness (default `claude`) from the registry, discovers the single Available Codespace, polls for SSH-ready, ensures prerequisites in the Codespace (remote state dir plus a `treehouse` install when missing; if `treehouse` cannot be installed it fails with the one-time setup command rather than a cryptic error), then leases a remote worktree over SSH, records `codespace=`/`remote_worktree=`/`remote_state=` and the resolved `harness=` in meta, copies the brief in, generates a polling `state/<id>.check.sh`, and launches the configured harness over SSH.
 For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).

@@ -5,6 +5,8 @@
 #   (a) fm-project-mode.sh parses [codespace]                  -> "codespace off"
 #   (b) fm-project-mode.sh parses [codespace +yolo]            -> "codespace on"
 #   (c) fm-project-mode.sh --slug parses [codespace owner/repo]-> "owner/repo"
+#   (c2) fm-project-mode.sh --codespace-harness defaults to claude
+#   (c3) fm-project-mode.sh --codespace-harness parses the named harness
 #   (d) fm-project-mode.sh --slug exits non-zero with no slug
 #   (e) fm-spawn.sh generates check.sh for codespace tasks
 #   (f) fm-spawn.sh records codespace name + leased remote_worktree in meta
@@ -12,6 +14,10 @@
 #   (h) fm-spawn.sh errors when no Available codespace found
 #   (i) fm-spawn.sh errors when >1 Available codespaces found
 #   (j) fm-spawn.sh errors when the registry line carries no owner/repo slug
+#   (j2) fm-spawn.sh codespace remote command defaults to claude
+#   (j3) fm-spawn.sh codespace remote command uses the configured harness (cursor)
+#   (j4) fm-spawn.sh bootstraps prerequisites (state dir + treehouse) before leasing
+#   (j5) fm-spawn.sh fails with an actionable message when treehouse can't bootstrap
 #   (k) fm-brief.sh writes a codespace scout brief (remote report + status, no push)
 #   (l) fm-teardown.sh copies a scout report back over SSH, then succeeds
 #   (m) fm-teardown.sh refuses a scout teardown when no report exists anywhere
@@ -110,6 +116,33 @@ test_slug_absent_errors() {
   pass "--slug exits non-zero when the line carries no owner/repo"
 }
 
+# ── (c2) --codespace-harness defaults to claude ────────────────────────────
+
+test_codespace_harness_default() {
+  local reg_dir out
+  reg_dir="$TMP_ROOT/reg-csh-default"
+  make_registry "$reg_dir" myproj "codespace acme/widget"
+  out=$(run_mode "$reg_dir" --codespace-harness myproj)
+  [ "$out" = "claude" ] || fail "codespace-harness default: expected 'claude', got '$out'"
+  pass "--codespace-harness defaults to claude when the bracket names none"
+}
+
+# ── (c3) --codespace-harness parses the named harness ──────────────────────
+
+test_codespace_harness_named() {
+  local reg_dir out
+  reg_dir="$TMP_ROOT/reg-csh-named"
+  make_registry "$reg_dir" myproj "codespace acme/widget cursor +yolo"
+  out=$(run_mode "$reg_dir" --codespace-harness myproj)
+  [ "$out" = "cursor" ] || fail "codespace-harness named: expected 'cursor', got '$out'"
+  # The harness token must not disturb slug/mode/yolo parsing.
+  [ "$(run_mode "$reg_dir" --slug myproj)" = "acme/widget" ] \
+    || fail "codespace-harness named: slug parse disturbed by harness token"
+  [ "$(run_mode "$reg_dir" myproj)" = "codespace on" ] \
+    || fail "codespace-harness named: mode/yolo parse disturbed by harness token"
+  pass "--codespace-harness parses the named harness without disturbing slug/mode/yolo"
+}
+
 # ── Helpers for spawn tests ─────────────────────────────────────────────────
 
 # Create a sandbox for a spawn test. Sets up:
@@ -121,7 +154,7 @@ test_slug_absent_errors() {
 # No local clone is created: codespace mode must not require one.
 # Echoes the sandbox dir.
 make_spawn_case() {
-  local name=$1 cs_name=${2:-my-codespace} cs_count=${3:-1} slug=${4-owner/myproj}
+  local name=$1 cs_name=${2:-my-codespace} cs_count=${3:-1} slug=${4-owner/myproj} harness=${5-}
   local dir fakebin
   dir="$TMP_ROOT/spawn-$name"
   fakebin="$dir/fakebin"
@@ -130,26 +163,37 @@ make_spawn_case() {
   # Fake watcher beacon so fm-guard stays quiet.
   touch "$dir/state/.last-watcher-beat"
 
-  # Registry with codespace mode (carrying owner/repo) and a brief. No clone.
-  if [ -n "$slug" ]; then
-    printf -- '- myproj [codespace %s] - test project (added 2026-06-22)\n' "$slug" > "$dir/data/projects.md"
-  else
-    printf -- '- myproj [codespace] - test project (added 2026-06-22)\n' > "$dir/data/projects.md"
-  fi
+  # Registry with codespace mode (carrying owner/repo and optional harness) and a
+  # brief. No clone. Bracket form: [codespace <owner/repo> [<harness>]].
+  local bracket="codespace"
+  [ -n "$slug" ] && bracket="$bracket $slug"
+  [ -n "$harness" ] && bracket="$bracket $harness"
+  printf -- '- myproj [%s] - test project (added 2026-06-22)\n' "$bracket" > "$dir/data/projects.md"
   printf 'You are a crewmate.\n' > "$dir/data/task-cs1/brief.md"
 
-  # Mock tmux: silently accept all subcommands.
-  cat > "$fakebin/tmux" <<'SH'
+  # Mock tmux: accept all subcommands; capture the literal (-l) send-keys payload
+  # (the launch command line) so tests can assert which harness is launched.
+  cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
-case "${1:-}" in
+case "\${1:-}" in
   display-message) printf 'testsession\n' ;;
   list-windows) printf '\n' ;;
-  *) exit 0 ;;
+  send-keys)
+    prev=
+    for a in "\$@"; do
+      [ "\$prev" = "-l" ] && printf '%s\n' "\$a" >> "$dir/mock-data/sendkeys.log"
+      prev=\$a
+    done
+    ;;
+  *) : ;;
 esac
+exit 0
 SH
   chmod +x "$fakebin/tmux"
 
-  # Mock gh: codespace list, cp, ssh (shell-ready, lease, return).
+  # Mock gh: codespace list, cp, ssh (shell-ready, prerequisite bootstrap, lease,
+  # return). All ssh command lines are logged to ssh.log. A bootstrap-fail control
+  # file makes the prerequisite bootstrap (the 'command -v treehouse' gate) fail.
   local cs_list_output
   if [ "$cs_count" = "0" ]; then
     cs_list_output=""
@@ -162,15 +206,18 @@ SH
 
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
+md="$dir/mock-data"
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "list" ]; then
-  cat "$dir/mock-data/cs-list-out"
+  cat "\$md/cs-list-out"
   exit 0
 fi
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "cp" ]; then
   exit 0
 fi
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "ssh" ]; then
+  printf '%s\n' "\$*" >> "\$md/ssh.log"
   case "\$*" in
+    *"command -v treehouse"*) [ -f "\$md/bootstrap-fail" ] && exit 1; exit 0 ;;
     *"treehouse get --lease"*) echo "/workspaces/myproj-wt/fm-task-cs1"; exit 0 ;;
     *"treehouse return"*) exit 0 ;;
     *) exit 0 ;;   # shell-ready ("-- true") and the interactive launch
@@ -315,6 +362,95 @@ test_no_slug_errors() {
   printf '%s\n' "$out" | grep -qi 'owner/repo' \
     || fail "no-slug: error message missing owner/repo guidance"
   pass "spawn errors when the registry line carries no owner/repo slug"
+}
+
+# ── (j2) codespace remote command defaults to claude ───────────────────────
+
+test_codespace_default_harness_launch() {
+  local dir rc out meta
+  dir=$(make_spawn_case "harness-default" "my-codespace" "1" "owner/myproj")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "harness-default: spawn should succeed (got $rc)\n$out"
+  meta="$dir/state/task-cs1.meta"
+  grep -q '^harness=claude$' "$meta" || fail "harness-default: meta should record harness=claude"
+  grep -q 'claude --dangerously-skip-permissions' "$dir/mock-data/sendkeys.log" \
+    || fail "harness-default: remote command should launch claude"
+  pass "codespace remote command defaults to claude when no harness configured"
+}
+
+# ── (j3) codespace remote command uses the configured harness (cursor) ──────
+
+test_codespace_configured_harness_launch() {
+  local dir rc out meta log
+  dir=$(make_spawn_case "harness-cursor" "my-codespace" "1" "owner/myproj" "cursor")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "harness-cursor: spawn should succeed (got $rc)\n$out"
+  meta="$dir/state/task-cs1.meta"
+  log="$dir/mock-data/sendkeys.log"
+  grep -q '^harness=cursor$' "$meta" || fail "harness-cursor: meta should record harness=cursor"
+  grep -q 'cursor-agent --force' "$log" \
+    || fail "harness-cursor: remote command should launch cursor-agent --force"
+  grep -q 'claude --dangerously-skip-permissions' "$log" \
+    && fail "harness-cursor: remote command must NOT be hardcoded claude"
+  printf '%s\n' "$out" | grep -q 'harness=cursor' \
+    || fail "harness-cursor: spawn summary should report harness=cursor"
+  pass "codespace remote command uses the configured harness, not hardcoded claude"
+}
+
+# ── (j4) codespace spawn bootstraps prerequisites before leasing ────────────
+
+test_codespace_bootstrap_runs() {
+  local dir rc out sshlog
+  dir=$(make_spawn_case "bootstrap" "my-codespace" "1")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "bootstrap: spawn should succeed (got $rc)\n$out"
+  sshlog="$dir/mock-data/ssh.log"
+  [ -f "$sshlog" ] || fail "bootstrap: no ssh calls recorded"
+  grep -q 'mkdir -p' "$sshlog" || fail "bootstrap: remote state dir not created (mkdir -p)"
+  grep -q 'command -v treehouse' "$sshlog" \
+    || fail "bootstrap: treehouse availability not ensured"
+  grep -q 'install.sh' "$sshlog" \
+    || fail "bootstrap: treehouse install path not present in bootstrap command"
+  pass "codespace spawn bootstraps prerequisites (state dir + treehouse) before leasing"
+}
+
+# ── (j5) codespace spawn fails clearly when treehouse can't be bootstrapped ─
+
+test_codespace_bootstrap_failure() {
+  local dir rc out
+  dir=$(make_spawn_case "bootstrap-fail" "my-codespace" "1")
+  touch "$dir/mock-data/bootstrap-fail"   # the 'command -v treehouse' gate fails
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "bootstrap-fail: spawn should fail when treehouse is unavailable"
+  printf '%s\n' "$out" | grep -qi 'treehouse is not available' \
+    || fail "bootstrap-fail: error should say treehouse is not available"
+  printf '%s\n' "$out" | grep -q 'install.sh' \
+    || fail "bootstrap-fail: error should name the one-time install command"
+  grep -q 'treehouse get --lease' "$dir/mock-data/ssh.log" \
+    && fail "bootstrap-fail: must not attempt to lease a worktree after bootstrap fails"
+  [ ! -f "$dir/state/task-cs1.meta" ] \
+    || fail "bootstrap-fail: no meta should be written (no lease held)"
+  pass "codespace spawn fails with an actionable message when treehouse can't be bootstrapped"
 }
 
 # ── (k) fm-brief.sh writes a codespace scout brief ─────────────────────────
@@ -527,12 +663,18 @@ test_codespace_mode_parses
 test_codespace_yolo_parses
 test_slug_parses
 test_slug_absent_errors
+test_codespace_harness_default
+test_codespace_harness_named
 test_check_sh_generated
 test_meta_records_lease
 test_scout_spawn_kind
 test_no_codespace_errors
 test_multiple_codespaces_errors
 test_no_slug_errors
+test_codespace_default_harness_launch
+test_codespace_configured_harness_launch
+test_codespace_bootstrap_runs
+test_codespace_bootstrap_failure
 test_codespace_scout_brief
 test_scout_report_copyback
 test_scout_no_report_refuses

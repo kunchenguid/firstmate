@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|cursor) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
@@ -82,7 +82,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -127,6 +127,12 @@ launch_template() {
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
+    cursor)
+      # cursor-agent has no turn-end hook mechanism (no notify flag, no extension
+      # loader): turn-end is surfaced by the busy-signature + pane-staleness +
+      # status writes, so the launch carries no __TURNEND__/__PIEXT__ wiring.
+      printf '%s' 'cursor-agent --force "$(cat __BRIEF__)"'
+      ;;
     pi)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'pi "$(cat __BRIEF__)"'
@@ -334,11 +340,24 @@ EOF
 fi
 
 # Codespace spawn path: no local clone. owner/repo comes from the registry line;
-# discover the project's single Available codespace, lease a worktree inside it
-# (non-interactive, capturing its path for teardown safety), copy the brief in, and
-# launch claude over SSH in a tmux window. Status is polled via a generated check.sh.
+# discover the project's single Available codespace, ensure prerequisites (treehouse
+# + remote state dir), lease a worktree inside it (non-interactive, capturing its
+# path for teardown safety), copy the brief in, and launch the configured harness
+# over SSH in a tmux window. The harness defaults to claude and is taken from the
+# registry bracket ([codespace owner/repo <harness>]); it must already be installed
+# in the codespace. Status is polled via a generated check.sh.
 if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
+
+  # Codespace crewmate harness comes from the project's registry bracket
+  # ([codespace owner/repo <harness>]); defaults to claude. The named agent must
+  # already be installed in the codespace; firstmate only launches it over SSH.
+  CS_HARNESS=$("$FM_ROOT/bin/fm-project-mode.sh" --codespace-harness "$PROJ_NAME" 2>/dev/null || echo claude)
+  [ -n "$CS_HARNESS" ] || CS_HARNESS=claude
+  CS_LAUNCH_TMPL=$(launch_template "$CS_HARNESS" secondmate) || {
+    echo "error: no launch template for codespace harness '$CS_HARNESS' (from $PROJ_NAME's registry line); supported: claude, codex, opencode, pi, cursor" >&2
+    exit 1
+  }
 
   # owner/repo comes from the registry ([codespace owner/repo]); no clone required.
   _CS_SLUG=$("$FM_ROOT/bin/fm-project-mode.sh" --slug "$PROJ_NAME" 2>/dev/null || true)
@@ -372,6 +391,26 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
+  # Ensure codespace prerequisites BEFORE leasing a worktree. Company-managed
+  # codespaces often cannot run personal dotfiles (org policy), so do not assume
+  # setup ran there: idempotently mkdir the remote state dir and install treehouse
+  # if it is missing. The harness (cursor-agent etc.) is assumed already installed.
+  # We re-source the login profile after install so a freshly-installed treehouse
+  # (e.g. in ~/.local/bin) is visible to the same verification, matching what a
+  # later SSH session running 'treehouse get' will see. The final 'command -v
+  # treehouse' is the gate: if it fails, treehouse could not be made available.
+  _CS_TH_INSTALL='curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh'
+  _CS_BOOTSTRAP="mkdir -p $CODESPACE_REMOTE_STATE; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}if ! command -v treehouse >/dev/null 2>&1; then "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}${_CS_TH_INSTALL} || true; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}for rc in \$HOME/.profile \$HOME/.bashrc \$HOME/.bash_profile; do [ -f \"\$rc\" ] && . \"\$rc\" >/dev/null 2>&1 || true; done; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}fi; command -v treehouse >/dev/null 2>&1"
+  if ! gh codespace ssh -c "$_CS_NAME" -- "$_CS_BOOTSTRAP" >/dev/null 2>&1; then
+    echo "error: treehouse is not available in codespace $_CS_NAME and could not be auto-installed." >&2
+    echo "       Run this once in the codespace, then retry: $_CS_TH_INSTALL" >&2
+    exit 1
+  fi
+
   # Poll for worktree-ready: lease a worktree (non-interactive; prints only its path,
   # banners to stderr). The lease is durable, so the slot survives until teardown
   # releases it with 'treehouse return', and its path is recorded for teardown safety.
@@ -399,7 +438,7 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     echo "window="
     echo "worktree="
     echo "project="
-    echo "harness=claude"
+    echo "harness=$CS_HARNESS"
     echo "kind=$KIND"
     echo "mode=codespace"
     echo "yolo=$YOLO"
@@ -426,10 +465,16 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   tmux new-window -d -t "$SES" -n "$W" -c "$FM_HOME"
 
   # One self-contained line: SSH with a forced PTY (-t), cd into the leased worktree,
-  # exec claude. A single command avoids inter-step timing; $(cat ...) expands on the
-  # remote. The remote paths are quoted for the remote shell, then the whole remote
-  # command is quoted again for the local pane shell.
-  _CS_REMOTE_CMD="cd $(shell_quote "$_CS_WT") && exec claude --dangerously-skip-permissions \"\$(cat $(shell_quote "/tmp/$ID-brief.md"))\""
+  # launch the configured harness. A single command avoids inter-step timing; the
+  # $(cat ...) in the launch template expands on the remote. The launch command comes
+  # from launch_template (the turn-end-free variant, since codespace status is polled
+  # via check.sh, not a local turn-end hook); __BRIEF__ is replaced with the remote
+  # brief path. No 'exec' prefix: some templates carry a leading VAR=val env
+  # assignment (opencode), which 'exec' would treat as the program name. The remote
+  # paths are quoted for the remote shell, then the whole remote command is quoted
+  # again for the local pane shell.
+  _CS_LAUNCH=${CS_LAUNCH_TMPL//__BRIEF__/$(shell_quote "/tmp/$ID-brief.md")}
+  _CS_REMOTE_CMD="cd $(shell_quote "$_CS_WT") && $_CS_LAUNCH"
   _CS_PANE_LINE="gh codespace ssh -c $(shell_quote "$_CS_NAME") -- -t $(shell_quote "$_CS_REMOTE_CMD")"
   tmux send-keys -t "$T" -l "$_CS_PANE_LINE"
   sleep 0.3
@@ -440,7 +485,7 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     echo "window=$T"
     echo "worktree="
     echo "project="
-    echo "harness=claude"
+    echo "harness=$CS_HARNESS"
     echo "kind=$KIND"
     echo "mode=codespace"
     echo "yolo=$YOLO"
@@ -466,7 +511,7 @@ printf '%s\n' "\$out"
 CHECKEOF
   chmod +x "$STATE/$ID.check.sh"
 
-  echo "spawned $ID harness=claude kind=$KIND mode=codespace yolo=$YOLO window=$T worktree=$_CS_WT codespace=$_CS_NAME"
+  echo "spawned $ID harness=$CS_HARNESS kind=$KIND mode=codespace yolo=$YOLO window=$T worktree=$_CS_WT codespace=$_CS_NAME"
   exit 0
 fi
 
@@ -552,6 +597,10 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    cursor*)
+      # cursor-agent: no turn-end hook (no notify flag, no extension loader).
+      # Supervision falls back to busy-signature + pane staleness + status writes.
       ;;
   esac
 fi

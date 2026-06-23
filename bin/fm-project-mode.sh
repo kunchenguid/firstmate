@@ -14,6 +14,14 @@
 # codespace projects register with NO local clone: owner/repo comes from the
 # registry, not from a clone's origin remote. Usage: fm-project-mode.sh --slug <name>
 #
+# With --codespace-harness, prints the agent harness a codespace crewmate should
+# run, taken from the bracket's optional harness token (any token that is neither
+# "codespace", the owner/repo slug, nor "+yolo"); defaults to "claude" when the
+# bracket names no harness. The codespace crewmate runs over SSH inside the
+# codespace, so the named harness must already be installed there. Bracket form:
+#   [codespace <owner/repo> [<harness>] [+yolo]]   e.g. [codespace acme/widget cursor]
+# Usage: fm-project-mode.sh --codespace-harness <name>
+#
 # mode = how a finished change reaches main:
 #   no-mistakes  full pipeline -> PR -> captain merge (default)
 #   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
@@ -35,11 +43,43 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 
 SLUG_MODE=
+CS_HARNESS_MODE=
 if [ "${1:-}" = "--slug" ]; then
   SLUG_MODE=1
   shift
+elif [ "${1:-}" = "--codespace-harness" ]; then
+  CS_HARNESS_MODE=1
+  shift
 fi
-NAME=${1:?usage: fm-project-mode.sh [--slug] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--slug|--codespace-harness] <project-name>}
+
+if [ -n "$CS_HARNESS_MODE" ]; then
+  # Print the codespace harness token from the [codespace ...] bracket, or
+  # "claude" when none is named. The harness is any bracket token that is not
+  # "codespace", the owner/repo slug (contains "/"), or "+yolo".
+  harness=claude
+  if [ -f "$REG" ]; then
+    h=$(awk -v n="$NAME" '
+      $1=="-" && $2==n {
+        if ($3 ~ /^\[/) {
+          s="";
+          for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
+          gsub(/^\[|\]$/, "", s);
+          k = split(s, a, " ");
+          for (j=1; j<=k; j++) {
+            if (a[j]=="codespace" || a[j]=="+yolo" || a[j]=="") continue;
+            if (a[j] ~ /\//) continue;   # owner/repo slug
+            print a[j]; exit;
+          }
+        }
+        exit
+      }
+    ' "$REG")
+    [ -n "$h" ] && harness=$h
+  fi
+  printf '%s\n' "$harness"
+  exit 0
+fi
 
 if [ -n "$SLUG_MODE" ]; then
   # Print the owner/repo slug from the project's [codespace owner/repo] bracket.
