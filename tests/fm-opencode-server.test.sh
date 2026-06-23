@@ -81,8 +81,8 @@ test_helper_visibility_modes() {
     || fail "terminal visibility did not alias to desktop"
   printf '%s\n' "$out" | grep -F 'opencode_desktop=recorded' >/dev/null \
     || fail "desktop visibility did not record the desktop link by default"
-  printf '%s\n' "$out" | grep -F 'opencode_desktop_deeplink=opencode://new-session?' >/dev/null \
-    || fail "desktop visibility did not produce an OpenCode new-session deep link"
+  printf '%s\n' "$out" | grep -F 'opencode_desktop_deeplink=opencode://open-project?' >/dev/null \
+    || fail "desktop visibility did not produce an OpenCode project deep link"
   printf '%s\n' "$out" | grep -F 'prompt=' >/dev/null \
     && fail "desktop visibility unexpectedly included a default prompt"
   printf '%s\n' "$out" | grep -F 'opencode_web=' >/dev/null \
@@ -99,6 +99,8 @@ test_helper_visibility_modes() {
     || fail "mock helper start failed for explicit desktop prompt"
   printf '%s\n' "$out" | grep -F 'opencode_server_model=openai/gpt-5.5' >/dev/null \
     || fail "OpenCode model override was not recorded"
+  printf '%s\n' "$out" | grep -F 'opencode_desktop_deeplink=opencode://new-session?' >/dev/null \
+    || fail "explicit desktop prompt did not use the OpenCode new-session deep link"
   printf '%s\n' "$out" | grep -F 'prompt=Task+fm-helper-x1c' >/dev/null \
     || fail "explicit desktop prompt was not encoded into the deep link"
 
@@ -166,8 +168,8 @@ test_spawn_send_peek_teardown_backend() {
     || fail "opencode-server model override spawn failed"
   grep -qx 'opencode_server_model=openai/gpt-5.5' "$home/state/opencode-task-model.meta" \
     || fail "spawn meta missing OpenCode model override"
-  grep -q '^opencode_desktop_deeplink=opencode://new-session?' "$meta" \
-    || fail "meta missing desktop deep link"
+  grep -q '^opencode_desktop_deeplink=opencode://open-project?' "$meta" \
+    || fail "meta missing desktop project deep link"
   wt=$(grep '^worktree=' "$meta" | cut -d= -f2-)
   case "$wt" in
     "$home/state/opencode-server-worktrees/opencode-task-x1") ;;

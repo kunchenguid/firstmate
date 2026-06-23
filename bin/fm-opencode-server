@@ -332,9 +332,9 @@ function desktopOpenRequested() {
 }
 
 function desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile }) {
-  const url = new URL("opencode://new-session");
-  url.searchParams.set("directory", windowsPath(worktree));
   const prompt = desktopPrompt({ title, webUrl, sessionId, worktree, taskId, briefFile });
+  const url = new URL(prompt ? "opencode://new-session" : "opencode://open-project");
+  url.searchParams.set("directory", windowsPath(worktree));
   if (prompt) url.searchParams.set("prompt", prompt);
   return url.toString();
 }
