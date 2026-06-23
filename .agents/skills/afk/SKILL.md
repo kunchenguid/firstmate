@@ -76,11 +76,15 @@ opencode, and pi).
 ## Busy-guard and composer guard
 
 The daemon never injects into an in-use pane. Two checks run before every
-injection:
+injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
 
 - **`pane_is_busy`** — the harness shows a busy footer (agent mid-turn).
-- **`pane_input_pending`** — the cursor line has non-empty content (a human's
-  half-typed line, or a previous injection whose Enter was swallowed).
+- **`pane_input_pending`** — the cursor line holds real unsubmitted text (a
+  human's half-typed line, or a previous injection whose Enter was swallowed).
+  The detector **strips the harness's composer box borders first**, so an idle
+  *bordered* composer (claude draws `│ > … │`) is correctly read as empty, not
+  pending. Without this, every idle claude pane looked like pending input and
+  the daemon deferred 100% of escalations (incident afk-invx-i5).
 
 Either condition defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
@@ -88,9 +92,22 @@ afk mode the composer guard is belt-and-suspenders (no human is typing), but it
 protects against the race window between the captain returning and their
 message landing, and against the daemon's own previous injection sitting unsent.
 
+**Max-defer escape (the daemon must never silently wedge).** If anything stays
+buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon **forces** one
+delivery that bypasses the composer guard on an idle pane (the busy-guard still
+holds). If even the forced submit cannot be confirmed, it raises a loud,
+rate-limited wedge alarm: an ERROR in the daemon log, a durable
+`state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
+catch-up if present), and a flash on the supervisor client's status line. So a
+guard false-positive becomes a bounded delay, never an unbounded silent no-op.
+
 ## Submit model
 
-The daemon types the digest **once** via `send-keys -l`, then submits with
-Enter. If the composer still has text after Enter (swallowed Enter), it retries
-**Enter only** (never retypes the digest), preventing concatenation of two
-sentinel-prefixed digests into one corrupted turn.
+The digest is typed **once** via `send-keys -l`, then submitted with Enter and
+**verified**: Enter is retried (Enter only, never a retype) until the composer
+clears. A submit "landed" only when the composer is confirmed empty afterward —
+the same corrected, border-aware detector as the composer guard, so a
+bordered-empty claude composer is recognized as submitted rather than mistaken
+for a swallowed Enter. `fm-send.sh` uses the same primitive and exits non-zero
+when a steer's Enter is positively swallowed, so firstmate learns an instruction
+did not land instead of leaving it unsubmitted.
