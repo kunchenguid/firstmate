@@ -28,8 +28,8 @@
 # is harness-generic: any harness that dims placeholder/ghost text benefits.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
-# structural border stripping. FM_BUSY_REGEX overrides the busy footer set
-# (mirrors fm-watch.sh / the daemon).
+# dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
+# footer set (mirrors fm-watch.sh / the daemon).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.

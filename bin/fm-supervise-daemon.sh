@@ -72,9 +72,9 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
-#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after structural
-#                                   border stripping (default: bare prompt
-#                                   glyphs plus busy footers)
+#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
+#                                   and structural border stripping (default:
+#                                   bare prompt glyphs plus busy footers)
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
@@ -82,10 +82,11 @@
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
-#                                   structural (bin/fm-tmux-lib.sh): it strips the
+#                                   structural and style-aware (bin/fm-tmux-lib.sh):
+#                                   it drops dim/faint ghost text and strips the
 #                                   harness's box borders before deciding, so a
-#                                   bordered-but-empty composer is not misread as
-#                                   pending input.
+#                                   ghost-only or bordered-but-empty composer is
+#                                   not misread as pending input.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
@@ -404,10 +405,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # call sites and the unit tests stable.
 #
 # pane_input_pending returns 0 (pending) when the cursor line holds real
-# unsubmitted text — a human's half-typed line (the return race) or a previous
-# injection whose Enter was swallowed. The detector strips the harness's composer
-# box borders first, so an idle bordered claude composer ("│ > … │") is correctly
-# read as empty, not pending (incident afk-invx-i5).
+# unsubmitted text - a human's half-typed line (the return race) or a previous
+# injection whose Enter was swallowed. The detector drops dim/faint ghost text and
+# strips the harness's composer box borders, so a ghost-only or idle bordered
+# claude composer ("│ > … │") is correctly read as empty, not pending (incidents
+# afk-invx-i5 and composer-robust).
 pane_is_busy() { fm_pane_is_busy "$@"; }        # <window>
 pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
 
@@ -574,12 +576,14 @@ window_for_task() {  # <task-key>
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the border-aware composer detector reports empty after Enter.
+#   - SUBMIT ACK = the dim-ghost-aware and border-aware composer detector reports
+#     empty after Enter.
 #     Empty means the text was consumed; pending means Enter was swallowed; unknown
 #     is treated as undelivered by this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has content (a
-#     human's half-typed line, or a previous injection's unsent text), defer
-#     entirely - injecting would merge with the human's text.
+#   - COMPOSER GUARD before typing: if the cursor line already has real content
+#     after dim/faint ghost text and borders are ignored (a human's half-typed
+#     line, or a previous injection's unsent text), defer entirely - injecting
+#     would merge with the human's text.
 inject_msg() {  # <message> [state]
   local msg=$1 state target retries sleep_s verdict
   state="${2:-$(_state_root)}"
@@ -597,8 +601,9 @@ inject_msg() {  # <message> [state]
   tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
   # (3) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
-  #   b) pane_input_pending: the cursor line has real unsubmitted text (a human's
-  #      half-typed line, or a previous injection whose Enter was swallowed).
+  #   b) pane_input_pending: the cursor line has real unsubmitted text after
+  #      dim/faint ghost text and borders are ignored (a human's half-typed line,
+  #      or a previous injection whose Enter was swallowed).
   if pane_is_busy "$target"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1

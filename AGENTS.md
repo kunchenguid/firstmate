@@ -578,16 +578,16 @@ This is why fewer, cheaper firstmate turns handle the same fleet.
 - **Composer guard on the supervisor pane** - before injecting, the daemon checks both `pane_is_busy` (harness busy footer = agent mid-turn) and `pane_input_pending` (real unsubmitted text on the cursor line = human mid-typing or previous injection with swallowed Enter).
   Either condition **defers** the injection (buffer preserved for retry).
   This is the human-in-the-pane safety property: the daemon never merges its digest into the captain's half-typed line.
-  The composer detector (shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`) **strips the harness's composer box borders first**, so an idle *bordered* composer (claude draws `│ > … │`) reads as empty, not pending.
-  Without this, every idle claude pane looked like pending input and the daemon deferred 100% of escalations (incident afk-invx-i5).
-  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border stripping, and `FM_BUSY_REGEX` overrides busy footers.
+  The composer detector (shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`) drops dim/faint ghost text, then strips the harness's composer box borders, so a ghost-only or idle *bordered* composer (claude draws `│ > … │`) reads as empty, not pending.
+  Without these filters, idle bordered composers and dim ghost suggestions can look like pending input and stall supervision (incidents afk-invx-i5 and composer-robust).
+  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after dim-ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge.
   If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
   If that cannot confirm a submit, it raises a loud, rate-limited wedge alarm (ERROR log + durable `state/.subsuper-inject-wedged` marker + a status-line flash).
   A composer false-positive is then surfaced as a visible stall, never an unbounded silent no-op.
 - **Verified type-once submit model** - the digest is typed once via `send-keys -l`, then submitted with Enter and **verified**.
   Enter is retried, Enter only and never a retype, until the composer is confirmed empty.
-  That empty composer is the acknowledgement that the submit landed, using the same border-aware detector so a bordered-empty claude composer counts as submitted rather than a false "swallowed Enter".
+  That empty composer is the acknowledgement that the submit landed, using the same dim-ghost-aware and border-aware detector so a ghost-only or bordered-empty claude composer counts as submitted rather than a false "swallowed Enter".
   `fm-send.sh` shares this primitive and exits non-zero on a positively-confirmed swallow, so firstmate learns a steer did not land instead of leaving it unsubmitted.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before classification/relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's mkdir-based lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
