@@ -16,8 +16,12 @@
 #   (j) fm-spawn.sh errors when the registry line carries no owner/repo slug
 #   (j2) fm-spawn.sh codespace remote command defaults to claude
 #   (j3) fm-spawn.sh codespace remote command uses the configured harness (cursor)
-#   (j4) fm-spawn.sh bootstraps prerequisites (state dir + treehouse) before leasing
+#   (j4) fm-spawn.sh bootstraps prerequisites (state dir + RUNNABLE treehouse) before leasing
+#   (j4b) fm-spawn.sh bootstrap falls back to a go-install source build when the prebuilt won't run
 #   (j5) fm-spawn.sh fails with an actionable message when treehouse can't bootstrap
+#   (q) fm-spawn.sh codespace launch sources login profiles + PATH so the harness binary resolves
+#   (r) fm-spawn.sh injects Codespace git credentials (guarded) for the lease AND the launch
+#   (s) generated check.sh mirrors remote status into local state/<id>.status without double-waking
 #   (k) fm-brief.sh writes a codespace scout brief (remote report + status, no push)
 #   (l) fm-teardown.sh copies a scout report back over SSH, then succeeds
 #   (m) fm-teardown.sh refuses a scout teardown when no report exists anywhere
@@ -217,8 +221,12 @@ fi
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "ssh" ]; then
   printf '%s\n' "\$*" >> "\$md/ssh.log"
   case "\$*" in
-    *"command -v treehouse"*) [ -f "\$md/bootstrap-fail" ] && exit 1; exit 0 ;;
     *"treehouse get --lease"*) echo "/workspaces/myproj-wt/fm-task-cs1"; exit 0 ;;
+    # The bootstrap ends in the runnable-treehouse gate ('treehouse --version'); its
+    # exit status models whether treehouse could be made runnable. bootstrap-fail
+    # means neither the prebuilt install nor the source build produced a runnable
+    # treehouse, so the gate (and the whole bootstrap SSH call) fails.
+    *"treehouse --version"*) [ -f "\$md/bootstrap-fail" ] && exit 1; exit 0 ;;
     *"treehouse return"*) exit 0 ;;
     *) exit 0 ;;   # shell-ready ("-- true") and the interactive launch
   esac
@@ -398,13 +406,19 @@ test_codespace_configured_harness_launch() {
   meta="$dir/state/task-cs1.meta"
   log="$dir/mock-data/sendkeys.log"
   grep -q '^harness=cursor$' "$meta" || fail "harness-cursor: meta should record harness=cursor"
-  grep -q 'cursor-agent --force' "$log" \
-    || fail "harness-cursor: remote command should launch cursor-agent --force"
+  # The Cursor CLI is installed as 'cursor-agent' or plain 'agent', so the launch
+  # must RESOLVE the real binary at runtime, not hardcode 'cursor-agent'.
+  grep -q 'command -v cursor-agent' "$log" \
+    || fail "harness-cursor: remote command should probe for cursor-agent"
+  grep -q '_fmcur=agent' "$log" \
+    || fail "harness-cursor: remote command should fall back to 'agent'"
+  grep -q -- '--force' "$log" \
+    || fail "harness-cursor: remote command should pass --force"
   grep -q 'claude --dangerously-skip-permissions' "$log" \
     && fail "harness-cursor: remote command must NOT be hardcoded claude"
   printf '%s\n' "$out" | grep -q 'harness=cursor' \
     || fail "harness-cursor: spawn summary should report harness=cursor"
-  pass "codespace remote command uses the configured harness, not hardcoded claude"
+  pass "codespace remote command resolves the cursor binary (cursor-agent or agent), not hardcoded"
 }
 
 # ── (j4) codespace spawn bootstraps prerequisites before leasing ────────────
@@ -422,11 +436,36 @@ test_codespace_bootstrap_runs() {
   sshlog="$dir/mock-data/ssh.log"
   [ -f "$sshlog" ] || fail "bootstrap: no ssh calls recorded"
   grep -q 'mkdir -p' "$sshlog" || fail "bootstrap: remote state dir not created (mkdir -p)"
-  grep -q 'command -v treehouse' "$sshlog" \
-    || fail "bootstrap: treehouse availability not ensured"
+  # The gate must verify treehouse EXECUTES (treehouse --version), not just that a
+  # binary is on PATH (the old 'command -v treehouse' false-greened a crashing binary).
+  grep -q 'treehouse --version' "$sshlog" \
+    || fail "bootstrap: treehouse runnability not verified (treehouse --version)"
   grep -q 'install.sh' "$sshlog" \
-    || fail "bootstrap: treehouse install path not present in bootstrap command"
-  pass "codespace spawn bootstraps prerequisites (state dir + treehouse) before leasing"
+    || fail "bootstrap: prebuilt treehouse install path not present in bootstrap command"
+  pass "codespace spawn bootstraps prerequisites (state dir + runnable treehouse) before leasing"
+}
+
+# ── (j4b) bootstrap falls back to a source build when the prebuilt won't run ─
+
+test_codespace_source_build_fallback() {
+  local dir rc out sshlog
+  dir=$(make_spawn_case "source-build" "my-codespace" "1")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "source-build: spawn should succeed (got $rc)\n$out"
+  sshlog="$dir/mock-data/ssh.log"
+  # The from-source fallback links against the codespace's own glibc and ships --lease.
+  grep -q 'go install github.com/kunchenguid/treehouse@latest' "$sshlog" \
+    || fail "source-build: bootstrap missing the go install source-build fallback"
+  grep -q 'GOBIN=' "$sshlog" \
+    || fail "source-build: source build should install into a writable GOBIN dir"
+  grep -q '/usr/local/go/bin' "$sshlog" \
+    || fail "source-build: Go's bin dir should be on PATH for the source build"
+  pass "codespace bootstrap includes a go-install source-build fallback for a non-runnable prebuilt"
 }
 
 # ── (j5) codespace spawn fails clearly when treehouse can't be bootstrapped ─
@@ -451,6 +490,115 @@ test_codespace_bootstrap_failure() {
   [ ! -f "$dir/state/task-cs1.meta" ] \
     || fail "bootstrap-fail: no meta should be written (no lease held)"
   pass "codespace spawn fails with an actionable message when treehouse can't be bootstrapped"
+}
+
+# ── (q) launch sources login profiles + PATH so the harness binary resolves ──
+
+test_codespace_launch_sources_profiles() {
+  local dir rc out log
+  dir=$(make_spawn_case "launch-path" "my-codespace" "1" "owner/myproj" "cursor")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "launch-path: spawn should succeed (got $rc)\n$out"
+  log="$dir/mock-data/sendkeys.log"
+  # The non-interactive SSH launch must source login profiles so install dirs like
+  # $HOME/.local/bin land on PATH, and force-add the standard bins defensively.
+  grep -q '.profile' "$log" || fail "launch-path: launch should source login profiles"
+  grep -q 'HOME/.local/bin' "$log" || fail "launch-path: launch should put \$HOME/.local/bin on PATH"
+  pass "codespace launch sources login profiles and puts \$HOME/.local/bin on PATH"
+}
+
+# ── (r) git credentials are injected for the lease AND the launch ────────────
+
+test_codespace_token_injection() {
+  local dir rc out sshlog log lease_line
+  dir=$(make_spawn_case "token-inject" "my-codespace" "1" "owner/myproj" "cursor")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "token-inject: spawn should succeed (got $rc)\n$out"
+  sshlog="$dir/mock-data/ssh.log"
+  log="$dir/mock-data/sendkeys.log"
+
+  # The lease SSH command (where treehouse runs 'git fetch origin') must decode and
+  # export the Codespace token, guarded by the company secrets file's presence.
+  lease_line=$(grep 'treehouse get --lease' "$sshlog" | head -1)
+  [ -n "$lease_line" ] || fail "token-inject: no lease SSH command recorded"
+  printf '%s\n' "$lease_line" | grep -q '/workspaces/.codespaces/shared/.env-secrets' \
+    || fail "token-inject: lease command should guard on the company secrets file"
+  printf '%s\n' "$lease_line" | grep -q 'base64 -d' \
+    || fail "token-inject: lease command should base64-decode the token"
+  printf '%s\n' "$lease_line" | grep -q 'GITHUB_TOKEN' \
+    || fail "token-inject: lease command should export GITHUB_TOKEN"
+  printf '%s\n' "$lease_line" | grep -q 'GITHUB_SERVER_URL' \
+    || fail "token-inject: lease command should export GITHUB_SERVER_URL"
+
+  # The harness launch (ship tasks commit/push) must inject the same credentials.
+  grep -q '/workspaces/.codespaces/shared/.env-secrets' "$log" \
+    || fail "token-inject: launch command should guard on the company secrets file"
+  grep -q 'GITHUB_TOKEN' "$log" \
+    || fail "token-inject: launch command should export GITHUB_TOKEN"
+  pass "codespace git credentials are injected (guarded) for both the lease and the launch"
+}
+
+# ── (s) check.sh mirrors remote status into local state/<id>.status for perch ─
+
+test_codespace_status_mirror() {
+  local dir rc out check status_file lines1 lines2
+
+  dir=$(make_spawn_case "status-mirror" "my-codespace" "1")
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "status-mirror: spawn should succeed (got $rc)\n$out"
+
+  check="$dir/state/task-cs1.check.sh"
+  status_file="$dir/state/task-cs1.status"
+  [ -f "$check" ] || fail "status-mirror: check.sh not generated"
+
+  # Replace the gh mock with one that returns the LAST line of a controllable
+  # remote status file (emulating the check's remote 'cat ... | tail -1').
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "ssh" ]; then
+  tail -n 1 "$dir/mock-data/remote-status" 2>/dev/null
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  # 1) First status line -> mirrored locally, and check.sh prints NOTHING (so it
+  #    cannot raise a 'check:' wake on top of the signal wake the append triggers).
+  printf 'working: building\n' > "$dir/mock-data/remote-status"
+  out=$(PATH="$dir/fakebin:$PATH" bash "$check")
+  [ -z "$out" ] || fail "status-mirror: check.sh must not print to stdout (avoids double-wake), got: '$out'"
+  [ -f "$status_file" ] || fail "status-mirror: local state/<id>.status not created"
+  grep -qx 'working: building' "$status_file" || fail "status-mirror: first status line not mirrored"
+  lines1=$(wc -l < "$status_file" | tr -d '[:space:]')
+
+  # 2) Same remote line again -> NOT re-appended (check.last dedupe), still silent.
+  #    This is what prevents a wake loop / spurious wakes on every poll.
+  out=$(PATH="$dir/fakebin:$PATH" bash "$check")
+  [ -z "$out" ] || fail "status-mirror: repeat poll must stay silent, got: '$out'"
+  lines2=$(wc -l < "$status_file" | tr -d '[:space:]')
+  [ "$lines1" = "$lines2" ] || fail "status-mirror: identical remote line re-appended (would re-wake every poll)"
+
+  # 3) New remote line -> mirrored (appended) so perch shows the latest state.
+  printf 'working: building\ndone: ready in branch fm/task-cs1\n' > "$dir/mock-data/remote-status"
+  out=$(PATH="$dir/fakebin:$PATH" bash "$check")
+  [ -z "$out" ] || fail "status-mirror: new-line poll must stay silent, got: '$out'"
+  grep -qx 'done: ready in branch fm/task-cs1' "$status_file" \
+    || fail "status-mirror: new remote status line not mirrored"
+  pass "check.sh mirrors new remote status into local state/<id>.status without double-waking"
 }
 
 # ── (k) fm-brief.sh writes a codespace scout brief ─────────────────────────
@@ -674,7 +822,11 @@ test_no_slug_errors
 test_codespace_default_harness_launch
 test_codespace_configured_harness_launch
 test_codespace_bootstrap_runs
+test_codespace_source_build_fallback
 test_codespace_bootstrap_failure
+test_codespace_launch_sources_profiles
+test_codespace_token_injection
+test_codespace_status_mirror
 test_codespace_scout_brief
 test_scout_report_copyback
 test_scout_no_report_refuses

@@ -144,6 +144,27 @@ launch_template() {
   esac
 }
 
+# Build the remote launch command for a codespace crewmate. Unlike launch_template
+# (which assumes the binary is on PATH under a fixed name), this resolves the real
+# installed command in the codespace at launch time. $1 is the harness, $2 is the
+# ALREADY shell-quoted remote brief path. Only cursor needs special handling: its
+# CLI is installed as 'cursor-agent' on personal images but as plain 'agent'
+# ($HOME/.local/bin/agent) in company-managed Codespaces, so launch whichever
+# exists. All other harnesses reuse launch_template verbatim.
+codespace_launch_command() {
+  local harness=$1 brief_q=$2 tmpl
+  case "$harness" in
+    cursor)
+      # shellcheck disable=SC2016  # $_fmcur expands in the remote shell, not here.
+      printf '%s' '_fmcur=cursor-agent; command -v cursor-agent >/dev/null 2>&1 || _fmcur=agent; "$_fmcur" --force '"$brief_q"
+      ;;
+    *)
+      tmpl=$(launch_template "$harness" secondmate) || return 1
+      printf '%s' "${tmpl//__BRIEF__/$brief_q}"
+      ;;
+  esac
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -349,12 +370,35 @@ fi
 if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
 
+  # Reusable remote env prefix, prepended to EVERY non-interactive SSH command we
+  # run in the codespace (bootstrap, lease, launch). A `gh codespace ssh -- <cmd>`
+  # shell is non-login and non-interactive: it does not source the user's login
+  # profiles, so install dirs like $HOME/.local/bin (where the Cursor CLI and a
+  # source-built treehouse land) are off PATH, and it carries no git credentials.
+  # The prefix, in order:
+  #   1. sources the login profiles so profile-managed PATH entries appear,
+  #   2. force-adds the standard user bin ($HOME/.local/bin) and Go's bin
+  #      (/usr/local/go/bin, needed by the treehouse source-build fallback below),
+  #   3. injects the Codespace's GitHub token when the company-managed secrets file
+  #      is present, so treehouse's `git fetch origin` (and any later push) can
+  #      authenticate over https.
+  # It is guarded and best-effort: the token block runs ONLY when
+  # /workspaces/.codespaces/shared/.env-secrets exists, so personal Codespaces with
+  # working auth are untouched, and the token value is never printed. It ends with
+  # ';' so it composes cleanly before any following command. The single quotes are
+  # deliberate: every $VAR here must expand in the remote shell, not locally.
+  # shellcheck disable=SC2016
+  _CS_ENV_PREFIX='for _rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zprofile" "$HOME/.zshrc"; do [ -f "$_rc" ] && . "$_rc" >/dev/null 2>&1 || true; done; export PATH="$HOME/.local/bin:/usr/local/go/bin:$PATH"; if [ -f /workspaces/.codespaces/shared/.env-secrets ]; then _cstok=$(grep -E "^GITHUB_TOKEN=" /workspaces/.codespaces/shared/.env-secrets | head -1 | cut -d= -f2- | base64 -d 2>/dev/null || true); if [ -n "$_cstok" ]; then export GITHUB_TOKEN="$_cstok" GITHUB_SERVER_URL="https://github.com"; fi; unset _cstok; fi;'
+
   # Codespace crewmate harness comes from the project's registry bracket
   # ([codespace owner/repo <harness>]); defaults to claude. The named agent must
   # already be installed in the codespace; firstmate only launches it over SSH.
   CS_HARNESS=$("$FM_ROOT/bin/fm-project-mode.sh" --codespace-harness "$PROJ_NAME" 2>/dev/null || echo claude)
   [ -n "$CS_HARNESS" ] || CS_HARNESS=claude
-  CS_LAUNCH_TMPL=$(launch_template "$CS_HARNESS" secondmate) || {
+  # Validate the harness is supported (and surface a clear error if not). The actual
+  # remote launch string is built by codespace_launch_command below, which resolves
+  # the real installed binary at launch time (cursor in particular).
+  launch_template "$CS_HARNESS" secondmate >/dev/null || {
     echo "error: no launch template for codespace harness '$CS_HARNESS' (from $PROJ_NAME's registry line); supported: claude, codex, opencode, pi, cursor" >&2
     exit 1
   }
@@ -392,22 +436,35 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   fi
 
   # Ensure codespace prerequisites BEFORE leasing a worktree. Company-managed
-  # codespaces often cannot run personal dotfiles (org policy), so do not assume
-  # setup ran there: idempotently mkdir the remote state dir and install treehouse
-  # if it is missing. The harness (cursor-agent etc.) is assumed already installed.
-  # We re-source the login profile after install so a freshly-installed treehouse
-  # (e.g. in ~/.local/bin) is visible to the same verification, matching what a
-  # later SSH session running 'treehouse get' will see. The final 'command -v
-  # treehouse' is the gate: if it fails, treehouse could not be made available.
+  # codespaces run an older base image and cannot run personal dotfiles (org
+  # policy), so do not assume setup ran there: idempotently mkdir the remote state
+  # dir and make treehouse runnable. The harness (cursor-agent/agent etc.) is
+  # assumed already installed.
+  #
+  # The gate verifies treehouse actually EXECUTES (`treehouse --version` exits 0),
+  # not merely that a binary is on PATH. The prebuilt binary can install yet crash
+  # at runtime - on Debian 11 (glibc 2.31) the prebuilt v1.8.0 fails with
+  # "GLIBC_2.34 not found" - a false green that `command -v` would pass and that
+  # then breaks at the lease step. When the prebuilt binary does not run, fall back
+  # to building from source with `go install`, which links against the codespace's
+  # own glibc and includes --lease (Go is present at /usr/local/go/bin; the env
+  # prefix puts it on PATH). The env prefix is re-sourced after each install so a
+  # freshly-installed treehouse (in ~/.local/bin) is visible to the same gate,
+  # matching what the later 'treehouse get' SSH session will see. The final
+  # `treehouse --version` is the gate: if it fails, treehouse could not be made
+  # runnable by either route and spawn aborts with the one-time manual command.
   _CS_TH_INSTALL='curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh'
-  _CS_BOOTSTRAP="mkdir -p $CODESPACE_REMOTE_STATE; "
-  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}if ! command -v treehouse >/dev/null 2>&1; then "
-  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}${_CS_TH_INSTALL} || true; "
-  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}for rc in \$HOME/.profile \$HOME/.bashrc \$HOME/.bash_profile; do [ -f \"\$rc\" ] && . \"\$rc\" >/dev/null 2>&1 || true; done; "
-  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}fi; command -v treehouse >/dev/null 2>&1"
+  # shellcheck disable=SC2016  # $HOME expands in the remote shell, not here.
+  _CS_TH_SRC='GOBIN="$HOME/.local/bin" go install github.com/kunchenguid/treehouse@latest'
+  _CS_TH_RUNS='treehouse --version >/dev/null 2>&1'
+  _CS_BOOTSTRAP="${_CS_ENV_PREFIX} mkdir -p $CODESPACE_REMOTE_STATE; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}if ! ${_CS_TH_RUNS}; then ${_CS_TH_INSTALL} || true; ${_CS_ENV_PREFIX} fi; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}if ! ${_CS_TH_RUNS}; then mkdir -p \"\$HOME/.local/bin\"; ${_CS_TH_SRC} || true; ${_CS_ENV_PREFIX} fi; "
+  _CS_BOOTSTRAP="${_CS_BOOTSTRAP}${_CS_TH_RUNS}"
   if ! gh codespace ssh -c "$_CS_NAME" -- "$_CS_BOOTSTRAP" >/dev/null 2>&1; then
-    echo "error: treehouse is not available in codespace $_CS_NAME and could not be auto-installed." >&2
+    echo "error: treehouse is not available (and could not be built from source) in codespace $_CS_NAME." >&2
     echo "       Run this once in the codespace, then retry: $_CS_TH_INSTALL" >&2
+    echo "       (or build from source with /usr/local/go/bin on PATH: $_CS_TH_SRC)" >&2
     exit 1
   fi
 
@@ -419,7 +476,7 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   # banner-only line re-acquires the same lease rather than leaking a fresh one.
   _CS_WT=
   for _ in $(seq 1 "${FM_CODESPACE_WT_RETRIES:-10}"); do
-    _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')
+    _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "${_CS_ENV_PREFIX} treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')
     [ -n "$_CS_WT" ] && break
     sleep 2
   done
@@ -464,17 +521,23 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   fi
   tmux new-window -d -t "$SES" -n "$W" -c "$FM_HOME"
 
-  # One self-contained line: SSH with a forced PTY (-t), cd into the leased worktree,
-  # launch the configured harness. A single command avoids inter-step timing; the
-  # $(cat ...) in the launch template expands on the remote. The launch command comes
-  # from launch_template (the turn-end-free variant, since codespace status is polled
-  # via check.sh, not a local turn-end hook); __BRIEF__ is replaced with the remote
-  # brief path. No 'exec' prefix: some templates carry a leading VAR=val env
-  # assignment (opencode), which 'exec' would treat as the program name. The remote
-  # paths are quoted for the remote shell, then the whole remote command is quoted
-  # again for the local pane shell.
-  _CS_LAUNCH=${CS_LAUNCH_TMPL//__BRIEF__/$(shell_quote "/tmp/$ID-brief.md")}
-  _CS_REMOTE_CMD="cd $(shell_quote "$_CS_WT") && $_CS_LAUNCH"
+  # One self-contained line: SSH with a forced PTY (-t), source the env prefix
+  # (login profiles + PATH + git credentials, so the harness binary resolves and a
+  # ship task can commit/push), cd into the leased worktree, launch the configured
+  # harness. A single command avoids inter-step timing; the $(cat ...) in the launch
+  # command expands on the remote. The launch command comes from
+  # codespace_launch_command (the turn-end-free variant, since codespace status is
+  # mirrored via check.sh, not a local turn-end hook) and resolves the real harness
+  # binary in the codespace - notably cursor, installed as 'cursor-agent' or plain
+  # 'agent'. No 'exec' prefix: some templates carry a leading VAR=val env assignment
+  # (opencode), which 'exec' would treat as the program name. The remote paths are
+  # quoted for the remote shell, then the whole remote command is quoted again for
+  # the local pane shell.
+  _CS_LAUNCH=$(codespace_launch_command "$CS_HARNESS" "$(shell_quote "/tmp/$ID-brief.md")") || {
+    echo "error: no launch command for codespace harness '$CS_HARNESS'" >&2
+    exit 1
+  }
+  _CS_REMOTE_CMD="${_CS_ENV_PREFIX} cd $(shell_quote "$_CS_WT") && $_CS_LAUNCH"
   _CS_PANE_LINE="gh codespace ssh -c $(shell_quote "$_CS_NAME") -- -t $(shell_quote "$_CS_REMOTE_CMD")"
   tmux send-keys -t "$T" -l "$_CS_PANE_LINE"
   sleep 0.3
@@ -494,20 +557,31 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     echo "remote_state=$CODESPACE_REMOTE_STATE"
   } > "$STATE/$ID.meta"
 
-  # Poll script: pull the last status line from the remote state file, but emit it
-  # ONLY when it differs from the previously emitted line. The watcher's check
-  # contract is to print only when firstmate should wake; without this dedupe a
-  # single non-empty status would re-wake firstmate every poll until teardown.
-  # The last emitted line is recorded in a sibling state file.
+  # Poll script: pull the last status line from the remote state file and MIRROR a
+  # new line into the local state/<id>.status. The perch dashboard reads the last
+  # line of {FM_HOME}/state/<id>.status, so mirroring is what makes a codespace
+  # task's status badge live instead of blank/stale. It also unifies codespace
+  # status with local crewmates: the watcher's signal scan hashes state/*.status,
+  # so the mirror's append is what wakes firstmate, the same path a local crewmate
+  # uses.
+  #
+  # Watcher interaction (deliberate): we append ONLY when the remote line differs
+  # from the last one we mirrored (recorded in the sibling check.last), so the
+  # locally-hashed status file changes exactly once per distinct line - bounding
+  # wakes and preventing a wake loop (the local append never touches the remote
+  # file, so it cannot re-trigger this poll). We print NOTHING to stdout: the
+  # signal wake from the status append is the single wake; emitting the line too
+  # would add a redundant 'check:' wake for the same status (a spurious double-wake).
   _CS_NAME_Q=$(shell_quote "$_CS_NAME")
   cat > "$STATE/$ID.check.sh" <<CHECKEOF
 #!/usr/bin/env bash
 last_file='$STATE/$ID.check.last'
+status_file='$STATE/$ID.status'
 out=\$(gh codespace ssh -c ${_CS_NAME_Q} -- "cat ${CODESPACE_REMOTE_STATE}/${ID}.status 2>/dev/null | tail -1" 2>/dev/null)
 [ -n "\$out" ] || exit 0
 [ "\$out" = "\$(cat "\$last_file" 2>/dev/null)" ] && exit 0
 printf '%s\n' "\$out" > "\$last_file"
-printf '%s\n' "\$out"
+printf '%s\n' "\$out" >> "\$status_file"
 CHECKEOF
   chmod +x "$STATE/$ID.check.sh"
 
