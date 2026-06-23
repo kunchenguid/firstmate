@@ -84,7 +84,7 @@ cd firstmate && claude
 
 That is the whole install.
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-If `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact, but firstmate still hand-edits `data/backlog.md` until that tool can parse firstmate's backlog format.
+If `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent, firstmate keeps hand-editing `data/backlog.md` exactly as before.
 
 **Run it inside tmux for the best experience.**
 firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside tmux puts every crewmate window in your own session, one per task, where you can watch the crew work in real time or type into any window to intervene.
@@ -173,7 +173,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 ## Configuration
 
 The shared orchestrator behavior lives in `AGENTS.md` - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
-The tracked `.tasks.toml` pins the optional `tasks-axi` markdown backend to `data/backlog.md`, but current backlog mutations remain manual until `tasks-axi` can parse firstmate's backlog format.
+The tracked `.tasks.toml` pins the optional `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+When `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation; without it, backlog bookkeeping remains manual.
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
 Persistent secondmate routes live locally in `data/secondmates.md`.
 Each line records the secondmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
