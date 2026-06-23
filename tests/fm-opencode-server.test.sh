@@ -75,16 +75,30 @@ test_helper_visibility_modes() {
   printf 'brief\n' > "$brief"
 
   out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=terminal \
-    FM_OPENCODE_VISIBILITY_DRY_RUN=1 "$HELPER" start helper-x1 fm-helper-x1 "$worktree" "$brief") \
+    "$HELPER" start helper-x1 fm-helper-x1 "$worktree" "$brief") \
     || fail "mock helper start failed for terminal visibility"
   printf '%s\n' "$out" | grep -F 'opencode_visibility=desktop' >/dev/null \
     || fail "terminal visibility did not alias to desktop"
-  printf '%s\n' "$out" | grep -F 'opencode_desktop=dry-run' >/dev/null \
-    || fail "desktop visibility did not report a dry-run desktop launch"
+  printf '%s\n' "$out" | grep -F 'opencode_desktop=recorded' >/dev/null \
+    || fail "desktop visibility did not record the desktop link by default"
   printf '%s\n' "$out" | grep -F 'opencode_desktop_deeplink=opencode://new-session?' >/dev/null \
     || fail "desktop visibility did not produce an OpenCode new-session deep link"
+  printf '%s\n' "$out" | grep -F 'prompt=' >/dev/null \
+    && fail "desktop visibility unexpectedly included a default prompt"
   printf '%s\n' "$out" | grep -F 'opencode_web=' >/dev/null \
     && fail "desktop-only visibility unexpectedly reported web output"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=desktop \
+    FM_OPENCODE_DESKTOP_OPEN=1 "$HELPER" start helper-x1b fm-helper-x1b "$worktree" "$brief") \
+    || fail "mock helper start failed for explicit desktop open"
+  printf '%s\n' "$out" | grep -F 'opencode_desktop=dry-run' >/dev/null \
+    || fail "explicit desktop open did not report a dry-run launch in mock mode"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=desktop \
+    FM_OPENCODE_DESKTOP_PROMPT='Task {title}' "$HELPER" start helper-x1c fm-helper-x1c "$worktree" "$brief") \
+    || fail "mock helper start failed for explicit desktop prompt"
+  printf '%s\n' "$out" | grep -F 'prompt=Task+fm-helper-x1c' >/dev/null \
+    || fail "explicit desktop prompt was not encoded into the deep link"
 
   out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_VISIBILITY=web \
     FM_OPENCODE_VISIBILITY_DRY_RUN=1 "$HELPER" start helper-x2 fm-helper-x2 "$worktree" "$brief") \

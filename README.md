@@ -186,8 +186,9 @@ Harness support is a table in section 4: claude, codex, opencode, and pi are all
 The default crew backend is `tmux`.
 Set `FM_BACKEND=opencode-server`, write `opencode-server` to local `config/backend`, or put `FM_BACKEND=opencode-server` in local `config/backend.env`, to run ordinary OpenCode tasks through one OpenCode server per task worktree instead of a tmux pane.
 Secondmates still use the tmux path, so homes with registered secondmates still require tmux even when ordinary tasks use `opencode-server`.
-`FM_OPENCODE_VISIBILITY=headless` is the default and starts no UI; `web` records the local server URL without opening a browser; `desktop` opens OpenCode Desktop through `opencode://new-session`; `both` records the web URL and opens Desktop.
-The aliases `terminal`, `attach`, `tui`, `app`, and `chat` intentionally map to Desktop new-chat visibility, not an external terminal.
+`FM_OPENCODE_VISIBILITY=headless` is the default and starts no UI; `web` records the local server URL without opening a browser; `desktop` records an OpenCode Desktop `opencode://new-session` link without opening it; `both` records the web URL and Desktop link.
+The aliases `terminal`, `attach`, `tui`, `app`, and `chat` intentionally map to Desktop-link visibility, not an external terminal.
+OpenCode Desktop does not currently expose an attach-to-existing-server-session deep link, so FirstMate does not auto-open standalone prompt-backed Desktop chats by default; set `FM_OPENCODE_DESKTOP_OPEN=1` to explicitly launch the fallback `new-session` link, and set `FM_OPENCODE_DESKTOP_PROMPT` only if you want Desktop to start its own chat/model call.
 Loopback OpenCode servers use no extra auth by default.
 Non-loopback or WSL/Windows hybrid servers use `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD` when present, otherwise firstmate generates per-task basic auth and stores the effective credential only in local gitignored task metadata.
 
@@ -198,7 +199,8 @@ FM_HOME=                 # optional operational home; unset means this repo root
 FM_BACKEND=tmux          # tmux or opencode-server; config/backend(.env) is also supported
 FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both; FM_OPENCODE_SERVER_VISIBILITY is an alias
 FM_OPENCODE_DESKTOP_APP=          # optional path to OpenCode.exe for desktop visibility
-FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; {url}, {session}, {worktree}, {title}, {task}, {brief}
+FM_OPENCODE_DESKTOP_OPEN=0        # set to 1 to auto-open the fallback Desktop new-session link
+FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; unset means no Desktop model call; {url}, {session}, {worktree}, {title}, {task}, {brief}
 FM_OPENCODE_DESKTOP_COMMAND=      # optional custom command template for desktop visibility
 FM_OPENCODE_SERVER_HOST=          # optional bind/connect host override; non-loopback auth is persisted only in local state
 FM_OPENCODE_SERVER_PORT=0         # optional fixed server port; 0 means choose a free port

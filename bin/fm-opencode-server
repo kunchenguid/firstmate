@@ -306,7 +306,12 @@ function desktopPrompt({ title, sessionId, worktree, taskId, briefFile, webUrl }
   const template = process.env.FM_OPENCODE_DESKTOP_PROMPT;
   if (template && ["0", "false", "off", "none"].includes(template.toLowerCase())) return "";
   if (template) return expandCommandTemplate(template, values);
-  return `FirstMate task ${title} is running in this worktree. Use this chat for visibility and questions about the task. Do not modify files unless explicitly instructed.`;
+  return "";
+}
+
+function desktopOpenRequested() {
+  const raw = String(process.env.FM_OPENCODE_DESKTOP_OPEN || "").toLowerCase();
+  return ["1", "true", "yes", "on", "open", "new-session"].includes(raw);
 }
 
 function desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile }) {
@@ -317,12 +322,15 @@ function desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile
   return url.toString();
 }
 
-function launchDesktop({ title, webUrl, sessionId, worktree, taskId, briefFile, dryRun = process.env.FM_OPENCODE_VISIBILITY_DRY_RUN === "1" }) {
+function launchDesktop({ title, webUrl, sessionId, worktree, taskId, briefFile, dryRun = process.env.FM_OPENCODE_VISIBILITY_DRY_RUN === "1" || MOCK }) {
   const mode = visibility();
   if (!mode.desktop) return null;
   const template = process.env.FM_OPENCODE_DESKTOP_COMMAND;
   const deeplink = desktopDeepLink({ title, webUrl, sessionId, worktree, taskId, briefFile });
   const app = desktopAppPath();
+  if (!desktopOpenRequested() && !template) {
+    return { launched: "recorded", deeplink, app };
+  }
   if (!template) {
     if (dryRun) return { launched: "dry-run", deeplink, app };
     if (!app || !fs.existsSync(app)) {
@@ -471,7 +479,7 @@ async function start(taskId, title, worktree, briefFile) {
       console.log(`opencode_web=${web.opened}`);
       console.log(`opencode_web_url=${web.url}`);
     }
-    const desktop = launchDesktop({ title, webUrl: "http://127.0.0.1:0", sessionId: `mock-${taskId}`, worktree, taskId, briefFile, dryRun: true });
+    const desktop = launchDesktop({ title, webUrl: "http://127.0.0.1:0", sessionId: `mock-${taskId}`, worktree, taskId, briefFile });
     if (desktop) {
       console.log(`opencode_desktop=${desktop.launched}`);
       if (desktop.deeplink) console.log(`opencode_desktop_deeplink=${desktop.deeplink}`);
