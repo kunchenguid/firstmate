@@ -505,6 +505,7 @@ Due per-task checks run before signal scanning so chatty crewmate status updates
 
 Never rely on hooks or status files alone; the heartbeat review of every recorded backend surface is mandatory and unconditional.
 The recorded backend surface is the ground truth: tmux panes for `backend=tmux`, OpenCode server captures for `backend=opencode-server`.
+For `opencode-server`, a failed capture is treated as a stale surface so a dead server or missing session still wakes supervision instead of vanishing.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
