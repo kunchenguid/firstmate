@@ -109,7 +109,16 @@ launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
-    claude) printf '%s' 'claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
+    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
+    # otherwise-empty composer and would otherwise read like real typed input when
+    # firstmate captures the pane (see AGENTS.md section 4). It is a per-launch env
+    # prefix scoped to this firstmate-launched agent; it never touches the captain's
+    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
+    # does NOT suppress the interactive ghost text (verified empirically), so the env
+    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
+    # the defense-in-depth backstop for any pane this flag cannot reach.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'

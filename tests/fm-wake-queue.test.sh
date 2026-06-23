@@ -88,7 +88,27 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   capture-pane)
-    [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null
+    # Honor a single-line band capture (-S N -E M, both non-negative) the way the
+    # composer reader now bounds its capture to the cursor row; otherwise (e.g.
+    # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
+    # ignored: this fake emits plain text, which the dim-stripper passes through.
+    _S=""; _E=""; shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -S) _S="${2:-}"; shift 2; continue ;;
+        -E) _E="${2:-}"; shift 2; continue ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] || exit 0
+    if [ -n "$_S" ] && [ -n "$_E" ]; then
+      case "$_S$_E" in
+        *[!0-9]*) cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
+        *) sed -n "$((_S + 1)),$((_E + 1))p" "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
+      esac
+    else
+      cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null
+    fi
     exit 0 ;;
   send-keys)
     while [ "$#" -gt 0 ]; do
