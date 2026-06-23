@@ -1,3 +1,6 @@
 /.gitattributes text eol=lf
+AGENTS.md text eol=lf
+README.md text eol=lf
 *.sh text eol=lf
+bin/fm-codex-app text eol=lf
 bin/fm-opencode-server text eol=lf
