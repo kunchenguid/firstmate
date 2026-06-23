@@ -21,8 +21,16 @@ fi
 
 cat > "$STATE/$ID.check.sh" <<EOF
 api_path=\$(printf '%s\n' "$URL" | sed -E 's#^https://github.com/([^/]+)/([^/]+)/pull/([0-9]+).*#/repos/\1/\2/pulls/\3#')
-merged=\$(gh-axi api "\$api_path" 2>/dev/null | awk -F': ' '
-  /^merged:/ { gsub(/"/, "", \$2); print tolower(\$2); exit }
+merged=\$(gh-axi api "\$api_path" 2>/dev/null | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const data = JSON.parse(input);
+    if (data && data.merged === true) process.stdout.write("true");
+  } catch {}
+});
 ')
 [ "\$merged" = "true" ] && echo "merged"
 EOF

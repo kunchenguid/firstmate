@@ -162,7 +162,7 @@ wait_live() {
 }
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief fakebin home_one home_two merge_out out
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
@@ -192,6 +192,16 @@ test_fm_home_parameterization() {
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"
+  fakebin="$TMP_ROOT/fm-home-gh"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '{"merged": true}\n'
+SH
+  chmod +x "$fakebin/gh-axi"
+  merge_out=$(PATH="$fakebin:$PATH" bash "$home_one/state/task-a.check.sh") \
+    || fail "pr check script failed on JSON response"
+  [ "$merge_out" = merged ] || fail "pr check script did not detect JSON merged=true"
   pass "FM_HOME parameterizes data and state paths"
 }
 
