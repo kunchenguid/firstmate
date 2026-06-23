@@ -127,19 +127,22 @@ treehouse_hook_command_usable() {
     }
     function emit_word() {
       word = trim(word)
+      if (word == "") {
+        word_quoted = 0
+        return
+      }
+      if (word ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+        word = ""
+        word_quoted = 0
+        return
+      }
       if (word ~ /^\/.*\/fm-treehouse-post-create\.sh$/ && (word_quoted || shell_safe(word))) {
         print word
-        exit
       }
-      word = ""
-      word_quoted = 0
+      exit
     }
     {
       line = trim($0)
-      if (line ~ /^\/.*\/fm-treehouse-post-create\.sh$/ && shell_safe(line)) {
-        print line
-        exit
-      }
       quote = ""
       word = ""
       word_quoted = 0
@@ -167,6 +170,9 @@ treehouse_hook_command_usable() {
           }
         }
         word = word c
+      }
+      if (quote != "") {
+        exit
       }
       emit_word()
     }

@@ -218,6 +218,34 @@ test_bootstrap_does_not_match_other_hook_commands() {
   pass "bootstrap does not match other hook commands"
 }
 
+test_bootstrap_rejects_hook_path_as_shell_argument() {
+  local case_dir fakebin out expected_config expected
+  case_dir="$TMP_ROOT/hook-path-as-arg"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks]\npost_create = ["echo %s/bin/fm-treehouse-post-create.sh"]\n' "$ROOT" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  expected="MISSING: treehouse-post-create-hook (install: $ROOT/bin/fm-bootstrap.sh install treehouse-post-create-hook)"
+  printf '%s\n' "$out" | grep -Fx "$expected" >/dev/null \
+    || fail "bootstrap accepted treehouse hook path as a shell argument: $out"
+  pass "bootstrap rejects treehouse hook path as shell argument"
+}
+
+test_bootstrap_accepts_hook_after_env_assignment() {
+  local case_dir fakebin out expected_config
+  case_dir="$TMP_ROOT/hook-after-env-assignment"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks]\npost_create = ["FM_HOME=%s/home %s/bin/fm-treehouse-post-create.sh"]\n' "$case_dir" "$ROOT" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap rejected treehouse hook command after env assignment: $out"
+  pass "bootstrap accepts treehouse hook after env assignment"
+}
+
 test_bootstrap_reports_treehouse_without_lease_support() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/lease-missing"
@@ -356,6 +384,8 @@ test_bootstrap_accepts_hooks_section_inline_comment
 test_bootstrap_ignores_commented_treehouse_hook_config
 test_bootstrap_ignores_stale_treehouse_hook_config
 test_bootstrap_does_not_match_other_hook_commands
+test_bootstrap_rejects_hook_path_as_shell_argument
+test_bootstrap_accepts_hook_after_env_assignment
 test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_treehouse_without_post_create_support
 test_bootstrap_reports_treehouse_without_post_create_hook_config
