@@ -81,7 +81,7 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: backend=, window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects=; opencode-server tasks also record opencode_server_url=, opencode_server_pid=, opencode_server_log=, opencode_session_id=, opencode_visibility=, and optional web/desktop metadata (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: backend=, window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects=; opencode-server tasks also record opencode_server_url=, opencode_server_pid=, opencode_server_log=, optional opencode_server_username=/opencode_server_password= for non-loopback auth, opencode_session_id=, opencode_visibility=, and optional web/desktop metadata (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -582,7 +582,7 @@ This is why fewer, cheaper firstmate turns handle the same fleet.
 
 ### Stuck-crewmate playbook (escalate in order)
 
-1. Peek the pane.
+1. Peek the recorded session.
 2. Crewmate is waiting on a question its brief already answers: answer in one line via fm-send.
 3. Crewmate is confused or looping: interrupt with the adapter's interrupt key (the session's harness is recorded as `harness=` in `state/<id>.meta`; e.g. `bin/fm-send.sh <selector> --key Escape`), then redirect with one corrective line.
 4. Crewmate is genuinely wedged after redirection: exit the agent with the adapter's exit command, relaunch with the same brief plus a `progress so far` note you append to it.

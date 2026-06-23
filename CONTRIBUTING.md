@@ -35,9 +35,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   `AGENTS.md` is the agent's entire job description; `CLAUDE.md` is a symlink to it, and `.claude/skills` is a symlink to `.agents/skills`.
 - Only shared material is tracked: `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.github/workflows/`, `bin/`, and `.agents/skills/`.
   Everything personal to one captain's fleet (`data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
-- Helper scripts in `bin/` are plain bash.
+- Helper scripts in `bin/` are mostly bash; `bin/fm-opencode-server` is the Node helper for the OpenCode server backend.
   Each starts with a usage header comment; keep it accurate when you change behavior.
-  `shellcheck bin/*.sh` must pass, and CI enforces it.
+  `shellcheck bin/*.sh` and `node --check bin/fm-opencode-server` must pass, and CI enforces them.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, the adapter tables in `AGENTS.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
