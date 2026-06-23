@@ -11,6 +11,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
+# shellcheck source=bin/fm-mux.sh
+. "$SCRIPT_DIR/fm-mux.sh"
 
 resolve() {
   case "$1" in
@@ -25,11 +27,10 @@ resolve() {
       [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
       echo "$window"
       ;;
-    *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \
-         || { echo "error: no window named $1" >&2; exit 1; } ;;
+    *) fm_mux_find_window "$1" || { echo "error: no window named $1" >&2; exit 1; } ;;
   esac
 }
 
 T=$(resolve "$1")
 N=${2:-40}
-tmux capture-pane -p -t "$T" -S -"$N"
+fm_mux_capture "$T" "$N"

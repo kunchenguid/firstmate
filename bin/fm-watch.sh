@@ -18,6 +18,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-mux.sh
+. "$SCRIPT_DIR/fm-mux.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -221,7 +223,7 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    tail40=$(fm_mux_capture "$w" 40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

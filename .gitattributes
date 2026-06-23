@@ -1,0 +1,15 @@
+# Cross-platform line endings.
+# firstmate runs on macOS, Linux, and Windows (Git Bash + WezTerm). Shell
+# scripts and config MUST use LF or they break on macOS/Linux/CI (a CRLF in a
+# `#!/usr/bin/env bash` line is a hard error). Normalize text to LF on checkout
+# regardless of a contributor's core.autocrlf setting. Tracked symlinks
+# (CLAUDE.md, .claude/skills) are mode 120000 and are not affected by these
+# text/eol attributes.
+* text=auto eol=lf
+
+# Binary assets must never be normalized.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.ico binary

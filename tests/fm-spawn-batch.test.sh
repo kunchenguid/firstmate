@@ -5,6 +5,9 @@
 # windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the live watcher guard / state.
 set -u
 
+# Pin the multiplexer backend so detection is deterministic on any host.
+export FM_MUX=tmux
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-batch.XXXXXX")

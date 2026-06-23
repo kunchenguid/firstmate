@@ -21,6 +21,9 @@
 # appearance — terminal line-wrapping looks like newlines but isn't.
 set -u
 
+# The daemon's mux calls must go through the tmux shim to the private socket.
+export FM_MUX=tmux
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 

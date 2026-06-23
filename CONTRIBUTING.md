@@ -38,6 +38,11 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   `shellcheck bin/*.sh` must pass, and CI enforces it.
+- firstmate runs on macOS, Linux, and Windows (Git Bash + WezTerm).
+  All terminal-multiplexer interaction goes through `bin/fm-mux.sh` (a `tmux` backend and a `wezterm` backend); never call `tmux` directly from another script.
+  Process/ancestry introspection goes through `bin/fm-proc.sh`, which works on MSYS where `ps -o` is unavailable.
+  Pin a backend in tests with `FM_MUX=tmux` (or `wezterm`).
+- All tracked text, especially shell scripts, must use LF line endings (`.gitattributes` enforces this); a CRLF in a `#!/usr/bin/env bash` line breaks the script on macOS/Linux/CI.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, the adapter tables in `AGENTS.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 

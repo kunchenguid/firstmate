@@ -33,6 +33,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-mux.sh
+. "$FM_ROOT/bin/fm-mux.sh"
 ID=$1
 FORCE=${2:-}
 
@@ -328,7 +330,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      tmux kill-window -t "$child_t" 2>/dev/null || true
+      fm_mux_kill_window "$child_t"
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -440,7 +442,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-tmux kill-window -t "$T" 2>/dev/null || true
+fm_mux_kill_window "$T"
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

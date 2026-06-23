@@ -1,10 +1,10 @@
 <h1 align="center">firstmate</h1>
 <p align="center">
   <a
-    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
     ><img
       alt="Platform"
-      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
   /></a>
   <a href="https://x.com/kunchenguid"
     ><img
@@ -28,13 +28,13 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in multiplexer windows (tmux on macOS/Linux, WezTerm tabs on Windows), giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
 There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
 
 - **One liaison** - you never talk to a worker agent.
   The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
-- **A visible crew** - every crewmate lives in a tmux window.
+- **A visible crew** - every crewmate lives in a multiplexer window: a tmux window on macOS/Linux, or a WezTerm tab on Windows.
   Watch any of them work, or type into their window to intervene; the first mate reconciles.
 - **Persistent domain supervisors** - route natural-language scopes through `data/secondmates.md` when a domain deserves its own long-lived supervisor.
   Each secondmate has a separate `FM_HOME`, local state, local projects, and its own session lock, while the main first mate still supervises it like any other direct report.
@@ -54,8 +54,8 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in tmux windows
-# fm-fix-login-k3 and fm-dark-mode-p7.
+# clones the project under projects/, and spawns two crewmates in multiplexer
+# windows fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
   PR ready for review, captain: https://github.com/you/xyz/pull/42
@@ -71,7 +71,9 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 ```sh
 # 1. a verified agent harness - claude, codex, opencode, or pi
 # 2. git + GitHub auth
-# 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
+# 3. a terminal multiplexer - tmux on macOS/Linux, or WezTerm on Windows
+#    (tmux has no Windows port; firstmate drives WezTerm's CLI there instead).
+#    firstmate offers to install one if missing.
 gh auth login
 ```
 
@@ -83,10 +85,11 @@ cd firstmate && claude
 ```
 
 That is the whole install.
-On first launch the first mate detects what its toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On first launch the first mate detects what its toolchain is missing or too old (a multiplexer, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
 
-**Run it inside tmux for the best experience.**
-firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside tmux puts every crewmate window in your own session, one per task, where you can watch the crew work in real time or type into any window to intervene.
+**Run it inside your multiplexer for the best experience.**
+On macOS/Linux that means tmux; on Windows it means WezTerm.
+firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside the multiplexer puts every crewmate window (a tmux window, or a WezTerm tab on Windows) alongside your own, one per task, where you can watch the crew work in real time or type into any window to intervene.
 
 ## How It Works
 
@@ -99,10 +102,10 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
-    │ tmux send-keys / status files │
+    │ fm-mux send / status files    │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   multiplexer windows/tabs you watch
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
@@ -136,7 +139,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
+- **Restart-proof** - all state lives in the multiplexer, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
@@ -166,6 +169,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, and checks child work |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
+| `fm-mux.sh`              | Terminal-multiplexer abstraction: one verb set over a `tmux` backend (macOS/Linux) and a `wezterm` backend (Windows) |
+| `fm-proc.sh`             | Portable process/ancestry introspection (Linux, macOS, and Git Bash/MSYS, where `ps -o` is unavailable)            |
 
 ## Configuration
 
@@ -185,10 +190,14 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
+On Windows, firstmate runs under Git Bash and drives the crew through WezTerm's multiplexer CLI instead of tmux (which has no Windows port); `bin/fm-mux.sh` auto-selects the backend, and `FM_MUX` forces it (`tmux` or `wezterm`).
+
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root
+FM_MUX=                 # force the multiplexer backend (tmux|wezterm); unset = auto-detect
+FM_WEZTERM=wezterm     # wezterm CLI binary used by the wezterm backend
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -200,7 +209,7 @@ FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effo
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
+FM_SUPERVISOR_TARGET=firstmate:0   # supervisor pane (tmux target, or wezterm:<pane_id>); auto-discovers from $TMUX_PANE / $WEZTERM_PANE
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
@@ -221,6 +230,7 @@ The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proact
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
+tests/fm-mux.test.sh                      # multiplexer abstraction: tmux + wezterm backends (fakes; no real multiplexer needed)
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, and /afk presence-gating tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests

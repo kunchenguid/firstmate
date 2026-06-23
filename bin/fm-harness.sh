@@ -12,34 +12,36 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# shellcheck source=bin/fm-proc.sh
+. "$SCRIPT_DIR/fm-proc.sh"
+
 detect_own() {
-  # Layer 1: environment markers for verified harnesses.
+  # Layer 1: environment markers for verified harnesses (OS-independent).
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
-  # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename "$comm")" in
+  # Layer 2: walk the ancestry and match the command name (or, for a bare
+  # interpreter like node/python, the harness name in its argv). fm_proc_ancestry
+  # walks the Windows process tree on MSYS, the OS process tree elsewhere.
+  local pid comm args base
+  while IFS="$(printf '\t')" read -r pid comm args; do
+    [ -n "$comm" ] || continue
+    base=$(basename "$comm")
+    case "$base" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
-      pi) echo pi; return ;;
+      pi|pi.exe) echo pi; return ;;
       node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
+          *" pi "*|*/pi|*\\pi|*\\pi.exe) echo pi; return ;;
         esac ;;
     esac
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
-      break
-    fi
-  done
+  done <<EOF
+$(fm_proc_ancestry "$$")
+EOF
   echo unknown
 }
 

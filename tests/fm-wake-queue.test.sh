@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -u
 
+# Pin the multiplexer backend so the fake `tmux` shim is always used, regardless
+# of the host (e.g. a Windows dev box running inside WezTerm would otherwise
+# auto-select the wezterm backend).
+export FM_MUX=tmux
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"

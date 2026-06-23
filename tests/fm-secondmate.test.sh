@@ -2,6 +2,10 @@
 # Behavior tests for secondmate home routing and lifecycle reuse.
 set -u
 
+# Pin the multiplexer backend so the fake `tmux` shim is always used (a Windows
+# dev box inside WezTerm would otherwise auto-select the wezterm backend).
+export FM_MUX=tmux
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=
 

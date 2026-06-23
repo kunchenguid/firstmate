@@ -67,7 +67,7 @@ README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
-bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
+bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, fm-mux.sh for the terminal-multiplexer abstraction (tmux on macOS/Linux, wezterm on Windows), and fm-proc.sh for portable process/ancestry introspection (incl. Git Bash/MSYS where `ps -o` is unavailable); read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -126,6 +126,12 @@ Do not memorize their flags; their session hooks and `--help` are the source of 
 If the captain names a different crewmate harness at bootstrap or later, write it to `config/crew-harness` (local, gitignored); that is the whole switch.
 
 ## 4. Harness adapters
+
+The crew lives in terminal-multiplexer windows.
+All multiplexer interaction (create window, send keys, capture pane, read cwd, kill) goes through `bin/fm-mux.sh`, which has two backends: `tmux` on macOS/Linux and `wezterm` on Windows (tmux has no Windows port, so firstmate drives WezTerm's CLI and crewmates appear as WezTerm tabs).
+The backend auto-selects (prefer `$TMUX`, then a tmux binary, then WezTerm); `FM_MUX` forces it.
+Never call `tmux` directly from a script; call the `fm_mux_*` verbs so both platforms work.
+Window handles are opaque: `session:window` for tmux, `wezterm:<pane_id>` for wezterm, stored verbatim in `state/<id>.meta`.
 
 Crewmates default to the same harness you are running on.
 The captain may override this at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single word - an adapter name below; the file is local and gitignored, so each machine keeps its own; absent or `default` means mirror your own harness).

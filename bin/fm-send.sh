@@ -12,6 +12,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
+# shellcheck source=bin/fm-mux.sh
+. "$SCRIPT_DIR/fm-mux.sh"
 
 resolve() {
   case "$1" in
@@ -26,8 +28,7 @@ resolve() {
       [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
       echo "$window"
       ;;
-    *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \
-         || { echo "error: no window named $1" >&2; exit 1; } ;;
+    *) fm_mux_find_window "$1" || { echo "error: no window named $1" >&2; exit 1; } ;;
   esac
 }
 
@@ -35,11 +36,11 @@ T=$(resolve "$1")
 shift
 
 if [ "${1:-}" = "--key" ]; then
-  tmux send-keys -t "$T" "$2"
+  fm_mux_send_key "$T" "$2"
 else
-  tmux send-keys -t "$T" -l "$*"
+  fm_mux_send_text "$T" "$*"
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing. Give popups time to settle.
   case "$*" in /*) sleep 1.2 ;; *) sleep 0.3 ;; esac
-  tmux send-keys -t "$T" Enter
+  fm_mux_send_enter "$T"
 fi

@@ -303,28 +303,28 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-if [ -n "${TMUX:-}" ]; then
-  SES=$(tmux display-message -p '#S')
-else
-  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-  SES=firstmate
-fi
+# Source the multiplexer abstraction (tmux on macOS/Linux, wezterm on Windows).
+. "$FM_ROOT/bin/fm-mux.sh"
+
+# Same session when firstmate already runs inside the multiplexer; a dedicated
+# session otherwise (tmux). wezterm has no separate session object - new tabs
+# land in the active window - so fm_mux_session returns a sentinel there.
+SES=$(fm_mux_session)
 
 W="fm-$ID"
-T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
-  echo "error: window $T already exists" >&2
+if fm_mux_window_exists "$SES" "$W"; then
+  echo "error: window $SES:$W already exists" >&2
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+T=$(fm_mux_new_window "$SES" "$W" "$PROJ_ABS") || { echo "error: failed to create window $W in $SES" >&2; exit 1; }
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  fm_mux_send_text "$T" 'treehouse get'
+  fm_mux_send_enter "$T"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    p=$(fm_mux_pane_path "$T" 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
@@ -430,8 +430,8 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
+fm_mux_send_text "$T" "$LAUNCH"
 sleep 0.3
-tmux send-keys -t "$T" Enter
+fm_mux_send_enter "$T"
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
