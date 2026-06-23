@@ -3,7 +3,7 @@
 # Blocks until supervision work is due, then exits printing one reason line:
 #   signal: <file>...     a crewmate wrote a status line or a turn-end hook fired; signals
 #                         landing within FM_SIGNAL_GRACE of each other coalesce into one wake
-#   stale: <window>       a crewmate pane stopped changing and shows no busy signature
+#   stale: <surface>      a crewmate pane/session stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
 # Run as a background task. Re-arm it after handling each wake; duplicate

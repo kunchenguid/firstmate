@@ -90,7 +90,7 @@ backend_name() {
 }
 
 has_registered_secondmates() {
-  [ -f "$DATA/secondmates.md" ] && grep -Eq '^- [^ ]+' "$DATA/secondmates.md"
+  [ -f "$DATA/secondmates.md" ] && grep -Eq '^[[:space:]]*-[[:space:]][^[:space:]]+' "$DATA/secondmates.md"
 }
 
 BACKEND=$(backend_name)
@@ -101,7 +101,6 @@ case "$BACKEND" in
     ;;
   *) TOOLS="tmux node treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
-
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
