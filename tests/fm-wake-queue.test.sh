@@ -846,6 +846,19 @@ test_pane_input_pending_idle_prompt_not_pending() {
   pass "pane_input_pending: bare prompts are not pending (idle)"
 }
 
+test_pane_input_pending_honors_idle_override_after_border_strip() {
+  local dir state fakebin capture
+  dir=$(make_supercase pending-custom-idle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  capture="$dir/pane.txt"
+  printf '│ custom idle> │\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
+    && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
+  pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
+}
+
 test_composer_guard_defers_on_partial_input() {
   local dir state fakebin sent capture
   dir=$(make_supercase composer-guard)
@@ -1133,6 +1146,22 @@ test_max_defer_force_recovers_on_idle_pane() {
   pass "max-defer force recovers and clears the buffer on an idle (bordered) pane"
 }
 
+test_normal_flush_clears_stale_wedge_marker() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case normal-clears-wedge)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  printf 'old wedge\n' > "$state/.subsuper-inject-wedged"
+  escalate_add "$state" "done: PR https://x/y/pull/2"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "normal escalate_flush failed"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after normal flush"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker survived successful normal flush"
+  pass "normal flush clears a stale wedge marker"
+}
+
 test_below_max_defer_does_not_force() {
   # A recently-buffered escalation must NOT be force-injected — normal batching
   # owns the delivery until MAX_DEFER elapses.
@@ -1218,6 +1247,7 @@ test_strip_injection_marker
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
+test_pane_input_pending_honors_idle_override_after_border_strip
 test_composer_guard_defers_on_partial_input
 test_inject_types_once_retries_enter_only
 test_inject_no_duplicate_on_success
@@ -1230,5 +1260,6 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_forces_then_alarms_on_stuck_pane
 test_max_defer_force_recovers_on_idle_pane
+test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_not_force
 test_fm_send_exits_nonzero_on_confirmed_swallow

@@ -15,10 +15,9 @@
 # corrected detector backs the submit acknowledgement (a submit "landed" iff the
 # composer is empty afterward), fixing the parallel false "Enter swallowed".
 #
-# Per-harness override: FM_COMPOSER_IDLE_RE is reserved for a future regex knob;
-# today the detector is structural (strip borders, then match a bare prompt) and
-# covers claude's box plus plain shell prompts. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / the daemon).
+# Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
+# structural border stripping. FM_BUSY_REGEX overrides the busy footer set
+# (mirrors fm-watch.sh / the daemon).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -53,6 +52,10 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   # Nothing left inside the box = empty composer.
   [ -n "$stripped" ] || { printf 'empty'; return 0; }
+  if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \
+     && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
+    printf 'empty'; return 0
+  fi
   # Just a bare prompt glyph = empty composer (idle).
   case "$stripped" in
     '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
