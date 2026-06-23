@@ -185,14 +185,15 @@ EOF
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE1='1. Never push to any remote. Never open or merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run the no-mistakes validation pipeline with \`--skip=push,pr,ci\`.
 During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
-After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+No-mistakes does not push, open a PR, or monitor CI in this workflow.
+After no-mistakes finishes local validation, append \`done: validated with --skip=push,pr,ci; branch ready for captain/manual push+PR\` and stop. You are finished.
 EOF
 )
     ;;
