@@ -65,7 +65,7 @@ AGENTS.md            this file (CLAUDE.md is a symlink to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
-.tasks.toml          tracked optional tasks-axi markdown backend config, currently inert
+.tasks.toml          tracked tasks-axi markdown backend config; drives backlog mutations when tasks-axi is on PATH (section 10), otherwise inert
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
@@ -112,8 +112,9 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and never surface it to the captain.
-  Firstmate does not route backlog mutations through `tasks-axi` yet (deferred pending format compatibility, section 10), so keep hand-editing `data/backlog.md` exactly as section 10 describes.
-  Its presence and its absence are equally a no-op here, never a missing tool to install.
+  When `tasks-axi` is on PATH, firstmate routes every `data/backlog.md` mutation through its verbs instead of hand-editing the file, exactly as section 10 describes.
+  When `tasks-axi` is absent, firstmate hand-edits `data/backlog.md` exactly as before, so the silent guarantee that backlog bookkeeping keeps working holds either way.
+  It is never a missing tool to install: its absence only falls back to hand-editing and never blocks work.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 
@@ -654,7 +655,22 @@ Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker
 Keep Done to the 10 most recent entries; prune older ones whenever you add to the section.
 Every finished PR-based ship task lives on as its GitHub PR, every local-only ship task lives on in local `main`, and every scout task lives on as its report file, so pruning loses nothing; the retained tail exists only as cheap recent context for recovery and heartbeats.
 
-A tracked `.tasks.toml` at this repo root pins the `tasks-axi` markdown backend to `data/backlog.md`, but adopting `tasks-axi` for backlog mutations is deferred pending a release whose format is compatible with the In-flight (`- [ ] <id>`) and `blocked-by: <id> - <reason>` shapes above; until then, every firstmate home (main and each secondmate) keeps hand-editing `data/backlog.md` exactly as this section describes.
+A tracked `.tasks.toml` at this repo root pins the `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+When `tasks-axi` is on PATH, firstmate mutates the backlog through its verbs instead of hand-editing.
+The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
+Map firstmate's real backlog operations to the verbs:
+
+- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
+- Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
+- Append a status note: `tasks-axi update <id> --append "<note>"`; replace fields with `--title`, `--body`, or `--body-file <path>`.
+- Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list the queued work that is dispatchable right now.
+- Read an item's full notes: `tasks-axi show <id> --full`.
+- Hand a task off to a secondmate home: `tasks-axi mv <id> --to <path>`, the verb form of moving the line into the secondmate's `data/backlog.md`.
+- Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.
+
+`tasks-axi done` auto-prunes Done to `done_keep = 10` and archives the pruned entries to `data/done-archive.md`, which supersedes the manual "keep Done to the 10 most recent" pruning above: when `tasks-axi` is present you do not hand-prune Done, and nothing is lost because pruned entries are archived rather than deleted.
+When `tasks-axi` is absent, every firstmate home (main and each secondmate) hand-edits `data/backlog.md` exactly as this section describes, including the manual Done pruning.
+Secondmates inherit this automatically: each secondmate home carries the same `AGENTS.md` and its own `.tasks.toml`, so the same present-or-absent rule applies in every home with no separate setup.
 
 ## 11. Crewmate briefs
 
