@@ -67,7 +67,12 @@ fm_tmux_strip_ghost() {
               k = split(params, a, ";")
               for (p = 1; p <= k; p++) {
                 v = a[p]; if (v == "") v = "0"
-                if (v == "2") dim = 1
+                if (v == "38" || v == "48") {
+                  mode = a[p + 1]
+                  if (mode == "5") p += 2
+                  else if (mode == "2") p += 4
+                  else if (mode != "") p += 1
+                } else if (v == "2") dim = 1
                 else if (v == "0" || v == "22") dim = 0
               }
             }

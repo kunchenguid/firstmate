@@ -93,6 +93,17 @@ test_strip_ghost_handles_combined_and_boundary_codes() {
   pass "fm_tmux_strip_ghost handles combined SGR, ESC[22m, and reset-then-dim"
 }
 
+test_strip_ghost_keeps_colored_text_with_2_payloads() {
+  local out
+  out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "green typed" ] || fail "8-bit color payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[38;2;1;2;3mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "truecolor typed" ] || fail "truecolor payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "background typed" ] || fail "background truecolor payload was treated as dim: '$out'"
+  pass "fm_tmux_strip_ghost keeps colored text with 2 payloads"
+}
+
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
 
 test_dim_ghost_only_composer_is_not_pending() {
@@ -134,6 +145,22 @@ test_normal_text_still_pending() {
     fm_pane_input_pending "fakepane" \
     || fail "real typed text was not detected as pending"
   pass "fm_pane_input_pending: normal-intensity typed text is still pending"
+}
+
+test_colored_text_with_2_payload_still_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/colored-text"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '\xe2\x9d\xaf \033[38;5;2mgreen typed\033[0m\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "8-bit colored typed text was not detected as pending"
+  printf '\xe2\x9d\xaf \033[38;2;1;2;3mtruecolor typed\033[0m\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "truecolor typed text was not detected as pending"
+  pass "fm_pane_input_pending: colored text with 2 payloads is still pending"
 }
 
 test_real_text_with_trailing_ghost_is_pending() {
@@ -178,8 +205,10 @@ test_peek_output_is_escape_free() {
 
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
+test_strip_ghost_keeps_colored_text_with_2_payloads
 test_dim_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
+test_colored_text_with_2_payload_still_pending
 test_real_text_with_trailing_ghost_is_pending
 test_peek_output_is_escape_free
