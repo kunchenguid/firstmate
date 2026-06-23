@@ -586,7 +586,7 @@ With afk active:
 
 **In-band sentinel marker (the load-bearing detail).** The daemon injects into the same pane the captain types into, so an escalation would otherwise look like a user message and cancel afk the moment it fired.
 Every daemon injection is prefixed with `FM_INJECT_MARK` (ASCII unit separator, 0x1f) — a byte a human would never type at the start of a message.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi).
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi, cursor).
 
 **Exiting afk (the captain's contract).** When firstmate receives a message while afk is active:
 - Leading marker present → **internal escalation**. Stay afk, process it.
