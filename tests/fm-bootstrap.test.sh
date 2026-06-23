@@ -105,6 +105,34 @@ test_bootstrap_accepts_treehouse_hook_from_another_firstmate_root() {
   pass "bootstrap accepts treehouse hook from another firstmate root"
 }
 
+test_bootstrap_accepts_treehouse_hook_path_with_spaces() {
+  local case_dir fakebin out other_root
+  case_dir="$TMP_ROOT/spaced-hook"
+  other_root="$case_dir/other firstmate"
+  mkdir -p "$case_dir/home" "$other_root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$other_root/bin/fm-treehouse-post-create.sh"
+  chmod +x "$other_root/bin/fm-treehouse-post-create.sh"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  write_treehouse_hook_config "$case_dir/home" "$other_root"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap rejected configured treehouse hook path with spaces: $out"
+  pass "bootstrap accepts treehouse hook path with spaces"
+}
+
+test_bootstrap_accepts_hooks_section_inline_comment() {
+  local case_dir fakebin out expected_config
+  case_dir="$TMP_ROOT/hooks-inline-comment"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks] # local hooks\npost_create = ["%s/bin/fm-treehouse-post-create.sh"]\n' "$ROOT" >"$expected_config"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap rejected treehouse hook under inline-commented hooks section: $out"
+  pass "bootstrap accepts inline-commented hooks section"
+}
+
 test_bootstrap_ignores_commented_treehouse_hook_config() {
   local case_dir fakebin out expected_config expected
   case_dir="$TMP_ROOT/commented-hook"
@@ -221,8 +249,29 @@ test_bootstrap_appends_treehouse_post_create_hook_config() {
   pass "bootstrap appends treehouse post_create hook config"
 }
 
+test_bootstrap_installs_into_hooks_section_with_inline_comment() {
+  local case_dir fakebin expected_config out hook_count
+  case_dir="$TMP_ROOT/hook-install-inline-comment"
+  mkdir -p "$case_dir/home/xdg/treehouse"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  expected_config="$case_dir/home/xdg/treehouse/config.toml"
+  printf '[hooks] # local hooks\npre_create = ["existing-hook"]\n' >"$expected_config"
+
+  install_bootstrap_tool "$case_dir/home" "$fakebin" treehouse-post-create-hook >/dev/null \
+    || fail "bootstrap install treehouse-post-create-hook failed with inline-commented hooks section"
+  hook_count=$(grep -Ec '^[[:space:]]*\[hooks\]' "$expected_config")
+  [ "$hook_count" -eq 1 ] || fail "bootstrap duplicated inline-commented hooks section"
+  grep -Fx "post_create = [\"$ROOT/bin/fm-treehouse-post-create.sh\"]" "$expected_config" >/dev/null \
+    || fail "bootstrap did not insert treehouse post_create under inline-commented hooks section"
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION=v1.8.0 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap reported problems after inline-commented hooks install: $out"
+  pass "bootstrap installs into inline-commented hooks section"
+}
+
 test_bootstrap_accepts_treehouse_lease_and_hook_support
 test_bootstrap_accepts_treehouse_hook_from_another_firstmate_root
+test_bootstrap_accepts_treehouse_hook_path_with_spaces
+test_bootstrap_accepts_hooks_section_inline_comment
 test_bootstrap_ignores_commented_treehouse_hook_config
 test_bootstrap_ignores_stale_treehouse_hook_config
 test_bootstrap_does_not_match_other_hook_commands
@@ -231,3 +280,4 @@ test_bootstrap_reports_treehouse_without_post_create_support
 test_bootstrap_reports_treehouse_without_post_create_hook_config
 test_bootstrap_installs_treehouse_post_create_hook_config
 test_bootstrap_appends_treehouse_post_create_hook_config
+test_bootstrap_installs_into_hooks_section_with_inline_comment

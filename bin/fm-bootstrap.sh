@@ -109,13 +109,47 @@ treehouse_hook_command_usable() {
     *) return 1 ;;
   esac
   hook_path=$(printf '%s\n' "$command" | awk '
-    {
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /(^|\/)fm-treehouse-post-create\.sh$/) {
-          print $i
-          exit
-        }
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function emit_word() {
+      word = trim(word)
+      if (word ~ /^\/.*\/fm-treehouse-post-create\.sh$/) {
+        print word
+        exit
       }
+      word = ""
+    }
+    {
+      line = trim($0)
+      if (line ~ /^\/.*\/fm-treehouse-post-create\.sh$/) {
+        print line
+        exit
+      }
+      quote = ""
+      word = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (quote == "" && c ~ /[[:space:]]/) {
+          emit_word()
+          continue
+        }
+        if (c == "\\" && i < length(line)) {
+          word = word substr(line, i + 1, 1)
+          i++
+          continue
+        }
+        if (c == "\"" || c == "'\''") {
+          if (quote == "") {
+            quote = c
+            continue
+          }
+          if (quote == c) {
+            quote = ""
+            continue
+          }
+        }
+        word = word c
+      }
+      emit_word()
     }
   ')
   [ -n "$hook_path" ] || return 1
@@ -176,13 +210,12 @@ treehouse_post_create_hook_configured() {
         }
       }
     }
-    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
-      clean = strip_comment($0)
-      in_hooks = (clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
-      in_post_create = 0
-    }
     {
       clean = strip_comment($0)
+      if (clean ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        in_hooks = (clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
+        in_post_create = 0
+      }
       post_create_line = 0
       if (in_hooks && clean ~ /^[[:space:]]*post_create[[:space:]]*=/) {
         in_post_create = 1
@@ -200,13 +233,64 @@ treehouse_post_create_hook_configured() {
 }
 
 treehouse_config_has_hooks_section() {
-  grep -Eq '^[[:space:]]*\[hooks\][[:space:]]*$' "$1"
+  awk '
+    function strip_comment(line,    i, c, prev, quote, out) {
+      quote = ""
+      out = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        prev = i > 1 ? substr(line, i - 1, 1) : ""
+        if (quote == "" && c == "#") {
+          break
+        }
+        out = out c
+        if ((c == "\"" || c == "'\''") && prev != "\\") {
+          if (quote == "") {
+            quote = c
+          } else if (quote == c) {
+            quote = ""
+          }
+        }
+      }
+      return out
+    }
+    { clean = strip_comment($0) }
+    clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
 }
 
 treehouse_config_has_post_create() {
   awk '
-    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/) }
-    in_hooks && /^[[:space:]]*post_create[[:space:]]*=/ { found = 1 }
+    function strip_comment(line,    i, c, prev, quote, out) {
+      quote = ""
+      out = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        prev = i > 1 ? substr(line, i - 1, 1) : ""
+        if (quote == "" && c == "#") {
+          break
+        }
+        out = out c
+        if ((c == "\"" || c == "'\''") && prev != "\\") {
+          if (quote == "") {
+            quote = c
+          } else if (quote == c) {
+            quote = ""
+          }
+        }
+      }
+      return out
+    }
+    {
+      clean = strip_comment($0)
+      if (clean ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        in_hooks = (clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
+      }
+      if (in_hooks && clean ~ /^[[:space:]]*post_create[[:space:]]*=/) {
+        found = 1
+      }
+    }
     END { exit found ? 0 : 1 }
   ' "$1"
 }
@@ -217,6 +301,26 @@ append_treehouse_post_create_hook() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-config.XXXXXX") || return 1
   if awk -v hook="$hook" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function strip_comment(line,    i, c, prev, quote, out) {
+      quote = ""
+      out = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        prev = i > 1 ? substr(line, i - 1, 1) : ""
+        if (quote == "" && c == "#") {
+          break
+        }
+        out = out c
+        if ((c == "\"" || c == "'\''") && prev != "\\") {
+          if (quote == "") {
+            quote = c
+          } else if (quote == c) {
+            quote = ""
+          }
+        }
+      }
+      return out
+    }
     function append_to_single_line(line, hook,    open, rel_close, close_pos, inside, prefix, suffix) {
       open = index(line, "[")
       rel_close = index(substr(line, open + 1), "]")
@@ -249,18 +353,19 @@ append_treehouse_post_create_hook() {
     }
     {
       lines[NR] = $0
-      if ($0 ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
-        in_hooks = ($0 ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
+      clean = strip_comment($0)
+      if (clean ~ /^[[:space:]]*\[[^]]+\][[:space:]]*$/) {
+        in_hooks = (clean ~ /^[[:space:]]*\[hooks\][[:space:]]*$/)
         if (in_post_create && !pc_end) {
           pc_end = NR - 1
         }
         in_post_create = 0
       }
-      if (in_hooks && $0 ~ /^[[:space:]]*post_create[[:space:]]*=/) {
+      if (in_hooks && clean ~ /^[[:space:]]*post_create[[:space:]]*=/) {
         pc_start = NR
         in_post_create = 1
       }
-      if (in_post_create && $0 ~ /\]/) {
+      if (in_post_create && clean ~ /\]/) {
         pc_end = NR
         in_post_create = 0
       }
@@ -319,8 +424,28 @@ install_treehouse_hook() {
   if ! treehouse_config_has_post_create "$config"; then
     tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-config.XXXXXX") || return 1
     if awk -v hook="$hook" '
+      function strip_comment(line,    i, c, prev, quote, out) {
+        quote = ""
+        out = ""
+        for (i = 1; i <= length(line); i++) {
+          c = substr(line, i, 1)
+          prev = i > 1 ? substr(line, i - 1, 1) : ""
+          if (quote == "" && c == "#") {
+            break
+          }
+          out = out c
+          if ((c == "\"" || c == "'\''") && prev != "\\") {
+            if (quote == "") {
+              quote = c
+            } else if (quote == c) {
+              quote = ""
+            }
+          }
+        }
+        return out
+      }
       { print }
-      !inserted && /^[[:space:]]*\[hooks\][[:space:]]*$/ {
+      !inserted && strip_comment($0) ~ /^[[:space:]]*\[hooks\][[:space:]]*$/ {
         printf "post_create = [\"%s\"]\n", hook
         inserted = 1
       }
