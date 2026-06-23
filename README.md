@@ -184,7 +184,7 @@ Harness support is a table in section 4: claude, codex, opencode, and pi are all
 
 The default crew backend is `tmux`.
 Set `FM_BACKEND=opencode-server`, or write `opencode-server` to local `config/backend`, to run ordinary OpenCode tasks through one OpenCode server per task worktree instead of a tmux pane.
-Secondmates still use the tmux path.
+Secondmates still use the tmux path, so homes with registered secondmates still require tmux even when ordinary tasks use `opencode-server`.
 `FM_OPENCODE_VISIBILITY=headless` is the default and starts no UI; `web` records the local server URL without opening a browser; `desktop` opens OpenCode Desktop through `opencode://new-session`; `both` records the web URL and opens Desktop.
 The aliases `terminal`, `attach`, `tui`, `app`, and `chat` intentionally map to Desktop new-chat visibility, not an external terminal.
 

@@ -15,6 +15,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
@@ -88,9 +89,16 @@ backend_name() {
   printf '%s\n' tmux
 }
 
+has_registered_secondmates() {
+  [ -f "$DATA/secondmates.md" ] && grep -Eq '^- [^ ]+' "$DATA/secondmates.md"
+}
+
 BACKEND=$(backend_name)
 case "$BACKEND" in
-  opencode-server) TOOLS="opencode node no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  opencode-server)
+    TOOLS="opencode node no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+    has_registered_secondmates && TOOLS="tmux $TOOLS"
+    ;;
   *) TOOLS="tmux node treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 

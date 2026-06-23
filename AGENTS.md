@@ -103,7 +103,7 @@ Never install anything the captain has not approved in this session.
 Run `bin/fm-bootstrap.sh`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
-Tool detection is backend-specific: the default `tmux` backend needs tmux and treehouse, while `opencode-server` needs the OpenCode CLI and uses git worktrees directly for ordinary tasks.
+Tool detection is backend-specific: the default `tmux` backend needs tmux and treehouse, while `opencode-server` needs the OpenCode CLI and uses git worktrees directly for ordinary tasks; homes with registered secondmates still need tmux because secondmates use the tmux path.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
