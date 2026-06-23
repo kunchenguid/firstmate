@@ -386,6 +386,25 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
+  # Record the lease-release-critical fields the instant the lease exists, BEFORE
+  # the unguarded brief copy / window creation / send-keys below. Under set -eu a
+  # failure in any of those would otherwise abort with the durable lease held and
+  # no meta for teardown to find and release. The complete meta (with window=)
+  # overwrites this once the window exists.
+  mkdir -p "$STATE"
+  {
+    echo "window="
+    echo "worktree="
+    echo "project="
+    echo "harness=claude"
+    echo "kind=$KIND"
+    echo "mode=codespace"
+    echo "yolo=$YOLO"
+    echo "codespace=$_CS_NAME"
+    echo "remote_worktree=$_CS_WT"
+    echo "remote_state=$CODESPACE_REMOTE_STATE"
+  } > "$STATE/$ID.meta"
+
   # Copy brief into the codespace before opening the window.
   gh codespace cp "$BRIEF" "remote:/tmp/$ID-brief.md" -c "$_CS_NAME"
 
@@ -427,12 +446,20 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     echo "remote_state=$CODESPACE_REMOTE_STATE"
   } > "$STATE/$ID.meta"
 
-  # Poll script: pull the last status line from the remote state file.
+  # Poll script: pull the last status line from the remote state file, but emit it
+  # ONLY when it differs from the previously emitted line. The watcher's check
+  # contract is to print only when firstmate should wake; without this dedupe a
+  # single non-empty status would re-wake firstmate every poll until teardown.
+  # The last emitted line is recorded in a sibling state file.
   _CS_NAME_Q=$(shell_quote "$_CS_NAME")
   cat > "$STATE/$ID.check.sh" <<CHECKEOF
 #!/usr/bin/env bash
+last_file='$STATE/$ID.check.last'
 out=\$(gh codespace ssh -c ${_CS_NAME_Q} -- "cat ${CODESPACE_REMOTE_STATE}/${ID}.status 2>/dev/null | tail -1" 2>/dev/null)
-[ -n "\$out" ] && echo "\$out"
+[ -n "\$out" ] || exit 0
+[ "\$out" = "\$(cat "\$last_file" 2>/dev/null)" ] && exit 0
+printf '%s\n' "\$out" > "\$last_file"
+printf '%s\n' "\$out"
 CHECKEOF
   chmod +x "$STATE/$ID.check.sh"
 
