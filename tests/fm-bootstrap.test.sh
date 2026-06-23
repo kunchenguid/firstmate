@@ -63,7 +63,7 @@ SH
 
 run_bootstrap() {
   local home=$1 fakebin=$2
-  CODEX_SANDBOX= CODEX_SANDBOX_NETWORK_DISABLED= PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
+  CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
 }
 
 run_bootstrap_in_codex_sandbox() {
