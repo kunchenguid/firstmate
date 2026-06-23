@@ -34,7 +34,7 @@ own worktrees, never anything under `projects/`.
    (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed
    by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
-   - `nudge-secondmates: <fm-windows...>|none`
+   - `nudge-secondmates: <window-targets...>|none`
 
 2. **Re-read AGENTS.md if your own instructions changed.** When the updater
    printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md,
@@ -44,16 +44,16 @@ own worktrees, never anything under `projects/`.
    stale ones you were started with. When it printed `reread-firstmate: no`,
    nothing changed for you - skip the re-read.
 
-3. **Nudge each updated secondmate.** For every window listed on the
+3. **Nudge each updated live secondmate.** For every target listed on the
    `nudge-secondmates:` line (do nothing when it says `none`), send a one-line
    re-read nudge so that secondmate picks up its new instructions too:
    ```sh
-   bin/fm-send.sh <fm-window> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+   bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
    ```
    This is a gentle steer, not an interruption: the secondmate already got a
    safe tracked-files fast-forward, and the nudge never forces, tears down, or
-   discards its work. A secondmate that was skipped or already current is not on
-   the list and needs no nudge.
+   discards its work. A secondmate that was skipped, already current, or has no
+   live metadata is not on the list and needs no nudge.
 
 4. **Report to the captain in plain outcomes.** Summarize what landed without
    firstmate's internal vocabulary: which parts of the fleet are now on the

@@ -13,7 +13,7 @@
 #     or the shared default branch.
 #   - The caller-action summary is correct: reread-firstmate flips to yes only
 #     when the instruction surface (AGENTS.md / bin / skills) changed, and
-#     nudge-secondmates lists exactly the secondmates that advanced.
+#     nudge-secondmates lists exactly the live secondmates that advanced.
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
@@ -99,6 +99,7 @@ add_sm() {
     printf 'kind=secondmate\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
 # Advance origin by one commit. mode=instr changes the instruction surface
@@ -134,7 +135,7 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "updated secondmate is nudged"
+  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
@@ -177,7 +178,7 @@ test_reread_gate_is_instruction_only() {
   assert_contains "$out" "firstmate: updated " "firstmate still advanced"
   assert_contains "$out" "reread-firstmate: no" "non-instruction change skips reread"
   # The secondmate still advanced, so it is still nudged (update-based nudge).
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate still nudged"
+  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "advanced secondmate still nudged"
   pass "T3 reread gates on instruction surface, nudge on advancement"
 }
 
@@ -242,6 +243,7 @@ test_registry_backstop() {
   w=$(new_world t7)
   # A secondmate worktree with NO meta, registered only in data/secondmates.md.
   git -C "$w/main" worktree add -q --detach "$w/reg1" main
+  printf 'reg1\n' > "$w/reg1/.fm-secondmate-home"
   printf -- '- reg1 - domain supervisor (home: %s/reg1; scope: things; projects: p; added 2026-06-23)\n' \
     "$w" > "$w/home/data/secondmates.md"
   bump_origin "$w" instr
@@ -249,8 +251,8 @@ test_registry_backstop() {
   out=$(run_update "$w")
 
   assert_contains "$out" "secondmate reg1: updated " "registry-only secondmate fast-forwarded"
-  assert_contains "$out" "nudge-secondmates: fm-reg1" "registry-only secondmate nudged"
-  pass "T7 secondmate resolved from registry when meta is absent"
+  assert_contains "$out" "nudge-secondmates: none" "registry-only secondmate is not nudged without live metadata"
+  pass "T7 secondmate resolved from registry without inventing a window"
 }
 
 # --- T8: dedup across meta + registry, never re-process the firstmate repo --
@@ -292,6 +294,44 @@ test_firstmate_wrong_branch_skipped() {
   pass "T9 firstmate off its default branch is skipped, not forced"
 }
 
+test_firstmate_detached_head_skipped() {
+  local w out before
+  w=$(new_world t10)
+  bump_origin "$w" instr
+  git -C "$w/main" checkout -q --detach HEAD
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" "detached firstmate skipped"
+  assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "detached firstmate HEAD moved"
+  pass "T10 firstmate detached HEAD is skipped"
+}
+
+test_unsafe_secondmate_home_skipped_before_git_update() {
+  local w out bad before
+  w=$(new_world t11)
+  bad="$w/home/projects/bad"
+  mkdir -p "$w/home/projects"
+  git clone -q "$w/origin.git" "$bad"
+  printf 'bad\n' > "$bad/.fm-secondmate-home"
+  before=$(git -C "$bad" rev-parse HEAD)
+  printf -- '- bad - bad home (home: %s; scope: x; projects: p; added 2026-06-23)\n' \
+    "$bad" > "$w/home/data/secondmates.md"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate bad: skipped: unsafe home: secondmate home cannot be inside the active firstmate home" \
+    "unsafe project-like home skipped"
+  assert_contains "$out" "nudge-secondmates: none" "unsafe home is not nudged"
+  [ "$(git -C "$bad" rev-parse HEAD)" = "$before" ] \
+    || fail "unsafe secondmate home HEAD moved"
+  pass "T11 unsafe secondmate home is not fast-forwarded"
+}
+
 test_updates_main_and_secondmate
 test_fast_forward_not_merge
 test_reread_gate_is_instruction_only
@@ -301,5 +341,7 @@ test_idempotent_already_current
 test_registry_backstop
 test_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
+test_firstmate_detached_head_skipped
+test_unsafe_secondmate_home_skipped_before_git_update
 
 echo "# all fm-update tests passed"
