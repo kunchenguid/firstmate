@@ -466,8 +466,8 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
         # lets the destructive 'treehouse return --force' discard unpushed work.
         # The unpushed check limits with 'git log -n 5' rather than piping to
         # 'head', so the pipeline's exit status is git's, not head's.
-        cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT status --porcelain" 2>/dev/null) && cs_dirty_rc=0 || cs_dirty_rc=$?
-        cs_unpushed=$(gh codespace ssh -c "$CODESPACE" -- "git -C $REMOTE_WT log --oneline -n 5 HEAD --not --remotes --" 2>/dev/null) && cs_unpushed_rc=0 || cs_unpushed_rc=$?
+        cs_dirty=$(gh codespace ssh -c "$CODESPACE" -- "git -C $(shell_quote "$REMOTE_WT") status --porcelain" 2>/dev/null) && cs_dirty_rc=0 || cs_dirty_rc=$?
+        cs_unpushed=$(gh codespace ssh -c "$CODESPACE" -- "git -C $(shell_quote "$REMOTE_WT") log --oneline -n 5 HEAD --not --remotes --" 2>/dev/null) && cs_unpushed_rc=0 || cs_unpushed_rc=$?
         if [ "$cs_dirty_rc" -ne 0 ] || [ "$cs_unpushed_rc" -ne 0 ]; then
           echo "REFUSED: could not verify codespace worktree $REMOTE_WT is clean (SSH or git check failed; status rc=$cs_dirty_rc, unpushed rc=$cs_unpushed_rc)." >&2
           echo "Refusing rather than infer 'clean' from a check that did not run, which could discard unpushed work. Restore connectivity / confirm the remote worktree path and retry (or get the captain's explicit OK to discard, then --force)." >&2
@@ -487,8 +487,13 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   # Release the durable worktree lease inside the codespace. The env prefix is
   # required so treehouse resolves on the non-interactive SSH PATH (it may be a
   # source build in $HOME/.local/bin), exactly as fm-spawn.sh's lease/launch do.
+  # FM_CS_CD_REPO_SCAN cd's into the repo checkout first: treehouse resolves its
+  # repo from cwd, and a non-interactive SSH shell starts in $HOME, so without it
+  # the return fails with "not in a git repository" and leaks the lease. If no
+  # checkout is found the snippet exits non-zero rather than running from $HOME,
+  # so the failure flows into the warn/error handling below.
   if [ -n "$CODESPACE" ] && [ -n "$REMOTE_WT" ]; then
-    if gh codespace ssh -c "$CODESPACE" -- "$FM_CS_ENV_PREFIX treehouse return --force $REMOTE_WT"; then
+    if gh codespace ssh -c "$CODESPACE" -- "$FM_CS_ENV_PREFIX $FM_CS_CD_REPO_SCAN treehouse return --force $(shell_quote "$REMOTE_WT")"; then
       :
     elif [ "$FORCE" = "--force" ]; then
       echo "warn: treehouse return failed in codespace $CODESPACE for $REMOTE_WT; continuing due to --force (lease may still be held)" >&2

@@ -918,6 +918,31 @@ test_teardown_return_carries_env_prefix() {
   pass "lease-release SSH carries the profile-sourcing + PATH env prefix"
 }
 
+# ── (u) lease-release cds into a /workspaces checkout before treehouse return ─
+
+test_teardown_return_cds_into_repo() {
+  local dir rc out line cd_part
+  dir=$(make_teardown_case "return-cd" ship)   # clean worktree, return succeeds
+
+  set +e
+  out=$(run_teardown "$dir" task-cs1 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "return-cd: teardown should succeed (got $rc)\n$out"
+  line=$(grep 'treehouse return' "$dir/mock-data/ssh.log" || true)
+  [ -n "$line" ] || fail "return-cd: no treehouse-return SSH command was logged"
+  # treehouse resolves its repo from cwd; the SSH shell starts in $HOME, so the
+  # command must cd into the codespace repo checkout BEFORE treehouse return, or
+  # the return fails ("not in a git repository") and leaks the durable lease.
+  cd_part="${line%%treehouse return*}"
+  printf '%s\n' "$cd_part" | grep -q 'for _c in /workspaces/\*' \
+    || fail "return-cd: lease-release should scan /workspaces/* for the repo checkout before treehouse return"
+  printf '%s\n' "$cd_part" | grep -q 'cd "\$_fmdir"' \
+    || fail "return-cd: lease-release should cd into the resolved checkout before treehouse return"
+  pass "lease-release cds into a /workspaces checkout before treehouse return"
+}
+
 test_codespace_mode_parses
 test_codespace_yolo_parses
 test_slug_parses
@@ -948,3 +973,4 @@ test_ship_check_failure_refuses
 test_return_failure_stops
 test_clean_teardown_succeeds
 test_teardown_return_carries_env_prefix
+test_teardown_return_cds_into_repo
