@@ -417,6 +417,8 @@ test_codespace_configured_harness_launch() {
     || fail "harness-cursor: remote command should fall back to 'agent'"
   grep -q -- '--force' "$log" \
     || fail "harness-cursor: remote command should pass --force"
+  grep -Eq 'cat [^ ]*task-cs1-brief\.md' "$log" \
+    || fail "harness-cursor: remote command should pass brief CONTENTS via cat, not the path"
   grep -q 'claude --dangerously-skip-permissions' "$log" \
     && fail "harness-cursor: remote command must NOT be hardcoded claude"
   printf '%s\n' "$out" | grep -q 'harness=cursor' \

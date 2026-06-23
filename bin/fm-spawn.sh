@@ -158,7 +158,7 @@ codespace_launch_command() {
   case "$harness" in
     cursor)
       # shellcheck disable=SC2016  # $_fmcur expands in the remote shell, not here.
-      printf '%s' '_fmcur=cursor-agent; command -v cursor-agent >/dev/null 2>&1 || _fmcur=agent; "$_fmcur" --force '"$brief_q"
+      printf '%s' '_fmcur=cursor-agent; command -v cursor-agent >/dev/null 2>&1 || _fmcur=agent; "$_fmcur" --force "$(cat '"$brief_q"')"'
       ;;
     *)
       tmpl=$(launch_template "$harness" secondmate) || return 1
