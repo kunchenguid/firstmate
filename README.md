@@ -188,6 +188,7 @@ When it is unset, the repo root is the home; when it is set, scripts still run f
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 Optional per-project worktree setup scripts live locally as `data/<project>-setup.sh`.
 After bootstrap wires the Treehouse `post_create` hook into the Treehouse user config, `treehouse get` runs the matching setup script in each new or reset worktree, logs output to `state/treehouse-setup-<project>.log`, and continues even if the setup exits non-zero.
+Bootstrap writes the hook as a shell-quoted command string, so firstmate paths containing spaces still work.
 
 Runtime tuning via environment variables (defaults shown):
 

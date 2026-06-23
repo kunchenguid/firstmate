@@ -15,7 +15,9 @@
 # Wiring (machine-level, one-time): add to the Treehouse user config
 # (${TREEHOUSE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/treehouse/config.toml})
 #   [hooks]
-#   post_create = ["<absolute path to this script>"]
+#   post_create = ["'<absolute path to this script>'"]
+# Treehouse treats hook entries as shell command strings, so keep the script
+# path shell-quoted; bootstrap writes this form automatically.
 # Treehouse ignores repo-level treehouse.toml hooks for safety, so the user
 # config is the only place this can live.
 #

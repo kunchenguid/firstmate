@@ -23,6 +23,10 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Ship/scout spawns run treehouse get with the active FM_HOME and operational
+# override variables so Treehouse post_create hooks see the same firstmate home.
+# FM_TREEHOUSE_GET_TIMEOUT controls how long spawn waits for treehouse get to
+# enter a worktree; default 300 seconds.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.

@@ -8,6 +8,8 @@
 #          "treehouse get --lease" support or post_create hook support.
 #          treehouse-post-create-hook is MISSING when Treehouse is not wired
 #          to firstmate's global post_create hook.
+#          Installing treehouse-post-create-hook edits the Treehouse user
+#          config and stores the hook path as a shell-quoted command string.
 #          Fleet sync fetches, fast-forwards, and prunes gone local branches;
 #          it is bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
