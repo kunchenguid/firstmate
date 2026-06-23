@@ -22,6 +22,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -99,8 +100,6 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
-# Optional capability, not a required tool: detected on PATH so it is never a
-# MISSING line and never prompts an install. Absent => silent, behavior unchanged.
-command -v tasks-axi >/dev/null 2>&1 && echo "TASKS_AXI: available"
+fm_tasks_axi_compatible && echo "TASKS_AXI: available"
 fleet_sync
 exit 0

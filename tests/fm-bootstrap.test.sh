@@ -95,15 +95,38 @@ test_bootstrap_reports_tasks_axi_when_available() {
   fakebin=$(make_fake_toolchain "$case_dir")
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.1'
+fi
 exit 0
 SH
   chmod +x "$fakebin/tasks-axi"
 
   out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_bootstrap "$case_dir/home" "$fakebin")
   [ "$out" = 'TASKS_AXI: available' ] || fail "bootstrap did not report tasks-axi availability: $out"
-  pass "bootstrap reports optional tasks-axi availability"
+  pass "bootstrap reports compatible optional tasks-axi availability"
+}
+
+test_bootstrap_ignores_incompatible_tasks_axi() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/tasks-axi-incompatible"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.0'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_bootstrap "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "bootstrap reported incompatible tasks-axi as available: $out"
+  pass "bootstrap ignores incompatible optional tasks-axi"
 }
 
 test_bootstrap_accepts_treehouse_lease_support
 test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_tasks_axi_when_available
+test_bootstrap_ignores_incompatible_tasks_axi

@@ -86,6 +86,18 @@ SH
   printf '%s\n' "$case_dir"
 }
 
+add_compatible_tasks_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.1'
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
@@ -148,6 +160,23 @@ test_local_only_fork_remote_allows() {
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+}
+
+test_teardown_prompts_tasks_axi_done_when_compatible() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-reminder)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
+  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "teardown did not prompt tasks-axi done: $out"
+  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
+    || fail "teardown did not prompt tasks-axi ready: $out"
+  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
+    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
+  pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -241,6 +270,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_local_only_fork_remote_allows
+test_teardown_prompts_tasks_axi_done_when_compatible
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
