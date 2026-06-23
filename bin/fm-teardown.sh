@@ -59,7 +59,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     # The work is safe once it is merged into the local default branch (firstmate
     # does that merge on the captain's approval). Refuse until then.
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '\.claude/settings\.local\.json|^\?\? \.claude/' | head -1 || true)
     unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT." >&2
@@ -70,7 +70,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '\.claude/settings\.local\.json|^\?\? \.claude/' | head -1 || true)
     unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
     if [ -n "$dirty" ] || [ -n "$unpushed" ]; then
       echo "REFUSED: worktree $WT has work not on any remote." >&2
