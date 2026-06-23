@@ -23,6 +23,10 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Ship/scout spawns run treehouse get with the active FM_HOME and operational
+# override variables so Treehouse post_create hooks see the same firstmate home.
+# FM_TREEHOUSE_GET_TIMEOUT controls how long spawn waits for treehouse get to
+# enter a worktree; default 300 seconds.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -320,10 +324,16 @@ fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  TREEHOUSE_LAUNCH="FM_ROOT_OVERRIDE=$(shell_quote "${FM_ROOT_OVERRIDE:-}") FM_STATE_OVERRIDE=$(shell_quote "${FM_STATE_OVERRIDE:-}") FM_DATA_OVERRIDE=$(shell_quote "${FM_DATA_OVERRIDE:-}") FM_PROJECTS_OVERRIDE=$(shell_quote "${FM_PROJECTS_OVERRIDE:-}") FM_CONFIG_OVERRIDE=$(shell_quote "${FM_CONFIG_OVERRIDE:-}") FM_HOME=$(shell_quote "$FM_HOME") treehouse get"
+  tmux send-keys -t "$T" -l "$TREEHOUSE_LAUNCH"
+  tmux send-keys -t "$T" Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
+  TREEHOUSE_GET_TIMEOUT=${FM_TREEHOUSE_GET_TIMEOUT:-300}
+  case "$TREEHOUSE_GET_TIMEOUT" in ''|*[!0-9]*) TREEHOUSE_GET_TIMEOUT=300 ;; esac
+  [ "$TREEHOUSE_GET_TIMEOUT" -gt 0 ] || TREEHOUSE_GET_TIMEOUT=300
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$TREEHOUSE_GET_TIMEOUT" ]; do
     p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
@@ -332,7 +342,7 @@ if [ "$KIND" != secondmate ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${TREEHOUSE_GET_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 fi

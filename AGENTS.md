@@ -67,7 +67,7 @@ README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
-bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
+bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning and fm-treehouse-post-create.sh for per-project worktree setup; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -88,6 +88,7 @@ state/               volatile runtime signals; gitignored
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, seen-status dedup, log, lock, pid); never touch
+  treehouse-setup-<project>.log      latest per-project treehouse post_create setup output
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -105,8 +106,8 @@ Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem; handle each:
 
-- `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
-  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
+- `MISSING: <tool> (install: <command>)` - list the missing tools or setup steps to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
+  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease` or whose version lacks `post_create` hooks; treat it as an upgrade request. For `treehouse-post-create-hook`, this wires firstmate's global Treehouse hook into the Treehouse user config.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
@@ -379,11 +380,20 @@ If one pair fails, the rest still run and the batch exits non-zero.
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits up to `FM_TREEHOUSE_GET_TIMEOUT` seconds (default 300) for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
 Add the task to `data/backlog.md` under In flight.
+
+Per-project worktree setup runs via a treehouse `post_create` hook (`bin/fm-treehouse-post-create.sh`), not inside fm-spawn: treehouse >= v1.8.0 fires the hook in the worktree right before handing it over, which is earlier and simpler than waiting inside fm-spawn.
+The hook is a single global script wired in the Treehouse user config (`${TREEHOUSE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/treehouse/config.toml}`) as a shell command string such as `post_create = ["'<abs path>/bin/fm-treehouse-post-create.sh'"]`; bootstrap reports `MISSING: treehouse-post-create-hook` until that wiring exists, and `bin/fm-bootstrap.sh install treehouse-post-create-hook` adds the shell-quoted form after approval.
+`fm-spawn` passes the active `FM_HOME` and operational override variables through `treehouse get`, so the hook can locate the same firstmate home, `data/`, `projects/`, and `state/` that the spawning firstmate is using.
+The hook verifies the current worktree belongs to the matching clone under `${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}` and runs `${FM_DATA_OVERRIDE:-$FM_HOME/data}/<project>-setup.sh` if it exists (project name = worktree directory basename, matching the `data/projects.md` convention).
+Output is logged to `${FM_STATE_OVERRIDE:-$FM_HOME/state}/treehouse-setup-<project>.log`.
+A failing setup script is non-fatal (treehouse continues on hook failure by design); the hook exits with the setup script's code so the failure surfaces in treehouse's own logs.
+Secondmates have no project worktree, so the hook is irrelevant to them.
+Any project can get a `data/<name>-setup.sh` and the hook picks it up automatically.
 
 ### Supervise
 
