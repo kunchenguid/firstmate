@@ -102,6 +102,16 @@ treehouse_hook_path() {
   cd "$FM_ROOT/bin" 2>/dev/null && printf '%s/fm-treehouse-post-create.sh\n' "$(pwd -P)"
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+toml_basic_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 treehouse_hook_command_usable() {
   command=$1
   case "$command" in
@@ -110,22 +120,27 @@ treehouse_hook_command_usable() {
   esac
   hook_path=$(printf '%s\n' "$command" | awk '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function shell_safe(s) {
+      return s !~ /[^A-Za-z0-9_\/:.,@%+=~=-]/
+    }
     function emit_word() {
       word = trim(word)
-      if (word ~ /^\/.*\/fm-treehouse-post-create\.sh$/) {
+      if (word ~ /^\/.*\/fm-treehouse-post-create\.sh$/ && (word_quoted || shell_safe(word))) {
         print word
         exit
       }
       word = ""
+      word_quoted = 0
     }
     {
       line = trim($0)
-      if (line ~ /^\/.*\/fm-treehouse-post-create\.sh$/) {
+      if (line ~ /^\/.*\/fm-treehouse-post-create\.sh$/ && shell_safe(line)) {
         print line
         exit
       }
       quote = ""
       word = ""
+      word_quoted = 0
       for (i = 1; i <= length(line); i++) {
         c = substr(line, i, 1)
         if (quote == "" && c ~ /[[:space:]]/) {
@@ -134,12 +149,14 @@ treehouse_hook_command_usable() {
         }
         if (c == "\\" && i < length(line)) {
           word = word substr(line, i + 1, 1)
+          word_quoted = 1
           i++
           continue
         }
         if (c == "\"" || c == "'\''") {
           if (quote == "") {
             quote = c
+            word_quoted = 1
             continue
           }
           if (quote == c) {
@@ -186,6 +203,28 @@ treehouse_post_create_hook_configured() {
       }
       return out
     }
+    function unescape_basic_string(value,    i, c, n, out) {
+      out = ""
+      for (i = 1; i <= length(value); i++) {
+        c = substr(value, i, 1)
+        if (c == "\\" && i < length(value)) {
+          n = substr(value, i + 1, 1)
+          if (n == "n") {
+            out = out "\n"
+          } else if (n == "t") {
+            out = out "\t"
+          } else if (n == "r") {
+            out = out "\r"
+          } else {
+            out = out n
+          }
+          i++
+          continue
+        }
+        out = out c
+      }
+      return out
+    }
     function emit_strings(line,    i, c, prev, quote, value) {
       quote = ""
       value = ""
@@ -199,7 +238,7 @@ treehouse_post_create_hook_configured() {
             continue
           }
           if (quote == c) {
-            print value
+            print (quote == "\"" ? unescape_basic_string(value) : value)
             quote = ""
             value = ""
             continue
@@ -409,6 +448,7 @@ append_treehouse_post_create_hook() {
 install_treehouse_hook() {
   config=$(treehouse_config_path)
   hook=$(treehouse_hook_path) || return 1
+  hook=$(toml_basic_escape "$(shell_quote "$hook")")
   if treehouse_post_create_hook_configured; then
     return 0
   fi
