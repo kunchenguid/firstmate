@@ -19,6 +19,8 @@
 #   (j4) fm-spawn.sh bootstraps prerequisites (state dir + RUNNABLE treehouse) before leasing
 #   (j4b) fm-spawn.sh bootstrap falls back to a go-install source build when the prebuilt won't run
 #   (j5) fm-spawn.sh fails with an actionable message when treehouse can't bootstrap
+#   (j6) fm-spawn.sh lease command cds into the slug-derived /workspaces/<repo> checkout
+#   (j7) the lease's repo-resolution snippet falls back to the single /workspaces git checkout
 #   (q) fm-spawn.sh codespace launch sources login profiles + PATH so the harness binary resolves
 #   (r) fm-spawn.sh injects Codespace git credentials (guarded) for the lease AND the launch
 #   (s) generated check.sh mirrors remote status into local state/<id>.status without double-waking
@@ -493,6 +495,92 @@ test_codespace_bootstrap_failure() {
   pass "codespace spawn fails with an actionable message when treehouse can't be bootstrapped"
 }
 
+# ── (j6) lease command cds into the slug-derived /workspaces/<repo> checkout ─
+
+test_codespace_lease_cds_into_repo() {
+  local dir rc out lease_line
+  # Slug acme/widget -> repo basename 'widget' -> checkout /workspaces/widget.
+  dir=$(make_spawn_case "lease-repo-cd" "my-codespace" "1" "acme/widget")
+
+  set +e
+  out=$(run_spawn "$dir" task-cs1 projects/myproj 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "lease-repo-cd: spawn should succeed (got $rc)\n$out"
+  lease_line=$(grep 'treehouse get --lease' "$dir/mock-data/ssh.log" | head -1)
+  [ -n "$lease_line" ] || fail "lease-repo-cd: no lease SSH command recorded"
+  # 'treehouse get' runs against cwd, so the lease must cd into the repo checkout
+  # (derived from the slug basename) BEFORE running treehouse.
+  printf '%s\n' "$lease_line" | grep -q '/workspaces/widget' \
+    || fail "lease-repo-cd: lease should cd into the slug-derived /workspaces/<repo>"
+  printf '%s\n' "$lease_line" | grep -q 'cd ' \
+    || fail "lease-repo-cd: lease should cd before leasing"
+  # Robustness: fall back to the single /workspaces/* git checkout, with an actionable
+  # error instead of treehouse's cryptic "not in a git repository".
+  printf '%s\n' "$lease_line" | grep -q 'for _c in /workspaces/\*' \
+    || fail "lease-repo-cd: lease should fall back to scanning /workspaces/* for a checkout"
+  printf '%s\n' "$lease_line" | grep -qi 'no git checkout found' \
+    || fail "lease-repo-cd: lease should fail with an actionable no-checkout error"
+  pass "lease command cds into the slug-derived /workspaces/<repo> checkout with a robust fallback"
+}
+
+# ── (j7) the repo-resolution snippet falls back to the single git checkout ───
+
+test_codespace_repo_resolution_fallback() {
+  # Genuinely run the repo-resolution+cd shell logic the lease command ships, against
+  # a fake /workspaces, to confirm the fallback picks the single git checkout when the
+  # slug-derived path is NOT a git repo.
+  local dir lease_line snippet ws stubbin resolved
+  dir=$(make_spawn_case "repo-resolve" "my-codespace" "1" "acme/widget")
+  run_spawn "$dir" task-cs1 projects/myproj >/dev/null 2>&1
+  lease_line=$(grep 'treehouse get --lease' "$dir/mock-data/ssh.log" | head -1)
+  [ -n "$lease_line" ] || fail "repo-resolve: no lease SSH command recorded"
+
+  # Extract just the repo-resolution+cd snippet (from the FIRST _fmdir= up to the
+  # ' treehouse get --lease' tail). Parameter expansion (#* / %%*) anchors to the
+  # first/last match cleanly; sed's greedy .* would skip to the fallback's _fmdir=.
+  snippet="_fmdir=${lease_line#*_fmdir=}"
+  snippet="${snippet%% treehouse get --lease*}"
+  case "$snippet" in
+    _fmdir=*\ cd\ *) : ;;
+    *) fail "repo-resolve: extracted snippet malformed: '$snippet'" ;;
+  esac
+
+  # Fake /workspaces: the slug-derived dir (widget) is NOT a git repo; a sibling
+  # 'other' IS. The fallback must pick 'other'.
+  ws="$dir/ws"; mkdir -p "$ws/widget" "$ws/other/.git"
+  # Stub git so 'git -C <path> rev-parse --show-toplevel' succeeds iff <path>/.git exists.
+  stubbin="$dir/stubbin"; mkdir -p "$stubbin"
+  cat > "$stubbin/git" <<'GIT'
+#!/usr/bin/env bash
+p=""
+while [ $# -gt 0 ]; do case "$1" in -C) p=$2; shift 2;; *) shift;; esac; done
+[ -d "$p/.git" ]
+GIT
+  chmod +x "$stubbin/git"
+
+  # Redirect /workspaces in the snippet to the fake tree, run it, print resulting cwd.
+  local local_snippet
+  local_snippet=$(printf '%s' "$snippet" | sed "s#/workspaces#$ws#g")
+  # Suffix-match (not full-path equality): the temp root can carry a '//' that cd/pwd
+  # normalizes away; the meaningful assertion is which checkout under ws/ was chosen.
+  resolved=$(PATH="$stubbin:$PATH" bash -c "$local_snippet pwd")
+  case "$resolved" in
+    */ws/other) : ;;
+    *) fail "repo-resolve: fallback should cd into the single git checkout, got '$resolved'" ;;
+  esac
+
+  # And when the slug-derived path IS a git repo, it is used directly (no fallback).
+  mkdir -p "$ws/widget/.git"
+  resolved=$(PATH="$stubbin:$PATH" bash -c "$local_snippet pwd")
+  case "$resolved" in
+    */ws/widget) : ;;
+    *) fail "repo-resolve: derived path should be used directly when it is a git repo, got '$resolved'" ;;
+  esac
+  pass "repo-resolution uses the derived checkout, and falls back to the single /workspaces git checkout"
+}
+
 # ── (q) launch sources login profiles + PATH so the harness binary resolves ──
 
 test_codespace_launch_sources_profiles() {
@@ -847,6 +935,8 @@ test_codespace_configured_harness_launch
 test_codespace_bootstrap_runs
 test_codespace_source_build_fallback
 test_codespace_bootstrap_failure
+test_codespace_lease_cds_into_repo
+test_codespace_repo_resolution_fallback
 test_codespace_launch_sources_profiles
 test_codespace_token_injection
 test_codespace_status_mirror

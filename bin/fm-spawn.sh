@@ -457,6 +457,25 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
+  # 'treehouse get' operates on the current git repo (it runs 'git rev-parse
+  # --show-toplevel' against cwd), so the lease MUST run from inside the codespace's
+  # repo checkout. A 'gh codespace ssh -- <cmd>' shell starts in the session's HOME,
+  # not the checkout, so an uncd'd lease fails with "not in a git repository". The
+  # codespace checks the repo out at /workspaces/<repo-name> (basename of the
+  # owner/repo slug); if that is not a git repo (a non-standard checkout dir), fall
+  # back to the single git checkout under /workspaces/*, and if none is found fail
+  # cleanly here rather than letting treehouse emit its cryptic error. The escaped
+  # $VARs below expand in the remote shell, not locally. This snippet is prepended to
+  # every lease attempt (after the env prefix, before treehouse).
+  _CS_REPO_BASENAME=$(basename "$_CS_SLUG")
+  _CS_CD_REPO="_fmdir=$(shell_quote "/workspaces/$_CS_REPO_BASENAME"); \
+if ! git -C \"\$_fmdir\" rev-parse --show-toplevel >/dev/null 2>&1; then \
+_fmdir=; for _c in /workspaces/*/; do \
+if git -C \"\$_c\" rev-parse --show-toplevel >/dev/null 2>&1; then _fmdir=\${_c%/}; break; fi; \
+done; fi; \
+if [ -z \"\$_fmdir\" ]; then echo 'fm-spawn: no git checkout found under /workspaces in this codespace' >&2; exit 3; fi; \
+cd \"\$_fmdir\" || exit 3;"
+
   # Poll for worktree-ready: lease a worktree (non-interactive; prints only its path,
   # banners to stderr). The lease is durable, so the slot survives until teardown
   # releases it with 'treehouse return', and its path is recorded for teardown safety.
@@ -465,12 +484,13 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   # banner-only line re-acquires the same lease rather than leaking a fresh one.
   _CS_WT=
   for _ in $(seq 1 "${FM_CODESPACE_WT_RETRIES:-10}"); do
-    _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "${_CS_ENV_PREFIX} treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')
+    _CS_WT=$(gh codespace ssh -c "$_CS_NAME" -- "${_CS_ENV_PREFIX} ${_CS_CD_REPO} treehouse get --lease --lease-holder fm-$ID" 2>/dev/null | tail -1 | tr -d '\r')
     [ -n "$_CS_WT" ] && break
     sleep 2
   done
   if [ -z "$_CS_WT" ]; then
     echo "error: could not lease a treehouse worktree in codespace $_CS_NAME" >&2
+    echo "       (the repo must be checked out under /workspaces; expected /workspaces/$_CS_REPO_BASENAME)" >&2
     exit 1
   fi
 
