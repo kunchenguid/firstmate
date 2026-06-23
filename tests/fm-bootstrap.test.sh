@@ -3,6 +3,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -60,7 +61,7 @@ SH
 
 run_bootstrap() {
   local home=$1 fakebin=$2
-  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
 }
 
 test_bootstrap_accepts_treehouse_lease_support() {
@@ -87,5 +88,22 @@ test_bootstrap_reports_treehouse_without_lease_support() {
   pass "bootstrap reports treehouse without get --lease support"
 }
 
+test_bootstrap_reports_tasks_axi_when_available() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/tasks-axi-available"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_bootstrap "$case_dir/home" "$fakebin")
+  [ "$out" = 'TASKS_AXI: available' ] || fail "bootstrap did not report tasks-axi availability: $out"
+  pass "bootstrap reports optional tasks-axi availability"
+}
+
 test_bootstrap_accepts_treehouse_lease_support
 test_bootstrap_reports_treehouse_without_lease_support
+test_bootstrap_reports_tasks_axi_when_available
