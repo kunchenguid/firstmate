@@ -28,6 +28,7 @@
 #   (n) fm-teardown.sh refuses a ship teardown when the codespace worktree is dirty
 #   (o) fm-teardown.sh stops with state intact when treehouse return fails
 #   (p) fm-teardown.sh releases the lease and removes state on success
+#   (t) fm-teardown.sh lease-release SSH carries the profile-sourcing + PATH env prefix
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -665,6 +666,7 @@ SH
 #!/usr/bin/env bash
 md="$dir/mock-data"
 if [ "\${1:-}" = "codespace" ] && [ "\${2:-}" = "ssh" ]; then
+  printf '%s\n' "\$*" >> "\$md/ssh.log"
   case "\$*" in
     *"status --porcelain"*) [ -f "\$md/check-fail" ] && exit 1; cat "\$md/dirty" 2>/dev/null; exit 0 ;;
     *"--not --remotes"*) [ -f "\$md/check-fail" ] && exit 1; cat "\$md/unpushed" 2>/dev/null; exit 0 ;;
@@ -807,6 +809,27 @@ test_clean_teardown_succeeds() {
   pass "ship teardown releases the lease and removes state on success"
 }
 
+# ── (t) lease-release SSH carries the profile-sourcing + PATH env prefix ─────
+
+test_teardown_return_carries_env_prefix() {
+  local dir rc out line
+  dir=$(make_teardown_case "return-prefix" ship)   # clean worktree, return succeeds
+
+  set +e
+  out=$(run_teardown "$dir" task-cs1 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "return-prefix: teardown should succeed (got $rc)\n$out"
+  line=$(grep 'treehouse return' "$dir/mock-data/ssh.log" || true)
+  [ -n "$line" ] || fail "return-prefix: no treehouse-return SSH command was logged"
+  printf '%s\n' "$line" | grep -q '.profile' \
+    || fail "return-prefix: lease-release should source login profiles"
+  printf '%s\n' "$line" | grep -q 'HOME/.local/bin' \
+    || fail "return-prefix: lease-release should put \$HOME/.local/bin on PATH"
+  pass "lease-release SSH carries the profile-sourcing + PATH env prefix"
+}
+
 test_codespace_mode_parses
 test_codespace_yolo_parses
 test_slug_parses
@@ -834,3 +857,4 @@ test_ship_dirty_refuses
 test_ship_check_failure_refuses
 test_return_failure_stops
 test_clean_teardown_succeeds
+test_teardown_return_carries_env_prefix

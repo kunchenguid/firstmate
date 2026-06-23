@@ -35,6 +35,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-codespace-lib.sh
+. "$SCRIPT_DIR/fm-codespace-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -371,24 +373,11 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
   CODESPACE_REMOTE_STATE="${FM_CODESPACE_REMOTE_STATE:-~/firstmate-state}"
 
   # Reusable remote env prefix, prepended to EVERY non-interactive SSH command we
-  # run in the codespace (bootstrap, lease, launch). A `gh codespace ssh -- <cmd>`
-  # shell is non-login and non-interactive: it does not source the user's login
-  # profiles, so install dirs like $HOME/.local/bin (where the Cursor CLI and a
-  # source-built treehouse land) are off PATH, and it carries no git credentials.
-  # The prefix, in order:
-  #   1. sources the login profiles so profile-managed PATH entries appear,
-  #   2. force-adds the standard user bin ($HOME/.local/bin) and Go's bin
-  #      (/usr/local/go/bin, needed by the treehouse source-build fallback below),
-  #   3. injects the Codespace's GitHub token when the company-managed secrets file
-  #      is present, so treehouse's `git fetch origin` (and any later push) can
-  #      authenticate over https.
-  # It is guarded and best-effort: the token block runs ONLY when
-  # /workspaces/.codespaces/shared/.env-secrets exists, so personal Codespaces with
-  # working auth are untouched, and the token value is never printed. It ends with
-  # ';' so it composes cleanly before any following command. The single quotes are
-  # deliberate: every $VAR here must expand in the remote shell, not locally.
-  # shellcheck disable=SC2016
-  _CS_ENV_PREFIX='for _rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zprofile" "$HOME/.zshrc"; do [ -f "$_rc" ] && . "$_rc" >/dev/null 2>&1 || true; done; export PATH="$HOME/.local/bin:/usr/local/go/bin:$PATH"; if [ -f /workspaces/.codespaces/shared/.env-secrets ]; then _cstok=$(grep -E "^GITHUB_TOKEN=" /workspaces/.codespaces/shared/.env-secrets | head -1 | cut -d= -f2- | base64 -d 2>/dev/null || true); if [ -n "$_cstok" ]; then export GITHUB_TOKEN="$_cstok" GITHUB_SERVER_URL="https://github.com"; fi; unset _cstok; fi;'
+  # run in the codespace (bootstrap, lease, launch). Defined once in
+  # bin/fm-codespace-lib.sh so fm-teardown.sh's lease-release uses the identical
+  # string; see that file for the full rationale (login-profile sourcing, PATH
+  # force-add, guarded token injection).
+  _CS_ENV_PREFIX="$FM_CS_ENV_PREFIX"
 
   # Codespace crewmate harness comes from the project's registry bracket
   # ([codespace owner/repo <harness>]); defaults to claude. The named agent must

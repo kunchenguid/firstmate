@@ -38,6 +38,8 @@ SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-codespace-lib.sh
+. "$SCRIPT_DIR/fm-codespace-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -482,9 +484,11 @@ if [ "$MODE" = codespace ] && [ "$KIND" != secondmate ]; then
     fi
   fi
 
-  # Release the durable worktree lease inside the codespace.
+  # Release the durable worktree lease inside the codespace. The env prefix is
+  # required so treehouse resolves on the non-interactive SSH PATH (it may be a
+  # source build in $HOME/.local/bin), exactly as fm-spawn.sh's lease/launch do.
   if [ -n "$CODESPACE" ] && [ -n "$REMOTE_WT" ]; then
-    if gh codespace ssh -c "$CODESPACE" -- "treehouse return --force $REMOTE_WT"; then
+    if gh codespace ssh -c "$CODESPACE" -- "$FM_CS_ENV_PREFIX treehouse return --force $REMOTE_WT"; then
       :
     elif [ "$FORCE" = "--force" ]; then
       echo "warn: treehouse return failed in codespace $CODESPACE for $REMOTE_WT; continuing due to --force (lease may still be held)" >&2
