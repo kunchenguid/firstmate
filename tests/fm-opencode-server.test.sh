@@ -96,6 +96,15 @@ test_helper_visibility_modes() {
   printf '%s\n' "$out" | grep -F 'opencode_desktop=' >/dev/null \
     && fail "web-only visibility unexpectedly reported desktop output"
 
+  out=$(FM_STATE_OVERRIDE="$state" FM_OPENCODE_SERVER_MOCK=1 FM_OPENCODE_SERVER_HOST=0.0.0.0 \
+    OPENCODE_SERVER_USERNAME= OPENCODE_SERVER_PASSWORD= \
+    "$HELPER" start helper-x3 fm-helper-x3 "$worktree" "$brief") \
+    || fail "mock helper start failed for non-loopback host"
+  printf '%s\n' "$out" | grep -F 'opencode_server_username=opencode' >/dev/null \
+    || fail "non-loopback host did not generate a username"
+  printf '%s\n' "$out" | grep -F 'opencode_server_password=' >/dev/null \
+    || fail "non-loopback host did not generate a password"
+
   pass "OpenCode helper records desktop deep links and web URLs without shell openers"
 }
 

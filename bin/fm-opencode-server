@@ -96,6 +96,11 @@ function windowsEnv(name) {
   return line ? line.slice(prefix.length) : "";
 }
 
+function envOrWindows(name) {
+  if (Object.prototype.hasOwnProperty.call(process.env, name)) return process.env[name] || "";
+  return windowsEnv(name);
+}
+
 function wslGatewayAddress() {
   try {
     const route = fs.readFileSync("/proc/net/route", "utf8").split(/\r?\n/);
@@ -122,21 +127,29 @@ function serverHosts(hybrid = isWslWindowsOpenCode()) {
   return { bind: "127.0.0.1", connect: "127.0.0.1", visible: "127.0.0.1" };
 }
 
+function isLoopbackHost(host) {
+  const normalized = String(host || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!normalized) return true;
+  if (normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") return true;
+  if (normalized.startsWith("127.")) return true;
+  return false;
+}
+
 function authHeaders(headers = {}) {
-  const password = REQUEST_AUTH?.password || process.env.OPENCODE_SERVER_PASSWORD || windowsEnv("OPENCODE_SERVER_PASSWORD");
+  const password = REQUEST_AUTH?.password || envOrWindows("OPENCODE_SERVER_PASSWORD");
   if (!password) return headers;
-  const username = REQUEST_AUTH?.username || process.env.OPENCODE_SERVER_USERNAME || windowsEnv("OPENCODE_SERVER_USERNAME") || "opencode";
+  const username = REQUEST_AUTH?.username || envOrWindows("OPENCODE_SERVER_USERNAME") || "opencode";
   return {
     ...headers,
     Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
   };
 }
 
-function serverAuth(hybrid) {
-  const password = process.env.OPENCODE_SERVER_PASSWORD || windowsEnv("OPENCODE_SERVER_PASSWORD");
-  const username = process.env.OPENCODE_SERVER_USERNAME || windowsEnv("OPENCODE_SERVER_USERNAME") || "opencode";
+function serverAuth(hybrid, hosts = serverHosts(hybrid)) {
+  const password = envOrWindows("OPENCODE_SERVER_PASSWORD");
+  const username = envOrWindows("OPENCODE_SERVER_USERNAME") || "opencode";
   if (password) return { username, password, generated: false };
-  if (!hybrid) return undefined;
+  if (!hybrid && isLoopbackHost(hosts.bind)) return undefined;
   return { username, password: crypto.randomBytes(18).toString("base64url"), generated: true };
 }
 
@@ -440,6 +453,7 @@ async function start(taskId, title, worktree, briefFile) {
   const mode = visibility();
 
   if (MOCK) {
+    const auth = serverAuth(false, serverHosts(false));
     fs.writeFileSync(logFile, `mock opencode-server start ${title}\n`);
     console.log("opencode_server_url=http://127.0.0.1:0");
     console.log("opencode_server_pid=0");
@@ -448,6 +462,10 @@ async function start(taskId, title, worktree, briefFile) {
     console.log(`opencode_session_title=${title}`);
     console.log("opencode_session_state=active");
     console.log(`opencode_visibility=${mode.value}`);
+    if (auth?.generated) {
+      console.log(`opencode_server_username=${auth.username}`);
+      console.log(`opencode_server_password=${auth.password}`);
+    }
     const web = openWebSurface({ webUrl: "http://127.0.0.1:0", dryRun: true });
     if (web) {
       console.log(`opencode_web=${web.opened}`);
@@ -465,7 +483,7 @@ async function start(taskId, title, worktree, briefFile) {
 
   const hybrid = isWslWindowsOpenCode();
   const hosts = serverHosts(hybrid);
-  const auth = serverAuth(hybrid);
+  const auth = serverAuth(hybrid, hosts);
   REQUEST_AUTH = auth;
   const port = Number(process.env.FM_OPENCODE_SERVER_PORT || 0) || (await findFreePort(hosts.connect === "127.0.0.1" ? hosts.connect : "127.0.0.1"));
   const serverUrl = `http://${hosts.connect}:${port}`;
