@@ -17,6 +17,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -93,6 +94,9 @@ case "$BACKEND" in
   opencode-server) TOOLS="opencode node no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
   *) TOOLS="tmux node treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
+if [ "$BACKEND" = opencode-server ] && [ -f "$DATA/secondmates.md" ] && grep -Eq '^[[:space:]]*-[[:space:]][^[:space:]]+' "$DATA/secondmates.md"; then
+  TOOLS="tmux $TOOLS"
+fi
 
 if [ "${1:-}" = "install" ]; then
   shift
