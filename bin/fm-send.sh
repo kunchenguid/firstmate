@@ -4,7 +4,7 @@
 #   <selector> may be a bare firstmate window name (fm-xyz), explicit
 #   session:window, or an OpenCode server session id recorded in this home's
 #   state/<id>.meta.
-# Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
+# Special keys instead of text: fm-send.sh <selector> --key Escape   (or Enter, C-c, ...)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

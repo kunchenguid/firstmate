@@ -35,7 +35,7 @@
 #     touch the queue; it only reads the watcher's stdout reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane is escalated only after it has been
+#   - Bounded wedge latency: a stale surface is escalated only after it has been
 #     idle for STALE_ESCALATE_SECS (configurable), rechecked once. A wedged
 #     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
 #     lost. Crewmates are autonomous, so a delayed stale response does not stall
@@ -60,7 +60,7 @@
 #                                   disables. Use sparingly: it overrides the
 #                                   captain-relevant escalation for matching
 #                                   kinds.
-#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
+#          FM_STALE_ESCALATE_SECS   idle seconds before a stale surface escalates
 #                                   as a possible wedge (default 240)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
@@ -302,7 +302,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
+classify_stale() {  # <surface> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win")
   last=$(last_status_line "$state/$task.status")
@@ -345,14 +345,14 @@ classify_unknown() {  # <reason>
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
-stale_marker_record() {  # <window> <state>  — create if absent
+stale_marker_record() {  # <surface> <state>  — create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win")")
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
-stale_marker_remove() {  # <window> <state>
+stale_marker_remove() {  # <surface> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win")")
   rm -f "$state/.subsuper-stale-$key"

@@ -6,11 +6,11 @@
 #   With no harness arg, opencode-server uses opencode; otherwise the harness comes
 #   from fm-harness.sh crew (config/crew-harness, falling back to firstmate's own
 #   harness). A bare adapter name (claude|codex|opencode|pi) overrides it for this
-#   spawn. A non-flag string containing whitespace is treated as a RAW launch
-#   command - the escape hatch for verifying new adapters.
-#   Set FM_BACKEND=opencode-server (or config/backend) to run ordinary opencode
-#   tasks through an API-backed OpenCode server instead of a tmux pane. The default
-#   backend is tmux, and secondmates always use tmux.
+#   spawn. On the tmux backend, a non-flag string containing whitespace is
+#   treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   Set FM_BACKEND=opencode-server (or config/backend(.env)) to run ordinary
+#   opencode tasks through an API-backed OpenCode server instead of a tmux pane.
+#   The default backend is tmux, and secondmates always use tmux.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -27,7 +27,7 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> [backend=<backend>] harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window|session-title> worktree=<path> [session=<opencode-session-id> server=<url>]
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu

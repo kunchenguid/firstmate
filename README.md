@@ -39,7 +39,7 @@ There is no app to install; the whole orchestrator is an `AGENTS.md` file that a
   OpenCode users can opt into `FM_BACKEND=opencode-server` for API-backed OpenCode sessions, with optional OpenCode Desktop new-chat visibility.
 - **Persistent domain supervisors** - route natural-language scopes through `data/secondmates.md` when a domain deserves its own long-lived supervisor.
   Each secondmate has a separate `FM_HOME`, local state, local projects, and its own session lock, while the main first mate still supervises it like any other direct report.
-- **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
+- **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable treehouse or firstmate-owned git worktrees.
   Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
 This is not an agent harness. This is not a skill. This is not a CLI.
@@ -56,6 +56,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 
 # firstmate checks its toolchain (asking your consent before installing anything),
 # clones the project under projects/, and spawns two crewmates in tmux windows
+# (or OpenCode server sessions if you configured that backend)
 # fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
@@ -72,7 +73,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 ```sh
 # 1. a verified agent harness - claude, codex, opencode, or pi
 # 2. git + GitHub auth visible through gh-axi
-# 3. tmux - the default crew backend uses tmux windows (firstmate offers to install it if missing)
+# 3. tmux for the default crew backend, or opencode for FM_BACKEND=opencode-server
 gh-axi api user
 ```
 
@@ -84,7 +85,7 @@ cd firstmate && claude
 ```
 
 That is the whole install.
-On first launch the first mate detects what its toolchain is missing (tmux, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On first launch the first mate detects what its configured backend and toolchain are missing (tmux/treehouse for the default backend, opencode for `opencode-server`, plus no-mistakes, gh-axi, chrome-devtools-axi, and lavish-axi as needed), lists it with the exact install commands, and installs only after you say go.
 
 **Run it inside tmux for the best experience.**
 firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside tmux puts every crewmate window in your own session, one per task, where you can watch the crew work in real time or type into any window to intervene.
@@ -120,7 +121,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
   A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-- **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
+- **Worktrees, not branches in your checkout** - crewmates never touch your clone; the tmux backend uses treehouse pools and the OpenCode server backend uses firstmate-owned git worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
@@ -135,7 +136,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
+- **Restart-proof** - all state lives in recorded backend surfaces, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
@@ -159,8 +160,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one batched, single-line digest prefixed with a sentinel marker |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
-| `fm-send.sh`             | Send one literal line (or `--key Escape`) to a crewmate window                                                      |
-| `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
+| `fm-send.sh`             | Send one literal line (or `--key Escape`) to a crewmate window or OpenCode session                                  |
+| `fm-peek.sh`             | Print a bounded tail of a crewmate pane or OpenCode session                                                         |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return the worktree or retire a secondmate home; protects ship work, requires scout reports, and checks child work |
@@ -183,22 +184,28 @@ When it is unset, the repo root is the home; when it is set, scripts still run f
 Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
 The default crew backend is `tmux`.
-Set `FM_BACKEND=opencode-server`, or write `opencode-server` to local `config/backend`, to run ordinary OpenCode tasks through one OpenCode server per task worktree instead of a tmux pane.
+Set `FM_BACKEND=opencode-server`, write `opencode-server` to local `config/backend`, or put `FM_BACKEND=opencode-server` in local `config/backend.env`, to run ordinary OpenCode tasks through one OpenCode server per task worktree instead of a tmux pane.
 Secondmates still use the tmux path.
 `FM_OPENCODE_VISIBILITY=headless` is the default and starts no UI; `web` records the local server URL without opening a browser; `desktop` opens OpenCode Desktop through `opencode://new-session`; `both` records the web URL and opens Desktop.
 The aliases `terminal`, `attach`, `tui`, `app`, and `chat` intentionally map to Desktop new-chat visibility, not an external terminal.
+Loopback OpenCode servers use no extra auth by default.
+Non-loopback or WSL/Windows hybrid servers use `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD` when present, otherwise firstmate generates per-task basic auth and stores the effective credential only in local gitignored task metadata.
 
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root
-FM_BACKEND=tmux          # tmux or opencode-server; config/backend is also supported
-FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both
+FM_BACKEND=tmux          # tmux or opencode-server; config/backend(.env) is also supported
+FM_OPENCODE_VISIBILITY=headless   # headless, web, desktop, or both; FM_OPENCODE_SERVER_VISIBILITY is an alias
 FM_OPENCODE_DESKTOP_APP=          # optional path to OpenCode.exe for desktop visibility
 FM_OPENCODE_DESKTOP_PROMPT=       # optional prompt template; {url}, {session}, {worktree}, {title}, {task}, {brief}
 FM_OPENCODE_DESKTOP_COMMAND=      # optional custom command template for desktop visibility
 FM_OPENCODE_SERVER_HOST=          # optional bind/connect host override; non-loopback auth is persisted only in local state
 FM_OPENCODE_SERVER_PORT=0         # optional fixed server port; 0 means choose a free port
+FM_OPENCODE_SERVER_START_TIMEOUT_MS=30000   # milliseconds to wait for opencode serve health
+FM_OPENCODE_SERVER_HTTP_TIMEOUT_MS=10000    # milliseconds to wait for each OpenCode API request
+OPENCODE_SERVER_USERNAME=opencode           # optional username for non-loopback OpenCode server auth
+OPENCODE_SERVER_PASSWORD=                   # optional password; generated per task when needed and absent
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -208,11 +215,11 @@ FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard wa
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, extend per harness
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|opencode-server status: busy'   # busy surface signatures, extend per harness/backend
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale surface escalates as a possible wedge
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes

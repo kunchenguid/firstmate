@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the tmux window, clear volatile state, refresh/prune
-# the project's clone for PR-based ship tasks, then print a backlog-refresh
-# reminder.
-# REFUSES if the worktree holds work not on any remote, because treehouse return
-# hard-resets the worktree and kills its processes. A fork counts as a remote,
-# so upstream-contribution PRs pushed to a fork satisfy this in any mode.
+# Tear down a finished task: return the task worktree or retire a
+# secondmate home, close the recorded backend surface, clear volatile state,
+# refresh/prune the project's clone for PR-based ship tasks, then print a
+# backlog-refresh reminder.
+# REFUSES if the worktree holds work not on any remote, because teardown
+# force-removes/resets the task worktree and stops its processes. A fork counts
+# as a remote, so upstream-contribution PRs pushed to a fork satisfy this in any
+# mode.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.

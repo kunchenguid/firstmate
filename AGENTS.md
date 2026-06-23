@@ -36,7 +36,7 @@ Hard rules, in priority order:
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
-   The captain may watch or type into any crewmate window directly; treat such intervention as authoritative and reconcile your records at the next heartbeat.
+   The captain may watch or type into any crewmate surface directly when the backend exposes one; treat such intervention as authoritative and reconcile your records at the next heartbeat.
 5. Report outcomes faithfully.
    If work failed, say so plainly with the evidence.
 
@@ -93,7 +93,7 @@ state/               volatile runtime signals; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a task is always named `fm-<id>`.
+The tmux window or backend-visible session title for a task is always named `fm-<id>`.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -156,7 +156,7 @@ When you verify a new adapter, record its env marker and command name in that sc
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
 First launch in a fresh worktree (or first ever on a machine) may show a trust or bypass-permissions confirmation.
-After every spawn, peek the pane within ~20s; if such a dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter` (or the choice the dialog requires) and verify the brief started processing.
+After every spawn, peek the pane within ~20s; if such a dialog is showing, accept it with `bin/fm-send.sh <selector> --key Enter` (or the choice the dialog requires) and verify the brief started processing.
 
 ### codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
@@ -223,7 +223,7 @@ Reconcile reality with your records before doing anything else:
 10. Handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in recorded backend surfaces, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and task worktrees; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -265,7 +265,7 @@ This idle contract is encoded in the charter brief (section 11), so it travels w
 When a secondmate is created for a domain, the existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule: read `data/backlog.md`, pick the queued items that fit the new scope, and move them with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
 The helper resolves the secondmate home from `data/secondmates.md` and mechanically moves each named item from the main `data/backlog.md` into the secondmate home's `data/backlog.md`, preserving the line and its section, so the item is neither duplicated nor lost.
-It refuses `## In flight` entries because active task ownership also lives in tmux and `state/`.
+It refuses `## In flight` entries because active task ownership also lives in backend sessions and `state/`.
 It is idempotent (an item already in the secondmate backlog is skipped) and refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items: that work stays with the main firstmate (section 7).
 
@@ -378,10 +378,10 @@ bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batc
 Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` applies to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 
-The script resolves the backend (`FM_BACKEND` or local `config/backend`, default `tmux`), resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `backend=`, `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command on the tmux backend only (only for verifying new adapters).
+The script resolves the backend (`FM_BACKEND`, local `config/backend`, or local `config/backend.env`, default `tmux`), resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `backend=`, `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command on the tmux backend only (only for verifying new adapters).
 `opencode-server` supports ordinary OpenCode ship/scout tasks only: it creates a firstmate-owned git worktree under `state/opencode-server-worktrees/`, starts one OpenCode server for that worktree, sends the brief through the OpenCode HTTP API, and records server/session metadata in the task meta.
 Set `FM_OPENCODE_VISIBILITY=headless` (default), `web`, `desktop`, or `both`; `desktop` uses OpenCode Desktop's `opencode://new-session` deep link, and `terminal`/`attach`/`tui`/`app`/`chat` are aliases for that Desktop path rather than external terminal launchers.
-If `FM_OPENCODE_SERVER_HOST` binds to a non-loopback host, the helper uses `OPENCODE_SERVER_PASSWORD` when present or generates per-task basic auth, then records the effective credentials only in local gitignored task metadata so restart/send/peek/watch keep working; never expose an unauthenticated OpenCode server or commit those credentials.
+Loopback OpenCode servers use no extra auth by default; WSL/Windows hybrid launches and explicit non-loopback `FM_OPENCODE_SERVER_HOST` binds use `OPENCODE_SERVER_USERNAME`/`OPENCODE_SERVER_PASSWORD` when present or generate per-task basic auth, then record the effective credentials only in local gitignored task metadata so restart/send/peek/watch keep working; never expose an unauthenticated non-loopback OpenCode server or commit those credentials.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For tmux ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
@@ -584,7 +584,7 @@ This is why fewer, cheaper firstmate turns handle the same fleet.
 
 1. Peek the pane.
 2. Crewmate is waiting on a question its brief already answers: answer in one line via fm-send.
-3. Crewmate is confused or looping: interrupt with the adapter's interrupt key (the window's harness is recorded as `harness=` in `state/<id>.meta`; e.g. `bin/fm-send.sh <window> --key Escape`), then redirect with one corrective line.
+3. Crewmate is confused or looping: interrupt with the adapter's interrupt key (the session's harness is recorded as `harness=` in `state/<id>.meta`; e.g. `bin/fm-send.sh <selector> --key Escape`), then redirect with one corrective line.
 4. Crewmate is genuinely wedged after redirection: exit the agent with the adapter's exit command, relaunch with the same brief plus a `progress so far` note you append to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
