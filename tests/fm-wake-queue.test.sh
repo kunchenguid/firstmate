@@ -274,10 +274,20 @@ test_singleton_start() {
   pid1=$!
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
   pid2=$!
-  sleep 0.5
-  live=0
-  is_live_non_zombie "$pid1" && live=$((live + 1))
-  is_live_non_zombie "$pid2" && live=$((live + 1))
+  # Poll for the actual invariant rather than a fixed delay: the losing watcher
+  # must exit (leaving exactly one live) AND report the existing singleton. Under
+  # load the loser may not have reached its exit within a guessed sleep, which is
+  # what made this assertion flake. Break as soon as it settles (usually <0.5s).
+  live=2
+  for _ in $(seq 1 40); do
+    live=0
+    is_live_non_zombie "$pid1" && live=$((live + 1))
+    is_live_non_zombie "$pid2" && live=$((live + 1))
+    if [ "$live" -eq 1 ] && grep -hq 'watcher: already running pid ' "$out1" "$out2"; then
+      break
+    fi
+    sleep 0.25
+  done
   [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
   grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true

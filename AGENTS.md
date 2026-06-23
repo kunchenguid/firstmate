@@ -57,7 +57,8 @@ README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
-bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning; read each script's header before first use
+systemd/             firstmate.service unit for crash/reboot autostart (section 5); install via bin/fm-install-autostart.sh
+bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, fm-resume.sh (autostart watchdog) and fm-install-autostart.sh; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -201,6 +202,8 @@ Reconcile reality with your records before doing anything else:
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, and treehouse; your conversation memory is a cache.
+
+**Autostart (crash/reboot resilience).** A WSL VM teardown (host sleep, idle timeout, or a Windows Update reboot) kills tmux and every crewmate at once, and nothing relaunched firstmate after the VM came back. `systemd/firstmate.service` closes that gap: a watchdog (`bin/fm-resume.sh --watch`) recreates the persistent `firstmate` tmux session on boot and self-heals if it dies, so the captain re-attaches (`tmux attach -t firstmate`) to a live, state-intact firstmate instead of a cold start. Install/remove with `bin/fm-install-autostart.sh [install|status|uninstall]`; the unit's `KillMode=process` means stopping the service never kills a running firstmate. Pair it with `~/.wslconfig` `vmIdleTimeout=-1` (prevents the idle teardown in the first place; needs `wsl --shutdown` to apply). The watchdog does NOT relaunch crewmates - resuming in-flight work is recovery's job once the captain is back.
 
 ## 6. Project management
 

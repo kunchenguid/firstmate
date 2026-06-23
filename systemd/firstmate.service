@@ -1,0 +1,27 @@
+[Unit]
+Description=Firstmate persistent supervisor session (crash/reboot resilience)
+Documentation=https://github.com/kunchenguid/firstmate
+# Wait for the Windows drive mounts; the orchestrator account config lives under
+# /mnt/c. Non-fatal if the mount unit name differs - the resume script retries.
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/firstmate
+Environment=HOME=/root
+# The watchdog: ensure the firstmate tmux session exists, re-checking forever.
+# On VM boot this recreates the session; if the loop itself ever dies, Restart
+# brings it back. The loop re-execs nothing destructive - it no-ops when the
+# session is already live.
+ExecStart=/root/firstmate/bin/fm-resume.sh --watch
+Restart=always
+RestartSec=10
+# Kill ONLY the watchdog loop on stop/restart, never the tmux server it guards.
+# This makes firstmate survive `systemctl restart firstmate` and decouples the
+# supervisor session's lifetime from this unit: the service is a guardian, not
+# the owner. To fully stop firstmate, kill its tmux session directly.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_ROOT/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
-FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# Grace before an empty-pid lock dir (holder died in the microsecond window
+# between mkdir and writing its pid) is treated as stale and reclaimed. A normal
+# holder death is reclaimed instantly via pid-liveness (kill -0), so this only
+# bounds recovery from that rare window. Kept generous (10s) so that under heavy
+# scheduling delay a live holder mid-write is never mistaken for stale and have
+# its lock stolen - the double-grant that made the concurrency tests flake.
+FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-10}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -36,78 +42,100 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
-fm_lock_remove_stale() {
-  local lockdir=$1 expected_pid=$2 current_pid
-  current_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$current_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$current_pid"; then
-    return 1
-  fi
-  case "$current_pid" in
-    ''|*[!0-9]*)
-      [ "$(fm_path_age "$lockdir")" -ge "$FM_LOCK_STALE_AFTER" ] || return 1
-      ;;
-  esac
-  rm -f "$lockdir/pid" 2>/dev/null || return 1
-  rmdir "$lockdir" 2>/dev/null
-}
+# The lock is a single FILE created with O_EXCL (bash `set -C` noclobber). This
+# replaced an mkdir-based dir lock: plain mkdir is NOT atomic on every target
+# filesystem - on WSL2's filesystem several concurrent mkdir calls were observed
+# to all "succeed" on one path (verified: 4 simultaneous successes in a 20-way
+# barrier race), which silently double-granted the old lock and made the watcher
+# singleton and wake-queue draining race. O_EXCL create IS atomic everywhere we
+# run (Linux, WSL2, macOS) and writes the holder pid in the SAME redirection, so
+# there is never a window where the lock exists with an unknown owner.
+#
+# The O_EXCL create is the ONE and ONLY grant. Reclaiming a dead holder's lock
+# never grants directly: it only frees the lock and lets the next O_EXCL create
+# (one atomic winner) take it. A live holder's lock can never be stolen, because
+# reclaim is gated on the holder pid being dead, and the one path that moves the
+# file (dead-holder reclaim) re-checks what it actually took and restores it via
+# an atomic hardlink if a live holder had reappeared in the gap.
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid
+  local lockfile=$1 pid me steal spid
   FM_LOCK_HELD_PID=
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$lockdir/pid" 2>/dev/null || true
-    rmdir "$lockdir" 2>/dev/null || true
-    return 1
-  fi
+  # Compute the pid in THIS shell, not inside the O_EXCL subshell below (where
+  # BASHPID would be the subshell's). Expanded before the subshell forks, so the
+  # holder pid is written - and matches what fm_lock_release compares against.
+  me=${BASHPID:-$$}
 
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$pid"; then
-    FM_LOCK_HELD_PID=$pid
-    return 1
-  fi
-  case "$pid" in
-    ''|*[!0-9]*)
-      if [ "$(fm_path_age "$lockdir")" -lt "$FM_LOCK_STALE_AFTER" ]; then
-        FM_LOCK_HELD_PID=$pid
+  # If a reclaimable lock is present (dead holder, long-empty file, or a legacy
+  # pre-O_EXCL directory), free it first. A LIVE holder's lock is never freed.
+  if [ -d "$lockfile" ]; then
+    pid=$(cat "$lockfile/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+      FM_LOCK_HELD_PID=$pid
+      return 1
+    fi
+    rm -rf "$lockfile" 2>/dev/null || true
+  elif [ -e "$lockfile" ]; then
+    pid=$(cat "$lockfile" 2>/dev/null || true)
+    if fm_pid_alive "$pid"; then
+      FM_LOCK_HELD_PID=$pid
+      return 1
+    fi
+    # Empty-but-fresh file: tolerate a brief writer gap rather than reclaim.
+    if [ -z "$pid" ] && [ "$(fm_path_age "$lockfile")" -lt "$FM_LOCK_STALE_AFTER" ]; then
+      FM_LOCK_HELD_PID=$pid
+      return 1
+    fi
+    # Dead (or long-empty) holder: move the lock aside and re-check the exact
+    # bytes we moved. If a live holder had replaced it in the gap, restore it
+    # with an atomic hardlink (ln fails if a fresh holder already exists, so we
+    # never clobber one) and back off. Otherwise it is freed.
+    steal="$lockfile.stale.$me"
+    rm -f "$steal" 2>/dev/null || true
+    if mv "$lockfile" "$steal" 2>/dev/null; then
+      spid=$(cat "$steal" 2>/dev/null || true)
+      if [ -n "$spid" ] && fm_pid_alive "$spid"; then
+        ln "$steal" "$lockfile" 2>/dev/null || true
+        rm -f "$steal" 2>/dev/null || true
+        FM_LOCK_HELD_PID=$spid
         return 1
       fi
-      ;;
-  esac
-
-  fm_lock_remove_stale "$lockdir" "$pid" || true
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
-      return 0
+      rm -f "$steal" 2>/dev/null || true
     fi
-    rm -f "$lockdir/pid" 2>/dev/null || true
-    rmdir "$lockdir" 2>/dev/null || true
-    return 1
   fi
 
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  # The one and only grant: an atomic O_EXCL create. Exactly one racer wins;
+  # losers (someone created it first) fall through to report the holder.
+  if ( set -C; printf '%s\n' "$me" > "$lockfile" ) 2>/dev/null; then
+    return 0
+  fi
+  pid=$(cat "$lockfile" 2>/dev/null || true)
   # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
   FM_LOCK_HELD_PID=$pid
   return 1
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockfile=$1
+  while ! fm_lock_try_acquire "$lockfile"; do
     sleep 0.1
   done
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current
+  local lockfile=$1 pid current
   current=${BASHPID:-$$}
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  # Remove only our own lock. A directory is the legacy format; treat its pid
+  # file the same way so an in-flight upgrade releases cleanly.
+  if [ -d "$lockfile" ]; then
+    pid=$(cat "$lockfile/pid" 2>/dev/null || true)
+    [ "$pid" = "$current" ] || return 0
+    rm -rf "$lockfile" 2>/dev/null || true
+    return 0
+  fi
+  pid=$(cat "$lockfile" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  rm -f "$lockdir/pid" 2>/dev/null || true
-  rmdir "$lockdir" 2>/dev/null || true
+  rm -f "$lockfile" 2>/dev/null || true
 }
 
 fm_wake_clean_field() {
