@@ -179,12 +179,11 @@ The first mate drives these; you rarely need to, but they work by hand too.
 ## Built-in skills
 
 Firstmate ships a few built-in skills you invoke by name.
-Claude uses the slash form shown here; codex uses the same names with `$`, such as `$no-mistakes`.
+Claude uses the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
-| `/no-mistakes`     | Validate code changes through the no-mistakes pipeline - review, test, document, lint, push, PR, CI - before they reach upstream              |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 
 ## Configuration
