@@ -317,6 +317,21 @@ if fm_mux_window_exists "$SES" "$W"; then
   exit 1
 fi
 
+# Duplicate-spawn guard for backends that cannot query a window by name (wezterm:
+# fm_mux_window_exists is a structural no-op there). For a non-secondmate task,
+# if this id already has a meta whose recorded window is still alive, refuse
+# rather than create a second tab and overwrite the meta - which would orphan the
+# prior tab+worktree and drop it out of teardown tracking. Secondmate respawn is a
+# deliberate recovery path (it reads home= from the existing meta above), so it is
+# exempt. This complements the fm_mux_window_exists check, which covers tmux.
+if [ "$KIND" != secondmate ] && [ -f "$STATE/$ID.meta" ]; then
+  prev_window=$(grep '^window=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  if [ -n "$prev_window" ] && fm_mux_pane_alive "$prev_window" 2>/dev/null; then
+    echo "error: task $ID already in flight (window $prev_window); tear it down first" >&2
+    exit 1
+  fi
+fi
+
 T=$(fm_mux_new_window "$SES" "$W" "$PROJ_ABS") || { echo "error: failed to create window $W in $SES" >&2; exit 1; }
 if [ "$KIND" != secondmate ]; then
   fm_mux_send_text "$T" 'treehouse get'

@@ -258,14 +258,17 @@ fm_mux_capture() {
   case "$(fm_mux_backend)" in
     tmux) tmux capture-pane -p -t "$handle" -S -"$lines" ;;
     wezterm)
-      # get-text returns the whole viewport, including the blank rows below the
-      # content (tmux's -S -N does not). Trim trailing blank lines before
-      # tailing so "last N lines" means N lines of actual content, matching the
-      # tmux backend - important for stable staleness hashing in fm-watch.
-      # Capture to a variable first so a dead pane (get-text non-zero) propagates
-      # as a non-zero return, like capture-pane on a missing tmux pane.
+      # --start-line -N reaches N lines back into scrollback (negative numbers go
+      # backwards from the top of the viewport), matching tmux's `capture-pane -S
+      # -N` history access - so a deep peek returns real history, not just the
+      # visible viewport. get-text still includes the blank rows below the content
+      # (tmux's -S -N does not), so trim trailing blank lines before tailing so
+      # "last N lines" means N lines of actual content, matching the tmux backend
+      # - important for stable staleness hashing in fm-watch. Capture to a variable
+      # first so a dead pane (get-text non-zero) propagates as a non-zero return,
+      # like capture-pane on a missing tmux pane.
       local out
-      out=$("$_FM_WEZ" cli get-text --pane-id "$(_fm_wez_pane "$handle")" 2>/dev/null) || return 1
+      out=$("$_FM_WEZ" cli get-text --pane-id "$(_fm_wez_pane "$handle")" --start-line "-$lines" 2>/dev/null) || return 1
       printf '%s\n' "$out" \
         | awk '{ a[NR]=$0 } END { n=NR; while (n>0 && a[n] ~ /^[[:space:]]*$/) n--; for (i=1;i<=n;i++) print a[i] }' \
         | tail -n "$lines"
