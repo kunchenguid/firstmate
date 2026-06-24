@@ -178,7 +178,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 
 ## Built-in skills
 
-Firstmate ships a few built-in skills you invoke by name.
+Firstmate ships these built-in skills you invoke by name.
 Claude uses the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
 | Skill              | What it does                                                                                                                                  |
