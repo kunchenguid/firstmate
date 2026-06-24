@@ -1367,6 +1367,46 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   pass "concurrent stale-lock steal yields exactly one winner"
 }
 
+test_lock_live_steal_mutex_is_not_reclaimed() {
+  local dir state lockdir dead holder_file holder out i lockpid stealpid
+  dir=$(make_case lock-live-stealer)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "live steal mutex holder did not start"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir")
+  wait "$holder" || fail "live steal mutex holder failed"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "stale lock was stolen while a live stealer held the mutex: $out" ;;
+  esac
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
+  [ "$lockpid" = "$dead" ] || fail "primary lock changed while live steal mutex was held: $out"
+  [ "$stealpid" = "$(cat "$holder_file")" ] || fail "live steal mutex owner changed: $out"
+  pass "live steal mutex is not reclaimed"
+}
+
 # A lock held by a LIVE pid is never stolen; acquire is a no-op that reports the
 # live holder via FM_LOCK_HELD_PID and leaves the pid file untouched.
 test_lock_does_not_steal_live_lock() {
@@ -1518,6 +1558,7 @@ test_live_stale_watch_lock_is_actionable
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
