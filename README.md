@@ -138,7 +138,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions, tooling, skills, and tracked skill compatibility symlinks and nudges updated secondmates without touching project clones.
   The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Kill the first mate session anytime; the next one reconciles and carries on.

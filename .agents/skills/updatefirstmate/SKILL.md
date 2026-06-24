@@ -1,13 +1,13 @@
 ---
 name: updatefirstmate
-description: Self-update a running firstmate and its secondmates to the latest from origin. Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"). Fast-forwards this firstmate repo's default branch and every secondmate home from origin (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+description: Self-update a running firstmate and its secondmates to the latest from origin. Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"). Fast-forwards this firstmate repo's default branch and every secondmate home from origin (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/, skills, compatibility symlinks, and instructions.
 user-invocable: true
 ---
 
 # updatefirstmate
 
 Self-update firstmate in place.
-Firstmate is its own repo, behind the same no-mistakes gate as any project, so new tracked material (AGENTS.md, bin/, skills) reaches `main` and then sits there until each running firstmate pulls it.
+Firstmate is its own repo, behind the same no-mistakes gate as any project, so new tracked material (AGENTS.md, bin/, skills, and tracked skill compatibility symlinks) reaches `main` and then sits there until each running firstmate pulls it.
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
@@ -27,7 +27,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `nudge-secondmates: <window-targets...>|none`
 
 2. **Re-read AGENTS.md if your own instructions changed.**
-   When the updater printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md, bin/, or skills) just advanced under you.
+   When the updater printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md, bin/, skills, or tracked skill compatibility symlinks) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 

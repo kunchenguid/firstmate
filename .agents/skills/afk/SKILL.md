@@ -72,7 +72,7 @@ separator, 0x1f) — invisible and untypable. This is how firstmate tells a
 daemon escalation apart from a real message in the same pane. The marker
 travels with the message text; it does not rely on harness-level
 typed-vs-injected detection (which is not portable across claude, codex,
-opencode, and pi).
+opencode, pi, and droid).
 
 ## Busy-guard and composer guard
 
@@ -82,12 +82,15 @@ injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
 - **`pane_is_busy`** — the harness shows a busy footer (agent mid-turn).
 - **`pane_input_pending`** — the cursor line holds real unsubmitted text (a
   human's half-typed line, or a previous injection whose Enter was swallowed).
-  The detector **strips the harness's composer box borders first**, so an idle
-  *bordered* composer (claude draws `│ > … │`) is correctly read as empty, not
-  pending. Without this, every idle claude pane looked like pending input and
+  The detector **drops dim/faint ghost text and strips the harness's composer
+  box borders first**, so an idle *bordered* composer (claude draws `│ > … │`)
+  or ghost-only composer is correctly read as empty, not pending.
+  Without border stripping, every idle claude pane looked like pending input and
   the daemon deferred 100% of escalations (incident afk-invx-i5).
-  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border
-  stripping.
+  Without dim/faint stripping, ghost suggestions can look like real typed text
+  and stall delivery (incident composer-robust).
+  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after
+  dim-ghost and border stripping.
 
 Either condition defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
@@ -110,9 +113,10 @@ The digest is typed **once** via `send-keys -l`, then submitted with Enter and
 **verified**: Enter is retried (Enter only, never a retype) until the composer
 clears.
 A submit "landed" only when the composer is confirmed empty afterward, using
-the same corrected, border-aware detector as the composer guard.
-A bordered-empty claude composer is recognized as submitted rather than
-mistaken for a swallowed Enter.
+the same corrected, dim-ghost-aware and border-aware detector as the composer
+guard.
+A ghost-only or bordered-empty claude composer is recognized as submitted
+rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
