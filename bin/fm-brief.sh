@@ -142,6 +142,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
+# Delegation
+You are a full agent session, so delegate parts of this investigation to subagents whenever it genuinely helps, instead of holding everything in your own context.
+Fan out widely for read-only work - recon, codebase search, parallel investigation of separate questions, specialist analysis - since a scout task writes nothing to a shared remote and parallel readers cannot collide.
+Gather their findings and synthesize the report yourself.
+Use judgment: delegate when it clearly helps, do trivial lookups directly.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -235,6 +241,13 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Delegation
+You are a full agent session, so delegate parts of your work to subagents whenever it genuinely helps, instead of holding everything in your own context.
+Fan out for thinking, do the writing yourself: hand off recon, codebase search, research, and specialist review or design opinions - their output stays out of your context and keeps you sharp on a long task.
+You have only this one worktree, so never run subagents that edit files in parallel - they will collide; you make the actual code changes.
+If the task genuinely needs independent parallel changes, that is firstmate's job: append a \`needs-decision\` line saying so and let firstmate split it into separate crewmates.
+Use judgment: delegate when it clearly helps, do trivial work directly.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
