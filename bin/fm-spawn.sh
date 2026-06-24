@@ -23,7 +23,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __DROIDSETTINGS__ absolute path to state/<task-id>.droid-settings.json
-#                  (Droid runtime settings with a task-local Stop hook)
+#                  (Droid runtime settings with a task-local Stop hook and
+#                  disabled co-author trailers)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;

@@ -221,7 +221,7 @@ Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its
 
 No trust dialog was observed in a fresh temporary directory.
 Launch with `--auto high` for autonomous crewmates; do not use `--skip-permissions-unsafe` for normal firstmate dispatch because Droid's high autonomy preserves its safety checks.
-For ship and scout tasks, fm-spawn writes a runtime-only `state/<id>.droid-settings.json` and launches Droid with `--settings` so a Stop hook touches `state/<id>.turn-ended` after each response.
+For ship and scout tasks, fm-spawn writes a runtime-only `state/<id>.droid-settings.json` and launches Droid with `--settings` so a Stop hook touches `state/<id>.turn-ended` after each response and Droid co-author trailers stay disabled.
 Secondmate launches omit the parent turn-end hook, the same as the other adapters.
 Droid discovers project skills from `.factory/skills`, so this repo tracks `.factory/skills` as a symlink to `.agents/skills`; `.claude/skills` remains the Claude compatibility symlink.
 Harness detection uses process ancestry (`droid` or a node wrapper whose args contain `droid`); no stable Droid-specific environment marker was observed.
