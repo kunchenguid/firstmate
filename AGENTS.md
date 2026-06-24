@@ -69,6 +69,7 @@ README.md            public overview and development notes
 .tasks.toml          tracked tasks-axi markdown backend config; drives backlog mutations when a compatible tasks-axi is on PATH (section 10), otherwise inert
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
+.factory/skills      symlink to .agents/skills for droid compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, and fm-update.sh for fast-forward-only self-updates; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -208,6 +209,23 @@ Project trust dialog can appear on the first pi run in any not-yet-trusted direc
 fm-spawn keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse (and pollute the project).
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Environment marker for harness detection: pi sets `PI_CODING_AGENT=true` for its children.
+
+### droid (VERIFIED 2026-06-24, Droid CLI 0.157.1)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `Streaming... (Press ESC to stop)` or `Thinking... (Press ESC to stop)` |
+| Exit command | `/quit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` when the skill is discoverable; otherwise steer with natural language |
+
+No trust dialog was observed in a fresh temporary directory.
+Launch with `--auto high` for autonomous crewmates; do not use `--skip-permissions-unsafe` for normal firstmate dispatch because Droid's high autonomy preserves its safety checks.
+For ship and scout tasks, fm-spawn writes a runtime-only `state/<id>.droid-settings.json` and launches Droid with `--settings` so a Stop hook touches `state/<id>.turn-ended` after each response.
+Secondmate launches omit the parent turn-end hook, the same as the other adapters.
+Droid discovers project skills from `.factory/skills`, so this repo tracks `.factory/skills` as a symlink to `.agents/skills`; `.claude/skills` remains the Claude compatibility symlink.
+Harness detection uses process ancestry (`droid` or a node wrapper whose args contain `droid`); no stable Droid-specific environment marker was observed.
+Resume after exit: `droid --resume [sessionId]` resumes the most recent or named session.
 
 ## 5. Recovery (run at every session start, after bootstrap)
 
@@ -422,7 +440,7 @@ Pooled clones keep their local default refs frozen at clone time and can lag `or
 ### Validate
 
 For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
-Use `/no-mistakes` for claude, `$no-mistakes` for codex; natural language also works.
+Use `/no-mistakes` for claude and droid when the skill is discoverable, `$no-mistakes` for codex, and natural language for any harness where the slash skill is unavailable.
 For example, with claude:
 
 ```sh
@@ -556,7 +574,7 @@ With afk active:
 
 **In-band sentinel marker (the load-bearing detail).** The daemon injects into the same pane the captain types into, so an escalation would otherwise look like a user message and cancel afk the moment it fired.
 Every daemon injection is prefixed with `FM_INJECT_MARK` (ASCII unit separator, 0x1f) — a byte a human would never type at the start of a message.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi).
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection (not portable across claude, codex, opencode, pi, droid).
 
 **Exiting afk (the captain's contract).** When firstmate receives a message while afk is active:
 - Leading marker present → **internal escalation**. Stay afk, process it.

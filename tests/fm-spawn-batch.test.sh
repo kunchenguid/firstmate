@@ -123,6 +123,22 @@ test_fm_projects_override_scopes_projects_path() {
   pass "FM_PROJECTS_OVERRIDE scopes projects/ paths for single-task spawn"
 }
 
+test_explicit_droid_adapter_is_verified() {
+  local home out status expected
+  home="$TMP_ROOT/droid home"
+  mkdir -p "$home/data" "$home/projects/alpha"
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-droid-z9 projects/alpha droid 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
+  expected="error: no brief at $home/data/nope-droid-z9/brief.md"
+  printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
+    || fail "explicit droid adapter did not reach the normal missing-brief check"
+  printf '%s\n' "$out" | grep -F "unknown harness 'droid'" >/dev/null \
+    && fail "explicit droid adapter was treated as unverified"
+  pass "explicit droid adapter is accepted as verified"
+}
+
 test_batch_dispatches_each_pair
 test_single_pair_is_batch
 test_single_mode_unaffected
@@ -130,3 +146,4 @@ test_batch_rejects_non_pair_argument
 test_id_with_slash_is_not_batch
 test_fm_home_scopes_projects_path
 test_fm_projects_override_scopes_projects_path
+test_explicit_droid_adapter_is_verified

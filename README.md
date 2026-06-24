@@ -69,7 +69,7 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 **Prerequisites** (the first mate detects everything else and offers to install it):
 
 ```sh
-# 1. a verified agent harness - claude, codex, opencode, or pi
+# 1. a verified agent harness - claude, codex, opencode, pi, or droid
 # 2. git + GitHub auth
 # 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
 gh auth login
@@ -192,7 +192,7 @@ After creating a secondmate, move existing main-backlog items that you have judg
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
-Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
+Harness support is a table in section 4: claude, codex, opencode, pi, and droid are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
 
 Runtime tuning via environment variables (defaults shown):
 
@@ -207,7 +207,7 @@ FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard wa
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|(Streaming|Thinking)\.\.\..*Press ESC to stop'   # busy-pane signatures, shared by watcher and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
@@ -245,5 +245,6 @@ tests/fm-secondmate.test.sh               # persistent secondmate routing, seedi
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
+[ "$(readlink .factory/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")
 ```

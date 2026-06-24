@@ -528,6 +528,23 @@ test_housekeeping_resumed_stale_cleared() {
   pass "resumed (busy) stale clears its marker without escalating"
 }
 
+test_droid_busy_footer_is_recognized() {
+  local dir state fakebin pane
+  dir=$(make_supercase droid-busy)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"
+  printf 'user prompt\n ⠋ Streaming...  (Press ESC to stop)\n' > "$pane"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" FM_STATE_OVERRIDE="$state" \
+    fm_pane_is_busy "fakepane" \
+    || fail "Droid Streaming busy footer was not recognized"
+  printf 'user prompt\n ⠇ Thinking...  (Press ESC to stop)\n' > "$pane"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" FM_STATE_OVERRIDE="$state" \
+    fm_pane_is_busy "fakepane" \
+    || fail "Droid Thinking busy footer was not recognized"
+  pass "Droid busy footers are recognized"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -1291,6 +1308,7 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_droid_busy_footer_is_recognized
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup

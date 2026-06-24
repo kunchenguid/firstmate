@@ -216,7 +216,7 @@ fetch_once() {
 # (AGENTS.md, which CLAUDE.md symlinks), its skills, and its tooling (bin/).
 changed_instr() {
   local dir=$1 base=$2 p out=""
-  for p in AGENTS.md bin .agents/skills; do
+  for p in AGENTS.md bin .agents/skills .factory/skills; do
     if ! git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
       out="$out${out:+, }$p"
     fi
