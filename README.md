@@ -231,7 +231,9 @@ FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck,
 ## Development
 
 Tracked changes to firstmate itself, including `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
-When supervising live crewmates, keep long validation or build work in the background so watcher wakes can still be handled.
+When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
+A crewmate driving its own `no-mistakes` validation does the opposite: it runs the gate in the foreground and lets each synchronous `no-mistakes axi run` or `no-mistakes axi respond` call return.
+The pipeline owns auto-fix changes; the crewmate authorizes them with `no-mistakes axi respond --action fix --findings <ids>` instead of editing or committing while the run is active.
 Human-authored pull requests targeting `main` must be raised through `git push no-mistakes`; see `CONTRIBUTING.md` for the enforced contributor workflow.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
 The current watcher reliability work keeps the one-shot process model and adds a durable queue, race-proof singleton lock, duplicate self-eviction, and home-scoped arm wrapper.

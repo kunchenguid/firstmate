@@ -24,7 +24,8 @@ Dependency bots are exempt so their automation keeps working, but regular contri
    git push no-mistakes
    ```
 
-6. Run `no-mistakes` to attach to the pipeline, watch findings, and auto-fix or review as needed.
+6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
+   While a run is active, let the pipeline apply authorized fixes instead of editing or committing them by hand.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
