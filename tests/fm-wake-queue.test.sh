@@ -1490,6 +1490,35 @@ test_lock_late_claim_loses_after_recreate() {
   pass "late original claimant cannot claim a recreated lock"
 }
 
+test_lock_paused_mid_acquire_claim_fails_during_steal() {
+  local dir state lockdir out pid
+  dir=$(make_case lock-paused-claim-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    owner=$(fm_lock_owner_dir "$2") || exit 20
+    ln -s "$owner" "$2" || exit 21
+    fm_lock_try_acquire "$2.steal" || exit 22
+    steal_owner=${FM_LOCK_OWNER_DIR:-}
+    if fm_lock_claim "$2" "$owner"; then late=won; else late=lost; fi
+    if fm_lock_try_create "$2" "$steal_owner"; then stealer=won; else stealer=lost; fi
+    pid=$(cat "$2/pid" 2>/dev/null || true)
+    printf "late=%s stealer=%s pid=%s\n" "$late" "$stealer" "$pid"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"late=lost"*) ;;
+    *) fail "paused claimant succeeded while steal mutex was held: $out" ;;
+  esac
+  case "$out" in
+    *"stealer=won"*) ;;
+    *) fail "stealer could not claim after paused claimant backed off: $out" ;;
+  esac
+  pid=${out#*pid=}; pid=${pid%% *}
+  [ -n "$pid" ] || fail "stealer claim did not record a pid: $out"
+  pass "paused mid-acquire claimant backs off to active stealer"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i lock_pid
   dir=$(make_case restart-reused-pid)
@@ -1562,6 +1591,7 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
+test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_guard_warns_on_pending_queue
