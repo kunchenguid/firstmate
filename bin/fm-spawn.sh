@@ -306,7 +306,7 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd -P)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -331,13 +331,16 @@ tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the treehouse subshell. Match the worktree by its invariant `.treehouse`
+  # path component (treehouse always places worktrees under {root}/.treehouse/) rather
+  # than "pane moved away from PROJ_ABS": at window startup the pane can briefly report
+  # a transient cwd (e.g. the project's parent dir) that already differs from PROJ_ABS,
+  # which would record the wrong worktree path.
   for _ in $(seq 1 60); do
     p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
+    case "$p" in
+      */.treehouse/*) WT="$p"; break ;;
+    esac
     sleep 1
   done
   if [ -z "$WT" ]; then
@@ -408,7 +411,10 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  # Name comes from the project arg (e.g. projects/quant-src -> quant-src), not from the
+  # resolved physical path, which can differ when projects/ holds an in-place symlink
+  # (e.g. projects/quant-src -> /mnt/e/Quant/src would otherwise resolve to "src").
+  PROJ_NAME=$(basename "${PROJ%/}")
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
