@@ -322,12 +322,36 @@ if [ "$KIND" != secondmate ]; then
   fm_mux_send_text "$T" 'treehouse get'
   fm_mux_send_enter "$T"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
+  # Detect the treehouse worktree the subshell entered.
+  # Primary signal: the pane's reported cwd moves off the project dir (fast).
+  # On the wezterm backend this depends on the shell emitting OSC 7, which Git
+  # Bash may not do, so once the subshell is up we ALSO print its $PWD into the
+  # pane behind a unique marker and read it back from the pane text - a fallback
+  # that needs no OSC 7. The fallback is wezterm-only so the verified tmux path
+  # (native cwd tracking) stays byte-identical. Whichever resolves first to a
+  # path different from the project dir wins.
+  BACKEND=$(fm_mux_backend)
+  WT_PROBE="__FM_WT_${ID}__"
+  WT_GRACE=${FM_WORKTREE_PROBE_GRACE:-8}
+  for i in $(seq 1 60); do
     p=$(fm_mux_pane_path "$T" 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
+    fi
+    if [ "$BACKEND" = wezterm ] && [ "$i" -ge "$WT_GRACE" ]; then
+      # Re-emit periodically: a probe sent before treehouse finished setting up
+      # runs in the project shell (path == project dir, ignored below); once the
+      # worktree subshell is active a probe prints the worktree path.
+      if [ $(( i % 3 )) -eq 0 ]; then
+        fm_mux_send_text "$T" "printf '%s%s\\n' '$WT_PROBE=' \"\$PWD\""
+        fm_mux_send_enter "$T"
+      fi
+      cand=$(fm_mux_capture "$T" 80 2>/dev/null | sed -n "s/^$WT_PROBE=//p" | tail -1 || true)
+      if [ -n "$cand" ] && [ "$cand" != "$PROJ_ABS" ]; then
+        WT="$cand"
+        break
+      fi
     fi
     sleep 1
   done

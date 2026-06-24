@@ -18,7 +18,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-proc.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|^pi$'
+# pi is anchored (so it does not match substrings like "api"/"raspi") but must
+# also accept the Windows process name pi.exe, matching fm-harness.sh - as a bare
+# basename and as "basename args" (the form holder_alive greps).
+HARNESS_RE='claude|codex|opencode|(^|[\\/])pi(\.exe)?($|[[:space:]])'
 
 harness_pid() {
   local pid comm args base

@@ -99,7 +99,15 @@ done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-mux_present || echo "MISSING: multiplexer (install: 'brew install tmux' on macOS/Linux, or install WezTerm https://wezfurlong.org/wezterm/install/windows.html on Windows)"
+if ! mux_present; then
+  # Emit a token install_cmd / `fm-bootstrap.sh install <token>` understands,
+  # chosen per platform: wezterm on Windows (no tmux port), tmux elsewhere.
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) mux_tool=wezterm ;;
+    *) mux_tool=tmux ;;
+  esac
+  echo "MISSING: $mux_tool (install: $(install_cmd "$mux_tool"))"
+fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)

@@ -185,7 +185,18 @@ fm_mux_new_window() {
       if command -v cygpath >/dev/null 2>&1; then
         wincwd=$(cygpath -w "$cwd" 2>/dev/null || printf '%s' "$cwd")
       fi
-      shell="${FM_MUX_WEZTERM_SHELL:-$(command -v bash || printf '%s' bash)}"
+      # wezterm is a native Windows process; an MSYS shell path like
+      # /usr/bin/bash is not resolvable to it. Convert an auto-detected MSYS
+      # path with cygpath -w (as we do for cwd); leave an explicit
+      # FM_MUX_WEZTERM_SHELL override untouched (the user owns that value).
+      if [ -n "${FM_MUX_WEZTERM_SHELL:-}" ]; then
+        shell=$FM_MUX_WEZTERM_SHELL
+      else
+        shell=$(command -v bash 2>/dev/null || printf '%s' bash)
+        case "$shell" in
+          /*) command -v cygpath >/dev/null 2>&1 && shell=$(cygpath -w "$shell" 2>/dev/null || printf '%s' "$shell") ;;
+        esac
+      fi
       pane=$("$_FM_WEZ" cli spawn --cwd "$wincwd" -- "$shell" --login -i) || return 1
       [ -n "$pane" ] || return 1
       "$_FM_WEZ" cli set-tab-title --pane-id "$pane" "$name" >/dev/null 2>&1 || true
