@@ -260,6 +260,8 @@ tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-pro
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
+tests/fm-spawn-batch.test.sh              # fm-spawn.sh batch dispatch argument routing: id=repo pair parsing, shared --scout, and partial-failure handling
+tests/fm-spawn-window-index.test.sh       # fm-spawn.sh new-window session-targeting fix: next-free-index placement and the occupied-index failure it avoids
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints "heartbeat")
