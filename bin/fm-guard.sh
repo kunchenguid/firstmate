@@ -5,7 +5,7 @@
 # missing or older than FM_GUARD_GRACE seconds, prints a loud warning so the
 # agent sees it in the tool output of whatever it was doing - the one channel
 # every harness has. Normal wake handling (watcher briefly down between a wake
-# and its restart) stays inside the grace window and stays silent.
+# and its re-arm) stays inside the grace window and stays silent.
 # Always exits 0: the guard warns, it never blocks.
 set -u
 

@@ -556,7 +556,7 @@ The `/afk` skill is the explicit trigger: invoking it sets a durable away-mode f
 **Entering afk.** Invoke the `/afk` skill.
 It sets `state/.afk` (durable — recovery re-enters afk if the flag survives a restart), ensures the daemon is running (`nohup bin/fm-supervise-daemon.sh &` if the pid is dead or absent), and acknowledges.
 With afk active:
-- **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher; the singleton lock no-ops a stray arm harmlessly, but the daemon is the single owner.
+- **Do not separately arm the watcher with `fm-watch-arm.sh` or `fm-watch.sh`.** The daemon manages the watcher; the singleton lock no-ops a stray arm harmlessly, but the daemon is the single owner.
 - **`fm-wake-drain.sh` still runs at the start of every escalated firstmate turn** - it is the lossless backstop. The daemon routes; the queue guarantees nothing is lost. The two are complementary, not redundant.
 
 **In-band sentinel marker (the load-bearing detail).** The daemon injects into the same pane the captain types into, so an escalation would otherwise look like a user message and cancel afk the moment it fired.
@@ -599,7 +599,7 @@ This is why fewer, cheaper firstmate turns handle the same fleet.
   That empty composer is the acknowledgement that the submit landed, using the same dim-ghost-aware and border-aware detector so a ghost-only or bordered-empty claude composer counts as submitted rather than a false "swallowed Enter".
   `fm-send.sh` shares this primitive and exits non-zero on a positively-confirmed swallow, so firstmate learns a steer did not land instead of leaving it unsubmitted.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before classification/relay, so the digest text firstmate sees is clean.
-- **Portable singleton lock** - the daemon uses the repo's mkdir-based lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
+- **Portable singleton lock** - the daemon uses the repo's portable lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale` both check the seen-status marker before escalating, so a status escalated by one path is not re-escalated by another in the same digest.
 - **Auto-discovered supervisor pane** - the daemon resolves its injection target from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE` (inherited from the pane that launched it), then a `firstmate:0` fallback with a warning; the resolution source is logged at startup so a wrong-but-resolving fallback is detectable.
 

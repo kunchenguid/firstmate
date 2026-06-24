@@ -6,8 +6,8 @@
 #   stale: <window>       a crewmate pane stopped changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
-# Run as a background task. Re-arm it after handling each wake; duplicate
-# invocations no-op through the watcher singleton lock.
+# Run as a background task. Re-arm after each wake through bin/fm-watch-arm.sh;
+# direct duplicate invocations still no-op through the watcher singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
