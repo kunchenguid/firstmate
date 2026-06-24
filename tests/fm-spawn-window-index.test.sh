@@ -49,8 +49,10 @@ build_session() {
 
 # 1. The source carries the session-targeting fix (guards the literal one-line change).
 test_source_uses_session_target() {
+  # shellcheck disable=SC2016  # single quotes are deliberate: this greps fm-spawn.sh's literal source, not an expansion.
   grep -Fq 'tmux new-window -d -t "$SES:"' "$SPAWN" \
     || fail "fm-spawn.sh must target the session ('\$SES:'), not the bare session/active window"
+  # shellcheck disable=SC2016  # single quotes are deliberate: this greps fm-spawn.sh's literal source, not an expansion.
   if grep -E 'tmux new-window -d -t "\$SES"[^:]' "$SPAWN" >/dev/null 2>&1; then
     fail "fm-spawn.sh still uses the bare-name new-window target"
   fi
