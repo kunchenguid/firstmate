@@ -406,7 +406,7 @@ EOF
       ;;
     droid*)
       cat > "$STATE/$ID.droid-settings.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"includeCoAuthoredByDroid":false,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
       ;;
   esac

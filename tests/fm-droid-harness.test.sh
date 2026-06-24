@@ -80,6 +80,8 @@ test_droid_ship_launch_uses_runtime_stop_hook() {
     || fail "droid ship spawn failed"
 
   [ -f "$settings" ] || fail "droid runtime settings file was not written"
+  grep -F '"includeCoAuthoredByDroid":false' "$settings" >/dev/null \
+    || fail "droid runtime settings did not disable Droid co-author trailers"
   grep -F "touch '$home/state/$id.turn-ended'" "$settings" >/dev/null \
     || fail "droid Stop hook does not touch the task turn-ended marker"
   grep -F "droid --settings '$settings' --auto high" "$log" >/dev/null \
