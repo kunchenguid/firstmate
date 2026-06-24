@@ -23,6 +23,16 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+fm_pid_identity() {
+  local pid=$1 out
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  out=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
 fm_path_mtime() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
@@ -35,6 +45,16 @@ fm_path_age() {
   local path=$1 m
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
+}
+
+fm_lock_clean_known_files() {
+  local lockdir=$1
+  rm -f \
+    "$lockdir/pid" \
+    "$lockdir/fm-home" \
+    "$lockdir/pid-identity" \
+    "$lockdir/watcher-path" \
+    2>/dev/null || true
 }
 
 # Claim a freshly-created (or freshly-reclaimed) lock dir: write our pid, then
@@ -70,7 +90,7 @@ fm_lock_claim() {
 # back, no concurrent acquirer can evict it, so under any number of concurrent
 # fm_lock_try_acquire calls on one lockdir AT MOST ONE returns 0.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_stale
+  local lockdir=$1 pid steal cur rc steal_stale mid_acquire_stale
   FM_LOCK_HELD_PID=
 
   # Fast path: create the lock dir atomically and claim it.
@@ -89,7 +109,9 @@ fm_lock_try_acquire() {
   # written yet). Respect a grace window before treating that as abandoned.
   case "$pid" in
     ''|*[!0-9]*)
-      if [ "$(fm_path_age "$lockdir")" -lt "$FM_LOCK_STALE_AFTER" ]; then
+      mid_acquire_stale=$FM_LOCK_STALE_AFTER
+      [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
+      if [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]; then
         FM_LOCK_HELD_PID=$pid
         return 1
       fi
@@ -129,7 +151,7 @@ fm_lock_try_acquire() {
 
   # Evict the stale dir and reclaim. The recreate mkdir still competes with any
   # fresh fast-path contender; mkdir is atomic, so only one of us creates it.
-  rm -f "$lockdir/pid" 2>/dev/null || true
+  fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
   rc=1
   if mkdir "$lockdir" 2>/dev/null; then
@@ -154,7 +176,7 @@ fm_lock_release() {
   current=${BASHPID:-$$}
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  rm -f "$lockdir/pid" 2>/dev/null || true
+  fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
 }
 

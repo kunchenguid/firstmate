@@ -3,6 +3,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATCH="$ROOT/bin/fm-watch.sh"
+WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
@@ -1366,9 +1367,57 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
-# The watcher self-evicts within one poll when the lock pid stops naming it
-# (a second watcher took over the singleton), and leaves the new holder's lock
-# intact rather than clobbering it on the way out.
+test_lock_empty_pid_uses_minimum_grace() {
+  local dir state lockdir out
+  dir=$(make_case lock-empty-grace)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "empty mid-acquire lock was stolen with zero stale threshold: $out" ;;
+  esac
+  [ -d "$lockdir" ] || fail "empty mid-acquire lock dir was removed during grace"
+  [ ! -e "$lockdir/pid" ] || fail "empty mid-acquire lock gained a pid during grace"
+  pass "empty mid-acquire lock keeps a minimum grace"
+}
+
+test_watch_restart_rejects_reused_pid() {
+  local dir state fakebin out live pid i lock_pid
+  dir=$(make_case restart-reused-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || fail "restart did not replace stale reused-pid lock (got '$lock_pid')"
+  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
+  kill "$pid" "$live" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch restart refuses to signal a reused pid"
+}
+
 test_watcher_self_evicts_on_lock_takeover() {
   local dir state fakebin out pid i lock_pid
   dir=$(make_case self-evict)
@@ -1406,6 +1455,8 @@ test_live_stale_watch_lock_is_actionable
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_does_not_steal_live_lock
+test_lock_empty_pid_uses_minimum_grace
+test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_guard_warns_on_pending_queue
 test_guard_rearms_after_draining_pending_queue

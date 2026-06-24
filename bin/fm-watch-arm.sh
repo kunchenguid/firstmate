@@ -23,6 +23,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 
+watch_lock_matches_pid() {
+  local pid=$1 lock_home lock_path lock_identity current_identity
+  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  [ "$lock_home" = "$FM_HOME" ] || return 1
+  [ "$lock_path" = "$WATCH" ] || return 1
+  [ -n "$lock_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" = "$lock_identity" ]
+}
+
+clear_stale_recorded_watcher_lock() {
+  local lock_home lock_path lock_identity
+  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  [ "$lock_home" = "$FM_HOME" ] || return 0
+  [ "$lock_path" = "$WATCH" ] || return 0
+  [ -n "$lock_identity" ] || return 0
+  fm_lock_clean_known_files "$WATCH_LOCK"
+  rmdir "$WATCH_LOCK" 2>/dev/null || true
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -34,15 +58,19 @@ if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
-    kill -TERM "$lock_pid" 2>/dev/null || true
-    # Wait for it to actually exit before relaunching, so the fresh watcher
-    # either takes a released lock or reclaims a now-dead-pid stale lock instead
-    # of seeing the dying one as a live holder and no-opping.
-    i=0
-    while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-      sleep 0.1
-      i=$((i + 1))
-    done
+    if watch_lock_matches_pid "$lock_pid"; then
+      kill -TERM "$lock_pid" 2>/dev/null || true
+      # Wait for it to actually exit before relaunching, so the fresh watcher
+      # either takes a released lock or reclaims a now-dead-pid stale lock instead
+      # of seeing the dying one as a live holder and no-opping.
+      i=0
+      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+    else
+      clear_stale_recorded_watcher_lock
+    fi
   fi
 fi
 
