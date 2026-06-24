@@ -41,6 +41,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+WATCHER_PID=${BASHPID:-$$}
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
@@ -157,6 +161,16 @@ run_check() {
 }
 
 while :; do
+  # Self-eviction: if the singleton lock no longer names this process, a second
+  # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
+  # down so the rightful singleton continues alone. The EXIT trap's release
+  # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
+  # This makes any duplicate self-resolve within one poll instead of persisting
+  # and doubling every wake.
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
+    exit 0
+  fi
+
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"

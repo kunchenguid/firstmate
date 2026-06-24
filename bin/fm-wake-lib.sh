@@ -37,39 +37,56 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
-fm_lock_remove_stale() {
-  local lockdir=$1 expected_pid=$2 current_pid
-  current_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$current_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$current_pid"; then
-    return 1
-  fi
-  case "$current_pid" in
-    ''|*[!0-9]*)
-      [ "$(fm_path_age "$lockdir")" -ge "$FM_LOCK_STALE_AFTER" ] || return 1
-      ;;
-  esac
-  rm -f "$lockdir/pid" 2>/dev/null || return 1
-  rmdir "$lockdir" 2>/dev/null
-}
-
-fm_lock_try_acquire() {
-  local lockdir=$1 pid
-  FM_LOCK_HELD_PID=
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$lockdir/pid" 2>/dev/null || true
+# Claim a freshly-created (or freshly-reclaimed) lock dir: write our pid, then
+# read it straight back and confirm it is still ours. The read-back is the race
+# arbiter - if a competitor stomped the pid file in between, we lost and must
+# not act as the holder. Returns 0 only when the lock provably names us.
+#
+# mypid is read as ${BASHPID:-$$} directly in this function's (caller's) shell,
+# NOT via $(fm_current_pid): a command substitution forks a subshell whose
+# BASHPID differs, which would record a dead pid and mismatch fm_lock_release's
+# own ${BASHPID:-$$} comparison. This matches the holder pid the caller's shell
+# is identified by.
+fm_lock_claim() {
+  local lockdir=$1 mypid back
+  mypid=${BASHPID:-$$}
+  if ! { printf '%s\n' "$mypid" > "$lockdir/pid"; } 2>/dev/null; then
     rmdir "$lockdir" 2>/dev/null || true
     return 1
   fi
+  back=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$back" = "$mypid" ]
+}
 
+# Single-winner lock acquire, portable (mkdir/rmdir only; no flock).
+#
+# Correctness rests on two facts:
+#   1. `mkdir "$lockdir"` is atomic: between any two successful mkdirs of the
+#      same path the dir must have been removed in between.
+#   2. A live holder's lock dir is never removed - reclaim only ever evicts a
+#      lock whose recorded pid is dead, and re-verifies that deadness while
+#      holding a serialized steal mutex immediately before the rmdir.
+# Together these mean: once an acquirer writes its own (live) pid and reads it
+# back, no concurrent acquirer can evict it, so under any number of concurrent
+# fm_lock_try_acquire calls on one lockdir AT MOST ONE returns 0.
+fm_lock_try_acquire() {
+  local lockdir=$1 pid steal cur rc steal_stale
+  FM_LOCK_HELD_PID=
+
+  # Fast path: create the lock dir atomically and claim it.
+  if mkdir "$lockdir" 2>/dev/null; then
+    fm_lock_claim "$lockdir" && return 0
+    return 1
+  fi
+
+  # Dir exists - someone holds (or held) it.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
+  # Empty / non-numeric pid means a holder is mid-acquire (mkdir done, pid not
+  # written yet). Respect a grace window before treating that as abandoned.
   case "$pid" in
     ''|*[!0-9]*)
       if [ "$(fm_path_age "$lockdir")" -lt "$FM_LOCK_STALE_AFTER" ]; then
@@ -79,20 +96,50 @@ fm_lock_try_acquire() {
       ;;
   esac
 
-  fm_lock_remove_stale "$lockdir" "$pid" || true
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
-      return 0
+  # Stale lock (dead pid, or empty/non-numeric past the grace). Serialize the
+  # destroy-and-recreate through a sibling steal mutex so two stealers can never
+  # evict-and-recreate concurrently - that serialization is what guarantees a
+  # single winner. The steal critical section is a few syscalls, so a steal
+  # mutex older than steal_stale can only belong to a crashed stealer and is
+  # safe to clear. Its threshold is INDEPENDENT of FM_LOCK_STALE_AFTER and never
+  # below 2s: tying it to that knob (which may be tuned to 0) would let a live
+  # stealer's mutex be force-cleared, breaking serialization and re-admitting
+  # the double-winner race.
+  steal_stale=$FM_LOCK_STALE_AFTER
+  [ "$steal_stale" -lt 2 ] && steal_stale=2
+  steal="$lockdir.steal"
+  if ! mkdir "$steal" 2>/dev/null; then
+    if [ "$(fm_path_age "$steal")" -ge "$steal_stale" ]; then
+      rmdir "$steal" 2>/dev/null || true
     fi
-    rm -f "$lockdir/pid" 2>/dev/null || true
-    rmdir "$lockdir" 2>/dev/null || true
+    if ! mkdir "$steal" 2>/dev/null; then
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      return 1
+    fi
+  fi
+
+  # Sole stealer now. Re-read the holder pid immediately before evicting: a
+  # racer may have refreshed it to a live pid since our first read above.
+  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if fm_pid_alive "$cur"; then
+    rmdir "$steal" 2>/dev/null || true
+    FM_LOCK_HELD_PID=$cur
     return 1
   fi
 
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
-  FM_LOCK_HELD_PID=$pid
-  return 1
+  # Evict the stale dir and reclaim. The recreate mkdir still competes with any
+  # fresh fast-path contender; mkdir is atomic, so only one of us creates it.
+  rm -f "$lockdir/pid" 2>/dev/null || true
+  rmdir "$lockdir" 2>/dev/null || true
+  rc=1
+  if mkdir "$lockdir" 2>/dev/null; then
+    fm_lock_claim "$lockdir" && rc=0
+  else
+    # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fi
+  rmdir "$steal" 2>/dev/null || true
+  return "$rc"
 }
 
 fm_lock_acquire_wait() {

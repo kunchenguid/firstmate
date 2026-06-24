@@ -1271,6 +1271,128 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   pass "fm-send exits non-zero when initial text send fails"
 }
 
+# A pid that is guaranteed dead: walk up from a high number until kill -0 fails.
+dead_pid() {
+  local p=999999
+  while kill -0 "$p" 2>/dev/null; do
+    p=$((p + 1))
+  done
+  printf '%s\n' "$p"
+}
+
+# fm_lock_try_acquire is single-winner: N processes racing on one lockdir, each
+# writing its own (live) pid and holding it for the contention window, must
+# yield exactly one success. This is the core race-proofing guarantee. Each
+# contender runs in its own `bash -c` with FM_STATE_OVERRIDE as a command-scoped
+# env prefix (not a subshell var modification), keeping the dataflow clean.
+test_lock_single_winner_under_concurrency() {
+  local dir state lockdir marker i pids pid wins
+  dir=$(make_case lock-concurrency)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/wins"
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "$$" >> "$3"
+        # Stay alive so the held lock names a live pid for the whole window;
+        # otherwise a late contender could legitimately reclaim a dead-pid lock.
+        sleep 1
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
+  pass "concurrent fm_lock_try_acquire yields exactly one winner"
+}
+
+# A genuinely-dead-pid stale lock is reclaimed by a single acquirer.
+test_lock_steals_dead_pid_lock() {
+  local dir state lockdir dead rc newpid
+  dir=$(make_case lock-dead-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer failed to steal a dead-pid stale lock (rc=$rc)"
+  [ "$newpid" != "$dead" ] || fail "stale dead-pid lock was not replaced (still $dead)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  pass "dead-pid stale lock is reclaimed by a single acquirer"
+}
+
+# A lock held by a LIVE pid is never stolen; acquire is a no-op that reports the
+# live holder via FM_LOCK_HELD_PID and leaves the pid file untouched.
+test_lock_does_not_steal_live_lock() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case lock-live-noop)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "live-held lock was acquired instead of refused: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "live holder pid not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "live holder's lock pid was clobbered (got '$lockpid')"
+  pass "live-held lock is not stolen"
+}
+
+# The watcher self-evicts within one poll when the lock pid stops naming it
+# (a second watcher took over the singleton), and leaves the new holder's lock
+# intact rather than clobbering it on the way out.
+test_watcher_self_evicts_on_lock_takeover() {
+  local dir state fakebin out pid i lock_pid
+  dir=$(make_case self-evict)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "watcher did not record its own pid in the lock"
+  # Simulate a second watcher taking over the singleton lock. $$ (the test
+  # runner) is a live pid that is not the watcher.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 60 || fail "watcher did not self-evict after lock takeover"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
+  pass "watcher self-evicts when the lock pid no longer names it"
+}
+
 test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
@@ -1281,6 +1403,10 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
+test_lock_single_winner_under_concurrency
+test_lock_steals_dead_pid_lock
+test_lock_does_not_steal_live_lock
+test_watcher_self_evicts_on_lock_takeover
 test_guard_warns_on_pending_queue
 test_guard_rearms_after_draining_pending_queue
 # Sub-supervisor (fm-supervise-daemon.sh) classifier + batching + housekeeping.
