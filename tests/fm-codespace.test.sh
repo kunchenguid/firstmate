@@ -940,6 +940,7 @@ test_teardown_return_cds_into_repo() {
   cd_part="${line%%treehouse return*}"
   printf '%s\n' "$cd_part" | grep -q 'for _c in /workspaces/\*' \
     || fail "return-cd: lease-release should scan /workspaces/* for the repo checkout before treehouse return"
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is a grep pattern matching the literal cd "$_fmdir".
   printf '%s\n' "$cd_part" | grep -q 'cd "\$_fmdir"' \
     || fail "return-cd: lease-release should cd into the resolved checkout before treehouse return"
   pass "lease-release cds into a /workspaces checkout before treehouse return"
