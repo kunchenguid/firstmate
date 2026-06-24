@@ -1336,6 +1336,37 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_stale_steal_single_winner_under_concurrency() {
+  local dir state lockdir dead marker i pids pid wins
+  dir=$(make_case lock-stale-concurrency)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/wins"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        sleep 1
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
+  pass "concurrent stale-lock steal yields exactly one winner"
+}
+
 # A lock held by a LIVE pid is never stolen; acquire is a no-op that reports the
 # live holder via FM_LOCK_HELD_PID and leaves the pid file untouched.
 test_lock_does_not_steal_live_lock() {
@@ -1385,6 +1416,38 @@ test_lock_empty_pid_uses_minimum_grace() {
   [ -d "$lockdir" ] || fail "empty mid-acquire lock dir was removed during grace"
   [ ! -e "$lockdir/pid" ] || fail "empty mid-acquire lock gained a pid during grace"
   pass "empty mid-acquire lock keeps a minimum grace"
+}
+
+test_lock_late_claim_loses_after_recreate() {
+  local dir state lockdir out
+  dir=$(make_case lock-late-claim)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    owner1=$(fm_lock_owner_dir "$2") || exit 20
+    ln -s "$owner1" "$2" || exit 21
+    touch -h -t 200001010000 "$2" 2>/dev/null || sleep 2
+    if ! fm_lock_try_acquire "$2"; then exit 22; fi
+    before=$(cat "$2/pid" 2>/dev/null || true)
+    if fm_lock_claim "$2" "$owner1"; then late=won; else late=lost; fi
+    after=$(cat "$2/pid" 2>/dev/null || true)
+    current_owner=$(readlink "$2" 2>/dev/null || true)
+    printf "late=%s before=%s after=%s owner_changed=%s\n" "$late" "$before" "$after" "$([ "$current_owner" != "$owner1" ] && echo yes || echo no)"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"late=lost"*) ;;
+    *) fail "late original claimant succeeded after lock recreation: $out" ;;
+  esac
+  case "$out" in
+    *"owner_changed=yes"*) ;;
+    *) fail "stale owner was not replaced before late claim: $out" ;;
+  esac
+  before=${out#*before=}; before=${before%% *}
+  after=${out#*after=}; after=${after%% *}
+  [ -n "$before" ] || fail "recreated lock did not record a pid: $out"
+  [ "$before" = "$after" ] || fail "late claim changed the recreated lock pid: $out"
+  pass "late original claimant cannot claim a recreated lock"
 }
 
 test_watch_restart_rejects_reused_pid() {
@@ -1454,8 +1517,10 @@ test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_stale_steal_single_winner_under_concurrency
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
+test_lock_late_claim_loses_after_recreate
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_guard_warns_on_pending_queue

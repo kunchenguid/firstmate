@@ -43,8 +43,7 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
-  fm_lock_clean_known_files "$WATCH_LOCK"
-  rmdir "$WATCH_LOCK" 2>/dev/null || true
+  fm_lock_remove_path "$WATCH_LOCK" || true
 }
 
 mode=arm
