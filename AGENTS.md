@@ -430,7 +430,7 @@ bin/fm-send.sh fm-<id> '/no-mistakes'
 ```
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
-It fixes auto-fix findings on its own.
+The no-mistakes pipeline fixes auto-fix findings on its own (inside its own worktree); the crewmate advances each gate with `no-mistakes axi respond`, and must never edit or commit code while a run is active.
 When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
@@ -536,8 +536,9 @@ If a guard warning says queued wakes are pending, drain them before doing anythi
 If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
 Watcher liveness is not enough if you are foreground-blocked.
 Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
-This includes your own no-mistakes pipeline, long builds, and any other multi-minute command.
+This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
+A crewmate driving its own `no-mistakes` validation does the opposite: it runs that gate drive in the foreground and drives it synchronously, never backgrounding or idle-waiting on its own validation run.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.

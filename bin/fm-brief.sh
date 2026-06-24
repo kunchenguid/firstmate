@@ -191,7 +191,13 @@ EOF
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
+
+During validation you drive the gates while the pipeline owns the fixes. Run it in the foreground and follow this contract:
+- Never edit or \`git commit\` code yourself while a run is active; the pipeline applies every fix in its own worktree.
+- When a gate shows auto-fix findings, advance it with \`no-mistakes axi respond --action fix --findings <ids>\` (the pipeline applies the fix and re-reviews). Escalate ask-user findings per rule 6.
+- \`no-mistakes axi run\` and \`axi respond\` block synchronously for many minutes (test and CI especially); the pipeline often fixes findings itself with no gate, so when a call returns no \`gate:\` object that is normal - just let it return.
+- Never cancel, abort, re-run, or background the run, and never idle-wait for a background notification: the call is in the foreground and returns on its own.
+
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
