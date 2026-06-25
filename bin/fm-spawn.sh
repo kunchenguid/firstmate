@@ -344,6 +344,22 @@ if [ "$KIND" != secondmate ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
+
+  # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
+  # a real git worktree root, distinct from the project's primary checkout
+  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a treehouse-get
+  # misfire can leave the pane in (or in a subdir of, or a symlink to) the primary
+  # checkout; branching/committing there would tangle the primary onto a feature
+  # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
+  # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P || true)
+  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P || true)
+  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P || true)
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+    echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
+    exit 1
+  fi
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the

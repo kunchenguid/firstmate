@@ -213,6 +213,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+
+**Verify isolation before anything else.** Confirm you are in your own disposable worktree, NOT the primary checkout firstmate operates from. Run \`git rev-parse --show-toplevel\` and confirm it resolves to the treehouse worktree you were launched in (a path under a \`.treehouse/\` pool), not the repo root. A reliable test that you are in a linked worktree: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` resolve to DIFFERENT paths (they are identical in the primary checkout). If it resolves to the primary checkout, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules

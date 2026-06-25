@@ -18,6 +18,30 @@ queue_pending=false
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
+
+# Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
+# firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
+# crewmate's branch/commits landed here instead of in its own isolated worktree,
+# the primary is stranded on a feature branch - surface it loudly on the very next
+# fleet action, the same way the watcher-down banner does. Scoped to the primary
+# only: detached HEAD (linked worktrees, secondmate homes) never trips this.
+tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" || true)
+if [ -n "$tangle_branch" ]; then
+  tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
+  trule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$trule"
+    printf '●  WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH\n'
+    printf "●  %s is on '%s', not its default branch '%s'.\n" "$FM_ROOT" "$tangle_branch" "$tangle_default"
+    printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
+    printf "●  The work is SAFE on the '%s' ref. Restore the primary to '%s':\n" "$tangle_branch" "$tangle_default"
+    printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
+    printf "●  then re-validate '%s' in a proper isolated worktree.\n" "$tangle_branch"
+    printf '●%s\n' "$trule"
+  } >&2
+fi
 
 # Portable mtime; see fm-watch.sh for why the `stat -f || stat -c` fallback breaks on Linux.
 if [ "$(uname)" = Darwin ]; then

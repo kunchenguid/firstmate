@@ -5,7 +5,10 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
-#                 "TASKS_AXI: available".
+#                 "TASKS_AXI: available", "TANGLE: <remediation>".
+#          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
+#          on a feature branch instead of its default branch - a crewmate's work
+#          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
@@ -25,6 +28,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -99,6 +104,14 @@ if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+# Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
+# default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
+# primary only; detached-HEAD worktrees and secondmate homes never trip it.
+tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
+if [ -n "$tangle_branch" ]; then
+  tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
+  echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
+fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

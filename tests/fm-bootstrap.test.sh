@@ -71,7 +71,10 @@ test_bootstrap_reporting() {
     mkdir -p "$case_dir/home"
     fakebin=$(make_fake_toolchain "$case_dir")
     [ "$tasks" = "-" ] || add_tasks_axi "$fakebin" "$tasks"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
+    # it stays inert: this suite pins tool detection, not the tangle guard, and the
+    # ambient checkout (CI runs on a feature branch) must not leak a TANGLE line in.
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP="$lease" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
