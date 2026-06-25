@@ -38,16 +38,19 @@ _fm_proc_winpid() {
 # args to the script. -File reliably executes the whole script, unlike the
 # -Command - stdin form. Returns the script's exit status.
 _fm_proc_run_ps() {
-  local ps tmp winpath rc
+  local ps tmpdir tmp winpath rc
   ps=$(_fm_proc_pwsh) || return 1
-  tmp=$(mktemp 2>/dev/null) || tmp="${TMPDIR:-/tmp}/fm-proc-$$-$RANDOM"
-  tmp="$tmp.ps1"
+  tmpdir=$(mktemp -d 2>/dev/null) || {
+    tmpdir="${TMPDIR:-/tmp}/fm-proc-$$-$RANDOM"
+    (umask 077 && mkdir "$tmpdir") || return 1
+  }
+  tmp="$tmpdir/script.ps1"
   cat > "$tmp"
   winpath="$tmp"
   command -v cygpath >/dev/null 2>&1 && winpath=$(cygpath -w "$tmp" 2>/dev/null || printf '%s' "$tmp")
   "$ps" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$winpath" "$@"
   rc=$?
-  rm -f "$tmp" 2>/dev/null || true
+  rm -rf "$tmpdir" 2>/dev/null || true
   return "$rc"
 }
 
