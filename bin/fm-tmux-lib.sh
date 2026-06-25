@@ -292,6 +292,12 @@ fm_tmux_inject_brief() {  # <target> <brief-file> [<timeout>]
   #   2. kimi (pi-tui) can drop the first Enter(s) during cold start, so Enter is
   #      retried (only — never retyped, which would duplicate the brief) until the
   #      box clears or the window ends.
+  #   3. After a successful submit kimi can replace the composer prompt row with a
+  #      busy/processing view, so the box read is "unknown" rather than "empty"
+  #      even though the brief already left the composer. A busy pane is therefore
+  #      an equally valid submit confirmation — but only when the box is not still
+  #      "pending" (real text on the prompt row), where the Enter was genuinely
+  #      swallowed and must be retried.
   attempts=${FM_INJECT_SUBMIT_RETRIES:-30}
   sleep_s=${FM_INJECT_SUBMIT_SLEEP:-0.5}
   i=0
@@ -300,6 +306,7 @@ fm_tmux_inject_brief() {  # <target> <brief-file> [<timeout>]
     sleep "$sleep_s"
     box=$(fm_tmux_composer_box_state "$target")
     [ "$box" = empty ] && return 0
+    if [ "$box" != pending ] && fm_pane_is_busy "$target"; then return 0; fi
     i=$((i + 1))
     if [ "$i" -ge "$attempts" ]; then
       printf 'error: brief typed but composer never cleared (submit not confirmed) in %s\n' "$target" >&2

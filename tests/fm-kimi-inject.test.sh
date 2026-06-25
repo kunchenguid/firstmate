@@ -160,6 +160,81 @@ test_retries_enter_until_multirow_composer_clears() {
   pass "injection retries Enter until kimi's multi-row composer actually clears"
 }
 
+# Build a fake tmux that models a kimi submit where the composer prompt row is
+# replaced by a busy/processing view once the brief is submitted: after the brief
+# is typed and Enter lands, the box scan no longer shows a prompt glyph (box state
+# reads "unknown"), while the pane tail shows a busy footer. A submit-confirmation
+# that demands box=="empty" would exhaust its retries and falsely abort the spawn;
+# a busy pane is an equally valid confirmation that the brief left the composer.
+make_fake_tmux_kimi_busy() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+DIR="$dir"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *cursor_y*) printf '20\n'; exit 0 ;; esac; done
+    printf 'faketarget\n'; exit 0 ;;
+  capture-pane)
+    shift
+    S=
+    while [ "\$#" -gt 0 ]; do case "\$1" in -S) shift; S=\$1 ;; -E) shift ;; esac; shift; done
+    typed=0; [ -f "\$DIR/typed.txt" ] && typed=1
+    enters=0; [ -f "\$DIR/enters.txt" ] && enters=\$(cat "\$DIR/enters.txt")
+    if [ "\$typed" -eq 1 ] && [ "\$enters" -ge 1 ]; then
+      # Submitted: prompt row replaced by a busy/processing view (no prompt glyph),
+      # so the box scan reads "unknown"; the pane tail shows the busy footer.
+      printf '\\xe2\\xa0\\x8b working...\\n'
+      exit 0
+    fi
+    # Not yet submitted: an empty composer box.
+    printf '\\xe2\\x94\\x82 > \\xe2\\x94\\x82\\n'
+    exit 0 ;;
+  send-keys)
+    shift
+    literal=0; text=
+    while [ "\$#" -gt 0 ]; do
+      case "\$1" in
+        -t) shift ;;
+        -l) literal=1 ;;
+        Enter)
+          n=0; [ -f "\$DIR/enters.txt" ] && n=\$(cat "\$DIR/enters.txt")
+          printf '%s' "\$((n + 1))" > "\$DIR/enters.txt" ;;
+        *) text="\$1" ;;
+      esac
+      shift
+    done
+    if [ "\$literal" -eq 1 ] && [ -n "\$text" ]; then printf '%s' "\$text" > "\$DIR/typed.txt"; fi
+    exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+test_busy_pane_confirms_submit() {
+  local dir fb brief enters
+  dir="$TMP_ROOT/busy"
+  mkdir -p "$dir"
+  fb=$(make_fake_tmux_kimi_busy "$dir")
+  brief="$dir/brief.md"
+  printf 'the brief text' > "$brief"
+
+  PATH="$fb:$PATH" FM_INJECT_SUBMIT_SLEEP=0.05 \
+    fm_tmux_inject_brief "sess:win" "$brief" \
+    || fail "injection should succeed when the pane goes busy after submit"
+
+  [ -f "$dir/typed.txt" ] || fail "brief was never typed"
+  enters=$(cat "$dir/enters.txt" 2>/dev/null || echo 0)
+  # One Enter submits and the pane goes busy; the loop must not keep hammering Enter.
+  [ "$enters" -le 2 ] || fail "Enter kept retrying despite a busy submit confirmation (sent $enters)"
+  pass "busy pane after submit confirms the brief left the composer"
+}
+
 test_single_line_uses_send_keys() {
   local dir fb brief
   dir="$TMP_ROOT/single"
@@ -219,4 +294,5 @@ test_times_out_when_composer_never_ready() {
 test_single_line_uses_send_keys
 test_multi_line_uses_paste_buffer
 test_retries_enter_until_multirow_composer_clears
+test_busy_pane_confirms_submit
 test_times_out_when_composer_never_ready
