@@ -156,6 +156,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 }
 "$WATCH" >"$child_out" &
 child=$!
+child_done=0
 
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
 # until some other watcher legitimately holds the singleton (a startup race), or
@@ -177,22 +178,15 @@ while :; do
     rm -f "$child_out" 2>/dev/null || true
     exit 0
   fi
-  if ! fm_pid_alive "$child"; then
+  if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
     wait "$child"
     rc=$?
+    child_done=1
     if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
       exit 0
     fi
-    # Child exited without becoming the healthy watcher. One last look: a peer may
-    # have come up healthy in the same instant.
-    if healthy_watcher; then
-      report_healthy
-      rm -f "$child_out" 2>/dev/null || true
-      exit 0
-    fi
-    break
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 0.2

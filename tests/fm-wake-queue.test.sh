@@ -1731,6 +1731,36 @@ SH
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
+test_arm_waits_for_peer_beacon_after_child_stands_down() {
+  local dir state fakebin armout peer beater identity status
+  dir=$(make_case arm-peer-startup-race)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  (
+    sleep 1
+    touch "$state/.last-watcher-beat"
+  ) &
+  beater=$!
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=4 "$WATCH_ARM" > "$armout" || status=$?
+  wait "$beater" 2>/dev/null || true
+  [ "$status" -eq 0 ] || fail "arm returned non-zero while peer became healthy (status $status): $(cat "$armout")"
+  grep -F "watcher: healthy pid=$peer" "$armout" >/dev/null || fail "arm did not wait for and report the peer watcher"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "arm waits for a peer watcher beacon after child stands down"
+}
+
 test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   local dir state fakebin armout live armpid status
   dir=$(make_case arm-failed-stale)
@@ -1821,6 +1851,7 @@ test_arm_reports_healthy_for_live_fresh_watcher
 test_arm_starts_and_confirms_fresh_watcher
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
+test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_never_healthy_off_dead_pid_self_heals
 test_guard_warns_on_pending_queue
