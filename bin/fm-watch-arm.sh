@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
-# Safe, home-scoped (re-)arm of the firstmate watcher.
+# Safe, home-scoped (re-)arm of the firstmate watcher, with honest verification.
 #
-# Default (no args): start bin/fm-watch.sh. The watcher is a singleton per
-# FM_HOME, so a second arm no-ops harmlessly when one is already alive. This is
-# the primary re-arm model - just arm, never kill, and let the singleton lock
-# decide.
+# The watcher (bin/fm-watch.sh) is one-shot: it blocks until a wake is due, prints
+# one reason line, and exits. Reliability depends on re-arming through a mechanism
+# that SURVIVES the call and NOTIFIES on exit, so firstmate must run this script as
+# the harness's own tracked background task (e.g. run_in_background). NEVER fire it
+# and forget with a shell `&` inside another call: that backgrounded child is
+# reaped when the call returns, leaving NO watcher running and - worse - a false
+# "already running" off the dying process. That exact mistake silently took
+# supervision down for ~30 minutes.
 #
-# --restart: stop ONLY this FM_HOME's watcher and start a fresh one. It resolves
-# the pid from THIS home's state/.watch.lock and signals exactly that pid, so it
-# can never touch another home's watcher. NEVER use `pkill -f bin/fm-watch.sh`:
-# that pattern matches every firstmate home's watcher (secondmate homes run the
-# same script) and would kill siblings.
+# This script forks the watcher as a tracked child, then VERIFIES the outcome
+# before it settles in. It confirms a watcher process is genuinely alive AND the
+# liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
+# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
+# exactly one unambiguous status line:
+#   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
+#   watcher: healthy pid=<N> (beacon <age>s)             - a genuinely live+fresh watcher already held the lock
+#   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+# It NEVER reports started/healthy off a stale beacon or a dead/reused pid: a
+# stale-beacon or dead-pid holder either self-heals (the fresh child steals the
+# dead lock per the singleton self-eviction/steal path and is confirmed) or this
+# returns the FAILED line. On started/healthy it exits zero; on FAILED it exits
+# non-zero so the failure is loud and a caller can react.
 #
-# Run this exactly like bin/fm-watch.sh - as a background task. It execs the
-# watcher in the foreground, so the harness backgrounds the whole invocation.
+# --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
+# state/.watch.lock) and start a fresh one. It resolves and signals exactly that
+# pid, so it can never touch another home's watcher. NEVER `pkill -f
+# bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
+# (secondmate homes run the same script) and would kill siblings.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +37,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
+BEAT="$STATE/.last-watcher-beat"
+# "Fresh" reuses the guard's threshold so there is one definition of liveness.
+GRACE=${FM_GUARD_GRACE:-300}
+# How long to wait for a freshly forked watcher to acquire the lock and beat.
+CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 
 watch_lock_matches_pid() {
   local pid=$1 lock_home lock_path lock_identity current_identity
@@ -44,6 +64,30 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
   fm_lock_remove_path "$WATCH_LOCK" || true
+}
+
+# A watcher is "healthy" iff the lock names a live process that is genuinely THIS
+# home's watcher (the identity match guards against a recycled/reused pid) AND the
+# liveness beacon is fresh within GRACE. Sets HEALTHY_PID on success. This is the
+# single honesty gate: a dead pid, a reused pid, or a stale beacon all fail it, so
+# this script can never report a watcher that is not really there.
+HEALTHY_PID=
+healthy_watcher() {
+  local pid age
+  HEALTHY_PID=
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  watch_lock_matches_pid "$pid" || return 1
+  age=$(fm_path_age "$BEAT")
+  [ "$age" -lt "$GRACE" ] || return 1
+  HEALTHY_PID=$pid
+  return 0
+}
+
+report_healthy() {
+  local age
+  age=$(fm_path_age "$BEAT")
+  echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
 mode=arm
@@ -73,4 +117,60 @@ if [ "$mode" = restart ]; then
   fi
 fi
 
-exec "$WATCH"
+# If a genuinely live+fresh watcher already holds the lock, do not start a second
+# one - the singleton would no-op anyway. Report it honestly and return success.
+# (--restart skips this: it just stopped this home's watcher and wants a fresh one.)
+if [ "$mode" = arm ] && healthy_watcher; then
+  report_healthy
+  exit 0
+fi
+
+# Start a watcher as a tracked child and confirm it before settling in. The child
+# stays our child for its whole life: we wait on it, so killing this arm (the
+# harness-tracked task) tears the watcher down too, and the watcher's eventual
+# wake exit propagates out so the harness re-notifies firstmate.
+child=
+cleanup_child() {
+  if [ -n "$child" ] && fm_pid_alive "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+}
+trap 'cleanup_child; exit 143' TERM INT
+
+"$WATCH" &
+child=$!
+
+# Verify the outcome: poll until this child is the confirmed healthy watcher, or
+# until some other watcher legitimately holds the singleton (a startup race), or
+# until the child gives up. Only then print the honest line.
+deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+while :; do
+  if healthy_watcher; then
+    if [ "$HEALTHY_PID" = "$child" ]; then
+      echo "watcher: started pid=$child (beacon fresh)"
+      wait "$child"
+      exit $?
+    fi
+    # Another watcher won the singleton; our child stood down. Report the live one.
+    report_healthy
+    wait "$child" 2>/dev/null || true
+    exit 0
+  fi
+  if ! fm_pid_alive "$child"; then
+    # Child exited without becoming the healthy watcher. One last look: a peer may
+    # have come up healthy in the same instant.
+    if healthy_watcher; then
+      report_healthy
+      exit 0
+    fi
+    break
+  fi
+  [ "$(date +%s)" -ge "$deadline" ] && break
+  sleep 0.2
+done
+
+trap - TERM INT
+echo "watcher: FAILED - no live watcher with a fresh beacon"
+cleanup_child
+wait "$child" 2>/dev/null || true
+exit 1

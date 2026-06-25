@@ -436,6 +436,44 @@ test_guard_rearms_after_draining_pending_queue() {
   pass "guard orders watcher re-arm after queued wake drain"
 }
 
+test_guard_banner_leads_when_no_fresh_watcher() {
+  local dir state err first banner_line queue_line
+  dir=$(make_case guard-banner)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  printf 'project=y\n' > "$state/task2.meta"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
+  # No beacon at all → no fresh watcher, beacon "never".
+  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
+  case "$first" in
+    '●'*) ;;
+    *) fail "no-watcher banner is not the first thing the guard prints (got '$first')" ;;
+  esac
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
+  grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
+  grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
+  grep -F 'bin/fm-watch-arm.sh' "$err" >/dev/null || fail "guard banner missing the fix command"
+  banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
+  queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
+  [ -n "$queue_line" ] || fail "guard dropped the queued-wakes warning"
+  [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
+  pass "guard leads with a prominent no-watcher banner before the queued-wakes warning"
+}
+
+test_guard_quiet_when_watcher_fresh() {
+  local dir state err
+  dir=$(make_case guard-fresh)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  [ ! -s "$err" ] || fail "guard warned during the grace window with a fresh watcher: $(cat "$err")"
+  pass "guard stays silent when a fresh watcher is alive and no wakes are queued"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1534,17 +1572,23 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
+  # The honest arm forks the fresh watcher as a tracked child and waits on it, so
+  # the lock now names that child, not the arm invocation. The property is the
+  # same: the stale reused-pid lock is replaced by a genuinely live watcher, which
+  # the arm confirms before reporting it. Wait for that confirmation, not just for
+  # the lock pid to appear (identity and beacon land a beat later).
   i=0
-  while [ "$i" -lt 50 ]; do
-    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-    [ "$lock_pid" = "$pid" ] && break
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ "$lock_pid" = "$pid" ] || fail "restart did not replace stale reused-pid lock (got '$lock_pid')"
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "restart did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
+  grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "restart did not report the fresh watcher it confirmed"
   is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
-  kill "$pid" "$live" 2>/dev/null || true
+  kill "$pid" "$lock_pid" "$live" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "watch restart refuses to signal a reused pid"
@@ -1574,6 +1618,131 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+# Honest arming (fm-watch-arm.sh): verify-then-report. A re-arm must confirm a
+# genuinely live watcher with a fresh beacon before claiming success, and shout
+# FAILED + non-zero when it cannot - never a false "already running".
+
+test_arm_reports_healthy_for_live_fresh_watcher() {
+  local dir state fakebin out armout i wpid status
+  dir=$(make_case arm-healthy)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  # A genuinely live watcher with a fresh beacon already holds the singleton.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  # Arming must confirm the existing watcher and NOT start a second one.
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" > "$armout" || status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit zero for a healthy watcher (status $status)"
+  grep -F "watcher: healthy pid=$wpid" "$armout" >/dev/null || fail "arm did not report the live watcher as healthy"
+  ! grep -qF 'watcher: started' "$armout" || fail "arm started a second watcher behind a healthy one"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "arm reports a live fresh watcher as healthy and exits zero"
+}
+
+test_arm_starts_and_confirms_fresh_watcher() {
+  local dir state fakebin armout i armpid lock_pid
+  dir=$(make_case arm-started)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  # Clean state: no watcher. Arm must fork one and confirm it before reporting.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not report a started watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  # The started line only prints after healthy_watcher passed (live pid + fresh
+  # beacon), so it doubles as proof the beacon was fresh at confirm time.
+  grep -F "watcher: started pid=$lock_pid (beacon fresh)" "$armout" >/dev/null || fail "started line did not name the confirmed live watcher (lock '$lock_pid')"
+  kill -0 "$lock_pid" 2>/dev/null || fail "confirmed-started watcher is not actually alive"
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm starts a watcher and confirms it live before reporting started"
+}
+
+test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
+  local dir state fakebin armout live armpid status
+  dir=$(make_case arm-failed-stale)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  live=$!
+  # A live process holds the lock but is NOT a confirmable watcher (no identity),
+  # and the beacon is stale. The fresh child cannot steal a LIVE lock, so no
+  # watcher can ever be confirmed - the honest answer is FAILED, not healthy.
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm never returned for an unconfirmable watcher"
+  [ "$status" -ne 0 ] || fail "arm exited zero when no fresh watcher could be confirmed"
+  grep -F 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" >/dev/null || fail "arm did not print the FAILED line"
+  ! grep -qF 'watcher: healthy' "$armout" || fail "arm reported healthy off a stale beacon"
+  ! grep -qF 'watcher: started' "$armout" || fail "arm falsely reported started"
+  is_live_non_zombie "$live" || fail "arm killed the unrelated live lock holder"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
+}
+
+test_arm_never_healthy_off_dead_pid_self_heals() {
+  local dir state fakebin armout dead_pid armpid i lock_pid
+  dir=$(make_case arm-dead-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do
+    dead_pid=$((dead_pid + 1))
+  done
+  # A dead pid holds the lock with a fresh-looking leftover beacon and full
+  # identity. A naive "lock pid recorded + beacon fresh" check would call this
+  # healthy; the honest gate must not, because the pid is dead.
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! grep -qF 'watcher: healthy' "$armout" || fail "arm reported healthy off a dead pid"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not self-heal the dead-pid lock into a fresh watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ "$lock_pid" != "$dead_pid" ] && kill -0 "$lock_pid" 2>/dev/null; } || fail "arm did not replace the dead-pid lock with a live watcher (got '$lock_pid')"
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm never reports healthy off a dead pid and self-heals into a confirmed watcher"
+}
+
 test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
@@ -1594,8 +1763,15 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
+# Honest arming: verify-then-report, FAILED + non-zero when unconfirmable.
+test_arm_reports_healthy_for_live_fresh_watcher
+test_arm_starts_and_confirms_fresh_watcher
+test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_arm_never_healthy_off_dead_pid_self_heals
 test_guard_warns_on_pending_queue
 test_guard_rearms_after_draining_pending_queue
+test_guard_banner_leads_when_no_fresh_watcher
+test_guard_quiet_when_watcher_fresh
 # Sub-supervisor (fm-supervise-daemon.sh) classifier + batching + housekeeping.
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
