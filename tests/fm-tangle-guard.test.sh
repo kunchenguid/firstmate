@@ -22,7 +22,7 @@ set -u
 . "$ROOT/bin/fm-tangle-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
-fm_git_identity
+fm_git_identity fmtest fmtest@example.invalid
 
 # A fresh git repo on `main` with one commit. Echoes its path.
 make_repo() {
@@ -132,7 +132,9 @@ test_brief_assertion_precedes_branch() {
     "brief must not claim the primary checkout has identical git dirs"
   iso=$(grep -n 'launched in primary checkout, not an isolated worktree' "$brief" | head -1 | cut -d: -f1)
   br=$(grep -n 'git checkout -b fm/' "$brief" | head -1 | cut -d: -f1)
-  [ -n "$iso" ] && [ -n "$br" ] || fail "brief missing assertion ($iso) or branch step ($br)"
+  if [ -z "$iso" ] || [ -z "$br" ]; then
+    fail "brief missing assertion ($iso) or branch step ($br)"
+  fi
   [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the branch step (line $br)"
   pass "fm-brief: ship brief asserts worktree isolation before the branch step"
 }

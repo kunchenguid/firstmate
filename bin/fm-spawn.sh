@@ -354,10 +354,19 @@ if [ "$KIND" != secondmate ]; then
   # checkout; branching/committing there would tangle the primary onto a feature
   # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
   # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
-  wt_real=$(cd "$WT" 2>/dev/null && pwd -P || true)
-  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P || true)
+  wt_real=
+  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
+    wt_real=
+  fi
+  proj_real=
+  if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
+    proj_real=
+  fi
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P || true)
+  wt_top_real=
+  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
+    wt_top_real=
+  fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
     exit 1
