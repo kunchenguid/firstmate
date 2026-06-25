@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-afk-inject-e2e.test.sh — private-socket end-to-end test for the afk
-# daemon's injection path. Exercises the two scenarios that afk-mode dogfooding
-# structurally CANNOT reach, because in afk mode nobody is typing:
+# tests/fm-afk-inject-e2e.test.sh - private-socket end-to-end test for the afk
+# daemon's injection path. It covers three operator-visible injection contracts:
 #
 #   Scenario A (human-partial-input): a partial line is typed into the
 #     supervisor pane with NO Enter, then an escalation fires. The daemon must
@@ -10,7 +9,11 @@
 #
 #   Scenario B (swallowed-Enter): the first Enter the daemon sends is dropped.
 #     The daemon must retry Enter (NOT retype the digest) and deliver exactly
-#     ONE clean submission — no concatenation, no duplicate.
+#     ONE clean submission: no concatenation, no duplicate.
+#
+#   Scenario C (normal digest): no human input and no swallowed Enter.
+#     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
+#     single-line digest with no duplicate or spurious user submission.
 #
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the

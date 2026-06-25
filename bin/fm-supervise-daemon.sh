@@ -706,7 +706,7 @@ trim_log() {
 
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
-# classifiers above are sourceable for unit tests (tests/fm-wake-queue.test.sh).
+# classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
 # ============================================================================
 
 fm_super_main() {
