@@ -136,9 +136,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
      && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
     printf 'empty'; return 0
   fi
-  # Just a bare prompt glyph = empty composer (idle).
+  # Just a bare prompt glyph = empty composer (idle). Codex uses `›` (U+203A);
+  # missing it caused post-submit idle panes to look pending and report a false
+  # "Enter swallowed" after the dim suggestion text was stripped.
   case "$stripped" in
-    '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    '>'|'❯'|'›'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
   # A busy footer landing on the cursor line is not pending input.
   if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then

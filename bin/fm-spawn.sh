@@ -35,6 +35,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -344,6 +346,16 @@ if [ "$KIND" != secondmate ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
+  # cwd can flip before the new shell has drawn a prompt. Wait briefly for a
+  # readable idle/busy line before typing the agent launch, otherwise the launch
+  # text can be swallowed during the treehouse handoff while spawn still reports
+  # success.
+  for _ in $(seq 1 20); do
+    state=$(fm_tmux_composer_state "$T")
+    [ "$state" = empty ] && break
+    fm_pane_is_busy "$T" && break
+    sleep 0.2
+  done
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -439,8 +451,16 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
-sleep 0.3
-tmux send-keys -t "$T" Enter
+verdict=$(fm_tmux_submit_core "$T" "$LAUNCH" 3 0.4 0.3)
+case "$verdict" in
+  pending)
+    echo "error: launch command was not submitted to $T (Enter swallowed; launch text left in composer)" >&2
+    exit 1
+    ;;
+  send-failed)
+    echo "error: launch command was not sent to $T (tmux send-keys failed)" >&2
+    exit 1
+    ;;
+esac
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

@@ -125,6 +125,22 @@ test_dim_ghost_only_composer_is_not_pending() {
   pass "fm_pane_input_pending: a dim ghost-only composer is NOT pending"
 }
 
+test_codex_bold_prompt_with_dim_suggestion_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/codex-bold-ghost"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # Codex idle composer: normal/bold prompt glyph plus a dim suggestion. The
+  # root cause of the false "Enter swallowed" was that ghost stripping left the
+  # prompt glyph `›`, but bare-prompt detection did not know that glyph.
+  printf '\033[1m\xe2\x80\xba\033[0m \033[2mExplain this codebase\033[0m\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "codex bold prompt plus dim suggestion falsely read as pending"
+  fi
+  pass "fm_pane_input_pending: codex bold › plus dim suggestion is NOT pending"
+}
+
 test_dim_ghost_inside_bordered_composer_is_not_pending() {
   local dir fb capture
   dir="$TMP_ROOT/ghost-bordered"; mkdir -p "$dir"
@@ -220,6 +236,7 @@ test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_dim_ghost_only_composer_is_not_pending
+test_codex_bold_prompt_with_dim_suggestion_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
