@@ -52,9 +52,10 @@
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
-#          FM_SUPERVISOR_TARGET     supervisor tmux target (override; otherwise
-#                                   auto-discovered from TMUX_PANE, then
-#                                   firstmate:0 fallback)
+#          FM_SUPERVISOR_TARGET     supervisor pane (tmux target, or
+#                                   wezterm:<pane_id>); override, otherwise
+#                                   auto-discovered from TMUX_PANE / WEZTERM_PANE,
+#                                   then firstmate:0 fallback
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the

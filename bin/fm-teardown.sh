@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the tmux window, clear volatile state, refresh/prune
+# secondmate home, kill the multiplexer window, clear volatile state, refresh/prune
 # the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work not on any remote, because treehouse return
