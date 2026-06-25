@@ -147,6 +147,7 @@ cleanup_child() {
   fi
   [ -n "$child_out" ] && rm -f "$child_out" 2>/dev/null || true
 }
+trap 'cleanup_child; exit 129' HUP
 trap 'cleanup_child; exit 143' TERM INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
@@ -197,7 +198,7 @@ while :; do
   sleep 0.2
 done
 
-trap - TERM INT
+trap - HUP TERM INT
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 cleanup_child
 wait "$child" 2>/dev/null || true

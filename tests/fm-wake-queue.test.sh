@@ -1678,6 +1678,36 @@ test_arm_starts_and_confirms_fresh_watcher() {
   pass "arm starts a watcher and confirms it live before reporting started"
 }
 
+test_arm_hup_cleans_child_and_temp_output() {
+  local dir state fakebin armout i armpid lock_pid status
+  dir=$(make_case arm-hup-cleanup)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  i=0
+  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
+  pass "arm cleans child watcher and temp output on HUP"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
@@ -1789,6 +1819,7 @@ test_watcher_self_evicts_on_lock_takeover
 # Honest arming: verify-then-report, FAILED + non-zero when unconfirmable.
 test_arm_reports_healthy_for_live_fresh_watcher
 test_arm_starts_and_confirms_fresh_watcher
+test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_never_healthy_off_dead_pid_self_heals
