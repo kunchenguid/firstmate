@@ -13,7 +13,8 @@
 # never changes a line's text, never writes into a project (it refuses a home
 # that is not a firstmate home), and is idempotent: a key already present in the
 # secondmate backlog is reported and skipped, so re-running converges. If any key
-# matches neither backlog, nothing is moved. See AGENTS.md sections 6-7.
+# matches neither backlog, nothing is moved. See AGENTS.md project management
+# and task lifecycle.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 set -eu
 

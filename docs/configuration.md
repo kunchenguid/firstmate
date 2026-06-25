@@ -33,6 +33,8 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
+`FM_ROOT_OVERRIDE` remains supported as the old whole-root override when `FM_HOME` is unset.
+`FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
 
 ## Harness support
 
@@ -51,6 +53,11 @@ Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root
+FM_ROOT_OVERRIDE=        # legacy whole-root override when FM_HOME is unset
+FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
+FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
+FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
+FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -70,11 +77,19 @@ FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
+FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that escalates daemon signal/stale/scan output
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
+FM_CRASH_THRESHOLD=10              # watcher crashes allowed inside FM_CRASH_WINDOW before daemon backoff
+FM_CRASH_WINDOW=60                 # seconds in the crash-loop detection window
+FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash threshold
+FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
+FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
+FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
