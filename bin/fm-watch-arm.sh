@@ -145,7 +145,9 @@ cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
   fi
-  [ -n "$child_out" ] && rm -f "$child_out" 2>/dev/null || true
+  if [ -n "$child_out" ]; then
+    rm -f "$child_out" 2>/dev/null || true
+  fi
 }
 trap 'cleanup_child; exit 129' HUP
 trap 'cleanup_child; exit 143' TERM INT
