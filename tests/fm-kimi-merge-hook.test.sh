@@ -36,7 +36,7 @@ test_appends_stop_hook_to_plain_config() {
   "$MERGE" "$config" "$turnend" || fail "merge failed on plain config"
 
   grep -qF 'event = "Stop"' "$config" || fail "Stop event missing"
-  grep -qF "command = \"touch $turnend\"" "$config" || fail "Stop command missing"
+  grep -qF "command = \"touch '$turnend'\"" "$config" || fail "Stop command missing"
   grep -qF '[[hooks]]' "$config" || fail "[[hooks]] section missing"
   pass "appends Stop hook to a plain config"
 }
@@ -116,7 +116,7 @@ EOF
   "$MERGE" "$config" "$turnend" || fail "merge failed with existing different Stop hook"
   hooks_count=$(grep -cF '[[hooks]]' "$config")
   [ "$hooks_count" -eq 2 ] || fail "expected two [[hooks]] blocks, got $hooks_count"
-  grep -qF "command = \"touch $turnend\"" "$config" || fail "new touch command missing"
+  grep -qF "command = \"touch '$turnend'\"" "$config" || fail "new touch command missing"
   pass "adds a Stop hook when an existing Stop hook has a different command"
 }
 

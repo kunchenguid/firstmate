@@ -188,9 +188,32 @@ test_copied_config_contains_stop_hook() {
 
   grep -qF 'event = "Stop"' "$home/state/test-id.kimi-home/config.toml" \
     || fail "Stop event missing in copied config"
-  grep -qF "command = \"touch $home/state/test-id.turn-ended\"" "$home/state/test-id.kimi-home/config.toml" \
+  grep -qF "command = \"touch '$home/state/test-id.turn-ended'\"" "$home/state/test-id.kimi-home/config.toml" \
     || fail "Stop command missing or wrong turnend path"
   pass "copied config.toml contains the Stop hook"
+}
+
+test_symlinked_source_config_is_copied_not_followed() {
+  local home fb out worktree real
+  home="$TMP_ROOT/symcfg"
+  worktree="$home/wt"
+  mkdir -p "$worktree" "$home/captain/.kimi-code"
+  real="$home/dotfiles/config.toml"
+  mkdir -p "$home/dotfiles"
+  printf 'theme = "dark"\n' > "$real"
+  ln -s "$real" "$home/captain/.kimi-code/config.toml"
+  make_home "$home"
+  fb=$(make_fake_tmux "$home" testsession "$worktree")
+
+  out=$(run_spawn "$home" "$fb") || fail "spawn failed: $out"
+
+  [ ! -L "$home/state/test-id.kimi-home/config.toml" ] \
+    || fail "config.toml is a symlink (must be a standalone copy)"
+  grep -qF 'event = "Stop"' "$home/state/test-id.kimi-home/config.toml" \
+    || fail "Stop hook missing from per-task config"
+  grep -qF 'event = "Stop"' "$real" \
+    && fail "captain's real config was mutated through the symlink"
+  pass "symlinked source config is copied, not written through"
 }
 
 test_spawn_fails_when_kimi_code_home_missing() {
@@ -215,4 +238,5 @@ test_spawn_fails_when_kimi_code_home_missing() {
 test_launch_template_is_kimi_yolo
 test_per_task_home_symlinks_everything_except_config
 test_copied_config_contains_stop_hook
+test_symlinked_source_config_is_copied_not_followed
 test_spawn_fails_when_kimi_code_home_missing

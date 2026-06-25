@@ -465,7 +465,7 @@ EOF
         [ -e "$entry" ] || continue
         name=$(basename "$entry")
         if [ "$name" = "config.toml" ]; then
-          cp -a "$entry" "$KIMI_HOME/config.toml"
+          cat "$entry" > "$KIMI_HOME/config.toml"
         else
           ln -s "$entry" "$KIMI_HOME/$name"
         fi
