@@ -37,7 +37,8 @@ When it is unset, the repo root is the home; when it is set, scripts still run f
 ## Harness support
 
 claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
-The adapter tables (busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks) live in firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (harness adapters).
+The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
+Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 
 ## Toolchain
 
