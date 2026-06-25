@@ -224,9 +224,13 @@ $RULE1
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree and keep its content in sync with what your change actually did.
+Only create \`AGENTS.md\`/\`CLAUDE.md\` (when neither exists), or add a new section to one that already exists, when the task above explicitly asks you to (e.g. "record this in AGENTS.md", "update project memory") - never on your own judgment that something is durable knowledge worth keeping.
+
+# Commit and PR conventions
+Use a conventional-commit-style subject for every commit you make (\`feat: ...\`, \`fix: ...\`, \`perf: ...\`, \`chore: ...\`, \`refactor: ...\`, etc. - pick the type that matches the change).
+Where you open the PR yourself, give it the same conventional-commit-style title; where a tool opens it for you (e.g. the no-mistakes pipeline), the title typically carries through your commit message, so the same care applies either way.
+Keep the PR description concise and clear: the essential what and why, plus key evidence (test output, before/after numbers) when relevant - do not restate the task verbatim or pad a small change with structure it doesn't need.
 
 $DOD
 EOF

@@ -302,9 +302,9 @@ Project `AGENTS.md` files are created and updated by crewmates inside their work
 Firstmate ensures this through the brief contract and `bin/fm-ensure-agents-md.sh`; firstmate does not perform the write itself.
 Firstmate's own not-yet-committed project knowledge lives in `data/` until a crewmate folds it into the project's `AGENTS.md`.
 
-Create a project's `AGENTS.md` lazily on first need.
-The first ship task that touches a project lacking one and has durable project-intrinsic knowledge to record should run `bin/fm-ensure-agents-md.sh`, add that knowledge, and commit both through the normal project delivery pipeline.
-Do not eagerly backfill every project.
+A crewmate keeps an existing `AGENTS.md`/`CLAUDE.md` in sync with reality as a matter of course - that is maintenance, not unprompted creation.
+Creating `AGENTS.md`/`CLAUDE.md` where neither exists, or adding a new section to one that does, happens only when the brief's task explicitly asks for it.
+A crewmate must not create or extend project memory on its own judgment that something is "durable knowledge worth keeping": when firstmate itself judges that a task produced durable project-intrinsic knowledge worth recording, say so explicitly in the brief's task description (e.g. "record `<fact>` in `AGENTS.md`") rather than leaving it to crewmate discretion.
 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
@@ -683,7 +683,8 @@ Secondmates inherit this automatically: each secondmate home carries the same `A
 Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the harness-appropriate no-mistakes validation pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
-Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` and keep it in sync whenever the project already has agent-memory files, but only create `AGENTS.md`/`CLAUDE.md` or add a new section to one that exists when the task text explicitly asks for it - if you want a task to record a learning, say so in the task description instead of relying on crewmate judgment.
+Ship briefs also state the commit and PR conventions every mode shares: conventional-commit-style commit messages and PR titles (`feat:`, `fix:`, `perf:`, `chore:`, `refactor:`, etc.), and a concise PR description with the essential what/why and key evidence rather than restated task text or unneeded structure.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
