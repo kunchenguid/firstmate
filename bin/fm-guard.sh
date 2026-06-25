@@ -57,16 +57,16 @@ fi
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
 if [ "$watcher_fresh" = false ]; then
   if "$queue_pending"; then
-    fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
+    fix='After draining queued wakes, start durable supervision: run bin/fm-watch-loop.sh as the harness-tracked background task (or bin/fm-watch-arm.sh only if the harness auto-rearms after every wake).'
   else
-    fix='Re-arm it NOW: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
+    fix='Start durable supervision NOW: run bin/fm-watch-loop.sh as the harness-tracked background task (or bin/fm-watch-arm.sh only if the harness auto-rearms after every wake).'
   fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
     printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
-    printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
+    printf '●  Use bin/fm-watch-loop.sh for continuous supervision; bin/fm-watch-arm.sh remains the one-shot confirm-and-wait helper.\n'
     printf '●  %s\n' "$fix"
     printf '●%s\n' "$rule"
   } >&2

@@ -73,7 +73,7 @@ tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
-FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then "heartbeat")
+FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-loop.sh # watcher loop smoke test (prints start status, then heartbeats until stopped)
 ```
 
 ## Questions

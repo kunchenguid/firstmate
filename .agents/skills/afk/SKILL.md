@@ -49,7 +49,7 @@ No `/back` is needed. The first genuine message is the return signal:
   distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
   any pending escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake
-  responsiveness (arm `bin/fm-watch-arm.sh`).
+  responsiveness (start `bin/fm-watch-loop.sh`).
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
   is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this

@@ -10,6 +10,7 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
+WATCH_LOOP="$ROOT/bin/fm-watch-loop.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
@@ -107,9 +108,9 @@ test_guard_warnings() {
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
   grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
-  grep -F 'bin/fm-watch-arm.sh' "$err" >/dev/null || fail "guard banner missing the fix command"
+  grep -F 'bin/fm-watch-loop.sh' "$err" >/dev/null || fail "guard banner missing the continuous fix command"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, re-arm the watcher' "$err" >/dev/null || fail "guard did not order re-arm after drain"
+  grep -F 'After draining queued wakes, start durable supervision' "$err" >/dev/null || fail "guard did not order durable supervision after drain"
   ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
   banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
   queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
@@ -603,6 +604,59 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_watch_loop_rearms_after_each_signal() {
+  local dir state fakebin loopout looppid i sig_count lock_pid
+  dir=$(make_case watch-loop-rearm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  loopout="$dir/watch-loop.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_LOOP" > "$loopout" 2>&1 &
+  looppid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watch-loop: started pid=' "$loopout" 2>/dev/null && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watch-loop: started pid=' "$loopout" || fail "watch loop did not start"
+
+  printf 'in-progress: first\n' > "$state/task.status"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    sig_count=$(grep -c '^signal:' "$loopout" 2>/dev/null || true)
+    [ "$sig_count" -ge 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "${sig_count:-0}" -ge 1 ] || fail "watch loop did not surface the first signal"
+
+  # The regression: after the first one-shot watcher exits, the loop must have
+  # started another live watcher before the next status write.
+  i=0
+  while [ "$i" -lt 80 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$lock_pid" ] && [ "$lock_pid" != "$looppid" ] && is_live_non_zombie "$lock_pid" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "${lock_pid:-}" ] && is_live_non_zombie "$lock_pid" || fail "watch loop did not re-arm a live watcher after the first signal"
+
+  printf 'done: second\n' >> "$state/task.status"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    sig_count=$(grep -c '^signal:' "$loopout" 2>/dev/null || true)
+    [ "$sig_count" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "${sig_count:-0}" -ge 2 ] || fail "watch loop did not surface the second signal after re-arming"
+
+  kill "$looppid" 2>/dev/null || true
+  wait "$looppid" 2>/dev/null || true
+  pass "watch loop continuously re-arms and surfaces multiple status signals"
+}
+
 test_singleton_start
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
@@ -623,3 +677,4 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_watch_loop_rearms_after_each_signal
