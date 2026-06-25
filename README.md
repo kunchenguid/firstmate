@@ -30,7 +30,7 @@ But the moment you want three project tasks done in parallel - fixes, investigat
 firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
-There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
+There is no app to install; the orchestrator is `AGENTS.md`, bundled skills, and helper scripts that any terminal coding agent can follow.
 
 - **One liaison** - you never talk to a worker agent.
   The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
@@ -41,7 +41,7 @@ There is no app to install; the whole orchestrator is an `AGENTS.md` file that a
 - **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
   Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
-This is not an agent harness. This is not a skill. This is not a CLI.
+This is not an agent harness. This is not a single skill. This is not a CLI.
 
 This is.. a directory that turns any agent into your firstmate, and you the captain.
 
@@ -178,7 +178,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 
 ## Built-in skills
 
-Firstmate ships these built-in skills you invoke by name.
+Firstmate ships these user-invocable built-in skills.
 Claude uses the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
 | Skill              | What it does                                                                                                                                  |
@@ -186,9 +186,12 @@ Claude uses the slash form shown here; codex uses the same names with `$`, such 
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 
+The repo also includes agent-only reference skills under `.agents/skills/`: `harness-adapters`, `secondmate-provisioning`, and `stuck-crewmate-recovery`.
+Captains do not invoke them directly; `AGENTS.md` names the operational trigger points where firstmate must load each one.
+
 ## Configuration
 
-The shared orchestrator behavior lives in `AGENTS.md` - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
+The shared orchestrator behavior lives in `AGENTS.md` and bundled skills - edit them like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
 The tracked `.tasks.toml` pins the optional `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 When compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation; without it, backlog bookkeeping remains manual.
 Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
@@ -205,7 +208,8 @@ After creating a secondmate, move existing main-backlog items that you have judg
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
-Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
+Harness support facts live in the agent-only `harness-adapters` skill, while launch templates live in `bin/fm-spawn.sh`.
+Claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before their facts are added.
 
 Runtime tuning via environment variables (defaults shown):
 

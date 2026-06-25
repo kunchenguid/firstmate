@@ -28,7 +28,7 @@
 # The marker and the busy-guard solve the same problem — the daemon and the
 # human share one input channel — so they live together under /afk.
 #
-# Reliability model (see AGENTS.md §8):
+# Reliability model (see the /afk skill):
 #   - Nothing is lost: the #29 watcher enqueues every wake to state/.wake-queue
 #     BEFORE advancing its suppression markers, so a crash/restart/missed
 #     injection is recovered on the next fm-wake-drain.sh. The daemon does not
