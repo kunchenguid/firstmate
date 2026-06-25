@@ -12,19 +12,16 @@
 #      ever reach firstmate's context.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 LIB="$ROOT/bin/fm-tmux-lib.sh"
 PEEK="$ROOT/bin/fm-peek.sh"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$LIB"
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-ghost-tests.XXXXXX")
-cleanup() { [ -n "${TMP_ROOT:-}" ] && rm -rf "$TMP_ROOT"; }
-trap cleanup EXIT
-
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+TMP_ROOT=$(fm_test_tmproot fm-ghost-tests)
 
 # ESC byte for building styled fixtures and asserting escape-free output.
 ESC=$(printf '\033')

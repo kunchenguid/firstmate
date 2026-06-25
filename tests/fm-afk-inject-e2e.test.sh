@@ -327,7 +327,57 @@ test_scenario_b() {
   pass "Scenario B: swallowed Enter produces exactly one clean digest"
 }
 
+# --- Scenario C: normal status, single clean digest -------------------------
+# No human input, no swallowed Enter: a captain-relevant status must produce
+# exactly ONE sentinel-prefixed, single-line digest, submitted once. This owns
+# the marker + single-line + no-duplicate operator contract that the deleted
+# fake-tmux units used to assert via internal send-keys counts.
+
+test_scenario_c() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  # Exactly one digest line in the submitted log (no duplicate, no loss).
+  local digest_count
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 digest, got $digest_count"
+
+  # Not concatenated with itself (two sentinel markers in one line).
+  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
+    fail "Scenario C: digest concatenated with itself (two sentinel markers in one line)"
+  fi
+
+  # The digest is classified as an injection and starts with the sentinel byte.
+  local digest_line digest_hex
+  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
+  case "$digest_line" in
+    *injection) ;;
+    *) fail "Scenario C: digest misclassified (expected injection): $digest_line" ;;
+  esac
+  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
+  case "$digest_hex" in
+    1f*) ;;
+    *) fail "Scenario C: digest does not start with sentinel marker (hex: $digest_hex)" ;;
+  esac
+
+  # The digest was submitted as ONE line (a multi-line digest would log >1 line),
+  # and no spurious user-classified lines were submitted.
+  local user_count
+  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
+  [ "$user_count" -eq 0 ] \
+    || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+
+  stop_daemon
+  pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+}
+
 test_scenario_a
 test_scenario_b
+test_scenario_c
 
 echo "all e2e injection tests passed"

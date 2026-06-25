@@ -19,46 +19,15 @@
 #     re-processed as one of its own secondmates.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 UPDATE="$ROOT/bin/fm-update.sh"
-TMP_ROOT=
 
-# Deterministic, isolated git identity and config for fixture commits.
-export GIT_AUTHOR_NAME=fmtest GIT_AUTHOR_EMAIL=fmtest@example.com
-export GIT_COMMITTER_NAME=fmtest GIT_COMMITTER_EMAIL=fmtest@example.com
+# Deterministic, isolated git identity for fixture commits.
+fm_git_identity fmtest fmtest@example.com
 
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-cleanup() {
-  if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
-  fi
-}
-
-trap cleanup EXIT
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-update-tests.XXXXXX")
-
-assert_contains() {
-  case "$1" in
-    *"$2"*) : ;;
-    *) fail "$3 (missing: '$2')"$'\n'"--- output ---"$'\n'"$1" ;;
-  esac
-}
-
-assert_not_contains() {
-  case "$1" in
-    *"$2"*) fail "$3 (unexpected: '$2')"$'\n'"--- output ---"$'\n'"$1" ;;
-    *) : ;;
-  esac
-}
+TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 
 # Build a fresh world: a bare origin seeded with one commit, a firstmate repo
 # clone checked out on main, and a home dir with state/ and data/. Echoes the
@@ -123,7 +92,10 @@ run_update() {
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
-# --- T1: main + secondmate behind, instruction change ----------------------
+# --- T1: main + secondmate behind, instruction change; FF, not a merge ------
+# Combines the former T1 (fast-forward + reread + nudge signalling) and T2
+# (the advance is a single-parent fast-forward, never a merge commit) into one
+# world so both contracts are proven against the same update run.
 test_updates_main_and_secondmate() {
   local w out
   w=$(new_world t1)
@@ -147,23 +119,12 @@ test_updates_main_and_secondmate() {
     || fail "firstmate left its default branch"
   git -C "$w/sm1" symbolic-ref -q HEAD >/dev/null \
     && fail "secondmate worktree is no longer detached"
-  pass "T1 main + secondmate fast-forward, reread + nudge signalled"
-}
-
-# --- T2: FF only, never a merge commit -------------------------------------
-test_fast_forward_not_merge() {
-  local w
-  w=$(new_world t2)
-  add_sm "$w" sm1
-  bump_origin "$w" instr
-  run_update "$w" >/dev/null
-
   # A fast-forwarded tip has exactly one parent; a merge commit would have two.
   [ "$(git -C "$w/main" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "firstmate tip is not a single-parent fast-forward"
   [ "$(git -C "$w/sm1" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "secondmate tip is not a single-parent fast-forward"
-  pass "T2 advance is a fast-forward, not a merge commit"
+  pass "T1 main + secondmate fast-forward (single-parent), reread + nudge signalled"
 }
 
 # --- T3: README-only change does not trigger a reread ----------------------
@@ -237,43 +198,41 @@ test_idempotent_already_current() {
   pass "T6 idempotent: a second run is a no-op"
 }
 
-# --- T7: registry backstop (secondmates.md, no live meta) ------------------
-test_registry_backstop() {
-  local w out
+# --- T7: registry backstop + dedup + self-exclusion, one world -------------
+# One world carries every secondmate-resolution edge at once:
+#   reg1 - registered in secondmates.md only, NO live meta (registry backstop);
+#   sm1  - present in BOTH meta and the registry (must be processed exactly once);
+#   selfish - a bogus registry line pointing the firstmate repo at itself.
+# Asserts: reg1 advances but is NOT nudged (no live metadata); sm1 advances,
+# is processed once, and IS nudged; the firstmate repo is never re-processed.
+test_registry_backstop_dedup_and_self_exclusion() {
+  local w out count
   w=$(new_world t7)
-  # A secondmate worktree with NO meta, registered only in data/secondmates.md.
+  add_sm "$w" sm1
   git -C "$w/main" worktree add -q --detach "$w/reg1" main
   printf 'reg1\n' > "$w/reg1/.fm-secondmate-home"
-  printf -- '- reg1 - domain supervisor (home: %s/reg1; scope: things; projects: p; added 2026-06-23)\n' \
-    "$w" > "$w/home/data/secondmates.md"
+  {
+    printf -- '- reg1 - domain supervisor (home: %s/reg1; scope: things; projects: p; added 2026-06-23)\n' "$w"
+    printf -- '- sm1 - dup (home: %s/sm1; scope: x; projects: p; added 2026-06-23)\n' "$w"
+    printf -- '- selfish - self (home: %s/main; scope: x; projects: p; added 2026-06-23)\n' "$w"
+  } > "$w/home/data/secondmates.md"
   bump_origin "$w" instr
 
   out=$(run_update "$w")
 
   assert_contains "$out" "secondmate reg1: updated " "registry-only secondmate fast-forwarded"
-  assert_contains "$out" "nudge-secondmates: none" "registry-only secondmate is not nudged without live metadata"
-  pass "T7 secondmate resolved from registry without inventing a window"
-}
-
-# --- T8: dedup across meta + registry, never re-process the firstmate repo --
-test_dedup_and_self_exclusion() {
-  local w out count
-  w=$(new_world t8)
-  add_sm "$w" sm1
-  # Same home also listed in the registry -> must process sm1 exactly once.
-  printf -- '- sm1 - dup (home: %s/sm1; scope: x; projects: p; added 2026-06-23)\n' \
-    "$w" > "$w/home/data/secondmates.md"
-  # A bogus registry line pointing the firstmate repo at itself as a secondmate.
-  printf -- '- selfish - self (home: %s/main; scope: x; projects: p; added 2026-06-23)\n' \
-    "$w" >> "$w/home/data/secondmates.md"
-  bump_origin "$w" instr
-
-  out=$(run_update "$w")
-
+  assert_contains "$out" "secondmate sm1: updated " "meta+registry secondmate fast-forwarded"
   count=$(printf '%s\n' "$out" | grep -c '^secondmate sm1:' || true)
-  [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1"
+  [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1 (dedup across meta+registry)"
   assert_not_contains "$out" "secondmate selfish" "firstmate repo re-processed as its own secondmate"
-  pass "T8 deduped homes and excluded the firstmate repo itself"
+  # sm1 has live metadata, so it is nudged; reg1 has none, so it is not. Pin the
+  # nudge line exactly and confirm reg1 is absent from it (not from the whole
+  # output, where 'secondmate reg1: updated' legitimately appears).
+  local nudge_line
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_contains "$nudge_line" "main:fm-sm1" "live-meta secondmate is nudged"
+  assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
+  pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
 # --- T9: firstmate repo on a feature branch is skipped ---------------------
@@ -333,13 +292,11 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 }
 
 test_updates_main_and_secondmate
-test_fast_forward_not_merge
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
-test_registry_backstop
-test_dedup_and_self_exclusion
+test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update

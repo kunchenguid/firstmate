@@ -15,28 +15,11 @@
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
-TMP_ROOT=
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-cleanup() {
-  if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
-  fi
-}
-
-trap cleanup EXIT
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-tests.XXXXXX")
+TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -101,13 +84,12 @@ SH
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
-  cat > "$case_dir/state/task-x1.meta" <<EOF
-window=fm-task-x1
-worktree=$case_dir/wt
-project=$case_dir/project
-kind=$kind
-mode=$mode
-EOF
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -137,12 +119,6 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
-}
-
-# Exit code expectation. Args: expected actual label
-expect_code() {
-  local expected=$1 actual=$2 label=$3
-  [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
 }
 
 test_local_only_fork_remote_allows() {

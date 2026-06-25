@@ -258,12 +258,18 @@ The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proact
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
-tests/fm-wake-queue.test.sh               # durable wake queue, race-proof locks, watcher singleton/re-arm behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, and fm-send submit tests
+# tests/lib.sh, tests/secondmate-helpers.sh, tests/wake-helpers.sh are sourced shared helpers, not run directly.
+tests/fm-wake-queue.test.sh               # wake-queue losslessness: concurrent append/drain, signal catch-up, enqueue-before-suppressor ordering, atomic double-drain, dedupe
+tests/fm-watcher-lock.test.sh             # watcher singleton + lock-primitive races + watch-arm liveness + guard warnings
+tests/fm-daemon.test.sh                   # sub-supervisor classifiers, captain-status-phrase matrix, /afk presence-gating, border-aware composer, max-defer, and fm-send submit units
+tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher+daemon lifecycle: routine/terminal routing across a restart, one buffered digest, no duplicate, stale transient/persistent/resume
+tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end afk injection: partial-input deferral, swallowed-Enter retry, normal single-digest
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
-tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
+tests/fm-secondmate-lifecycle-e2e.test.sh # secondmate happy path: seed -> spawn -> routed send -> backlog handoff -> recovery respawn -> teardown
+tests/fm-secondmate-safety.test.sh        # secondmate path-boundary safety matrices, registry/charter/origin validation, lease handling, no-mistakes init, handoff safety
+tests/fm-spawn-batch.test.sh              # fm-spawn.sh batch (id=repo) argument parsing and FM_HOME project-path scoping
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
-tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
