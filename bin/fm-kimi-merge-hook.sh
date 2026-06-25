@@ -35,12 +35,12 @@ fi
 
 # Do not duplicate an identical Stop hook command.
 # The command is distinctive (touch <turnend>), so its presence is enough.
-if grep -qF "command = \"touch $TURNEND\"" "$CONFIG"; then
+if grep -qF "command = \"touch '$TURNEND'\"" "$CONFIG"; then
   exit 0
 fi
 
 {
   printf '\n[[hooks]]\n'
   printf 'event = "Stop"\n'
-  printf 'command = "touch %s"\n' "$TURNEND"
+  printf "command = \"touch '%s'\"\n" "$TURNEND"
 } >> "$CONFIG"

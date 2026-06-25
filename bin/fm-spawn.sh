@@ -461,7 +461,7 @@ EOF
       KIMI_HOME="$STATE/$ID.kimi-home"
       rm -rf "$KIMI_HOME"
       mkdir -p "$KIMI_HOME"
-      for entry in "$CAPTAIN_HOME"/*; do
+      while IFS= read -r entry; do
         [ -e "$entry" ] || continue
         name=$(basename "$entry")
         if [ "$name" = "config.toml" ]; then
@@ -469,7 +469,7 @@ EOF
         else
           ln -s "$entry" "$KIMI_HOME/$name"
         fi
-      done
+      done < <(find "$CAPTAIN_HOME" -mindepth 1 -maxdepth 1)
       if [ ! -f "$KIMI_HOME/config.toml" ]; then
         touch "$KIMI_HOME/config.toml"
       fi
