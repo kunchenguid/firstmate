@@ -21,7 +21,7 @@
 <h3 align="center">Talk to one agent. Ship with a crew.</h3>
 
 <p align="center">
-  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.jpg" width="100%" />
+  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
 
 ## What it is
