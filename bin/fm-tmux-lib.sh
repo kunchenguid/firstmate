@@ -246,7 +246,7 @@ EOF
 # Multi-line briefs are pasted via tmux paste-buffer; single-line briefs use send-keys -l.
 fm_tmux_inject_brief() {  # <target> <brief-file> [<timeout>]
   local target=$1 brief=$2 timeout=${3:-30} waited=0 line_count
-  local attempts sleep_s i box
+  local attempts sleep_s i box buf
   # Wait for the actual composer BOX to render empty, not just for the cursor row
   # to read blank. On a cold-starting pane the cursor line is blank before the TUI
   # draws its composer, which a single-row check mistakes for a ready, empty
@@ -262,13 +262,18 @@ fm_tmux_inject_brief() {  # <target> <brief-file> [<timeout>]
   fi
   line_count=$(awk 'END { print NR }' "$brief" 2>/dev/null || echo 0)
   if [ "$line_count" -gt 1 ]; then
-    # Multi-line: paste so internal newlines do not submit early.
-    if ! tmux load-buffer -b __fm_brief - < "$brief" 2>/dev/null; then
+    # Multi-line: paste so internal newlines do not submit early. Use a buffer
+    # name unique to this target and process so a concurrent spawn on the same
+    # tmux server cannot overwrite it mid-inject, and delete it on paste so the
+    # brief text does not linger in a server-global buffer.
+    buf="__fm_brief_$(printf '%s_%s' "$target" "$$" | tr -c 'A-Za-z0-9_' '_')"
+    if ! tmux load-buffer -b "$buf" - < "$brief" 2>/dev/null; then
       printf 'error: failed to load brief into tmux paste buffer\n' >&2
       return 1
     fi
-    if ! tmux paste-buffer -b __fm_brief -t "$target" 2>/dev/null; then
+    if ! tmux paste-buffer -d -b "$buf" -t "$target" 2>/dev/null; then
       printf 'error: failed to paste brief into %s\n' "$target" >&2
+      tmux delete-buffer -b "$buf" 2>/dev/null || true
       return 1
     fi
   else
