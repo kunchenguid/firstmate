@@ -24,6 +24,7 @@ detect_own() {
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
+      *kimi*) echo kimi; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -32,6 +33,7 @@ detect_own() {
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
+          *kimi*) echo kimi; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

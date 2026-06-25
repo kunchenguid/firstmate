@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|kimi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
@@ -41,6 +41,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -88,7 +90,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -140,6 +142,7 @@ launch_template() {
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    kimi) printf '%s' 'kimi --yolo' ;;
     *) return 1 ;;
   esac
 }
@@ -446,6 +449,33 @@ EOF
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    kimi*)
+      # kimi has no project-local config.toml; use a per-task KIMI_CODE_HOME that
+      # symlinks the captain's credentials/sessions but carries a copied config
+      # with a Stop hook that touches the turn-end marker.
+      CAPTAIN_HOME="${HOME:-}/.kimi-code"
+      if [ ! -d "$CAPTAIN_HOME" ]; then
+        echo "error: ~/.kimi-code not found; run 'kimi login' first" >&2
+        exit 1
+      fi
+      KIMI_HOME="$STATE/$ID.kimi-home"
+      rm -rf "$KIMI_HOME"
+      mkdir -p "$KIMI_HOME"
+      for entry in "$CAPTAIN_HOME"/*; do
+        [ -e "$entry" ] || continue
+        name=$(basename "$entry")
+        if [ "$name" = "config.toml" ]; then
+          cp -a "$entry" "$KIMI_HOME/config.toml"
+        else
+          ln -s "$entry" "$KIMI_HOME/$name"
+        fi
+      done
+      if [ ! -f "$KIMI_HOME/config.toml" ]; then
+        touch "$KIMI_HOME/config.toml"
+      fi
+      "$FM_ROOT/bin/fm-kimi-merge-hook.sh" "$KIMI_HOME/config.toml" "$TURNEND" || exit 1
+      LAUNCH="KIMI_CODE_HOME=$(shell_quote "$KIMI_HOME") $LAUNCH"
+      ;;
   esac
 fi
 
@@ -493,5 +523,11 @@ fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
+
+if [ "$HARNESS" = kimi ]; then
+  # kimis's brief cannot ride the launch command (--prompt conflicts with --yolo),
+  # so inject it into the interactive composer once the TUI is ready.
+  fm_tmux_inject_brief "$T" "$BRIEF" || exit 1
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
