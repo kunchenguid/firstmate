@@ -174,9 +174,8 @@ reset_state() {
 
 # --- pane_input_pending environment self-check ------------------------------
 # Verify that pane_input_pending (which uses cursor_y + capture-pane) can detect
-# typed text in this tmux environment. If it can't (e.g., CI tmux has different
-# capture behavior), skip the e2e test with diagnostics. The unit tests in
-# fm-wake-queue.test.sh still cover the logic comprehensively.
+# typed text in this tmux environment. If it can't, the e2e cannot prove the
+# operator-visible injection contracts it owns.
 
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
@@ -188,8 +187,8 @@ selfcheck_pane_input_pending() {
     sleep 0.3
     return 0
   fi
-  # Not detected — print diagnostics and skip.
-  echo "skip: pane_input_pending cannot detect typed text in this tmux environment" >&2
+  # Not detected - print diagnostics and fail.
+  echo "pane_input_pending cannot detect typed text in this tmux environment" >&2
   local _cy _line
   _cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
   echo "  cursor_y=$_cy" >&2
@@ -197,10 +196,8 @@ selfcheck_pane_input_pending() {
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
   _line=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
   echo "  cursor line: '$_line'" >&2
-  # Clean up.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
-  cleanup_all
-  exit 0
+  fail "pane_input_pending self-check failed"
 }
 
 selfcheck_pane_input_pending
