@@ -90,6 +90,16 @@ report_healthy() {
   echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+watch_output_has_wake() {
+  local out=$1
+  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
+}
+
+print_watch_output() {
+  local out=$1
+  [ -s "$out" ] && cat "$out"
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -130,14 +140,20 @@ fi
 # harness-tracked task) tears the watcher down too, and the watcher's eventual
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
+child_out=
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
   fi
+  [ -n "$child_out" ] && rm -f "$child_out" 2>/dev/null || true
 }
 trap 'cleanup_child; exit 143' TERM INT
 
-"$WATCH" &
+child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  exit 1
+}
+"$WATCH" >"$child_out" &
 child=$!
 
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
@@ -149,18 +165,30 @@ while :; do
     if [ "$HEALTHY_PID" = "$child" ]; then
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
-      exit $?
+      rc=$?
+      print_watch_output "$child_out"
+      rm -f "$child_out" 2>/dev/null || true
+      exit "$rc"
     fi
     # Another watcher won the singleton; our child stood down. Report the live one.
     report_healthy
     wait "$child" 2>/dev/null || true
+    rm -f "$child_out" 2>/dev/null || true
     exit 0
   fi
   if ! fm_pid_alive "$child"; then
+    wait "$child"
+    rc=$?
+    if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+      print_watch_output "$child_out"
+      rm -f "$child_out" 2>/dev/null || true
+      exit 0
+    fi
     # Child exited without becoming the healthy watcher. One last look: a peer may
     # have come up healthy in the same instant.
     if healthy_watcher; then
       report_healthy
+      rm -f "$child_out" 2>/dev/null || true
       exit 0
     fi
     break
