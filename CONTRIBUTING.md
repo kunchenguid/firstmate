@@ -45,6 +45,32 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
+## Development
+
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
+A crewmate driving its own `no-mistakes` validation does the opposite: it runs the gate in the foreground and lets each synchronous `no-mistakes axi run` or `no-mistakes axi respond` call return.
+The pipeline owns auto-fix changes; the crewmate authorizes them with `no-mistakes axi respond --action fix --findings <ids>` instead of editing or committing while the run is active.
+Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
+
+Check and test the toolbelt before pushing:
+
+```sh
+bash -n bin/*.sh                          # syntax-check the toolbelt
+shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
+for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
+tests/fm-wake-queue.test.sh               # durable wake queue, race-proof locks, watcher singleton/re-arm behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, and fm-send submit tests
+tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
+tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
+tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
+tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
+tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
+[ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
+[ "$(readlink .claude/skills)" = "../.agents/skills" ]
+FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then "heartbeat")
+```
+
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
