@@ -30,8 +30,25 @@ stamp="$(date '+%Y%m%d-%H%M%S')"
 die() { echo "fm-registry: $*" >&2; exit 1; }
 
 slug() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
-    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-32 | sed -E 's/-+$//'
+  local s
+  s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-32 | sed -E 's/-+$//')
+  # A title that is entirely punctuation or non-ASCII slugifies to empty; keep
+  # the id well-formed with a stable fallback rather than emitting a trailing dash.
+  [ -n "$s" ] || s=entry
+  printf '%s' "$s"
+}
+
+# Resolve a collision-free id by appending -2, -3, ... when a heading with the
+# same base id already exists in the target registry, so two submissions in the
+# same second (the timestamp resolution) cannot overwrite or duplicate an id.
+unique_id() {
+  local base=$1 file=$2 id=$1 n=1
+  while [ -f "$file" ] && grep -qF "### $id - " "$file"; do
+    n=$((n + 1))
+    id="$base-$n"
+  done
+  printf '%s' "$id"
 }
 
 ensure_queue() {
@@ -67,7 +84,11 @@ case "$cmd" in
     [ -n "$replaces" ] || die "missing required --replaces"
     [ -n "$why" ]      || die "missing required --why"
     [ -f "$CAP" ]      || die "registry not found: $CAP"
-    id="T-$stamp-$(slug "$tool")"
+    id="$(unique_id "T-$stamp-$(slug "$tool")" "$CAP")"
+    # Preflight the queue first: if data/ cannot be created we die here, before
+    # the tracked registry is mutated, so we never leave a recorded entry with no
+    # queued evaluation.
+    ensure_queue
     {
       echo
       echo "### $id - $tool"
@@ -78,7 +99,6 @@ case "$cmd" in
       echo "- **Status:** proposed"
       echo "- **Proposed:** $today"
     } >> "$CAP"
-    ensure_queue
     echo "- [ ] evaluate tool proposal $id ($tool, replaces $replaces) -> CAPABILITIES.md (filed $today)" >> "$QUEUE"
     echo "recorded $id in CAPABILITIES.md and queued its evaluation in $QUEUE"
     ;;
@@ -99,7 +119,11 @@ case "$cmd" in
     [ -n "$impact" ]  || die "missing required --impact"
     [ -n "$cause" ]   || die "missing required --cause"
     [ -f "$PROB" ]    || die "registry not found: $PROB"
-    id="P-$stamp-$(slug "$problem")"
+    id="$(unique_id "P-$stamp-$(slug "$problem")" "$PROB")"
+    # Preflight the queue first: if data/ cannot be created we die here, before
+    # the tracked registry is mutated, so we never leave a recorded entry with no
+    # queued evaluation.
+    ensure_queue
     {
       echo
       echo "### $id - $problem"
@@ -111,7 +135,6 @@ case "$cmd" in
       echo "- **Status:** reported"
       echo "- **Reported:** $today"
     } >> "$PROB"
-    ensure_queue
     echo "- [ ] evaluate problem $id ($problem) -> PROBLEMS.md (filed $today)" >> "$QUEUE"
     echo "recorded $id in PROBLEMS.md and queued its evaluation in $QUEUE"
     ;;

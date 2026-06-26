@@ -9,7 +9,7 @@ The captain feeds the loop with the `report-problem` skill (names a problem) and
 
 ## Entry schema
 
-Every entry uses exactly these fields, in this order, so the registry stays scannable and machine-appendable:
+Every entry uses these fields, in this order, so the registry stays scannable and machine-appendable:
 
 - **Problem:** a one-line title naming the problem (not the symptom).
 - **Symptom:** what is actually observed - the failure, error, or degraded behavior.
@@ -17,7 +17,10 @@ Every entry uses exactly these fields, in this order, so the registry stays scan
 - **Suspected root cause:** the best current hypothesis for why it happens.
 - **Candidate fix / tool:** the proposed remedy - a tool, a script, a process change - or `TBD - to be evaluated`.
 - **Status:** one value from the vocabulary below.
-- **Reported / Resolved:** the date filed, and the date resolved once it is.
+- **Reported:** the date the entry was filed.
+- **Resolved:** the date it was resolved; optional, added only when **Status** becomes `resolved` (or `wontfix`).
+
+The `report-problem` skill emits every field except **Resolved**, which firstmate appends by hand when the entry closes.
 
 Each entry is a `### <id> - <problem title>` heading followed by those fields as a bullet list.
 Hand-authored seed entries below use readable ids; entries the `report-problem` skill appends use a timestamped id (`P-<YYYYMMDD-HHMMSS>-<slug>`) for uniqueness.
