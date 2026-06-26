@@ -5,7 +5,13 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
-#                 "TASKS_AXI: available", "TANGLE: <remediation>".
+#                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "NUDGE_SECONDMATES: <window-targets...>".
+#          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
+#          worktree was fast-forwarded to firstmate's own current default-branch
+#          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
+#          instruction surface actually changed; firstmate nudges each to re-read.
+#          Already-current or no-instruction-change homes are silently left alone.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -26,10 +32,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -67,6 +76,25 @@ fleet_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
+}
+
+secondmate_sync() {
+  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home's worktree
+  # to the primary checkout's current default-branch commit. Purely LOCAL - no
+  # fetch, no origin dependency: a secondmate home is a worktree of this same repo
+  # and already holds the primary's commit (fm-ff-lib.sh). Emits NUDGE_SECONDMATES:
+  # only for RUNNING secondmates whose instruction surface actually changed, so a
+  # secondmate already on the primary's version is never disturbed (AGENTS.md
+  # bootstrap + supervision). Mirrors fm-update's nudge-secondmates: report so
+  # firstmate can live-converge the listed windows.
+  [ -d "$STATE" ] || return 0
+  local primary_head
+  primary_head=$(primary_head_commit "$FM_ROOT") || return 0
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
+  sweep_live_secondmate_metas "$STATE" "$primary_head" yes >/dev/null
+  [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
+  return 0
 }
 
 install_cmd() {
@@ -116,5 +144,6 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
+secondmate_sync
 fleet_sync
 exit 0
