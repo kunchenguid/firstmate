@@ -123,6 +123,8 @@ start_daemon_present() {
   FM_GUARDIAN_TICK=2 \
   FM_GUARD_GRACE=2 \
   FM_GUARDIAN_NUDGE_COOLDOWN=9999 \
+  FM_ESCALATE_BATCH_SECS=0 \
+  FM_STALE_ESCALATE_SECS=999999 \
   FM_POLL=1 \
   FM_SIGNAL_GRACE=1 \
   FM_HEARTBEAT=999999 \
@@ -178,6 +180,35 @@ test_present_lapse_restores_and_nudges_once() {
   pass "present: a liveness lapse restores the watcher and nudges exactly once, then stays silent (criteria 1, 3)"
 }
 
+# criterion 4: afk is a policy toggle inside the ONE running process. Turning afk
+# on must transition the live daemon to away mode (own the watcher, self-handle +
+# escalate); turning it back off must return it to present/liveness-guardian.
+test_afk_toggle_in_one_process() {
+  : > "$LOG_FILE"                                   # clear the lapse nudge
+  # B -> A: afk on. The same daemon takes watcher ownership and self-handles.
+  date +%s > "$STATE_DIR/.afk"
+  sleep 3                                           # let the 1s poll notice + take over
+  echo "done: PR https://example.test/pr/777 checks green" > "$STATE_DIR/task-c1.status"
+  local i=0
+  while [ "$i" -lt 40 ]; do
+    grep -q 'Supervisor escalate' "$LOG_FILE" && break
+    sleep 0.5; i=$((i + 1))
+  done
+  grep -q 'Supervisor escalate' "$LOG_FILE" \
+    || fail "B->A: daemon did not escalate a captain status after afk turned on (transition or away mode broke)"
+
+  # A -> B: afk off. The same process returns to present mode and must NOT escalate
+  # a routine status (present mode never injects a routine wake).
+  rm -f "$STATE_DIR/.afk"
+  sleep 3
+  : > "$LOG_FILE"
+  echo "working: still compiling" > "$STATE_DIR/task-c1.status"
+  sleep 5
+  grep -q 'Supervisor escalate' "$LOG_FILE" \
+    && fail "A->B: daemon escalated while present (afk off) - did not return to liveness-guardian mode"
+  pass "afk toggles mode in one running process: B->A self-handles+escalates, A->B returns to present (criterion 4)"
+}
+
 test_clean_shutdown_releases_and_reaps() {
   # criterion 6: SIGTERM the running daemon -> clean exit. The pidfile is removed,
   # the singleton lock is released, and the forked watcher is torn down.
@@ -201,6 +232,7 @@ test_clean_shutdown_releases_and_reaps() {
 }
 
 test_present_lapse_restores_and_nudges_once
+test_afk_toggle_in_one_process
 test_clean_shutdown_releases_and_reaps
 
 echo "all present-mode guardian e2e tests passed"

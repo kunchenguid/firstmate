@@ -17,7 +17,11 @@ Its `--restart` mode signals only the watcher recorded in the current home's `st
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
-A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
+An always-on, per-home supervisor daemon (`bin/fm-supervise-daemon.sh`) makes watcher liveness structural rather than discipline-dependent: it is started at bootstrap and recovery via `bin/fm-guardian-arm.sh` and runs in two modes that the durable `state/.afk` flag toggles in-process.
+While present (afk off, the default) it is a liveness guardian: it does not own the watcher, but every tick it checks whether work is in flight and the liveness beacon has gone stale past `FM_GUARD_GRACE`, and if so restores the watcher via the singleton-safe path and injects exactly one re-arm/drain nudge - never for a routine wake.
+So a forgotten re-arm self-heals within a tick instead of silently stopping supervision.
+While away (afk on, activated by the `/afk` skill) the same process owns the watcher, self-handles routine wakes in bash, and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
+The daemon's watcher restore and away-mode takeover are home-scoped the same way `--restart` is: they touch only this home's watcher, never a broad `pkill`, so the singleton lock guarantees at most one watcher per home even when the guardian restores it at the same moment firstmate re-arms.
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 `fm-send.sh` adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that pause.
 
@@ -97,4 +101,4 @@ Kill the first mate session anytime; the next one reconciles and carries on.
 ## Development notes
 
 The current watcher reliability work keeps the one-shot process model and adds a durable queue, race-proof singleton lock, duplicate self-eviction, and a self-verifying tracked-child arm wrapper.
-The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proactive wake routing for walk-away supervision via the `/afk` skill; a blocking-waiter split remains a deferred follow-up phase.
+The always-on supervisor daemon (`bin/fm-supervise-daemon.sh`) makes liveness daemon-owned in both modes: a present-mode liveness guardian that restores a lapsed watcher and nudges once, and the `/afk` away mode that adds proactive wake routing and batched escalation. `state/.afk` toggles the policy in one long-lived process; it never starts or stops the daemon.
