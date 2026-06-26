@@ -3,9 +3,9 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# (authoritative for squash/rebase/merge alike, surviving head-branch deletion) or
-# its content is already in the up-to-date default branch.
+# OR - for a normal ship task whose commits are not so reachable - its recorded PR
+# is merged and the current HEAD still matches the recorded PR head, or its content
+# is already in the up-to-date default branch.
 #
 # Covers two fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -13,7 +13,8 @@
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
-#     recognizes the merged PR (or the content already in main) as landed.
+#     recognizes the matching recorded merged PR (or the content already in main) as
+#     landed.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -26,6 +27,8 @@
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
+#   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
+#   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -178,6 +181,14 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
+append_pr_meta_for_current_head() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
 # Override gh-axi so every call fails, simulating an API/network error.
 add_gh_axi_error() {
   local case_dir=$1
@@ -316,13 +327,12 @@ test_squash_merged_branch_deleted_allows() {
   local case_dir rc
   case_dir=$(make_case squash-merged)
   write_meta "$case_dir" no-mistakes ship
-  # The PR URL recorded in meta, as fm-pr-check would have written it.
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # Real branch content that is NOT pushed and NOT on origin/main: a squash merge
   # rewrote it into a different commit on main and auto-deleted the head branch, so
-  # HEAD is unreachable from every remote-tracking branch. The merged PR is the only
-  # signal that the work landed.
+  # HEAD is unreachable from every remote-tracking branch. The matching merged PR is
+  # the only signal that the work landed.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
   add_gh_axi_merged "$case_dir"
 
   set +e
@@ -333,6 +343,25 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_merged_pr_with_later_local_commit_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-pr-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  wt_commit_file "$case_dir" later.txt local-only "local follow-up"
+  add_gh_axi_merged "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-pr-head: teardown should refuse when HEAD moved after PR recording"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-pr-head: no REFUSED line in stderr"
+  pass "merged PR does not allow teardown after a later local commit"
 }
 
 test_content_in_default_fallback_allows() {
@@ -353,6 +382,25 @@ test_content_in_default_fallback_allows() {
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_content_fallback_refreshes_stale_origin_ref() {
+  local case_dir rc
+  case_dir=$(make_case content-stale-ref)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/project" config --unset-all remote.origin.fetch
+  git -C "$case_dir/project" config --add remote.origin.fetch '+refs/heads/not-main:refs/remotes/origin/not-main'
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
+  pass "content fallback refreshes origin default before comparing trees"
 }
 
 test_dirty_worktree_refuses() {
@@ -423,6 +471,8 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
+test_merged_pr_with_later_local_commit_refuses
 test_content_in_default_fallback_allows
+test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
