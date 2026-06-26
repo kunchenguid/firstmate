@@ -22,9 +22,10 @@ if [ -f "$META" ]; then
   if [ -n "$WT" ] && [ -d "$WT" ]; then
     LOCAL_HEAD=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
     if [ -n "$LOCAL_HEAD" ] && command -v gh >/dev/null 2>&1; then
-      REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null || true)
-      if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
-        PR_HEAD=$LOCAL_HEAD
+      if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
+        if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
+          PR_HEAD=$LOCAL_HEAD
+        fi
       fi
     fi
   fi
