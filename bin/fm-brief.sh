@@ -207,12 +207,24 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
-During validation the pipeline owns every fix; you only drive the gates. Once a run is active, every fix - both auto-fix findings and the fix for a real bug the review finds in your own code - is applied by the pipeline on your branch, in its own worktree. Never hand-edit, \`git commit\`, \`git reset\`/\`git checkout\`, abort, or re-run while a run is active: doing so duplicates the pipeline's work and forces a full re-validation. You advance the work only by responding to gates:
-- Process every return; never idle-wait. \`no-mistakes axi run\` / \`axi respond\` return either at a gate (a \`gate:\` object) or at a terminal or CI-ready outcome (no \`gate:\`). A run legitimately runs long - test, CI, and each fix round take many minutes - so a quiet call is working, not stalled. Backgrounding the call is fine; idle-waiting for the run to advance on its own is not, because it never advances past a gate by itself. Read every return: on a \`gate:\`, respond, and loop until you reach an outcome.
-- Auto-fix findings: advance the gate with \`no-mistakes axi respond --action fix --findings <ids>\`; the pipeline applies the fix on your branch and re-reviews. You never apply it yourself.
-- Review findings always gate. Review auto-fix is disabled, so every actionable review finding parks for your response instead of being self-fixed - drive it like any other gate.
-- ask-user findings: escalate to firstmate (rule 6) and stop. When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` (the \`--action\`/answer the decision implies) and let the pipeline apply it. Even when it is a real bug in your own code, do NOT implement the decided fix yourself and do NOT abort to go fix it - the pipeline applies it from your \`respond\`.
-- Avoid \`--yes\`: it silently auto-resolves every finding, including \`ask-user\`, with zero escalation, so a decision the captain should make gets resolved without them. Drive gates manually and escalate \`ask-user\` findings.
+During validation the pipeline owns every fix; you only drive the gates.
+Once a run is active, every fix - both auto-fix findings and the fix for a real bug the review finds in your own code - is applied by the pipeline on your branch, in its own worktree.
+Never hand-edit, \`git commit\`, \`git reset\`/\`git checkout\`, abort, or re-run while a run is active: doing so duplicates the pipeline's work and forces a full re-validation.
+You advance the work only by responding to gates:
+- Process every return; never idle-wait.
+  \`no-mistakes axi run\` / \`axi respond\` return either at a gate (a \`gate:\` object) or at a terminal or CI-ready outcome (no \`gate:\`).
+  A run legitimately runs long - test, CI, and each fix round take many minutes - so a quiet call is working, not stalled.
+  Backgrounding the call is fine; idle-waiting for the run to advance on its own is not, because it never advances past a gate by itself.
+  Read every return: on a \`gate:\`, respond, and loop until you reach an outcome.
+- Auto-fix findings: advance the gate with \`no-mistakes axi respond --action fix --findings <ids>\`; the pipeline applies the fix on your branch and re-reviews.
+  You never apply it yourself.
+- Review findings always gate.
+  Review auto-fix is disabled, so every actionable review finding parks for your response instead of being self-fixed - drive it like any other gate.
+- ask-user findings: escalate to firstmate (rule 6) and stop.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` (the \`--action\`/answer the decision implies) and let the pipeline apply it.
+  Even when it is a real bug in your own code, do NOT implement the decided fix yourself and do NOT abort to go fix it - the pipeline applies it from your \`respond\`.
+- Avoid \`--yes\`: it silently auto-resolves every finding, including \`ask-user\`, with zero escalation, so a decision the captain should make gets resolved without them.
+  Drive gates manually and escalate \`ask-user\` findings.
 
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

@@ -378,8 +378,10 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 Judge a validating crewmate by the run's step status, never by whether its shell is still running; read it cheaply with `no-mistakes axi status`.
 
 - `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone.
-- `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`. The crewmate owes a `respond`; if it is idle-waiting for the run to advance on its own, steer it to drive the gate, because a parked gate never self-resolves.
-- Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns. Steer it back to respond-only: the pipeline applies every fix on the branch from `axi respond`, including the fix for a real bug the review found in the crewmate's own code, and hand-fixing forces a full re-validation.
+- `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
+  The crewmate owes a `respond`; if it is idle-waiting for the run to advance on its own, steer it to drive the gate, because a parked gate never self-resolves.
+- Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
+  Steer it back to respond-only: the pipeline applies every fix on the branch from `axi respond`, including the fix for a real bug the review found in the crewmate's own code, and hand-fixing forces a full re-validation.
 
 ### PR ready
 
