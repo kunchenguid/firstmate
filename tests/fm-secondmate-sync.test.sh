@@ -210,7 +210,7 @@ test_ff_inflight_feature_branch() {
 # Shadow git with a wrapper that records any `fetch` invocation, then drive the
 # updated path and confirm the wrapper saw none.
 test_no_fetch_in_local_path() {
-  local w c1 base fakebin log
+  local w c1 base fakebin log real_git
   w=$(new_world ff-nofetch)
   c1=$(head_of "$w/main")
   git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
@@ -219,13 +219,14 @@ test_no_fetch_in_local_path() {
 
   fakebin="$w/fakebin"
   log="$w/fetch.log"
+  real_git=$(command -v git)
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<SH
 #!/usr/bin/env bash
 for a in "\$@"; do
   if [ "\$a" = fetch ]; then printf 'FETCH\n' >> '$log'; fi
 done
-exec $(command -v git) "\$@"
+exec '$real_git' "\$@"
 SH
   chmod +x "$fakebin/git"
 
