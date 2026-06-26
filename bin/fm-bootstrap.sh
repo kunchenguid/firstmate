@@ -6,12 +6,15 @@
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
 #          worktree was fast-forwarded to firstmate's own current default-branch
 #          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
 #          instruction surface actually changed; firstmate nudges each to re-read.
 #          Already-current or no-instruction-change homes are silently left alone.
+#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs for
+#          live secondmate homes; no-op/current and successful updates stay quiet.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -89,10 +92,27 @@ secondmate_sync() {
   # firstmate can live-converge the listed windows.
   [ -d "$STATE" ] || return 0
   local primary_head
-  primary_head=$(primary_head_commit "$FM_ROOT") || return 0
+  if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
+    local meta id
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
+      id=$(basename "$meta" .meta)
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: primary default-branch commit cannot be resolved"
+    done
+    return 0
+  fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
-  sweep_live_secondmate_metas "$STATE" "$primary_head" yes >/dev/null
+  local tmp line
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
+  sweep_live_secondmate_metas "$STATE" "$primary_head" yes >"$tmp"
+  while IFS= read -r line; do
+    case "$line" in
+      secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
+    esac
+  done < "$tmp"
+  rm -f "$tmp"
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }

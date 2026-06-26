@@ -15,9 +15,10 @@
 #   - The bootstrap sweep fast-forwards every live secondmate home and reports a
 #     nudge (NUDGE_SECONDMATES:) ONLY for a running secondmate whose instruction
 #     surface actually changed; an already-current or readme-only home is never
-#     nudged, and a home with no live metadata is never swept.
+#     nudged, a skipped home is reported as SECONDMATE_SYNC:, and a home with no
+#     live metadata is never swept.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
-#     before launch.
+#     before launch, or warns and launches unchanged when the sync is skipped.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -314,7 +315,31 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   pass "T8 bootstrap sweeps live homes, nudges only the running real-instruction-change secondmate"
 }
 
-# --- T9: spawning a secondmate fast-forwards its worktree before launch -------
+# --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
+test_bootstrap_sweep_surfaces_skipped_home() {
+  local w c1 base before fakebin out skip_line
+  w=$(new_world boot-skip)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-dirty "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  printf 'uncommitted local edit\n' >> "$w/sm-dirty/AGENTS.md"
+  before=$(head_of "$w/sm-dirty")
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm-dirty: skipped:' || true)
+  [ -n "$skip_line" ] || fail "no SECONDMATE_SYNC skip line emitted (got: $out)"
+  assert_contains "$skip_line" "dirty working tree" "dirty skipped home reports the actionable reason"
+  [ "$(head_of "$w/sm-dirty")" = "$before" ] || fail "dirty home HEAD moved"
+  [ "$(head_of "$w/main")" = "$base" ] || fail "primary HEAD changed during bootstrap"
+  grep -q 'uncommitted local edit' "$w/sm-dirty/AGENTS.md" || fail "dirty edit was discarded"
+  pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
+}
+
+# --- T10: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
   w=$(new_world spawn-ff)
@@ -345,7 +370,44 @@ SH
 
   [ "$(head_of "$w/sm")" = "$c2" ] \
     || fail "spawn did not fast-forward the secondmate worktree to the primary's HEAD"
-  pass "T9 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"
+  pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"
+}
+
+# --- T11: spawn warns when pre-launch sync is skipped ------------------------
+test_spawn_warns_when_sync_skipped_before_launch() {
+  local w c1 before fakebin err
+  w=$(new_world spawn-skip)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  bump_primary "$w" instr
+  printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"
+  before=$(head_of "$w/sm")
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
+
+  assert_contains "$(cat "$err")" \
+    "warning: secondmate sm sync skipped before launch: dirty working tree" \
+    "spawn warning reports the skipped sync reason"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty spawn home HEAD moved"
+  grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty spawn edit was discarded"
+  pass "T11 spawn warns when pre-launch sync is skipped"
 }
 
 test_ff_updated
@@ -356,6 +418,8 @@ test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
+test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
+test_spawn_warns_when_sync_skipped_before_launch
 
 echo "# all fm-secondmate-sync tests passed"

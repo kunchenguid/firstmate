@@ -312,7 +312,17 @@ if [ "$KIND" = secondmate ]; then
   # wrong-branch home is left untouched and launches as-is. The agent re-reads
   # AGENTS.md fresh on launch, so no nudge is needed here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes >/dev/null 2>&1 || true
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    case "$sm_ff_out" in
+      *': skipped:'*)
+        sm_ff_line=$(first_line "$sm_ff_out")
+        sm_ff_prefix="secondmate $ID: skipped: "
+        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        ;;
+    esac
+  else
+    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
