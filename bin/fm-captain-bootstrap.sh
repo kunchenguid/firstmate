@@ -84,16 +84,36 @@ handoff = os.path.join(state, "handoff-%s.md" % key)
 blocks = []
 
 # --- REHYDRATE block (any pane that has a pending handoff) --------------------
+# The resume directive (state/resume-<key>.directive) is written by an on-demand
+# compact (fm-compact-crewmate.sh --resume frontier|restart) to make the post-/clear
+# reset deterministic. "frontier" (default, and the behavior for any watchdog-driven
+# fire that wrote no directive) resumes the leave-off Frontier; "restart" tells the
+# crewmate to restart the task from the compacted brief instead of mid-frontier.
+def read_resume_directive():
+    p = os.path.join(state, "resume-%s.directive" % key)
+    try:
+        v = open(p).read().strip().lower()
+    except Exception:
+        return "frontier", None
+    return (v if v in ("frontier", "restart") else "frontier"), p
+
 if os.path.exists(handoff):
     text = read(handoff)
     if len(text) <= cap:
         body = text
     else:
         body = "[handoff %d chars > %d cap — read it in full at: %s]" % (len(text), cap, handoff)
+    resume_mode, resume_path = read_resume_directive()
+    if resume_mode == "restart":
+        directive = ("This is a deliberate RESTART: do NOT resume mid-frontier — "
+                     "re-read the compacted brief below and start the task again from a "
+                     "clean footing, using it as the authoritative scope.")
+    else:
+        directive = "This is exactly where you left off — pick the Frontier back up."
     blocks.append(
         "# Rehydrate — resume from your pre-/clear leave-off doc\n"
-        "(You were auto-restarted by the firstmate context watchdog; source=%s. "
-        "This is exactly where you left off — pick the Frontier back up.)\n\n%s" % (source or "?", body))
+        "(You were auto-restarted by the firstmate context watchdog; source=%s. %s)\n\n%s"
+        % (source or "?", directive, body))
     # Archive so the rehydrate fires exactly once.
     try:
         arch = os.path.join(state, "handoff-archive")
@@ -101,6 +121,12 @@ if os.path.exists(handoff):
         shutil.move(handoff, os.path.join(arch, "handoff-%s-%d.md" % (key, int(time.time()))))
     except Exception:
         pass
+    # Consume the resume directive so it fires exactly once (next boot is frontier).
+    if resume_path:
+        try:
+            os.remove(resume_path)
+        except Exception:
+            pass
 
 # --- CAPTAIN context block (unchanged behavior) ------------------------------
 if role == "captain":
