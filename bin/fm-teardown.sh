@@ -7,9 +7,9 @@
 # hard-resets the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its recorded PR is
-# merged and the current HEAD still matches the recorded PR head, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# normal ship task whose commits are not so reachable - when its PR is merged and
+# GitHub reports the current HEAD as that PR's head, or its content is already
+# present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
@@ -53,7 +53,6 @@ T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -81,17 +80,6 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
-# Extract a PR number from a GitHub PR URL (.../pull/<n>). Echoes the number, or
-# nothing when the URL carries no recognizable /pull/<n> segment.
-pr_number_from_url() {
-  local url=$1 n
-  case "$url" in
-    */pull/*) n=${url##*/pull/}; n=${n%%[!0-9]*} ;;
-    *) n= ;;
-  esac
-  printf '%s' "$n"
-}
-
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -104,25 +92,30 @@ pr_number_from_branch() {
   printf '%s' "$n"
 }
 
-recorded_pr_head_matches_current_head() {
-  local current
-  [ -n "$PR_HEAD" ] || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  [ "$current" = "$PR_HEAD" ]
-}
-
-# Is the worktree's recorded PR merged for this exact HEAD? Resolves the PR from the
-# recorded pr= URL first, then from the branch name, and asks gh-axi whether it is
-# merged. Returns non-zero when pr_head= is absent or stale, on not-merged, no-PR, or
-# any gh error - the caller then falls back to the content check.
+# Is the worktree's PR merged for this exact HEAD? Resolves the PR from the
+# recorded pr= URL first, then from the branch name, and asks GitHub for both the
+# PR state and head. Returns non-zero when the PR is not merged, the current HEAD
+# is not the PR head, no PR is found, or any gh error occurs - the caller then
+# falls back to the content check.
 pr_is_merged() {
-  local branch=$1 num view
-  recorded_pr_head_matches_current_head || return 1
-  num=$(pr_number_from_url "$PR_URL")
-  [ -n "$num" ] || num=$(pr_number_from_branch "$branch") || return 1
-  [ -n "$num" ] || return 1
-  view=$( cd "$WT" && gh-axi pr view "$num" 2>/dev/null ) || return 1
-  printf '%s\n' "$view" | grep -qiE '^[[:space:]]*state:[[:space:]]*merged[[:space:]]*$'
+  local branch=$1 target view state head current
+  if [ -n "$PR_URL" ]; then
+    target=$PR_URL
+  else
+    target=$(pr_number_from_branch "$branch") || return 1
+  fi
+  [ -n "$target" ] || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  state=${view%%$'\t'*}
+  head=${view#*$'\t'}
+  [ "$state" != "$view" ] || return 1
+  case "$state" in
+    MERGED|merged) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$head" ] || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  [ "$current" = "$head" ]
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -151,8 +144,8 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a recorded merged PR proves
-# the current HEAD, OR the content is already in the default branch (fallback, which
+# reachable from any remote-tracking branch? True when a merged PR proves the
+# current HEAD, OR the content is already in the default branch (fallback, which
 # also covers the no-PR and gh-error paths). False only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
@@ -549,7 +542,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     elif [ -n "$unpushed" ]; then
       # Commits not reachable from any remote. Before refusing, recognize LANDED work:
-      # a merged PR for the recorded HEAD or content already in the up-to-date default
+      # a merged PR for the current HEAD or content already in the up-to-date default
       # branch. On a gh lookup error work_is_landed falls back to the content check,
       # and if that is also inconclusive it returns false - so we never silently allow
       # teardown of possibly-unlanded work; only genuinely unlanded work is refused.
