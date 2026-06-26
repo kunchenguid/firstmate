@@ -291,6 +291,10 @@ A project may appear in several `projects:` clone lists, so choose the secondmat
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
 If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
+A secondmate is itself a firstmate, so a request reaches it in its own chat, which you never read - the only channel back to you is its status file.
+So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
+Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
+A captain typing directly into the secondmate's window is unmarked and stays a conversational captain intervention, so do not relay captain-destined chat through this path; the marker is applied only by `fm-send` to a `kind=secondmate` target.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
 When you create a new secondmate, hand its in-scope queued items off from the main backlog into its home with `bin/fm-backlog-handoff.sh` so it owns its domain's queue from day one (section 6).
@@ -345,6 +349,7 @@ Covered by section 8.
 Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
 Steer a secondmate the same way.
 Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays inside the secondmate home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
+Because `fm-send` to a `kind=secondmate` target marks the request as from-firstmate (section 7 intake), the secondmate's answer comes back on that status/doc path too, not in its chat; read the response there as an ordinary status signal and do not peek its chat for it.
 
 ### Delivery modes and yolo
 

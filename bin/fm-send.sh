@@ -12,6 +12,13 @@
 # instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
 # The composer/submit logic is shared with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+#
+# From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
+# records kind=secondmate, the text is prefixed with the from-firstmate marker
+# (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
+# instead of stranding it in chat the main firstmate never reads. A crewmate/scout
+# target, an explicit session:window escape-hatch target, and the --key path are
+# never marked - their behavior is unchanged.
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: a cleared composer only proves the text was
 # submitted, but the harness needs a beat to spin up the turn before its busy
@@ -27,6 +34,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-marker-lib.sh
+. "$SCRIPT_DIR/fm-marker-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -48,8 +57,24 @@ resolve() {
   esac
 }
 
+RAW_TARGET=$1
 T=$(resolve "$1")
 shift
+
+# Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
+# resolved through this home's meta and recording kind=secondmate, is marked: the
+# secondmate then routes its reply via the status path (see fm-marker-lib.sh).
+# An explicit session:window target (the escape hatch for windows outside this
+# home) and any crewmate/scout target are left unmarked, and so is the --key path.
+MARK_PREFIX=""
+case "$RAW_TARGET" in
+  fm-*)
+    meta="$STATE/${RAW_TARGET#fm-}.meta"
+    if [ -f "$meta" ] && grep -q '^kind=secondmate$' "$meta" 2>/dev/null; then
+      MARK_PREFIX="$FM_FROMFIRST_MARK"
+    fi
+    ;;
+esac
 
 if [ "${1:-}" = "--key" ]; then
   tmux send-keys -t "$T" "$2"
@@ -61,7 +86,7 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")
+  verdict=$(fm_tmux_submit_core "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
   case "$verdict" in
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
