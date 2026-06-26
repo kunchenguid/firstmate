@@ -37,7 +37,7 @@ FM_CC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the watch component: this brings in fm_ctx_fire_once and every resolution /
 # cooldown helper WITHOUT running the daemon (its main loop is guarded by the
 # BASH_SOURCE==0 check, which is false when we source it).
-# shellcheck source=bin/fm-context-watch.sh
+# shellcheck source=bin/fm-context-watch.sh disable=SC1091  # sibling sourced at runtime; not a shellcheck input
 . "$FM_CC_DIR/fm-context-watch.sh"
 # The mkdir-based lock helpers (fm_lock_try_acquire / fm_lock_release) the daemon
 # uses for its singleton; sourced here for the per-id in-flight guard.

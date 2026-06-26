@@ -220,7 +220,25 @@ fm_ctx_fire_once() {  # <statedir> <key>
 _ctx_log() { [ -n "${FM_CTX_LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$FM_CTX_LOG"; return 0; }
 
 # --- main loop (executed only) ----------------------------------------------
+# fm_ctx_main accepts an optional --scope/--home <home> to watch ONLY that firstmate
+# home's crewmates (a secondmate watching its own tree) instead of the global default.
+# Scoping is just re-pointing FM_HOME: _ctx_state_root resolves to $home/state, so the
+# poll set, the cooldown markers, AND the singleton lock ($STATE/.context-watch.lock)
+# are all naturally per-scope. No scope -> unchanged global behavior (FM_STATE_OVERRIDE
+# still wins when set, preserving the existing test/override path).
 fm_ctx_main() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope|--home)
+        shift; [ $# -gt 0 ] || { echo "error: --scope needs a home path" >&2; exit 2; }
+        FM_HOME=$1 ;;
+      --scope=*|--home=*) FM_HOME=${1#*=} ;;
+      --) shift; break ;;
+      --*) echo "error: unknown flag: $1" >&2; exit 2 ;;
+      *) echo "error: unexpected argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
   local STATE; STATE="$(_ctx_state_root)"; mkdir -p "$STATE"
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
   FM_STATE_OVERRIDE="$STATE" . "$FM_CTX_DIR/fm-wake-lib.sh"

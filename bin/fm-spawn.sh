@@ -494,4 +494,21 @@ tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
+# A secondmate watches its OWN tree's context: start a context-watch scoped to its
+# home as a presence-gated background child. fm-context-watch --scope self-singletons
+# on that home's lock (state/.context-watch.lock derives from the home), so a duplicate
+# spawn or a recovery respawn no-ops cleanly rather than stacking daemons. Idle-safe: it
+# only polls this home's ctx-*.json and fires the compact cycle for its own crewmates.
+# Disable with FM_SECONDMATE_NO_WATCH=1 (e.g. when the main firstmate already covers it).
+# The start command is overridable for tests (FM_CTX_WATCH_START_CMD receives the home
+# as $1), mirroring _ctx_send's FM_CTX_SEND_CMD; default detaches the real watcher.
+if [ "$KIND" = secondmate ] && [ "${FM_SECONDMATE_NO_WATCH:-}" != 1 ]; then
+  if [ -n "${FM_CTX_WATCH_START_CMD:-}" ]; then
+    eval "$FM_CTX_WATCH_START_CMD \"\$PROJ_ABS\"" || true
+  else
+    nohup env -u FM_STATE_OVERRIDE -u FM_ROOT_OVERRIDE FM_HOME="$PROJ_ABS" \
+      "$FM_ROOT/bin/fm-context-watch.sh" --scope "$PROJ_ABS" >/dev/null 2>&1 &
+  fi
+fi
+
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
