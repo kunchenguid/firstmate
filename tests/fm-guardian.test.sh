@@ -56,6 +56,23 @@ reap_guardian_watcher() {
   GUARDIAN_WATCHER_PID=""
 }
 
+# A stand-in for the real daemon: a long-lived bash process whose argv contains
+# "fm-supervise-daemon", so guardian-arm's identity check recognizes it as a
+# genuine daemon (the real daemon is likewise a non-exec'd bash process running a
+# script of that name). No exec, so ps -o command= keeps reporting this script's
+# path rather than sleep; the TERM trap reaps the sleep child so nothing orphans.
+write_daemon_stub() {  # <dir> -> prints stub path
+  local dir=$1 stub="$1/fm-supervise-daemon-stub.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+trap 'kill "${child:-}" 2>/dev/null; exit 0' TERM INT
+sleep 30 & child=$!
+wait "$child"
+SH
+  chmod +x "$stub"
+  printf '%s\n' "$stub"
+}
+
 # --- guardian_lapsed: the detection contract (criterion 3 boundary) ----------
 test_guardian_lapsed_matrix() {
   local dir state
@@ -307,18 +324,55 @@ test_guard_banner_still_fires_with_daemon_model() {
 
 # --- guardian-arm is singleton-safe (no-op when a live daemon already runs) ---
 test_guardian_arm_no_ops_when_daemon_alive() {
-  local dir state out
+  local dir state out stub daemon_pid
   dir=$(make_case guardian-arm-noop)
   state="$dir/state"
-  # A live "daemon": any live pid recorded in the pidfile.
+  # A live, GENUINE daemon: a stub whose argv contains fm-supervise-daemon so the
+  # identity check recognizes it. Liveness alone is not the contract — a bare
+  # 'sleep 30' must NOT pass (asserted by the recycled-pid test below).
+  stub=$(write_daemon_stub "$dir")
+  "$stub" &
+  daemon_pid=$!
+  printf '%s\n' "$daemon_pid" > "$state/.supervise-daemon.pid"
+  out=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" "$GUARDIAN_ARM" 2>&1) \
+    || { kill "$daemon_pid" 2>/dev/null; wait "$daemon_pid" 2>/dev/null; fail "guardian-arm exited non-zero with a live daemon"; }
+  grep -F "already running pid=$daemon_pid" <<<"$out" >/dev/null \
+    || { kill "$daemon_pid" 2>/dev/null; wait "$daemon_pid" 2>/dev/null; fail "guardian-arm did not no-op for a live daemon: $out"; }
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "guardian-arm no-ops when a live, genuine daemon already holds this home"
+}
+
+# --- guardian-arm does NOT trust a recycled non-daemon pid (the finding) ------
+# After an unclean daemon death the pidfile is stale; if that pid is recycled to an
+# unrelated live process, a liveness-only check would falsely no-op and start no
+# guardian. The identity check closes that: a live pid that is NOT a daemon must
+# make guardian-arm proceed to start rather than print "already running".
+test_guardian_arm_starts_for_recycled_non_daemon_pid() {
+  local dir state out fake daemon_pid
+  dir=$(make_case guardian-arm-recycled)
+  state="$dir/state"
+  # A live but UNRELATED pid: a plain sleep, whose argv is not the daemon.
   sleep 30 &
-  local fake=$!
+  fake=$!
   printf '%s\n' "$fake" > "$state/.supervise-daemon.pid"
-  out=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" "$GUARDIAN_ARM" 2>&1) || fail "guardian-arm exited non-zero with a live daemon"
-  grep -F "already running pid=$fake" <<<"$out" >/dev/null || fail "guardian-arm did not no-op for a live daemon: $out"
+  # The fakebin tmux (make_case) fails display-message, so the daemon guardian-arm
+  # launches fails target validation and self-terminates immediately — the start
+  # path runs without leaving a real daemon behind.
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" "$GUARDIAN_ARM" 2>&1) || true
+  if grep -F "already running" <<<"$out" >/dev/null; then
+    kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null
+    fail "guardian-arm falsely no-opped on a recycled non-daemon pid (identity check missing): $out"
+  fi
+  # Best-effort cleanup of any daemon the start path may have spawned before exit.
+  daemon_pid=$(cat "$state/.supervise-daemon.pid" 2>/dev/null || true)
+  case "$daemon_pid" in
+    ''|*[!0-9]*) : ;;
+    *) [ "$daemon_pid" != "$fake" ] && { kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; } ;;
+  esac
   kill "$fake" 2>/dev/null || true
   wait "$fake" 2>/dev/null || true
-  pass "guardian-arm no-ops when a live daemon already holds this home"
+  pass "guardian-arm starts (no false no-op) when the pidfile names a live NON-daemon pid"
 }
 
 test_guardian_lapsed_matrix
@@ -332,3 +386,4 @@ test_restore_does_not_stack
 test_no_broad_pkill_in_sources
 test_guard_banner_still_fires_with_daemon_model
 test_guardian_arm_no_ops_when_daemon_alive
+test_guardian_arm_starts_for_recycled_non_daemon_pid

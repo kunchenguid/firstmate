@@ -28,13 +28,26 @@ mkdir -p "$STATE"
 
 [ -x "$DAEMON" ] || { echo "guardian: FAILED - daemon not executable: $DAEMON" >&2; exit 1; }
 
-daemon_alive() {  # 0 if a live daemon already runs for this home
-  local pid
+daemon_alive() {  # 0 only if the pidfile names a LIVE, GENUINE daemon for this home
+  local pid cmd
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Liveness alone is not enough. An unclean daemon death (kill -9 / OOM) leaves a
+  # stale pidfile, and the OS may later recycle that pid to an unrelated process;
+  # trusting kill -0 alone would then falsely conclude the daemon is up and no-op,
+  # leaving this home with no guardian for as long as that process lives. Mirror
+  # the daemon's own lock identity check: require the pid to actually be an
+  # fm-supervise-daemon process. ps -o command= is portable on BSD and GNU. A
+  # false-negative here is safe — the daemon's portable singleton lock makes a
+  # redundant start a no-op — while the false-positive this closes is not.
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$cmd" in
+    *fm-supervise-daemon*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Already running for this home: no-op. The daemon also self-singletons via its
