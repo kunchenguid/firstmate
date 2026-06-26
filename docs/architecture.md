@@ -23,7 +23,7 @@ So a forgotten re-arm self-heals within a tick instead of silently stopping supe
 While away (afk on, activated by the `/afk` skill) the same process owns the watcher, self-handles routine wakes in bash, and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 The daemon's watcher restore and away-mode takeover are home-scoped the same way `--restart` is: they touch only this home's watcher, never a broad `pkill`, so the singleton lock guarantees at most one watcher per home even when the guardian restores it at the same moment firstmate re-arms.
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
-`fm-send.sh` adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that pause.
+`fm-send.sh` adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the daemon uses only the shared submit core and does not pay that pause.
 
 ## Worktrees, not branches in your checkout
 

@@ -61,7 +61,9 @@ shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, and duplicate-collapse tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
-tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
+tests/fm-daemon.test.sh                   # away-mode classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
+tests/fm-guardian.test.sh                 # always-on daemon present-mode liveness-guardian units: lapse decision, single-nudge cooldown, singleton-safe watcher restore, no routine-wake injection, and home-scoping
+tests/fm-guardian-present-e2e.test.sh     # present-mode (afk off) liveness guardian end to end: lapse, restore the watcher, nudge once, stay quiet, plus clean signal shutdown
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection

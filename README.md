@@ -110,7 +110,7 @@ You chat with the first mate.
 It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
-A presence-gated sub-supervisor (`/afk`) can self-handle routine events and batch only what matters while you step away.
+An always-on, per-home supervisor daemon keeps watcher liveness self-healing in the background, and `/afk` flips it to away mode to self-handle routine events and batch only what matters while you step away.
 When firstmate works on itself, spawn-time isolation checks and a primary-checkout tangle alarm keep the operating checkout on its default branch and stop a crewmate that did not land in a separate worktree.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, project modes, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
@@ -122,7 +122,7 @@ Claude uses the slash form shown here; codex uses the same names with `$`, such 
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
+| `/afk`             | Flip the always-on supervisor daemon to away mode: it self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
