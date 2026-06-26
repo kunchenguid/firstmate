@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# fm-context-watch.sh — WATCH+FIRE component of the firstmate context watchdog.
+#
+# A presence/busy-gated daemon, modelled on fm-supervise-daemon.sh, that polls the
+# ctx-<window>.json sentinels written by fm-ctx-statusline.sh / fm-ctx-stop-hook.sh
+# and, when a session crosses its restart threshold AND its pane is not busy, drives
+# the checkpoint -> handoff -> /clear cycle:
+#   1. fm-send a "checkpoint now: write your leave-off doc to state/handoff-<win>.md
+#      then stop" instruction into the pane.
+#   2. poll until that handoff file exists (bounded by FM_CTX_HANDOFF_TIMEOUT).
+#   3. tmux send-keys '/clear' into the pane (ONLY after the handoff exists — never
+#      wipe a session that has not checkpointed).
+#   4. mark a cooldown so the (now-stale) sentinel does not immediately re-fire.
+#
+# Thresholds live in fm-ctx-lib.sh: CAPTAIN fires at total context >= FM_CTX_CAPTAIN_FLOOR
+# (~185k, a margin UNDER the 200k floor — fire before, never at, 200k);
+# CREW/SECONDMATE fire at used_pct >= FM_CTX_CREW_PCT (~50). The busy-guard reuses
+# fm_pane_is_busy from fm-tmux-lib.sh — the SAME detector the away-mode daemon and
+# fm-send use — so a pane mid-turn is never interrupted.
+#
+# The pure decision functions below (fm_ctx_needs_restart / _ctx_eligible /
+# fm_ctx_select / fm_ctx_can_fire) are sourceable and unit-tested; the main loop
+# runs only when the script is executed.
+#
+# Env knobs:
+#   FM_STATE_OVERRIDE        state dir (testing)
+#   FM_CTX_POLL              seconds between polls (default 20)
+#   FM_CTX_COOLDOWN          seconds a fired window is suppressed (default 600)
+#   FM_CTX_HANDOFF_TIMEOUT   seconds to wait for the handoff file (default 120)
+#   FM_CTX_HANDOFF_POLL      seconds between handoff existence checks (default 2)
+#   FM_CTX_SEND_CMD          override the instruction-send command (testing); receives
+#                            "<target> <message>" appended. Default: bin/fm-send.sh.
+#   FM_CTX_CAPTAIN_FLOOR / FM_CTX_CREW_PCT   thresholds (see fm-ctx-lib.sh)
+set -u
+
+FM_CTX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_CTX_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+# shellcheck source=bin/fm-ctx-lib.sh
+. "$FM_CTX_DIR/fm-ctx-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
+. "$FM_CTX_DIR/fm-tmux-lib.sh"
+
+POLL_DEFAULT=20
+COOLDOWN_DEFAULT=600
+HANDOFF_TIMEOUT_DEFAULT=120
+HANDOFF_POLL_DEFAULT=2
+
+_ctx_state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+_ctx_now() { date +%s; }
+if [ "$(uname)" = Darwin ]; then
+  _ctx_mtime() { stat -f %m "$1" 2>/dev/null; }
+else
+  _ctx_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
+_ctx_age() {  # seconds since mtime; huge if missing
+  local m; m=$(_ctx_mtime "$1") || { echo 999999; return; }
+  echo $(( $(_ctx_now) - m ))
+}
+
+# --- sentinel reads (PURE) --------------------------------------------------
+# fm_ctx_json_field: echo one top-level field of a ctx-*.json (empty if absent).
+fm_ctx_json_field() {  # <json_file> <field>
+  [ -r "$1" ] || { printf ''; return 0; }
+  FM_F=$2 python3 -c '
+import sys, json, os
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+v = d.get(os.environ["FM_F"], "")
+print(v if v is not None else "")
+' "$1" 2>/dev/null
+}
+
+# fm_ctx_needs_restart: 0 if the measurement in <ctx_json> crosses its role's
+# threshold. Pure: reads only the file.
+fm_ctx_needs_restart() {  # <ctx_json>
+  local f=$1 role total pct
+  [ -r "$f" ] || return 1
+  role=$(fm_ctx_json_field "$f" role)
+  total=$(fm_ctx_json_field "$f" total_tokens)
+  pct=$(fm_ctx_json_field "$f" used_pct)
+  fm_ctx_should_restart "$role" "$total" "$pct"
+}
+
+# _ctx_key_from_path: ctx-<key>.json -> <key>
+_ctx_key_from_path() { local b; b=$(basename "$1"); b=${b#ctx-}; printf '%s' "${b%.json}"; }
+
+# _ctx_in_cooldown: 0 if this window fired within FM_CTX_COOLDOWN.
+_ctx_in_cooldown() {  # <statedir> <key>
+  local marker="$1/.ctx-fired-$2"
+  [ -e "$marker" ] || return 1
+  [ "$(_ctx_age "$marker")" -lt "${FM_CTX_COOLDOWN:-$COOLDOWN_DEFAULT}" ]
+}
+
+# fm_ctx_sentinel_managed: 0 iff the sentinel was stamped managed:true by the
+# MEASURE path (i.e. its pane is in the firstmate tmux session). Missing/false/any
+# other value -> NOT managed (fail-closed). This is what stops the daemon from ever
+# steering an ad-hoc/personal session that merely wrote a sentinel via the global
+# statusLine. (json.load turns JSON true into Python True, printed as "True".)
+fm_ctx_sentinel_managed() {  # <ctx_json>
+  local f=$1 m
+  [ -r "$f" ] || return 1
+  m=$(fm_ctx_json_field "$f" managed)
+  [ "$m" = true ] || [ "$m" = True ]
+}
+
+# _ctx_eligible: managed AND threshold crossed AND not in cooldown (no fire-time
+# tmux — pure read of the sentinel + cooldown marker).
+_ctx_eligible() {  # <statedir> <key>
+  local state=$1 key=$2
+  fm_ctx_sentinel_managed "$state/ctx-$key.json" || return 1
+  fm_ctx_needs_restart "$state/ctx-$key.json" || return 1
+  _ctx_in_cooldown "$state" "$key" && return 1
+  return 0
+}
+
+# fm_ctx_select: print the window keys whose sessions should be restarted
+# (threshold crossed, not in cooldown). Pure — the busy-guard is applied later by
+# fm_ctx_can_fire. This is the G1 surface.
+fm_ctx_select() {  # <statedir>
+  local state=$1 f key
+  for f in "$state"/ctx-*.json; do
+    [ -e "$f" ] || continue
+    key=$(_ctx_key_from_path "$f")
+    _ctx_eligible "$state" "$key" && printf '%s\n' "$key"
+  done
+}
+
+# fm_ctx_target_for: the tmux target to steer for a window key (the pane id stored
+# by the statusline; falls back to the window field).
+fm_ctx_target_for() {  # <statedir> <key>
+  local state=$1 key=$2 f t
+  f="$state/ctx-$key.json"
+  t=$(fm_ctx_json_field "$f" tmux_target)
+  [ -n "$t" ] || t=$(fm_ctx_json_field "$f" window)
+  printf '%s' "$t"
+}
+
+# _ctx_pane_busy: the busy-guard — the SAME detector the away-mode daemon uses.
+_ctx_pane_busy() { fm_pane_is_busy "$1"; }  # <target>
+
+# _ctx_target_in_session: 0 iff <target> resolves, RIGHT NOW, to a live pane in the
+# firstmate tmux session. Defense-in-depth at fire time: even if a sentinel claimed
+# managed:true, we re-confirm the actual pane belongs to firstmate before sending
+# keys. Any tmux error / unresolvable / foreign-session target -> return 1 (never
+# fire on a pane we cannot positively confirm is ours).
+_ctx_target_in_session() {  # <target>
+  local target=$1 sess
+  [ -n "$target" ] || return 1
+  sess=$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
+  fm_ctx_session_managed "$sess"
+}
+
+# fm_ctx_can_fire: the full fire gate — eligible (managed + over threshold + not in
+# cooldown) AND the target re-confirms as a firstmate-session pane AND the pane is
+# not busy. This is the G2 surface (a busy pane must NOT fire).
+fm_ctx_can_fire() {  # <statedir> <key> <target>
+  local state=$1 key=$2 target=$3
+  _ctx_eligible "$state" "$key" || return 1
+  _ctx_target_in_session "$target" || return 1
+  _ctx_pane_busy "$target" && return 1
+  return 0
+}
+
+# fm_ctx_checkpoint_msg: the instruction sent into the pane. Names the EXACT
+# handoff path (so the session does not have to compute its own key) and the
+# context-discipline leave-off format; kept terse and well under the inject cap.
+fm_ctx_checkpoint_msg() {  # <key>
+  local key=$1 state; state=$(_ctx_state_root)
+  printf 'CONTEXT CHECKPOINT (auto): your context is near its limit. Write your leave-off doc NOW to %s/handoff-%s.md using the context-discipline format — Goal / Done-green / Frontier / Open-decisions / Pointers (references, not contents; keep it well under 10k chars). Write that file, then stop. You will be /cleared and rehydrated from it.' "$state" "$key"
+}
+
+# _ctx_send: deliver the checkpoint instruction. Overridable for tests; default is
+# the verified fm-send.sh (non-fatal if its submit verification is unhappy — the
+# text still landed, and the handoff poll is the real ack).
+_ctx_send() {  # <target> <msg>
+  if [ -n "${FM_CTX_SEND_CMD:-}" ]; then
+    eval "$FM_CTX_SEND_CMD \"\$1\" \"\$2\"" || true
+  else
+    "$FM_CTX_DIR/fm-send.sh" "$1" "$2" || true
+  fi
+}
+
+_ctx_mark_fired() { local state=$1 key=$2; _ctx_now > "$state/.ctx-fired-$key"; }
+
+# fm_ctx_fire_once: the checkpoint -> wait-for-handoff -> /clear sequence for one
+# window. Returns 0 only if the handoff appeared and /clear was issued. NEVER
+# issues /clear without a handoff on disk (a session that did not checkpoint is
+# left intact). This is the G4 surface.
+fm_ctx_fire_once() {  # <statedir> <key>
+  local state=$1 key=$2 target handoff msg timeout step
+  target=$(fm_ctx_target_for "$state" "$key")
+  [ -n "$target" ] || { _ctx_log "fire: no target for $key"; return 1; }
+  handoff="$state/handoff-$key.md"
+  msg=$(fm_ctx_checkpoint_msg "$key")
+  _ctx_log "fire: checkpoint -> $key ($target)"
+  _ctx_send "$target" "$msg"
+  timeout=${FM_CTX_HANDOFF_TIMEOUT:-$HANDOFF_TIMEOUT_DEFAULT}
+  step=${FM_CTX_HANDOFF_POLL:-$HANDOFF_POLL_DEFAULT}
+  # step may be fractional (e.g. 0.2 in tests); count integer iterations against a
+  # ceil(timeout/step) bound so the loop guard stays integer-safe.
+  local i=0 max_iters
+  max_iters=$(awk -v t="$timeout" -v s="$step" 'BEGIN{ if (s<=0) s=1; n=t/s; if (n>int(n)) n=int(n)+1; print int(n) }')
+  while [ ! -e "$handoff" ]; do
+    [ "$i" -lt "$max_iters" ] || { _ctx_log "fire: no handoff for $key after ${timeout}s; NOT clearing"; return 1; }
+    sleep "$step"
+    i=$((i + 1))
+  done
+  # Handoff exists — safe to recycle the session.
+  tmux send-keys -t "$target" -l '/clear' 2>/dev/null || true
+  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  _ctx_mark_fired "$state" "$key"
+  _ctx_log "fire: /clear issued for $key (handoff present)"
+  return 0
+}
+
+_ctx_log() { [ -n "${FM_CTX_LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$FM_CTX_LOG"; return 0; }
+
+# --- main loop (executed only) ----------------------------------------------
+fm_ctx_main() {
+  local STATE; STATE="$(_ctx_state_root)"; mkdir -p "$STATE"
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
+  FM_STATE_OVERRIDE="$STATE" . "$FM_CTX_DIR/fm-wake-lib.sh"
+  local LOCK="$STATE/.context-watch.lock" PIDFILE="$STATE/.context-watch.pid"
+  FM_CTX_LOG="$STATE/.context-watch.log"
+  if ! fm_lock_try_acquire "$LOCK"; then
+    echo "error: another fm-context-watch is already running (lock $LOCK held)" >&2
+    exit 1
+  fi
+  echo "$$" > "$PIDFILE"
+  cleanup() { trap - TERM INT; fm_lock_release "$LOCK" 2>/dev/null || true; rm -f "$PIDFILE" 2>/dev/null || true; _ctx_log "context-watch shutting down"; exit 0; }
+  trap cleanup TERM INT
+  _ctx_log "context-watch starting (pid $$); floor=${FM_CTX_CAPTAIN_FLOOR}; crew_pct=${FM_CTX_CREW_PCT}"
+  local key target
+  while true; do
+    for key in $(fm_ctx_select "$STATE"); do
+      target=$(fm_ctx_target_for "$STATE" "$key")
+      [ -n "$target" ] || continue
+      if fm_ctx_can_fire "$STATE" "$key" "$target"; then
+        fm_ctx_fire_once "$STATE" "$key" || true
+      else
+        _ctx_log "skip $key: busy or ineligible"
+      fi
+    done
+    sleep "${FM_CTX_POLL:-$POLL_DEFAULT}"
+  done
+}
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  fm_ctx_main "$@"
+fi
