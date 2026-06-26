@@ -14,6 +14,7 @@
 # on a remote yet the change is fully in main.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -28,9 +29,9 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
-#   --force skips the unpushed-work check for ordinary tasks and discards
-#   secondmate child work for kind=secondmate. Only use it when the captain has
-#   explicitly said to discard the work.
+#   --force skips ordinary-task dirty and landed-work checks, skips scout report
+#   checks, and discards secondmate child work for kind=secondmate. Only use it
+#   when the captain has explicitly said to discard the work.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

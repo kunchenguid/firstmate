@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Promote a scout task to a ship task in place: the crewmate keeps its window,
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
-# state/<task-id>.meta so fm-teardown.sh applies the full unpushed-work protection
+# state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
