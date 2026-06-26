@@ -375,6 +375,12 @@ The no-mistakes pipeline fixes auto-fix findings on its own (inside its own work
 When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
+Judge a validating crewmate by the run's step status, never by whether its shell is still running; read it cheaply with `no-mistakes axi status`.
+
+- `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone.
+- `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`. The crewmate owes a `respond`; if it is idle-waiting for the run to advance on its own, steer it to drive the gate, because a parked gate never self-resolves.
+- Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns. Steer it back to respond-only: the pipeline applies every fix on the branch from `axi respond`, including the fix for a real bug the review found in the crewmate's own code, and hand-fixing forces a full re-validation.
+
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
@@ -491,7 +497,7 @@ Watcher liveness is not enough if you are foreground-blocked.
 Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
 This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
-A crewmate driving its own `no-mistakes` validation does the opposite: it runs that gate drive in the foreground and drives it synchronously, never backgrounding or idle-waiting on its own validation run.
+A crewmate driving its own `no-mistakes` validation does the opposite: it drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
