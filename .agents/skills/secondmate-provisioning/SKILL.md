@@ -32,9 +32,9 @@ bin/fm-brief.sh <id> --secondmate <project>...
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
-Keep the charter focused on the persistent responsibility, available project clones, and escalation back to the main firstmate status file.
+Keep the charter focused on the persistent responsibility, available project clones, escalation back to the main firstmate status file, and the requests-from-main-firstmate contract.
 The scaffold's definition of done encodes the idle-by-default contract: on startup the secondmate reconciles only its own in-flight work and then waits for routed tasks, never self-initiating a survey or audit.
-Preserve that wording when filling the charter.
+Preserve that wording when filling the charter, including the marker rule that marked supervisor requests return through status or a doc pointer while unmarked captain messages stay conversational.
 
 Provision the persistent home and registry entry after the charter is filled:
 

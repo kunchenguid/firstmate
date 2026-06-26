@@ -13,7 +13,8 @@
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
-#   only captain-relevant escalations append to this home's status file.
+#   captain-relevant escalations and marked from-firstmate replies append to this
+#   home's status file.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 # For ship tasks, the definition of done is shaped by the project's delivery mode

@@ -16,9 +16,9 @@
 # From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
 # (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
-# instead of stranding it in chat the main firstmate never reads. A crewmate/scout
-# target, an explicit session:window escape-hatch target, and the --key path are
-# never marked - their behavior is unchanged.
+# or a status-pointed doc instead of stranding it in chat the main firstmate
+# never reads. A crewmate/scout target, an explicit session:window escape-hatch
+# target, and the --key path are never marked - their behavior is unchanged.
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: a cleared composer only proves the text was
 # submitted, but the harness needs a beat to spin up the turn before its busy

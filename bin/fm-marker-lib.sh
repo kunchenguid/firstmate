@@ -6,8 +6,9 @@
 # a firstmate running in its own home, so without a marker it treats every
 # incoming fm-send/tmux line as if its captain typed it and answers
 # CONVERSATIONALLY in its own chat. But the main firstmate never reads a
-# secondmate's chat: the only main<-secondmate channel is the terse status file
-# (charter escalation). A detailed chat-only reply therefore strands, unseen.
+# secondmate's chat: the only main<-secondmate wakeup channel is the status file
+# (charter escalation), optionally pointing to a doc for detail. A detailed
+# chat-only reply therefore strands, unseen.
 #
 # The marker lets the secondmate tell its supervisor's request apart from a
 # message the captain typed directly into its pane:
