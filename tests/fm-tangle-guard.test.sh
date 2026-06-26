@@ -156,7 +156,8 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  send-keys) [ -n "${FM_FAKE_TMUX_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"; exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -173,6 +174,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_LOG="${FM_FAKE_TMUX_LOG:-}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -199,11 +201,21 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
-  out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
+  local launchlog="$TMP_ROOT/spawn-launch.log"
+  : > "$launchlog"
+  out=$(FM_FAKE_TMUX_LOG="$launchlog" run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
+  # Path-B routing: a crew launch pins FM_HOME to the SPAWNING home so its context
+  # sentinels land in that home's state dir (where a secondmate's scoped watch sees its
+  # own crewmates); the main firstmate's crew keep landing in the main state dir. Role is
+  # unaffected (fm_ctx_role is cwd-based; a crewmate's cwd is its worktree, never the home).
+  grep -F "FM_HOME=$home " "$launchlog" >/dev/null \
+    || grep -F "FM_HOME='$home' " "$launchlog" >/dev/null \
+    || fail "crew launch did not pin FM_HOME to the spawning home (sentinels would leak to the wrong state dir)"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+  pass "fm-spawn: a crew launch pins FM_HOME to the spawning home for context-sentinel routing"
 }
 
 test_lib_classification

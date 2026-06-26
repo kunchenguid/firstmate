@@ -164,6 +164,10 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Gate-check clause: mode-independent, so defined once and appended to the
+# definition of done below rather than repeated in each mode's heredoc.
+GATE_CHECK="Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply."
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -172,7 +176,6 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
@@ -185,7 +188,6 @@ EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
@@ -199,7 +201,6 @@ EOF
     DOD=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
-Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -258,5 +259,6 @@ If this task produced durable project-intrinsic knowledge, record it in \`AGENTS
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+$GATE_CHECK
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

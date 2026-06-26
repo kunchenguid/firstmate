@@ -111,8 +111,13 @@ phase_seed() {
 
 phase_spawn() {
   : > "$LOG"
+  local watchlog="$HOME_DIR/state/watch-start.log"
+  rm -f "$watchlog"
+  # Stub the scoped-watch start (FM_CTX_WATCH_START_CMD receives the home as $1) so the
+  # test records the intent instead of detaching a real looping daemon.
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    FM_CTX_WATCH_START_CMD="printf '%s\\n' >> \"$watchlog\"" \
     "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
     || fail "secondmate spawn failed"
 
@@ -129,7 +134,9 @@ phase_spawn() {
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
   assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"
-  pass "spawn: launches in the subhome with persistent charter, records routing meta"
+  # The secondmate auto-starts a context-watch scoped to its OWN home.
+  assert_grep "$SUB_ABS" "$watchlog" "spawn did not start a context-watch scoped to the secondmate's own home"
+  pass "spawn: launches in the subhome with persistent charter, records routing meta, starts scoped watch"
 }
 
 phase_send() {
@@ -188,6 +195,7 @@ phase_recovery() {
   # persistent home (no explicit home argument).
   rm -f "$HOME_DIR/state/design.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    FM_CTX_WATCH_START_CMD=: \
     "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
     || fail "recovery respawn failed"
   local meta="$HOME_DIR/state/design.meta"
