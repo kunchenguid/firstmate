@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "id": "gate-g1-threshold",
+      "title": "Threshold selection: captain>=185k and crew>=50% selected; sub-threshold not",
+      "observable": "fm_ctx_select picks a captain sentinel at total>=185k and a crew sentinel at used_pct>=50, and excludes sub-threshold sentinels",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/context-watchdog.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-ctxwatch-g1.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-06-26T00:55:41.994Z",
+      "mutation_verified": "2026-06-26T00:55:53.805Z",
+      "status": "red",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-06-25T00:00:00Z",
+      "last_verified": "2026-06-26T05:25:06.470Z"
+    },
+    {
+      "id": "gate-g2-busy-guard",
+      "title": "Busy-guard: an over-threshold pane that is busy does NOT fire",
+      "observable": "fm_ctx_can_fire returns false for an eligible sentinel whose scratch tmux pane shows a busy footer",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/context-watchdog.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-ctxwatch-g2.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-06-26T00:55:41.994Z",
+      "mutation_verified": "2026-06-26T00:55:54.584Z",
+      "status": "red",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-06-25T00:00:00Z",
+      "last_verified": "2026-06-26T05:25:06.470Z"
+    },
+    {
+      "id": "gate-g3-rehydrate",
+      "title": "Rehydrate: SessionStart with handoff injects+archives it; no-handoff path unchanged",
+      "observable": "bootstrap injects handoff additionalContext and archives it; with no handoff a captain pane still gets captain ctx and no rehydrate block",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/context-watchdog.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-ctxwatch-g3.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-06-26T00:55:41.994Z",
+      "mutation_verified": "2026-06-26T00:55:56.262Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-06-25T00:00:00Z",
+      "last_verified": "2026-06-26T05:25:06.470Z"
+    },
+    {
+      "id": "gate-g4-e2e",
+      "title": "E2E on scratch pane: threshold -> checkpoint -> handoff -> /clear -> rehydrate",
+      "observable": "fm_ctx_fire_once sends the checkpoint instruction into a scratch pane, waits for the handoff, issues /clear, and the bootstrap rehydrates from it",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/context-watchdog.md",
+      "blocked_by": [
+        "gate-g1-threshold",
+        "gate-g3-rehydrate"
+      ],
+      "test_ref": "bash tests/fm-ctxwatch-g4.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-06-26T00:55:41.994Z",
+      "mutation_verified": "2026-06-26T00:55:56.646Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-06-25T00:00:00Z",
+      "last_verified": "2026-06-26T05:25:06.470Z"
+    },
+    {
+      "id": "gate-g5-inject-cap",
+      "title": "Inject cap: handoff under 10k injected verbatim, over 10k yields a pointer",
+      "observable": "fm_ctx_inject_payload and the bootstrap emit the handoff verbatim under the cap and a short file pointer over it",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/context-watchdog.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-ctxwatch-g5.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-06-26T00:55:41.994Z",
+      "mutation_verified": "2026-06-26T00:55:56.504Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-06-25T00:00:00Z",
+      "last_verified": "2026-06-26T05:25:06.470Z"
+    }
+  ]
+}
