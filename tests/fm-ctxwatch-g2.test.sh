@@ -23,8 +23,13 @@ tmux new-session -d -s "$SESS" -x 200 -y 50 2>/dev/null || { pass "G2 busy-guard
 PANE=$(tmux display-message -p -t "$SESS" '#{pane_id}')
 [ -n "$PANE" ] || fail "could not resolve scratch pane id"
 
+# Treat the disposable scratch session as the managed firstmate session so the
+# fire-time _ctx_target_in_session re-confirmation passes and the busy-guard (not
+# the session check) is the deciding factor under test.
+export FM_TMUX_SESSION="$SESS"
+
 # Plant an over-threshold captain sentinel pointing at the scratch pane.
-printf '{"window":"%s","tmux_target":"%s","role":"captain","total_tokens":195000,"used_pct":98,"exceeds_200k":false,"ts":0}' \
+printf '{"window":"%s","tmux_target":"%s","role":"captain","total_tokens":195000,"used_pct":98,"exceeds_200k":false,"managed":true,"ts":0}' \
   "g2win" "$PANE" > "$STATE/ctx-g2win.json"
 
 # Make the pane busy (normal) or idle (mutation).

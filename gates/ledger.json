@@ -12,11 +12,11 @@
       "baseline_ref": null,
       "first_observed_red": "2026-06-26T00:55:41.994Z",
       "mutation_verified": "2026-06-26T00:55:53.805Z",
-      "status": "red",
+      "status": "green",
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:25:06.470Z"
+      "last_verified": "2026-06-26T05:27:06.212Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -29,11 +29,11 @@
       "baseline_ref": null,
       "first_observed_red": "2026-06-26T00:55:41.994Z",
       "mutation_verified": "2026-06-26T00:55:54.584Z",
-      "status": "red",
+      "status": "green",
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:25:06.470Z"
+      "last_verified": "2026-06-26T05:27:06.212Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:25:06.470Z"
+      "last_verified": "2026-06-26T05:27:06.212Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:25:06.470Z"
+      "last_verified": "2026-06-26T05:27:06.212Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:25:06.470Z"
+      "last_verified": "2026-06-26T05:27:06.212Z"
     }
   ]
 }

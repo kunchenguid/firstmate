@@ -16,7 +16,7 @@ STATE=$(mktemp -d "${TMPDIR:-/tmp}/fm-ctx-g1.XXXXXX")
 trap 'rm -rf "$STATE"' EXIT
 
 write_ctx() {  # <key> <role> <total> <pct>
-  printf '{"window":"%s","tmux_target":"%%9","role":"%s","total_tokens":%s,"used_pct":%s,"exceeds_200k":false,"ts":0}' \
+  printf '{"window":"%s","tmux_target":"%%9","role":"%s","total_tokens":%s,"used_pct":%s,"exceeds_200k":false,"managed":true,"ts":0}' \
     "$1" "$2" "$3" "$4" > "$STATE/ctx-$1.json"
 }
 
