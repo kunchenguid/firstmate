@@ -152,6 +152,22 @@ If `config/crew-harness` names an unverified one, tell the captain and fall back
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.
 Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harness-specific skill invocation, interrupt, exit, resume, or adapter verification.
 
+### kimi (VERIFIED 2026-06-25, kimi-code 0.19.2)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `thinking...` (reasoning) and `working...` (generating), each with a leading braille spinner |
+| Exit commands | `/exit` and `/quit` |
+| Interrupt | single Escape |
+| Autonomy flag | `--yolo` |
+| Skill invocation | `/<skill>` (e.g., `/no-mistakes`) |
+| Turn-end hook | TOML `[[hooks]] event="Stop" command="touch <turnend>"` |
+| Brief injection | Must be typed into the interactive composer after launch; `--prompt` conflicts with `--yolo` |
+| Per-task home | `state/<id>.kimi-home/`; symlink everything from `~/.kimi-code` except `config.toml`; set `KIMI_CODE_HOME` |
+| First-run auth | Captain must run `kimi login` so `~/.kimi-code` exists; no per-directory trust dialog observed |
+
+No verified environment marker was found for harness detection in v0.19.2; `bin/fm-harness.sh` matches the command name (`*kimi*`) in process ancestry.
+
 ## 5. Recovery (run at every session start, after bootstrap)
 
 You may have been restarted mid-flight.

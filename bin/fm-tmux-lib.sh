@@ -29,14 +29,17 @@
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / the daemon).
+# footer set (mirrors fm-watch.sh / the daemon). FM_INJECT_SUBMIT_RETRIES and
+# FM_INJECT_SUBMIT_SLEEP tune how long fm_tmux_inject_brief retries Enter while a
+# cold-starting composer (e.g. kimi/pi-tui) drops the first keypresses.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; kimi:
+# "thinking..." / "working...".
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|thinking\.\.\.|working\.\.\.'
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
@@ -189,4 +192,125 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+}
+
+# fm_tmux_composer_box_state: classify the agent's whole composer input BOX as
+# empty|pending|unknown by scanning the bottom of the pane for the composer's
+# prompt row, instead of trusting a single cursor-row read.
+#
+# Why this exists (kimi / pi-tui): fm_tmux_composer_state reads only the cursor_y
+# row. kimi draws a multi-row composer box and parks the cursor on a BLANK
+# continuation row below the prompt, so a single-row read reports "empty" while
+# the typed brief still sits on the prompt row above. Used to verify a brief
+# actually submitted — where a false "empty" silently drops the brief — so it must
+# find the prompt row wherever it is, not assume it is the cursor line.
+#
+# The prompt row is the last captured line that, after dropping dim ghost text and
+# box borders, begins with a composer prompt glyph (">" or "❯"). Text after the
+# glyph is pending input; just the glyph is an empty composer. If no such row is
+# found (the box has not rendered yet) the state is unknown, so a not-yet-ready
+# pane is never mistaken for a ready, empty one.
+fm_tmux_composer_box_state() {  # <target> -> empty|pending|unknown
+  local target=$1 raw cleaned line stripped rest found=0 state=unknown
+  raw=$(tmux capture-pane -e -p -t "$target" -S -12 2>/dev/null) || { printf 'unknown'; return 0; }
+  cleaned=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
+  while IFS= read -r line; do
+    stripped=${line//│/}
+    stripped=${stripped//┃/}
+    stripped=${stripped//|/}
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    case "$stripped" in
+      '>'*|'❯'*)
+        found=1
+        rest=$stripped
+        rest=${rest#'>'}
+        rest=${rest#'❯'}
+        rest="${rest#"${rest%%[![:space:]]*}"}"
+        if [ -n "$rest" ]; then state=pending; else state=empty; fi
+        ;;
+    esac
+  done <<EOF
+$cleaned
+EOF
+  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  printf '%s' "$state"
+}
+
+# fm_tmux_inject_brief: inject a brief file into an interactive agent composer.
+# Usage: fm_tmux_inject_brief <target> <brief-file> [<timeout>]
+#   <target>      tmux target (session:window)
+#   <brief-file>  path to the brief to inject
+#   <timeout>     seconds to wait for a ready composer (default 30)
+# Returns 0 on success, 1 if the composer never becomes ready or the brief cannot be sent.
+# Multi-line briefs are pasted via tmux paste-buffer; single-line briefs use send-keys -l.
+fm_tmux_inject_brief() {  # <target> <brief-file> [<timeout>]
+  local target=$1 brief=$2 timeout=${3:-30} waited=0 line_count
+  local attempts sleep_s i box buf
+  # Wait for the actual composer BOX to render empty, not just for the cursor row
+  # to read blank. On a cold-starting pane the cursor line is blank before the TUI
+  # draws its composer, which a single-row check mistakes for a ready, empty
+  # composer and injects into a pane that cannot yet accept input.
+  while [ "$waited" -lt "$timeout" ]; do
+    [ "$(fm_tmux_composer_box_state "$target")" = empty ] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$waited" -ge "$timeout" ]; then
+    printf 'error: composer never became ready for brief injection in %s\n' "$target" >&2
+    return 1
+  fi
+  line_count=$(awk 'END { print NR }' "$brief" 2>/dev/null || echo 0)
+  if [ "$line_count" -gt 1 ]; then
+    # Multi-line: paste so internal newlines do not submit early. Use a buffer
+    # name unique to this target and process so a concurrent spawn on the same
+    # tmux server cannot overwrite it mid-inject, and delete it on paste so the
+    # brief text does not linger in a server-global buffer.
+    buf="__fm_brief_$(printf '%s_%s' "$target" "$$" | tr -c 'A-Za-z0-9_' '_')"
+    if ! tmux load-buffer -b "$buf" - < "$brief" 2>/dev/null; then
+      printf 'error: failed to load brief into tmux paste buffer\n' >&2
+      return 1
+    fi
+    if ! tmux paste-buffer -d -b "$buf" -t "$target" 2>/dev/null; then
+      printf 'error: failed to paste brief into %s\n' "$target" >&2
+      tmux delete-buffer -b "$buf" 2>/dev/null || true
+      return 1
+    fi
+  else
+    # Single-line: type literally.
+    if ! tmux send-keys -t "$target" -l "$(cat "$brief")" 2>/dev/null; then
+      printf 'error: failed to send brief to %s\n' "$target" >&2
+      return 1
+    fi
+  fi
+  # Submit and verify the brief actually LEFT the composer. Two kimi-specific
+  # hazards make a single Enter + cursor-row check unreliable:
+  #   1. kimi parks the cursor on a blank composer row, so emptiness must be judged
+  #      against the whole composer box (fm_tmux_composer_box_state), not the cursor
+  #      line — otherwise a still-full composer reads as "submitted" and the brief
+  #      is silently dropped while spawn reports success.
+  #   2. kimi (pi-tui) can drop the first Enter(s) during cold start, so Enter is
+  #      retried (only — never retyped, which would duplicate the brief) until the
+  #      box clears or the window ends.
+  #   3. After a successful submit kimi can replace the composer prompt row with a
+  #      busy/processing view, so the box read is "unknown" rather than "empty"
+  #      even though the brief already left the composer. A busy pane is therefore
+  #      an equally valid submit confirmation — but only when the box is not still
+  #      "pending" (real text on the prompt row), where the Enter was genuinely
+  #      swallowed and must be retried.
+  attempts=${FM_INJECT_SUBMIT_RETRIES:-30}
+  sleep_s=${FM_INJECT_SUBMIT_SLEEP:-0.5}
+  i=0
+  while :; do
+    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    sleep "$sleep_s"
+    box=$(fm_tmux_composer_box_state "$target")
+    [ "$box" = empty ] && return 0
+    if [ "$box" != pending ] && fm_pane_is_busy "$target"; then return 0; fi
+    i=$((i + 1))
+    if [ "$i" -ge "$attempts" ]; then
+      printf 'error: brief typed but composer never cleared (submit not confirmed) in %s\n' "$target" >&2
+      return 1
+    fi
+  done
 }

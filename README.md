@@ -53,7 +53,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, or pi), git with GitHub auth, and tmux for the crew windows.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or kimi), git with GitHub auth, and tmux for the crew windows.
 The first mate detects and offers to install everything else.
 
 ```sh

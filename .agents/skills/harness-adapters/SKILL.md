@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, and pi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and kimi.
 user-invocable: false
 ---
 
@@ -40,6 +40,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- kimi: `/<skill>`, for example `/no-mistakes`.
 
 ## claude (VERIFIED)
 
@@ -110,3 +111,23 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
+
+## kimi (VERIFIED 2026-06-25, kimi-code 0.19.2)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `thinking...` (reasoning) and `working...` (generating), each with a leading braille spinner |
+| Exit command | `/exit` (or `/quit`) |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+
+No per-directory trust dialog was observed.
+First-run auth is the captain's: they must run `kimi login` once so `~/.kimi-code` exists, or `fm-spawn` aborts with `error: ~/.kimi-code not found; run 'kimi login' first`.
+
+kimi has no project-local config, so `fm-spawn` builds a per-task `KIMI_CODE_HOME` at `state/<id>.kimi-home` that symlinks everything from `~/.kimi-code` except `config.toml`, which it copies and amends with a `Stop` hook that touches the turn-end marker.
+`fm-teardown` removes that directory.
+
+The brief cannot ride the launch command because `--prompt` conflicts with `--yolo`, so `fm-spawn` injects it into the interactive composer after launch via `fm_tmux_inject_brief` (`bin/fm-tmux-lib.sh`).
+That helper waits for the multi-row composer box to render empty, pastes multi-line briefs, and retries Enter (never retypes) while the cold-starting TUI drops the first keypresses; a busy pane counts as a valid submit confirmation.
+
+No verified env marker exists for detection in v0.19.2; `bin/fm-harness.sh` matches the command name (`*kimi*`) in process ancestry.
