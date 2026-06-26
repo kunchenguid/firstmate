@@ -34,3 +34,4 @@ Each file also starts with a short header comment.
 | `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, and prints the backlog reminder |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
+| `fm-registry.sh`         | Append a structured `propose-tool` or `report-problem` entry to the tracked `CAPABILITIES.md` / `PROBLEMS.md` registry and queue its evaluation in the fleet-local queue |

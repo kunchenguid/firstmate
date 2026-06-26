@@ -124,6 +124,8 @@ Claude uses the slash form shown here; codex uses the same names with `$`, such 
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
+| `/propose-tool`    | Record a proposal for a better alternative tool (what it replaces, why it is better) as a structured entry in the capabilities manifest ([`CAPABILITIES.md`](CAPABILITIES.md)) and queue it for evaluation |
+| `/report-problem`  | Record a recurring problem (symptom, impact, suspected cause) as a structured entry in the problem registry ([`PROBLEMS.md`](PROBLEMS.md)) and queue it for evaluation |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
@@ -132,6 +134,8 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, the files you set, and harness support.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [`CAPABILITIES.md`](CAPABILITIES.md) - the living manifest of every tool, MCP server, skill, and quality gate firstmate uses, with their known limits.
+- [`PROBLEMS.md`](PROBLEMS.md) - the registry of recurring problems, named so fixes target causes instead of symptoms.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 
