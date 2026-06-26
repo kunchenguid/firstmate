@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's unpushed-work safety check.
+# Tests for bin/fm-teardown.sh's landed-work safety check.
 #
-# Covers the local-only fork-remote fix: a local-only-registered project whose
-# task pushes its work to a fork (upstream-contribution PRs) must be teardown-
-# eligible because a fork IS a remote. The pre-fix code short-circuited to a
-# strict local-main check and false-refused legitimate fork-pushed work.
+# The check refuses to tear down a worktree whose work has not LANDED, because
+# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
+# OR - for a normal ship task whose commits are not so reachable - its PR is merged
+# (authoritative for squash/rebase/merge alike, surviving head-branch deletion) or
+# its content is already in the up-to-date default branch.
+#
+# Covers two fixes:
+#   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
+#     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
+#   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
+#     remote after a squash merge deletes the head branch, yet the change is fully in
+#     main. Reachability alone false-refused this common GitHub flow; the check now
+#     recognizes the merged PR (or the content already in main) as landed.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (the fix)
+#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes  + HEAD on origin remote-tracking branch   -> ALLOW  (no regression)
-#   (e) no-mistakes  + truly unpushed work                     -> REFUSE (no regression)
+#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
+#   (g) no-mistakes + squash-merged PR, branch-deleted         -> ALLOW  (squash fix)
+#   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
+#   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
+#   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -46,7 +59,19 @@ SH
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
+  # number fails. This keeps the landed-work check hermetic (never reaching the real
+  # gh-axi) and represents the common "no GitHub PR" baseline. Tests that need a
+  # merged PR or a lookup error override this file with the helpers below.
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -110,6 +135,58 @@ add_fork_with_pushed_branch() {
   # so refs/remotes/fork/fm-task-x1 is visible from the worktree (shared object db).
   git -C "$case_dir/wt" push -q fork fm/task-x1
   git -C "$case_dir/project" fetch -q fork
+}
+
+# Commit a real file change on the worktree's task branch (unlike wt_commit, which
+# makes an empty commit). A non-empty tree is what the content-in-default check
+# inspects. Args: case_dir file content [message]
+wt_commit_file() {
+  local case_dir=$1 file=$2 content=$3 msg=${4:-add $2}
+  printf '%s\n' "$content" > "$case_dir/wt/$file"
+  git -C "$case_dir/wt" add -- "$file"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+# Land <file>=<content> as a single commit on origin's default branch, simulating a
+# squash merge whose net change matches the task branch but whose commit differs.
+# After this, the branch's content is in origin/main even though the branch's own
+# commits are not reachable from it. Args: case_dir file content
+land_on_origin_main() {
+  local case_dir=$1 file=$2 content=$3 tmp
+  tmp="$case_dir/_land"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# Override gh-axi to report the branch's PR (number 7) as merged.
+add_gh_axi_merged() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# Override gh-axi so every call fails, simulating an API/network error.
+add_gh_axi_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+echo "error: gh-axi unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
@@ -221,7 +298,9 @@ test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "unpushed work"
+  # Real content that is not pushed, has no PR (default gh-axi mock), and never
+  # landed on origin/main: genuinely unlanded work that must still refuse.
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -230,7 +309,94 @@ test_no_mistakes_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
-  pass "no-mistakes worktree with truly unpushed work is refused (no regression)"
+  pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_squash_merged_branch_deleted_allows() {
+  local case_dir rc
+  case_dir=$(make_case squash-merged)
+  write_meta "$case_dir" no-mistakes ship
+  # The PR URL recorded in meta, as fm-pr-check would have written it.
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # Real branch content that is NOT pushed and NOT on origin/main: a squash merge
+  # rewrote it into a different commit on main and auto-deleted the head branch, so
+  # HEAD is unreachable from every remote-tracking branch. The merged PR is the only
+  # signal that the work landed.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_gh_axi_merged "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
+  pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_content_in_default_fallback_allows() {
+  local case_dir rc
+  case_dir=$(make_case content-landed)
+  write_meta "$case_dir" no-mistakes ship
+  # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
+  # cannot fire and the content check must carry it. The branch adds feature.txt, and
+  # the same net change has independently landed on origin/main via a squash commit.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
+  pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_dirty_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case dirty-wt)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # The committed work has fully landed (merged PR + content in default), but an
+  # uncommitted edit remains. Dirtiness must refuse regardless: the reset would
+  # discard those changes.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_axi_merged "$case_dir"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dirty-wt: teardown should refuse a dirty worktree even when the committed work has landed"
+  grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
+  pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+test_gh_error_and_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case gh-error)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # Real content not pushed, the PR lookup errors, and origin/main never gained the
+  # content. The fail-safe must refuse rather than allow on a transient gh failure.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_gh_axi_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gh-error: teardown should refuse when the PR lookup errors and content is not landed"
+  grep -q REFUSED "$case_dir/stderr" || fail "gh-error: no REFUSED line in stderr"
+  pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -256,3 +422,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_squash_merged_branch_deleted_allows
+test_content_in_default_fallback_allows
+test_dirty_worktree_refuses
+test_gh_error_and_content_absent_refuses
