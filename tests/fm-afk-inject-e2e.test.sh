@@ -91,6 +91,17 @@ _buf=
 redraw() {
   printf '\r\033[K%s' "$_buf"
 }
+# Byte-accurate hex without depending on a PATH `od`: a user's Open Design `od`
+# shim (in ~/.local/bin) can shadow coreutils octal-dump, and the pane's login
+# shell re-prepends it, so bare `od` would emit CLI usage instead of bytes. Prefer
+# coreutils od at a known absolute path, then hexdump, then xxd; all lowercase, no
+# spaces. On CI (no shim) this still resolves to coreutils od.
+_hex_bytes() {
+  if [ -x /usr/bin/od ]; then /usr/bin/od -An -tx1
+  elif command -v hexdump >/dev/null 2>&1; then hexdump -v -e '/1 "%02x"'
+  else xxd -p
+  fi
+}
 submit_line() {
   local _line=$_buf _c _hex
   if [ "${_line:0:1}" = "$MARK" ]; then
@@ -98,7 +109,7 @@ submit_line() {
   else
     _c="user"
   fi
-  _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
+  _hex=$(printf '%s' "$_line" | _hex_bytes | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
   printf '\r\033[K\n'

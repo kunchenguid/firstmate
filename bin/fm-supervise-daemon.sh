@@ -10,15 +10,34 @@
 # check-output events reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full per-wake responsiveness.
-# When afk is off, the daemon stays quiet — it self-handles routine wakes and
-# buffers escalations without injecting, so the base one-shot fm-watch.sh
-# protocol is the active mechanism. Escalations that arrive while afk is off
-# survive in state/.subsuper-escalations and are flushed on the next
-# "while you were out" catch-up or when afk is re-entered.
+# ALWAYS-ON, TWO MODES. This daemon is a per-home, long-lived liveness guardian
+# that runs whenever firstmate is up (started at bootstrap and recovery via
+# bin/fm-guardian-arm.sh, not only by /afk). The durable away-mode flag
+# state/.afk is now a POLICY TOGGLE inside the one process, never daemon
+# existence:
+#
+#   Mode A — afk ON (away): own the watcher as a child, classify each wake, and
+#     SELF-HANDLE the routine majority in bash or ESCALATE a batched, distilled
+#     digest to firstmate's pane on captain-relevant events. Injection is
+#     presence-gated by state/.afk (unchanged from the prior always-inject
+#     replacement).
+#
+#   Mode B — afk OFF (present): the daemon does NOT own the watcher and does NOT
+#     process wakes — firstmate's own run_in_background fm-watch-arm.sh is
+#     primary. The daemon's only job is to GUARANTEE watcher liveness: every
+#     FM_GUARDIAN_TICK it checks whether work is in flight AND the liveness
+#     beacon (state/.last-watcher-beat) is missing or older than FM_GUARD_GRACE.
+#     If so, firstmate's per-turn re-arm has lapsed: the guardian restores the
+#     watcher itself (singleton-safe fork) AND injects exactly ONE minimal nudge
+#     so firstmate drains the wake-queue and resumes. It never injects for a
+#     routine wake — only a detected liveness lapse. This makes the ~69-minute
+#     "missed re-arm => supervision silently off" failure mode impossible while
+#     keeping present-mode firstmate's normal per-turn flow untouched.
+#
+# afk flips the mode in-process: ON => Mode A injection policy, OFF => Mode B
+# lapse-only nudge, with no daemon restart and no change to approval authority.
+# Escalations buffered in Mode A survive in state/.subsuper-escalations and are
+# flushed on the next "while you were out" catch-up if afk turns off mid-batch.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
@@ -132,6 +151,25 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+
+# --- Mode B (present) liveness-guardian tunables ----------------------------
+# How often the present-mode guardian checks watcher liveness. 30-60s keeps the
+# check cheap while bounding restore latency to one tick past the grace window.
+GUARDIAN_TICK_DEFAULT=45
+# A watcher is "lapsed" when its beacon is missing or older than this. Reuses the
+# guard's threshold so liveness has ONE definition across fm-watch.sh,
+# fm-watch-arm.sh, fm-guard.sh, and the guardian. Crucially, this tolerance is
+# what keeps the guardian SILENT during a normal sub-grace gap (the watcher is
+# briefly down between a wake and firstmate's re-arm): only a true lapse — a beacon
+# stale past the grace, i.e. firstmate stopped re-arming entirely — ever nudges,
+# so a routine wake never produces an injection (acceptance criterion 3).
+GUARD_GRACE_DEFAULT=300
+# After a lapse nudge, suppress further nudges for this long so a single lapse
+# produces exactly ONE re-arm/drain nudge, never a stream. Defaults to the grace.
+GUARDIAN_NUDGE_COOLDOWN_DEFAULT=$GUARD_GRACE_DEFAULT
+# The single, minimal lapse nudge. Marker-prefixed at injection like every daemon
+# message, so firstmate recognizes it as internal (not a captain message).
+GUARDIAN_NUDGE_MSG='supervision liveness lapsed - draining the wake-queue and resuming'
 
 # --- presence-gating + sentinel marker --------------------------------------
 # The in-band sentinel: ASCII unit separator (0x1f). Invisible and untypable on
@@ -584,22 +622,24 @@ window_for_task() {  # <task-key>
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target retries sleep_s verdict
-  state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the base one-shot
-  # watcher. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
-  # (2) Single-line digest: collapse any embedded newlines so submission via
+# _inject_marked: the shared, hardened injection core (no presence gate). Used by
+# inject_msg (Mode A escalations, afk-gated by its caller) and inject_nudge (Mode
+# B liveness nudge, NOT gated). Collapses to one line, prepends the sentinel
+# marker, busy/pending-guards the supervisor pane, then types ONCE and submits
+# Enter (retry Enter only) via the shared primitive. Returns 0 only on a confirmed
+# empty composer; an unconfirmed/busy/pending pane returns non-zero so the caller
+# preserves whatever it was trying to deliver.
+_inject_marked() {  # <message> <state>
+  local msg=$1 state=$2 target retries sleep_s verdict
+  # (1) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
-  # them. Then prepend the sentinel marker — firstmate's afk-exit contract
-  # keys off its presence at the start of the message.
+  # them. Then prepend the sentinel marker — firstmate keys off its presence to
+  # tell an internal daemon message from a real captain message.
   msg=$(_collapse_newlines "$msg")
   msg="${FM_INJECT_MARK}${msg}"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
-  # (3) Busy-guard: never inject into an in-use pane. Two checks:
+  # (2) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   #   b) pane_input_pending: the cursor line has real unsubmitted text after
   #      dim/faint ghost text and borders are ignored (a human's half-typed line,
@@ -612,10 +652,10 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor pane has pending input (non-empty composer)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
+  # (3) Type the message ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the composer is confirmed
   # EMPTY afterward (the text was consumed). An unconfirmed/unknown pane does NOT
-  # count as delivered, so the buffer is preserved (strict) rather than cleared.
+  # count as delivered, so the caller preserves (strict) rather than clears.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
@@ -624,6 +664,96 @@ inject_msg() {  # <message> [state]
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
+}
+
+# inject_msg: Mode A escalation injection. Presence-gated — injects ONLY when afk
+# is active. When afk is off, the daemon self-handles and stays quiet; escalations
+# buffer and survive for the next catch-up flush. This gate is unchanged.
+inject_msg() {  # <message> [state]
+  local msg=$1 state
+  state="${2:-$(_state_root)}"
+  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  _inject_marked "$msg" "$state"
+}
+
+# inject_nudge: Mode B liveness nudge injection. NOT presence-gated — it fires
+# while afk is OFF (present), because its whole job is to wake a present firstmate
+# whose watcher re-arm has lapsed. It reuses the same marker + busy-guard +
+# verified submit hardening as inject_msg, so a present captain's half-typed line
+# is never clobbered and the nudge is recognized as internal, not a captain
+# message. Returns 0 only on a confirmed submit.
+inject_nudge() {  # <message> [state]
+  local msg=$1 state
+  state="${2:-$(_state_root)}"
+  _inject_marked "$msg" "$state"
+}
+
+# --- Mode B liveness guardian (present; PURE-ish, testable) ------------------
+# guardian_lapsed: 0 when watcher liveness has lapsed AND there is work to guard —
+# i.e. some state/*.meta exists (a task in flight) AND state/.last-watcher-beat is
+# missing or older than FM_GUARD_GRACE. With no work in flight there is nothing to
+# supervise, so it is never a lapse. The grace tolerance is what makes a normal
+# sub-grace gap (watcher briefly down between a wake and firstmate's re-arm) NOT a
+# lapse, so routine wakes never trigger a nudge.
+guardian_lapsed() {  # <state>
+  local state=$1 m in_flight=0 age
+  for m in "$state"/*.meta; do
+    [ -e "$m" ] && { in_flight=1; break; }
+  done
+  [ "$in_flight" = 1 ] || return 1
+  age=$(_file_age "$state/.last-watcher-beat")
+  [ "$age" -ge "${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}" ]
+}
+
+# guardian_nudge_due: 0 when the lapse nudge cooldown has elapsed, so a single
+# lapse yields exactly ONE nudge rather than a stream. Keyed off the
+# state/.guardian-last-nudge marker's mtime.
+guardian_nudge_due() {  # <state>
+  local state=$1 cooldown
+  # Default the cooldown to the live grace (so a small test grace shrinks it too),
+  # falling back to the compile-time default when neither is set.
+  cooldown=${FM_GUARDIAN_NUDGE_COOLDOWN:-${FM_GUARD_GRACE:-$GUARDIAN_NUDGE_COOLDOWN_DEFAULT}}
+  [ "$(_file_age "$state/.guardian-last-nudge")" -ge "$cooldown" ]
+}
+
+# guardian_restore_watcher: fork a watcher via the singleton-safe path so a lapsed
+# beacon goes fresh again within a tick. The fork can never double-arm: the
+# watcher's own singleton lock makes a redundant fork stand down. We track and
+# opportunistically reap our forked child (GUARDIAN_WATCHER_PID) to avoid zombies
+# and to avoid stacking forks while one is already alive. FM_WATCH_CMD/FM_WATCH_ERR
+# default to fm_super_main's WATCH/WATCH_ERR (dynamic scope); a test injects them.
+guardian_restore_watcher() {
+  local watch="${FM_WATCH_CMD:-${WATCH:-}}" err="${FM_WATCH_ERR:-${WATCH_ERR:-/dev/null}}"
+  [ -n "$watch" ] || return 1
+  if [ -n "${GUARDIAN_WATCHER_PID:-}" ] && ! kill -0 "$GUARDIAN_WATCHER_PID" 2>/dev/null; then
+    wait "$GUARDIAN_WATCHER_PID" 2>/dev/null || true
+    GUARDIAN_WATCHER_PID=""
+  fi
+  [ -z "${GUARDIAN_WATCHER_PID:-}" ] || return 0
+  "$watch" >/dev/null 2>>"$err" &
+  GUARDIAN_WATCHER_PID=$!
+}
+
+# guardian_step: one present-mode liveness check. On a detected lapse it restores
+# the watcher itself AND nudges firstmate exactly once (cooldown-guarded). It never
+# processes wakes — firstmate does, draining the durable queue after the nudge.
+# A non-lapsed tick is a no-op, so routine wakes produce no nudge.
+guardian_step() {  # <state>
+  local state=$1
+  guardian_lapsed "$state" || return 0
+  guardian_restore_watcher
+  if guardian_nudge_due "$state"; then
+    _now > "$state/.guardian-last-nudge"
+    if inject_nudge "$GUARDIAN_NUDGE_MSG" "$state"; then
+      log "guardian: liveness lapse — restored watcher and nudged firstmate"
+    else
+      # Pane busy/pending: firstmate is mid-turn and will see the guard banner and
+      # the durable queue itself. The watcher is already restored; nothing lost.
+      log "guardian: liveness lapse — restored watcher, nudge deferred (pane busy/pending)"
+    fi
+  else
+    log "guardian: liveness lapse — restored watcher, nudge suppressed (cooldown)"
+  fi
 }
 
 # --- INJECT_SKIP prefix match (literal prefixes, no regex) ------------------
@@ -720,10 +850,17 @@ fm_super_main() {
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
+  local WATCH_LOCK="$STATE/.watch.lock"
   local LOG="$STATE/.supervise-daemon.log"
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
   local PIDFILE="$STATE/.supervise-daemon.pid"
+  local GUARDIAN_TICK=${FM_GUARDIAN_TICK:-$GUARDIAN_TICK_DEFAULT}
+  # GUARDIAN_WATCHER_PID tracks the watcher the Mode B guardian forks on a lapse,
+  # so it is reaped (no zombie) and never double-forked. WATCH/WATCH_ERR reach
+  # guardian_restore_watcher via dynamic scope from here; a unit test injects
+  # FM_WATCH_CMD/FM_WATCH_ERR instead.
+  local GUARDIAN_WATCHER_PID=""
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
   local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
@@ -776,17 +913,26 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); always-on, two-mode; target=$TARGET; target_source=$target_source; afk=$afk_status (afk on=away/own+escalate, off=present/liveness-guardian); guardian_tick=${FM_GUARDIAN_TICK:-$GUARDIAN_TICK_DEFAULT}s; guard_grace=${FM_GUARD_GRACE:-$GUARD_GRACE_DEFAULT}s; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
 
-  # --- shutdown: flush buffered escalations, reap child, release lock -------
+  # --- shutdown: flush buffered escalations, reap children, release lock -----
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
+    # Flush any buffered Mode A escalation; and if a present-mode liveness lapse
+    # is still open, fire its single nudge now so it is not lost on shutdown.
     escalate_flush "$STATE" 2>/dev/null || true
-    if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
-      wait "$WATCHER_PID" 2>/dev/null || true
+    if ! afk_active "$STATE" && guardian_lapsed "$STATE" && guardian_nudge_due "$STATE"; then
+      _now > "$STATE/.guardian-last-nudge"
+      inject_nudge "$GUARDIAN_NUDGE_MSG" "$STATE" 2>/dev/null || true
     fi
+    local p
+    for p in "${WATCHER_PID:-}" "${GUARDIAN_WATCHER_PID:-}"; do
+      if [ -n "$p" ]; then
+        kill "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+      fi
+    done
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
@@ -823,8 +969,101 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason
+  # daemon_watch_lock_is_genuine: 0 iff the watch lock names <pid> as a real
+  # watcher of THIS home (fm-home + watcher-path + a matching pid-identity). The
+  # identity check guards against a recycled/reused pid. Mirrors
+  # fm-watch-arm.sh's watch_lock_matches_pid so a B->A takeover never signals an
+  # unrelated process or another home's watcher (home isolation).
+  daemon_watch_lock_is_genuine() {  # <pid>
+    local pid=$1 lock_home lock_path lock_identity current_identity
+    lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+    lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+    lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+    [ "$lock_home" = "$FM_HOME" ] || return 1
+    [ "$lock_path" = "$WATCH" ] || return 1
+    [ -n "$lock_identity" ] || return 1
+    current_identity=$(fm_pid_identity "$pid") || return 1
+    [ "$current_identity" = "$lock_identity" ]
+  }
+
+  # daemon_stop_home_watcher: home-scoped stop of the watcher recorded in THIS
+  # home's lock, used when the daemon takes watcher ownership on B->A. It signals
+  # ONLY a pid the lock proves is this home's genuine watcher, then waits for it to
+  # exit so the fresh daemon-owned watcher takes a released (or now-dead) lock
+  # rather than colliding with a live holder. Never a broad pkill.
+  daemon_stop_home_watcher() {
+    local lock_pid i=0
+    lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+    fm_pid_alive "$lock_pid" || return 0
+    daemon_watch_lock_is_genuine "$lock_pid" || return 0
+    kill -TERM "$lock_pid" 2>/dev/null || true
+    while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+  }
+
+  # enter_mode_a (afk turned ON / away): take watcher ownership so the daemon can
+  # self-handle and escalate. firstmate's present-mode arm may still hold the
+  # watcher, so stop it (home-scoped) and start a fresh daemon-owned child. The
+  # singleton lock makes this safe even under a race: at most one watcher survives.
+  enter_mode_a() {
+    if [ -n "${GUARDIAN_WATCHER_PID:-}" ]; then
+      kill "$GUARDIAN_WATCHER_PID" 2>/dev/null || true
+      wait "$GUARDIAN_WATCHER_PID" 2>/dev/null || true
+      GUARDIAN_WATCHER_PID=""
+    fi
+    daemon_stop_home_watcher
+    start_watcher
+    log "afk on: took watcher ownership (away mode: self-handle + escalate)"
+  }
+
+  # enter_mode_b (afk turned OFF / present): release watcher ownership so
+  # firstmate's run_in_background arm is primary again. Killing our owned child
+  # leaves the beacon fresh (it beat moments ago), so the guardian's grace window
+  # covers firstmate re-arming without a spurious nudge. Delay the first guardian
+  # check by one tick so a just-returned firstmate has room to arm.
+  enter_mode_b() {
+    if [ -n "${WATCHER_PID:-}" ]; then
+      kill "$WATCHER_PID" 2>/dev/null || true
+      wait "$WATCHER_PID" 2>/dev/null || true
+      WATCHER_PID=""
+    fi
+    if [ -n "${CUR_TMP:-}" ]; then
+      rm -f "$CUR_TMP" 2>/dev/null || true
+      CUR_TMP=""
+    fi
+    _now > "$STATE/.guardian-last-check"
+    log "afk off: released watcher ownership (present mode: liveness guardian only)"
+  }
+
+  local rc reason mode MODE_PREV=""
   while true; do
+    # afk is a POLICY TOGGLE inside this one process, checked every second so a
+    # transition is acted on promptly: ON => Mode A (own watcher, self-handle /
+    # escalate), OFF => Mode B (present; liveness guardian only).
+    if afk_active "$STATE"; then mode=A; else mode=B; fi
+    if [ "$mode" != "$MODE_PREV" ]; then
+      if [ "$mode" = A ]; then enter_mode_a; else enter_mode_b; fi
+      MODE_PREV=$mode
+    fi
+
+    if [ "$mode" = B ]; then
+      # --- Mode B (present): liveness guardian ONLY --------------------------
+      # The daemon does not own the watcher or process wakes here — firstmate's
+      # own arm is primary. Every GUARDIAN_TICK, restore a lapsed watcher and nudge
+      # firstmate exactly once. A non-lapsed tick is a no-op, so routine wakes never
+      # produce a nudge. The pane-gone case is handled inside the guardian path
+      # (inject just defers); no separate backoff is needed when present.
+      if [ "$(_file_age "$STATE/.guardian-last-check")" -ge "$GUARDIAN_TICK" ]; then
+        _now > "$STATE/.guardian-last-check"
+        guardian_step "$STATE"
+      fi
+      sleep 1
+      continue
+    fi
+
+    # --- Mode A (away): own the watcher, self-handle / escalate (UNCHANGED) ---
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

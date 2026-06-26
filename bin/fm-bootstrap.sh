@@ -117,6 +117,16 @@ secondmate_sync() {
   return 0
 }
 
+guardian_arm() {
+  # Start the always-on supervisor daemon (liveness guardian) for this home if it
+  # is not already running. Best-effort and quiet: watcher liveness is then
+  # daemon-guaranteed from session start, not dependent on per-turn re-arm
+  # discipline. Output is infra, not a firstmate-actionable detection line, so it
+  # is suppressed; the daemon logs details to state/.supervise-daemon.log.
+  [ -x "$FM_ROOT/bin/fm-guardian-arm.sh" ] || return 0
+  "$FM_ROOT/bin/fm-guardian-arm.sh" >/dev/null 2>&1 || true
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
@@ -164,6 +174,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
+guardian_arm
 secondmate_sync
 fleet_sync
 exit 0

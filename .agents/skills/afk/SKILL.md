@@ -6,11 +6,21 @@ user-invocable: true
 
 # afk
 
-Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
-sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
-batched digest rather than per-wake injections.
+Away-mode supervision. The supervisor daemon **already runs always** (started at
+bootstrap and recovery as the per-home liveness guardian, section 8). `/afk` does
+not start a daemon; it flips that one long-lived process's injection **policy**
+from present to away, and makes the token-saving tradeoff **consented** and
+**explicit**: the captain is stepping away, so the daemon may triage routine wakes
+in bash instead of waking firstmate's LLM for each one, and escalations reach the
+captain as one pre-read, batched digest rather than per-wake injections.
+
+The daemon's two modes (one process, `state/.afk` is the toggle):
+
+- **Present (afk off):** liveness guardian only - it does not own the watcher or
+  process wakes; it restores a lapsed watcher and nudges firstmate once, and
+  never injects a routine wake.
+- **Away (afk on):** it owns the watcher, self-handles routine wakes, and
+  escalates a batched captain-relevant digest.
 
 ## What it does
 
@@ -19,22 +29,20 @@ batched digest rather than per-wake injections.
    date '+%s' > state/.afk
    ```
    This file survives a firstmate restart: recovery re-enters afk if the
-   flag is present.
+   flag is present. The running daemon picks up the flag on its next cycle and
+   transitions to away mode in-process (it takes watcher ownership), with no
+   restart.
 
-2. **Ensure the sub-supervisor daemon is running.** Check the pid file; start
-   the daemon only if it is dead or absent:
+2. **Ensure the daemon is running** (it should already be, from bootstrap):
    ```sh
-   if [ -f state/.supervise-daemon.pid ] && kill -0 "$(cat state/.supervise-daemon.pid)" 2>/dev/null; then
-     : # daemon already alive - it picks up the flag on its next cycle
-   else
-     nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &
-   fi
+   bin/fm-guardian-arm.sh   # singleton-safe: no-op if a live daemon already holds this home
    ```
-   The daemon is **presence-gated**: it injects escalations only while
-   `state/.afk` exists, and stays quiet otherwise.
+   The away-mode escalation injection is **presence-gated** by `state/.afk`; the
+   present-mode liveness nudge is the only thing the daemon injects while afk is
+   off.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child; the singleton lock no-ops a stray arm harmlessly.
+3. **Do not separately arm `fm-watch.sh`.** In away mode the daemon owns the
+   watcher; the singleton lock no-ops a stray arm harmlessly.
 
 4. **Acknowledge** to the captain that away-mode is active: the daemon will
    self-handle routine wakes, escalate only captain-relevant events, and the
@@ -45,13 +53,16 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk`
-  -> the captain is back. Clear `state/.afk`, stop the daemon, flush one
-  distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
-  any pending escalations from `state/.subsuper-escalations` and any
+  -> the captain is back. Clear `state/.afk` - this is enough: the daemon
+  transitions back to present/liveness-guardian mode on its own and keeps
+  guaranteeing watcher liveness, so **do not stop it**. Flush one distilled
+  "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending
+  escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake
   responsiveness (arm `bin/fm-watch-arm.sh`).
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
-  is a daemon escalation; stay afk and process it.
+  is a daemon escalation (away mode) or a liveness nudge (present mode); stay in
+  the current mode and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 

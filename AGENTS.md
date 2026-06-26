@@ -85,11 +85,11 @@ state/               volatile runtime signals; gitignored
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
-  .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .afk               durable away-mode flag; in-process policy toggle for the always-on daemon (present=on -> away/own-watcher+escalate, absent=off -> present/liveness-guardian); set by /afk, cleared on user return; never starts/stops the daemon
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
-  .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
-  .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
+  .last-watcher-beat watcher liveness beacon, touched every poll; the always-on daemon's liveness guardian and fm-guard.sh both read it
+  .subsuper-* .supervise-daemon.* .guardian-*   always-on supervisor daemon internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -102,6 +102,7 @@ Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
+Bootstrap also starts the always-on supervisor daemon for this home via `bin/fm-guardian-arm.sh` (best-effort, quiet, singleton-safe: a no-op if a live daemon already holds this home), so watcher liveness is daemon-guaranteed from session start rather than dependent on per-turn re-arm discipline (section 8).
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Bootstrap also sweeps every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
@@ -170,10 +171,10 @@ Reconcile reality with your records before doing anything else:
 7. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.
    Each secondmate is a firstmate in its own home, so it reconciles only work that is already its own and then idles; it never creates new work during recovery.
-8. If `state/.afk` is present, load `/afk`, ensure the daemon is running, do not arm the one-shot watcher because the daemon owns it, and resume away-mode supervision.
+8. Ensure the always-on supervisor daemon is running for this home with `bin/fm-guardian-arm.sh` (singleton-safe; it may well have survived the restart, since it is detached and independent of your process - in which case this no-ops and it already covered the restart gap). If `state/.afk` is present, load `/afk`, and because the daemon is in away mode and owns the watcher, do not arm the one-shot watcher; resume away-mode supervision. If `state/.afk` is absent, the daemon is the present-mode liveness guardian and you re-arm the watcher as normal (section 8).
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
+10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher, otherwise re-arm it yourself with the guardian as the backstop.
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
@@ -424,27 +425,37 @@ From there the task is an ordinary ship task through its mode-specific validatio
 
 ## 8. Supervision protocol
 
-The watcher is the backbone.
-Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
+The watcher is the backbone, and a per-home supervisor daemon guarantees it stays alive.
+Whenever at least one task is in flight, the watcher (`bin/fm-watch.sh`) must be running.
 It costs zero tokens while running and exits with one reason line when something needs you.
 It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
-After handling drained wakes, re-arm the watcher before you end the turn by running `bin/fm-watch-arm.sh` as a background task.
+
+**Liveness is daemon-guaranteed, not discipline-dependent.**
+The supervisor daemon (`bin/fm-supervise-daemon.sh`) runs always - started at bootstrap and recovery via `bin/fm-guardian-arm.sh`, not only by `/afk` - as a long-lived, per-home liveness guardian with two modes that `state/.afk` toggles in-process:
+
+- **Present (afk off, the default):** the daemon does **not** own the watcher and does not process wakes - your own re-arm is primary. Every guardian tick it checks one thing: is work in flight **and** is the liveness beacon (`state/.last-watcher-beat`) missing or older than `FM_GUARD_GRACE`? If so, your per-turn re-arm has genuinely lapsed (not a brief sub-grace gap), so the guardian restores the watcher itself via the singleton-safe path **and** injects exactly one nudge so you drain the wake-queue and resume. It never injects for a routine wake - only a detected liveness lapse. So a missed re-arm self-heals within a tick instead of silently stopping supervision indefinitely (the failure that once cost ~69 minutes).
+- **Away (afk on):** the daemon owns the watcher, self-handles routine wakes, and escalates a batched captain-relevant digest, exactly as before. `/afk` only flips this injection policy; it never starts or stops the daemon.
+
+So re-arming the watcher each turn is now a redundant backstop, not the single load-bearing step.
+You still re-arm - it keeps the present-mode watcher healthy and the guardian idle - but a forgotten re-arm no longer takes supervision down.
+After handling drained wakes, re-arm the watcher before you end the turn by running `bin/fm-watch-arm.sh` as a harness-tracked background task.
 Arm or re-arm the watcher only through the harness's own tracked background mechanism - the one that survives the call and notifies you when the process exits - so the re-arm actually persists and the next wake reaches you.
-Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
+Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns; the guardian would restore it within a tick, but you would lose the harness notification on its next wake.
 `bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified "already running", as the source of truth for watcher state.
-The watcher is singleton-safe: acquisition is race-proof, so under any number of concurrent arms at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
+The watcher is singleton-safe: acquisition is race-proof, so under any number of concurrent arms - including the guardian restoring it at the same moment you re-arm - at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
 If one is already alive with a fresh liveness beacon, another invocation exits cleanly instead of creating a duplicate watcher; if the live holder's beacon is stale, the new invocation exits with an actionable failure.
 Re-arming is the primary model: just run `bin/fm-watch-arm.sh` and let the singleton lock no-op when a healthy watcher is already alive.
 If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which stops only this home's watcher (the pid recorded in this home's `state/.watch.lock`) and starts a fresh one.
-Never `pkill -f bin/fm-watch.sh`: that pattern matches every firstmate home's watcher, including secondmate homes that run the same script, so a broad pkill from one home kills sibling homes' watchers.
-Away-mode supervision is provided by the `/afk` skill and its daemon; while `state/.afk` exists, the daemon owns the watcher.
+The guardian is home-scoped the same way: it restores and stops only this home's watcher and signals only pids the lock proves are this home's, never a broad `pkill`.
+Never `pkill -f bin/fm-watch.sh` or `pkill -f fm-supervise-daemon`: those patterns match every firstmate home's watcher and daemon, including secondmate homes that run the same scripts, so a broad pkill from one home kills sibling homes' supervision.
 Waiting on the watcher is intentionally silent.
 After arming it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
 Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
+bin/fm-guardian-arm.sh     # start the always-on supervisor daemon (liveness guardian) if not running; no-ops if alive
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
@@ -471,15 +482,16 @@ A secondmate may be sitting on its own watcher with no visible pane changes, so 
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
 This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature.
 
-**Watcher liveness is guarded, not just disciplined.**
-Arming the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
+**Watcher liveness is guaranteed by the daemon, then guarded as defense in depth.**
+The always-on supervisor daemon is the structural guarantee: while present it restores a lapsed watcher within a tick and nudges you once, so a forgotten re-arm self-heals rather than stranding supervision.
+The pull-based guard is the second, independent layer in case the daemon itself is somehow down.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
 The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, or that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
 The no-watcher case leads with a prominent, bordered ●-marked banner (in-flight count, beacon age, and the exact one-line re-arm command) so it reads as an alarm rather than a buried stderr line you can skim past.
-So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
+So even if both the daemon and your re-arm have lapsed, the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and its re-arm) silent.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
-If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
+If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes; if it persists, confirm the daemon is up with `bin/fm-guardian-arm.sh`.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
@@ -503,11 +515,12 @@ Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `
 The skill owns the full daemon procedure: classification policy, batching, injection hardening, max-defer, verified submit, marker stripping, portable lock, dedupe, target discovery, reliability properties, and `FM_INJECT_SKIP`.
 Inline facts that must survive without a loaded skill:
 
-- Every daemon injection is prefixed with `FM_INJECT_MARK`, ASCII unit separator `0x1f`, so internal escalations are distinguishable from a captain message.
-- While `state/.afk` exists, the daemon owns the watcher; do not separately arm `fm-watch-arm.sh` or `fm-watch.sh`.
-- If firstmate receives a marked message while afk is active, it is an internal escalation: stay afk and process it.
+- The supervisor daemon runs **always** (started at bootstrap and recovery via `bin/fm-guardian-arm.sh`), not only under `/afk`. `state/.afk` is a policy toggle inside that one process: on = away (own the watcher, self-handle, escalate digests); off = present (liveness guardian only - restore a lapsed watcher and nudge once, never inject a routine wake). `/afk` and its exit only flip this policy; they never start or stop the daemon.
+- Every daemon injection is prefixed with `FM_INJECT_MARK`, ASCII unit separator `0x1f`, so an internal escalation or a present-mode liveness nudge is distinguishable from a captain message.
+- While `state/.afk` exists, the daemon owns the watcher; do not separately arm `fm-watch-arm.sh` or `fm-watch.sh`. While afk is off, you re-arm the watcher as normal - the daemon only steps in on a detected liveness lapse.
+- If firstmate receives a marked message while afk is active, it is an internal escalation: stay afk and process it. A marked present-mode liveness nudge ("supervision liveness lapsed ...") means drain `state/.wake-queue`, handle, and re-arm; it does not change afk state.
 - If the message starts with `/afk`, stay afk and refresh the flag.
-- Any other unmarked message means the captain is back: clear `state/.afk`, stop the daemon, flush catch-up from `state/.wake-queue`, `state/.subsuper-escalations`, and `state/.subsuper-inject-wedged`, then re-arm normal watcher supervision.
+- Any other unmarked message means the captain is back: clear `state/.afk` (the daemon transitions back to present/liveness-guardian mode on its own - do **not** stop it), flush catch-up from `state/.wake-queue`, `state/.subsuper-escalations`, and `state/.subsuper-inject-wedged`, then re-arm normal watcher supervision.
 - Afk never changes approval authority; PR merges, ask-user findings, destructive actions, irreversible actions, and security-sensitive choices still require the same approval they required before.
 - Bias ambiguous cases toward exit because a present captain beats token savings and a false exit is self-correcting.
 

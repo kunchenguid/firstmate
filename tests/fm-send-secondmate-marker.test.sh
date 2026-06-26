@@ -152,16 +152,15 @@ test_key_path_is_not_marked() {
 }
 
 test_marker_is_label_plus_unit_separator() {
-  local us hex
+  local us
   us=$(printf '\037')
   [ "$FM_FROMFIRST_MARK" = "[fm-from-firstmate]$us" ] \
-    || fail "marker is not the expected label + 0x1f sequence"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -c)"
+    || fail "marker is not the expected label + 0x1f sequence"
   # The last byte must be ASCII unit separator 0x1f, the untypable guarantee.
-  hex=$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -tx1 | tr -d ' \n')
-  case "$hex" in
-    *1f) : ;;
-    *) fail "marker does not end in a 0x1f byte; bytes were: $hex" ;;
-  esac
+  # Pure-bash last-char check (no `od`, which a PATH shim can shadow to a
+  # same-named tool, e.g. the Open Design `od` CLI).
+  [ "${FM_FROMFIRST_MARK: -1}" = "$us" ] \
+    || fail "marker does not end in a 0x1f byte"
   # The detector keys on that exact untypable sequence.
   fm_message_from_firstmate "${FM_FROMFIRST_MARK}do the work" \
     || fail "detector should recognize a marked message"
