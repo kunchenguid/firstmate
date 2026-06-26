@@ -47,7 +47,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `CAPABILITIES.md`, `PROBLEMS.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 A crewmate driving its own `no-mistakes` validation does the opposite: it runs the gate in the foreground and lets each synchronous `no-mistakes axi run` or `no-mistakes axi respond` call return.
 The pipeline owns auto-fix changes; the crewmate authorizes them with `no-mistakes axi respond --action fix --findings <ids>` instead of editing or committing while the run is active.

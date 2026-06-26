@@ -43,7 +43,7 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 Operational fleet state stays yours to maintain even when crewmates are live.
-Shared, tracked material means `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files.
+Shared, tracked material means `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `CAPABILITIES.md`, `PROBLEMS.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files.
 When one or more crewmates are in flight, delegate changes to shared, tracked material to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
 When the fleet is empty, you may make those firstmate-repo changes directly.
 Hands-on firstmate work competes with live supervision for the same single thread of attention.
@@ -65,6 +65,8 @@ Each secondmate gets its own persistent `FM_HOME`, so its local state, backlog, 
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
+CAPABILITIES.md      living manifest of tools, MCP servers, skills, and quality gates with known limits (section 14)
+PROBLEMS.md          registry of recurring problems with an explicit schema (section 14)
 .github/workflows/   shared CI and PR enforcement, committed
 .tasks.toml          tracked tasks-axi markdown backend config; drives backlog mutations when a compatible tasks-axi is on PATH (section 10), otherwise inert
 .agents/skills/      shared skills, committed
