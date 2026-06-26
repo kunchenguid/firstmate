@@ -15,28 +15,11 @@
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
-TMP_ROOT=
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-cleanup() {
-  if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
-  fi
-}
-
-trap cleanup EXIT
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-tests.XXXXXX")
+TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -86,16 +69,27 @@ SH
   printf '%s\n' "$case_dir"
 }
 
+add_compatible_tasks_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.1'
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
-  cat > "$case_dir/state/task-x1.meta" <<EOF
-window=fm-task-x1
-worktree=$case_dir/wt
-project=$case_dir/project
-kind=$kind
-mode=$mode
-EOF
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -127,12 +121,6 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
-# Exit code expectation. Args: expected actual label
-expect_code() {
-  local expected=$1 actual=$2 label=$3
-  [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
-}
-
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -148,6 +136,25 @@ test_local_only_fork_remote_allows() {
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+}
+
+test_teardown_prompts_tasks_axi_done_when_compatible() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-reminder)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
+  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "teardown did not prompt tasks-axi done: $out"
+  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
+    || fail "teardown did not prompt tasks-axi ready: $out"
+  printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
+    || fail "teardown did not preserve date-gate check: $out"
+  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
+    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
+  pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -205,6 +212,8 @@ test_no_mistakes_origin_remote_allows() {
 
   expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
+  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
+    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
@@ -241,6 +250,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_local_only_fork_remote_allows
+test_teardown_prompts_tasks_axi_done_when_compatible
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

@@ -32,6 +32,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 # shellcheck source=bin/fm-mux.sh
 . "$FM_ROOT/bin/fm-mux.sh"
@@ -44,6 +46,7 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
+PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -69,6 +72,36 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+backlog_refresh_reminder() {
+  local pr done_cmd report_path
+  if fm_tasks_axi_compatible; then
+    case "$KIND" in
+      scout)
+        report_path="data/$ID/report.md"
+        done_cmd="tasks-axi done $ID --report $report_path"
+        ;;
+      secondmate)
+        done_cmd="tasks-axi done $ID --note \"retired\""
+        ;;
+      *)
+        if [ "$MODE" = local-only ]; then
+          done_cmd="tasks-axi done $ID --note \"local main\""
+        else
+          pr=$PR_URL
+          if [ -n "$pr" ]; then
+            done_cmd="tasks-axi done $ID --pr $pr"
+          else
+            done_cmd="tasks-axi done $ID --pr PR_URL"
+          fi
+        fi
+        ;;
+    esac
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+  else
+    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+  fi
 }
 
 registry_home_for_line() {
@@ -453,4 +486,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
-printf '%s\n' "🌱 Backlog: $ID just finished. Update data/backlog.md - move $ID to Done (keep Done to the 10 most recent), then re-scan Queued for items now unblocked (a \"blocked-by: $ID\" may have just cleared) or now time-due, and dispatch what's ready."
+backlog_refresh_reminder

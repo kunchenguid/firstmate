@@ -13,15 +13,18 @@
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
-#   only captain-relevant escalations append to this home's status file.
+#   captain-relevant escalations and marked from-firstmate replies append to this
+#   home's status file.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see AGENTS.md sections 6-7):
+# (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
+# and task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
+# Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
@@ -29,6 +32,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-marker-lib.sh
+. "$SCRIPT_DIR/fm-marker-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -88,12 +93,22 @@ You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
+# Requests from the main firstmate
+You are a firstmate in your own home, so an incoming message reaches you in your own chat.
+You must distinguish who it is from, because the answer goes to a different place.
+A request relayed to you by the main firstmate (your supervisor) is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
+When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
+For a terse result, a status line is the whole answer.
+For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
+A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
+
 # Escalation to main firstmate
 Handle routine work yourself.
 Escalate only true captain-relevant outcomes by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, done, failed.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+This is also how you return the answer to a marked from-firstmate request above.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -191,7 +206,13 @@ EOF
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-During validation, fix auto-fix findings yourself; escalate ask-user findings per rule 6.
+
+During validation you drive the gates while the pipeline owns the fixes. Run it in the foreground and follow this contract:
+- Never edit or \`git commit\` code yourself while a run is active; the pipeline applies every fix in its own worktree.
+- When a gate shows auto-fix findings, advance it with \`no-mistakes axi respond --action fix --findings <ids>\` (the pipeline applies the fix and re-reviews). Escalate ask-user findings per rule 6.
+- \`no-mistakes axi run\` and \`axi respond\` block synchronously for many minutes (test and CI especially); the pipeline often fixes findings itself with no gate, so when a call returns no \`gate:\` object that is normal - just let it return.
+- Never cancel, abort, re-run, or background the run, and never idle-wait for a background notification: the call is in the foreground and returns on its own.
+
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
@@ -206,6 +227,11 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+
+**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable treehouse worktree you were launched in, typically a path under a \`.treehouse/\` pool, not the primary checkout firstmate operates from.
+The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules

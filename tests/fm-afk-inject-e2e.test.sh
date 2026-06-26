@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-afk-inject-e2e.test.sh — private-socket end-to-end test for the afk
-# daemon's injection path. Exercises the two scenarios that afk-mode dogfooding
-# structurally CANNOT reach, because in afk mode nobody is typing:
+# tests/fm-afk-inject-e2e.test.sh - private-socket end-to-end test for the afk
+# daemon's injection path. It covers three operator-visible injection contracts:
 #
 #   Scenario A (human-partial-input): a partial line is typed into the
 #     supervisor pane with NO Enter, then an escalation fires. The daemon must
@@ -10,7 +9,11 @@
 #
 #   Scenario B (swallowed-Enter): the first Enter the daemon sends is dropped.
 #     The daemon must retry Enter (NOT retype the digest) and deliver exactly
-#     ONE clean submission — no concatenation, no duplicate.
+#     ONE clean submission: no concatenation, no duplicate.
+#
+#   Scenario C (normal digest): no human input and no swallowed Enter.
+#     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
+#     single-line digest with no duplicate or spurious user submission.
 #
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
@@ -71,15 +74,28 @@ LOG_FILE="$STATE_DIR/submitted.log"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50
 SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
 
-# Supervisor pane loop: a raw-mode bash read loop that logs each submitted line
-# verbatim (hex + text + classification). "Did it inject cleanly" becomes an
-# assertable string.
+# Supervisor pane loop: a small deterministic composer that logs each submitted
+# line verbatim (hex + text + classification). It draws the in-progress input
+# itself instead of relying on the terminal driver's canonical-mode echo, because
+# tmux cursor placement for that echo varies across CI environments.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\x1f'
 LOG="$1"
-while IFS= read -r _line; do
+OLD_STTY=$(stty -g 2>/dev/null || true)
+[ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
+cleanup() {
+  [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+_buf=
+redraw() {
+  printf '\r\033[K%s' "$_buf"
+}
+submit_line() {
+  local _line=$_buf _c _hex
   if [ "${_line:0:1}" = "$MARK" ]; then
     _c="injection"
   else
@@ -87,6 +103,22 @@ while IFS= read -r _line; do
   fi
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
+  _buf=
+  printf '\r\033[K\n'
+  redraw
+}
+
+redraw
+while IFS= read -r -n 1 _ch; do
+  if [ -z "$_ch" ]; then
+    submit_line
+    continue
+  fi
+  case "$_ch" in
+    $'\r'|$'\n') submit_line ;;
+    $'\177'|$'\b') _buf=${_buf%?}; redraw ;;
+    *) _buf="${_buf}${_ch}"; redraw ;;
+  esac
 done
 LOOP
 chmod +x "$LOOP_SCRIPT"
@@ -177,9 +209,8 @@ reset_state() {
 
 # --- pane_input_pending environment self-check ------------------------------
 # Verify that pane_input_pending (which uses cursor_y + capture-pane) can detect
-# typed text in this tmux environment. If it can't (e.g., CI tmux has different
-# capture behavior), skip the e2e test with diagnostics. The unit tests in
-# fm-wake-queue.test.sh still cover the logic comprehensively.
+# typed text in this tmux environment. If it can't, the e2e cannot prove the
+# operator-visible injection contracts it owns.
 
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
@@ -191,8 +222,8 @@ selfcheck_pane_input_pending() {
     sleep 0.3
     return 0
   fi
-  # Not detected — print diagnostics and skip.
-  echo "skip: pane_input_pending cannot detect typed text in this tmux environment" >&2
+  # Not detected - print diagnostics and fail.
+  echo "pane_input_pending cannot detect typed text in this tmux environment" >&2
   local _cy _line
   _cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
   echo "  cursor_y=$_cy" >&2
@@ -200,10 +231,8 @@ selfcheck_pane_input_pending() {
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
   _line=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
   echo "  cursor line: '$_line'" >&2
-  # Clean up.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
-  cleanup_all
-  exit 0
+  fail "pane_input_pending self-check failed"
 }
 
 selfcheck_pane_input_pending
@@ -330,7 +359,57 @@ test_scenario_b() {
   pass "Scenario B: swallowed Enter produces exactly one clean digest"
 }
 
+# --- Scenario C: normal status, single clean digest -------------------------
+# No human input, no swallowed Enter: a captain-relevant status must produce
+# exactly ONE sentinel-prefixed, single-line digest, submitted once. This owns
+# the marker + single-line + no-duplicate operator contract that the deleted
+# fake-tmux units used to assert via internal send-keys counts.
+
+test_scenario_c() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  # Exactly one digest line in the submitted log (no duplicate, no loss).
+  local digest_count
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 digest, got $digest_count"
+
+  # Not concatenated with itself (two sentinel markers in one line).
+  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
+    fail "Scenario C: digest concatenated with itself (two sentinel markers in one line)"
+  fi
+
+  # The digest is classified as an injection and starts with the sentinel byte.
+  local digest_line digest_hex
+  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
+  case "$digest_line" in
+    *injection) ;;
+    *) fail "Scenario C: digest misclassified (expected injection): $digest_line" ;;
+  esac
+  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
+  case "$digest_hex" in
+    1f*) ;;
+    *) fail "Scenario C: digest does not start with sentinel marker (hex: $digest_hex)" ;;
+  esac
+
+  # The digest was submitted as ONE line (a multi-line digest would log >1 line),
+  # and no spurious user-classified lines were submitted.
+  local user_count
+  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
+  [ "$user_count" -eq 0 ] \
+    || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+
+  stop_daemon
+  pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+}
+
 test_scenario_a
 test_scenario_b
+test_scenario_c
 
 echo "all e2e injection tests passed"

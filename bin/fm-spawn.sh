@@ -8,8 +8,12 @@
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
+#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Before a secondmate launch, the home is locally fast-forwarded to the primary
+#   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
+#   path is a real git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -35,6 +39,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -104,12 +110,21 @@ else
 fi
 
 # The verified launch command per adapter. The knowledge half of each adapter
-# (busy signature, exit command, dialogs, quirks) lives in AGENTS.md section 4.
+# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
-    claude) printf '%s' 'claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
+    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
+    # otherwise-empty composer and would otherwise read like real typed input when
+    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
+    # prefix scoped to this firstmate-launched agent; it never touches the captain's
+    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
+    # does NOT suppress the interactive ghost text (verified empirically), so the env
+    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
+    # the defense-in-depth backstop for any pane this flag cannot reach.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -291,6 +306,26 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
+  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
+  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
+  # spawn section). Purely local - no fetch: the home is a worktree of this same
+  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
+  # wrong-branch home is left untouched and launches as-is. The agent re-reads
+  # AGENTS.md fresh on launch, so no nudge is needed here.
+  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    case "$sm_ff_out" in
+      *': skipped:'*)
+        sm_ff_line=$(first_line "$sm_ff_out")
+        sm_ff_prefix="secondmate $ID: skipped: "
+        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        ;;
+    esac
+  else
+    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -374,6 +409,31 @@ if [ "$KIND" != secondmate ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
+
+  # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
+  # a real git worktree root, distinct from the project's primary checkout
+  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a treehouse-get
+  # misfire can leave the pane in (or in a subdir of, or a symlink to) the primary
+  # checkout; branching/committing there would tangle the primary onto a feature
+  # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
+  # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
+  wt_real=
+  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
+    wt_real=
+  fi
+  proj_real=
+  if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
+    proj_real=
+  fi
+  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_top_real=
+  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
+    wt_top_real=
+  fi
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+    echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
+    exit 1
+  fi
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -428,7 +488,7 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.

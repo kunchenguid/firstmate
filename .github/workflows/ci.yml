@@ -20,8 +20,19 @@ jobs:
   tests:
     name: Behavior tests
     runs-on: ubuntu-latest
+    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
+    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      - name: Require tmux for e2e tests
+        run: |
+          set -eu
+          command -v tmux >/dev/null || {
+            echo "::error::tmux is required for real afk injection e2e coverage"
+            exit 1
+          }
+          tmux -V
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do
