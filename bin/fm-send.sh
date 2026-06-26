@@ -65,5 +65,9 @@ else
       echo "error: text not sent to $T (tmux send-keys failed)" >&2
       exit 1
       ;;
+    busy)
+      echo "error: text not sent to $T (target pane busy)" >&2
+      exit 1
+      ;;
   esac
 fi

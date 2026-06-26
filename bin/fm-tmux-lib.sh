@@ -168,8 +168,10 @@ fm_pane_is_busy() {  # <target>
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
+# it. Echoes the final verdict on stdout (empty|pending|unknown|busy|send-failed) so callers can
 # pick their own success policy:
+#   - busy means nothing was typed; steering a pane mid-turn queues text into the
+#     next tool-call composer and creates a false swallowed-Enter diagnosis.
 #   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
 #     not be mistaken for a delivered escalation).
 #   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
@@ -188,6 +190,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  fm_pane_is_busy "$target" && { printf 'busy'; return 0; }
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"

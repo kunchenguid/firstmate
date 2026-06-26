@@ -461,6 +461,10 @@ case "$verdict" in
     echo "error: launch command was not sent to $T (tmux send-keys failed)" >&2
     exit 1
     ;;
+  busy)
+    echo "error: launch command was not sent to $T (target pane busy)" >&2
+    exit 1
+    ;;
 esac
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
