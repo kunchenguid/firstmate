@@ -371,7 +371,7 @@ For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
-The no-mistakes pipeline fixes auto-fix findings on its own (inside its own worktree); the crewmate advances each gate with `no-mistakes axi respond`, and must never edit or commit code while a run is active.
+The no-mistakes pipeline owns every validation fix on the crewmate's branch in its own worktree; the crewmate advances each gate with `no-mistakes axi respond`, and must never hand-edit, commit, reset, checkout, abort, or re-run while a run is active.
 When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
