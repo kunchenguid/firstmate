@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Watcher liveness and worktree-tangle guard, called at the top of the
-# supervision scripts.
+# Watcher liveness and worktree-tangle guard, called by supervision scripts and
+# by fm-wake-drain.sh after it empties queued wakes.
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.

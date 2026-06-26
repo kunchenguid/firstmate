@@ -465,7 +465,7 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
-bin/fm-wake-drain.sh       # drain queued wake records at turn start
+bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
 ```
 
 On wake, in order of cheapness:

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, signal catch-up while no watcher runs, stale/check
-# enqueue-before-suppressor ordering, atomic double-drain, and duplicate collapse.
-# Nothing is lost and nothing is double-consumed. Watcher/lock liveness lives in
-# fm-watcher-lock.test.sh; daemon classification/injection in fm-daemon.test.sh.
+# enqueue-before-suppressor ordering, atomic double-drain, duplicate collapse,
+# and the drain-time watcher-liveness assertion.
+# Nothing is lost and nothing is double-consumed. General watcher/lock liveness
+# lives in fm-watcher-lock.test.sh; daemon classification/injection in
+# fm-daemon.test.sh.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
