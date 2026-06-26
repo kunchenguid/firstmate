@@ -186,34 +186,51 @@ _ctx_send() {  # <target> <msg>
 
 _ctx_mark_fired() { local state=$1 key=$2; _ctx_now > "$state/.ctx-fired-$key"; }
 
-# fm_ctx_fire_once: the checkpoint -> wait-for-handoff -> /clear sequence for one
-# window. Returns 0 only if the handoff appeared and /clear was issued. NEVER
-# issues /clear without a handoff on disk (a session that did not checkpoint is
-# left intact). This is the G4 surface.
+# fm_ctx_fire_once: the checkpoint -> wait-for-FRESH-handoff -> /clear sequence for
+# one window. Returns 0 only if a handoff written AFTER this checkpoint appeared and
+# /clear was issued. NEVER issues /clear on a STALE pre-existing handoff: a
+# handoff-<key>.md left over from a prior cycle (one that did not get archived, e.g.
+# the rehydrate never ran) would otherwise let the wait loop fall straight through and
+# wipe the crewmate's CURRENT turn, rehydrating from the old doc and silently
+# discarding live work. To prevent that we baseline the existing handoff's mtime before
+# sending the checkpoint and only accept a handoff strictly NEWER than that baseline.
+# This is the G4/G9 surface; it protects both the daemon and fm-compact-crewmate.
 fm_ctx_fire_once() {  # <statedir> <key>
-  local state=$1 key=$2 target handoff msg timeout step
+  local state=$1 key=$2 target handoff msg timeout step baseline
   target=$(fm_ctx_target_for "$state" "$key")
   [ -n "$target" ] || { _ctx_log "fire: no target for $key"; return 1; }
   handoff="$state/handoff-$key.md"
+  # Baseline the pre-existing handoff mtime (0 if absent) so only a fresh, post-checkpoint
+  # write counts. A stale handoff present at fire time will not satisfy the freshness test.
+  if [ -e "$handoff" ]; then
+    baseline=$(_ctx_mtime "$handoff"); baseline=${baseline:-0}
+  else
+    baseline=0
+  fi
   msg=$(fm_ctx_checkpoint_msg "$key")
-  _ctx_log "fire: checkpoint -> $key ($target)"
+  _ctx_log "fire: checkpoint -> $key ($target); handoff-baseline-mtime=$baseline"
   _ctx_send "$target" "$msg"
   timeout=${FM_CTX_HANDOFF_TIMEOUT:-$HANDOFF_TIMEOUT_DEFAULT}
   step=${FM_CTX_HANDOFF_POLL:-$HANDOFF_POLL_DEFAULT}
   # step may be fractional (e.g. 0.2 in tests); count integer iterations against a
   # ceil(timeout/step) bound so the loop guard stays integer-safe.
-  local i=0 max_iters
+  local i=0 max_iters m
   max_iters=$(awk -v t="$timeout" -v s="$step" 'BEGIN{ if (s<=0) s=1; n=t/s; if (n>int(n)) n=int(n)+1; print int(n) }')
-  while [ ! -e "$handoff" ]; do
-    [ "$i" -lt "$max_iters" ] || { _ctx_log "fire: no handoff for $key after ${timeout}s; NOT clearing"; return 1; }
+  # Wait for a handoff that is strictly NEWER than the baseline (a fresh checkpoint).
+  while true; do
+    if [ -e "$handoff" ]; then
+      m=$(_ctx_mtime "$handoff"); m=${m:-0}
+      [ "$m" -gt "$baseline" ] && break
+    fi
+    [ "$i" -lt "$max_iters" ] || { _ctx_log "fire: no FRESH handoff for $key after ${timeout}s; NOT clearing"; return 1; }
     sleep "$step"
     i=$((i + 1))
   done
-  # Handoff exists — safe to recycle the session.
+  # A fresh handoff exists — safe to recycle the session.
   tmux send-keys -t "$target" -l '/clear' 2>/dev/null || true
   tmux send-keys -t "$target" Enter 2>/dev/null || true
   _ctx_mark_fired "$state" "$key"
-  _ctx_log "fire: /clear issued for $key (handoff present)"
+  _ctx_log "fire: /clear issued for $key (fresh handoff present)"
   return 0
 }
 

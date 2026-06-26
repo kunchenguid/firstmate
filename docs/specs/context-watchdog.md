@@ -62,6 +62,22 @@ own home's crewmates and fires the compact cycle for them. Opt out with
 `FM_SECONDMATE_NO_WATCH=1`; the start is overridable via `FM_CTX_WATCH_START_CMD`
 for tests.
 
+For the scoped watch to actually SEE its crewmates, their sentinels must land in
+its home's state dir. So `fm-spawn.sh` pins every launched session's `FM_HOME` to
+the SPAWNING home: a secondmate's crew/scout sessions inherit the secondmate home
+(their sentinels route there), while the main firstmate's crew keep landing in the
+main state dir. Role is unaffected — `fm_ctx_role` is cwd-based and a crewmate's
+cwd is its worktree, never the home, so it stays `role=crew`.
+
+## Fresh-handoff guard
+
+`fm_ctx_fire_once` baselines the existing `handoff-<key>.md` mtime before sending
+the checkpoint and only accepts a handoff written AFTER it. A STALE handoff from a
+prior cycle (e.g. one the rehydrate never archived) therefore never short-circuits
+the wait loop into an immediate `/clear` that would wipe the crewmate's current
+turn and rehydrate from the old doc. Only a fresh, post-checkpoint handoff
+recycles the session. This protects both the daemon and `fm-compact-crewmate`.
+
 ## The window key
 
 `<window>` is the sanitized tmux `session:window_name` (`fm_ctx_window_key`),
@@ -85,3 +101,7 @@ bootstrap already used), else crew.
 - **G8** a per-secondmate scoped watch acts only on its own home's crewmates
   while a global watch still sees all (no regression); `fm-spawn` auto-starts the
   scoped watch on secondmate boot
+- **G9** a STALE pre-existing handoff does NOT trigger `/clear`; only a fresh
+  post-checkpoint handoff recycles the session
+- crew launch routes its sentinel to the spawning home (so a secondmate's scoped
+  watch sees its crewmates), asserted in the secondmate behavior suite

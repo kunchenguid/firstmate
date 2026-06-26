@@ -489,6 +489,17 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+else
+  # Crew/scout: pin the launched session's FM_HOME to the SPAWNING home so its context
+  # sentinels (ctx-<key>.json, written by the global statusLine/stop-hook) land in THIS
+  # home's state dir. That is what lets a secondmate's own scoped context-watch see its
+  # crewmates: a secondmate runs fm-spawn under FM_HOME=<secondmate-home>, so its crew
+  # sessions inherit that home; the main firstmate's crew keep landing in the main state
+  # dir (its FM_HOME). Role is unaffected — fm_ctx_role is cwd-based and a crewmate's cwd
+  # is its worktree, never the home, so it stays role=crew. Operational overrides are
+  # cleared (as for secondmates) so the session resolves state purely from FM_HOME.
+  sq_home=$(shell_quote "$FM_HOME")
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
