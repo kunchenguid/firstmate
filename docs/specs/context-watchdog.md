@@ -36,6 +36,32 @@ plumbing (busy-guard via `fm-tmux-lib.sh`, portable mkdir lock via
    `hookSpecificOutput.additionalContext` (or a pointer if > 10k chars), then
    archives it. Without a handoff, behavior is unchanged.
 
+## On-demand compaction (secondmate-invokable)
+
+`bin/fm-compact-crewmate.sh <id> [--resume frontier|restart]` runs the SAME
+fire-once cycle on demand against one crewmate, instead of waiting for the poll.
+It sources `fm-context-watch.sh` and calls the daemon's `fm_ctx_fire_once`
+(`fm_ctx_fire_once` is defined once; the command never forks it), resolves the
+target via `fm_ctx_target_for`, guards an in-flight compact with a per-id mkdir
+lock, and honors the existing cooldown (idempotent). `--resume frontier`
+(default) resumes the leave-off Frontier; `--resume restart` writes a
+`state/resume-<key>.directive` sentinel that the REHYDRATE path reads to instead
+tell the crewmate to restart the task from the compacted brief — making the reset
+deterministic. The bootstrap consumes the directive after one boot.
+
+## Per-secondmate scoped watch
+
+`fm-context-watch.sh --scope/--home <home>` re-points `FM_HOME`, so
+`_ctx_state_root` (`${FM_STATE_OVERRIDE:-$FM_HOME/state}`) — and therefore the
+poll set, cooldown markers, and the singleton lock — are all scoped to that one
+home. No scope keeps the global daemon behavior unchanged. `fm-spawn.sh`
+auto-starts such a scoped watch on every `kind=secondmate` launch as a
+presence-gated background child that self-singletons on the home's lock (a
+duplicate spawn or recovery respawn no-ops). It is idle-safe: it only watches its
+own home's crewmates and fires the compact cycle for them. Opt out with
+`FM_SECONDMATE_NO_WATCH=1`; the start is overridable via `FM_CTX_WATCH_START_CMD`
+for tests.
+
 ## The window key
 
 `<window>` is the sanitized tmux `session:window_name` (`fm_ctx_window_key`),
@@ -51,3 +77,11 @@ bootstrap already used), else crew.
 - **G3** rehydrate injects+archives; no-handoff path unchanged (no regression)
 - **G4** e2e on a disposable scratch pane: checkpoint → handoff → /clear → rehydrate
 - **G5** inject path respects the 10k cap (pointer fallback when large)
+- **G6** on-demand compact (`fm-compact-crewmate`) runs the shared fire-once
+  cycle on a scratch pane, reuses the daemon's `fm_ctx_fire_once` (no
+  duplication), and is idempotent under cooldown
+- **G7** `--resume frontier` vs `--resume restart` inject different, mode-correct
+  rehydrate directives; the directive is consumed once
+- **G8** a per-secondmate scoped watch acts only on its own home's crewmates
+  while a global watch still sees all (no regression); `fm-spawn` auto-starts the
+  scoped watch on secondmate boot
