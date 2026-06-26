@@ -614,3 +614,19 @@ These skills are not captain-invocable; they are conditional operating reference
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, recovering, handing backlog to, or retiring a secondmate home, and before editing `data/secondmates.md`.
+
+The two captain-invocable registry skills (`propose-tool`, `report-problem`) are not in the agent-only list above; they are described with the registries in section 14.
+
+## 14. Capabilities and problem registries
+
+Firstmate keeps a living record of what it can do and what keeps going wrong, so improvements start by naming the underlying problem rather than chasing symptoms.
+
+- [`CAPABILITIES.md`](CAPABILITIES.md) - the living manifest of every tool, MCP server, skill, and quality gate this firstmate uses, with current capabilities and known limits. Keep it current in the same change whenever a capability is added, removed, upgraded, or hits a new limit.
+- [`PROBLEMS.md`](PROBLEMS.md) - the registry of recurring problems with an explicit schema (problem, symptom, impact, suspected root cause, candidate fix/tool, status). The tracked file is the general taxonomy; fleet-specific incidents stay local in `data/`.
+
+Two captain-invocable skills feed the loop, each appending a structured entry via `bin/fm-registry.sh` and queuing an evaluation:
+
+- `propose-tool` - the captain proposes a better alternative tool (tool, what it replaces, why it is better); recorded in `CAPABILITIES.md`.
+- `report-problem` - the captain flags a problem (problem, symptom, impact, suspected root cause); recorded in `PROBLEMS.md`.
+
+The loop they close: problem reported -> named in the registry -> candidate tool/fix evaluated -> capability added -> manifest and playbook updated.
