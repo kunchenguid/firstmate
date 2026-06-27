@@ -17,7 +17,7 @@ test_auth_missing_is_structured() {
   status=$?
   [ "$status" -ne 0 ] || fail "auth missing should exit nonzero"
   assert_contains "auth missing" "$out" "type: auth_missing"
-  assert_contains "auth missing" "$out" '1Password item "RetellAi Api Credentials"'
+  assert_contains "auth missing" "$out" '1Password item "Recall.it API Key"'
   printf '%s\n' "$out" | grep -F 'Bearer ' >/dev/null && fail "auth missing leaked a bearer header"
   pass "retell-axi auth missing output is structured and secret-free"
 }
@@ -37,7 +37,7 @@ test_mcp_config_uses_env_placeholder() {
   out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" mcp-config)
   assert_contains "mcp config" "$out" "https://mcp.retellai.com"
   assert_contains "mcp config" "$out" 'Bearer ${RETELL_API_KEY}'
-  printf '%s\n' "$out" | grep -F 'RetellAi Api Credentials' >/dev/null && fail "mcp config should not mention the 1Password item as a config secret"
+  printf '%s\n' "$out" | grep -F 'Recall.it API Key' >/dev/null && fail "mcp config should not mention the 1Password item as a config secret"
   pass "retell-axi MCP config uses safe placeholders"
 }
 

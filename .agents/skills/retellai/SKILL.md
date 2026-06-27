@@ -42,7 +42,7 @@ Authoritative docs:
 `retell-axi` looks for credentials in this order:
 
 1. `RETELL_API_KEY` in the environment.
-2. The captain's 1Password item named `RetellAi Api Credentials` through the `op` CLI.
+2. The captain's 1Password item named `Recall.it API Key` through the `op` CLI.
 3. A structured auth-missing error with setup hints.
 
 Do not print the secret.
