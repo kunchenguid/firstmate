@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-crew-state.sh — the deterministic crew-current-state
+# Behavior tests for bin/fm-crew-state.sh - the deterministic crew-current-state
 # helper.
 #
 # The status file (state/<id>.status) is a best-effort append-only EVENT LOG, so
 # `tail -1` of it reports the last event, not the current state. fm-crew-state
-# reads the AUTHORITATIVE source (an active no-mistakes run-step, else the pane
-# busy-signature) and reconciles the possibly-stale log against it. These cases
-# pin every branch of that logic, hermetically, over real throwaway git repos
-# with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane source):
+# reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
+# pane busy-signature) and reconciles the possibly-stale log against it. These
+# cases pin every branch of that logic, hermetically, over real throwaway git
+# repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
+# source):
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step

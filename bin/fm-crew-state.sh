@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-crew-state.sh — deterministic read of a crew's CURRENT state.
+# fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
 # Crews append only wake-worthy transitions (done/needs-decision/blocked/failed)
@@ -7,11 +7,11 @@
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (an
-# active no-mistakes run-step, else the pane busy-signature) and reconciles the
-# possibly-stale log against it.
+# current state from a tail of the log: it reads the authoritative source (a
+# no-mistakes run-step attributed to this crew's branch, else the pane
+# busy-signature) and reconciles the possibly-stale log against it.
 #
-# The determinism lives entirely here — only run-step / pane / log reads plus
+# The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
@@ -19,17 +19,19 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + window + kind from state/<id>.meta.
-#   2. Active no-mistakes run for this crew's branch? The run-step is
-#      AUTHORITATIVE: running/fixing -> working, ci -> working, awaiting_approval/
-#      fix_review -> parked (with gate findings), terminal passed/checks-passed ->
-#      done, failed/cancelled -> failed.
+#   2. Matching no-mistakes run for this crew's branch, active or terminal?
+#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
+#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      passed/checks-passed -> done, failed/cancelled -> failed.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      pane busy-signature (fm-tmux-lib.sh) + the status log's last line.
-#   5. Missing meta / torn-down worktree / dead window: report unknown · none.
+#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#      attributed to this crew, a dead window also reports unknown · none rather
+#      than trusting a stale status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
