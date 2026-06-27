@@ -13,7 +13,7 @@ assert_contains() {
 test_auth_missing_is_structured() {
   local out status
   set +e
-  out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" auth check 2>&1)
+  out=$(RETELL_API_KEY='' RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" auth check 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "auth missing should exit nonzero"
   assert_contains "auth missing" "$out" "type: auth_missing"
@@ -25,7 +25,7 @@ test_auth_missing_is_structured() {
 test_home_auth_missing_is_structured() {
   local out status
   set +e
-  out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" 2>&1)
+  out=$(RETELL_API_KEY='' RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "home auth missing should exit nonzero"
   assert_contains "home auth missing" "$out" "type: auth_missing"
@@ -37,7 +37,7 @@ test_home_auth_missing_is_structured() {
 test_invalid_id_is_structured() {
   local out status
   set +e
-  out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" calls view 'bad/id' 2>&1)
+  out=$(RETELL_API_KEY='' RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" calls view 'bad/id' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "invalid id should exit nonzero"
   assert_contains "invalid id" "$out" "type: invalid_id"
@@ -46,8 +46,9 @@ test_invalid_id_is_structured() {
 
 test_mcp_config_uses_env_placeholder() {
   local out
-  out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" mcp-config)
+  out=$(RETELL_API_KEY='' RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" mcp-config)
   assert_contains "mcp config" "$out" "https://mcp.retellai.com"
+  # shellcheck disable=SC2016  # the literal ${RETELL_API_KEY} placeholder is the asserted output
   assert_contains "mcp config" "$out" 'Bearer ${RETELL_API_KEY}'
   printf '%s\n' "$out" | grep -F 'Recall.it API Key' >/dev/null && fail "mcp config should not mention the 1Password item as a config secret"
   pass "retell-axi MCP config uses safe placeholders"
@@ -55,6 +56,7 @@ test_mcp_config_uses_env_placeholder() {
 
 test_format_modes_are_handled() {
   local bin="$ROOT/bin/retell-axi" mode
+  # shellcheck disable=SC2013  # format mode names are single words; word-splitting the list is intended
   for mode in $(grep -oE 'format_file [a-z-]+' "$bin" | awk '{print $2}' | sort -u); do
     grep -F "mode === \"$mode\"" "$bin" >/dev/null \
       || fail "format_file mode '$mode' has no handler in the formatter"

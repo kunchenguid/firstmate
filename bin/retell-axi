@@ -20,6 +20,7 @@ script_path() {
 
 display_path() {
   path=$(script_path)
+  # shellcheck disable=SC2088  # the ~/ is a literal display prefix, not a path to expand
   case $path in
     "$HOME"/*) printf '~/%s\n' "${path#"$HOME"/}" ;;
     *) printf '%s\n' "$path" ;;
