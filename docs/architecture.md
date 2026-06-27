@@ -9,7 +9,7 @@ firstmate's full operating manual for the orchestrator agent itself is [`AGENTS.
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, check-script output such as PR merge polling, terminal stale panes, non-terminal stale panes that persist past `FM_STALE_ESCALATE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, check-script output such as PR merge polling or an X mention, terminal stale panes, non-terminal stale panes that persist past `FM_STALE_ESCALATE_SECS`, and heartbeat backstop hits.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 Benign wakes, such as `working:` notes, bare turn-ended signals, fresh non-terminal stale panes, and no-change heartbeats, advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
@@ -17,6 +17,7 @@ Routine watcher polling, re-arm no-ops, elapsed waiting time, and absorbed benig
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed.
 Only when no matching run exists does it fall back to the pane busy-signature and then the status log; a dead pane without a run reports unknown instead of trusting a stale log.
+Optional X mode rides the same check path: bootstrap drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
 
 Routine re-arms go through `bin/fm-watch-arm.sh`, which forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `healthy` / `FAILED`, the last exiting non-zero) - never a false `already running` off a dying process.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
@@ -80,6 +81,18 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a PR for the current `HEAD` is merged, or when the worktree content is already present in the freshly fetched default branch.
 That content check lets a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local default-branch merge or after the branch is pushed to any remote.
+
+## Optional X mode
+
+X mode is opt-in presence for the shared `@myfirstmate` bot.
+A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
+On bootstrap, that token creates two local artifacts: `state/x-watch.check.sh`, which performs one bounded relay poll through `bin/fm-x-poll.sh`, and `config/x-mode.env`, which sets `FM_CHECK_INTERVAL=30` for watcher arms in that home.
+Without the token, bootstrap removes those artifacts on opt-out and otherwise stays silent, so non-X users see no behavior change.
+Pending mentions are stored as `state/x-inbox/<request_id>.json`; the `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-tweet context for follow-ups, composes public-safe outcome-only replies from live fleet state, and submits them through `bin/fm-x-reply.sh`.
+Pure acknowledgments or mentions with nothing to answer are cleared without posting.
+Concise replies stay single unnumbered tweets; genuinely long replies are split by the client into bounded, numbered text threads on word boundaries, with `texts` carrying the ordered chunks for the relay.
+For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` skip the public post and record the full would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread, while the rest of the poll -> compose -> would-post loop still succeeds.
+The watcher, wake queue, arm wrapper, and afk daemon are unchanged; X mode is layered on top through the existing check mechanism.
 
 ## Project memory belongs to projects
 

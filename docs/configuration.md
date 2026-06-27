@@ -46,10 +46,40 @@ Launch mechanics, including the verified command templates, live in [`bin/fm-spa
 ## Toolchain
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 If compatible `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent or incompatible, firstmate keeps hand-editing `data/backlog.md` exactly as before.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable reason, and `NUDGE_SECONDMATES:` only when a running home advanced and its instruction surface changed.
+
+## X mode (.env)
+
+X mode lets a firstmate instance answer public `@myfirstmate` mentions from live fleet state.
+It is off unless the firstmate home's gitignored `.env` contains a non-empty `FMX_PAIRING_TOKEN`.
+That token is the only required user-set value; the relay derives the tenant from it.
+`FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`, mainly for developers pointing at a local relay.
+For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so watcher artifacts are explicit local opt-in state.
+`FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
+
+Bootstrap turns the token into local generated state.
+It writes `state/x-watch.check.sh`, a check shim that runs `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher arms in that home.
+When the token is removed or empty, the next bootstrap removes those artifacts.
+Steady-state off is silent and writes nothing.
+
+`bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
+HTTP 204 is silent.
+A pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate with `x-mention <request_id>`.
+The full relay object is preserved, including `in_reply_to: {author_handle, text}` for follow-up replies or `null` for fresh mentions.
+The `fmx-respond` skill decides whether the stashed mention warrants a public reply; pure acknowledgments or mentions with nothing to answer are cleared without posting.
+Relay auth or config problems are reported once as `x-mode-error ...` until recovery.
+Live replies are posted by `bin/fm-x-reply.sh`, which sends `POST /connector/answer` with `{request_id,text}` for one-tweet replies.
+If the reply exceeds `FMX_X_REPLY_MAX_CHARS`, the client splits it into a numbered, text-only thread on word boundaries and sends `{request_id,text,texts}`, where `texts` is the ordered chunk list and `text` remains the first chunk for older relays.
+`FMX_X_REPLY_MAX_CHARS` defaults to 280 and clamps to a minimum of 50; `FMX_X_THREAD_MAX` defaults to 25 and caps oversized replies, marking the last retained tweet with an ellipsis when truncation is needed.
+
+Set `FMX_DRY_RUN` to preview replies without posting.
+Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
+In dry-run, `fm-x-reply.sh` records the full would-be payload to `state/x-outbox/<request_id>.json`, including `texts` for a thread, prints a `DRY RUN` summary to stderr, echoes the `request_id`, and exits 0.
+This path needs `jq` to build the JSON payload, but it runs before token and network checks, so it needs neither `FMX_PAIRING_TOKEN` nor `curl`.
 
 ## Environment variables
 
@@ -65,9 +95,15 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
+FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
+FMX_PAIRING_TOKEN=      # X mode pairing token; put it in .env to opt in and activate bootstrap wiring
+FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
+FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
+FMX_DRY_RUN=            # truthy previews X replies to state/x-outbox/ without posting or requiring a token
+FMX_X_REPLY_MAX_CHARS=280   # X reply per-tweet split budget; values below 50 clamp to 50
+FMX_X_THREAD_MAX=25     # maximum tweets in one auto-split X reply thread
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED

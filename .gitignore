@@ -6,3 +6,4 @@ data/
 .DS_Store
 .env
 config/crew-harness
+config/x-mode.env
