@@ -146,13 +146,10 @@ no_mistakes_version_parts() {
 }
 
 no_mistakes_compatible() {
-  local parts major minor patch
+  local parts major minor patch extra
   parts=$(no_mistakes_version_parts) || return 1
-  set -- $parts
-  [ $# -eq 3 ] || return 1
-  major=$1
-  minor=$2
-  patch=$3
+  IFS=' ' read -r major minor patch extra <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
   [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
   [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
   [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
