@@ -1,0 +1,727 @@
+#!/usr/bin/env bash
+# Agent-ergonomic read-only Retell AI CLI.
+# Usage: retell-axi [auth check|mcp-config|agents list|agents view <id>|calls list|calls view <id>|phone-numbers list|voices list|knowledge-bases list]
+set -u
+
+API_BASE=${RETELL_AXI_API_BASE:-https://api.retellai.com}
+OP_ITEM=${RETELL_AXI_OP_ITEM:-Recall.it API Key}
+API_KEY_LOADED=0
+API_KEY=""
+AUTH_SOURCE=""
+HTTP_CODE=""
+DEFAULT_LIMIT=10
+
+script_path() {
+  case $0 in
+    */*) dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) && printf '%s/%s\n' "$dir" "$(basename "$0")" ;;
+    *) command -v "$0" 2>/dev/null || printf '%s\n' "$0" ;;
+  esac
+}
+
+display_path() {
+  path=$(script_path)
+  case $path in
+    "$HOME"/*) printf '~/%s\n' "${path#"$HOME"/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+usage() {
+  cat <<'EOF'
+retell-axi: read-only Retell AI inspection for agents
+
+commands:
+  retell-axi                         live home view
+  retell-axi auth check              verify auth without exposing the key
+  retell-axi mcp-config              print safe MCP config templates
+  retell-axi agents list [--limit N] [--channel voice|chat] [--query TEXT]
+  retell-axi agents view <id>
+  retell-axi calls list [--limit N] [--agent <id>] [--status <status>] [--total]
+  retell-axi calls view <id> [--full-transcript]
+  retell-axi phone-numbers list [--limit N]
+  retell-axi voices list [--limit N]
+  retell-axi knowledge-bases list
+
+auth lookup order:
+  1. RETELL_API_KEY environment variable
+  2. 1Password item "Recall.it API Key" via op
+EOF
+}
+
+json_string() {
+  RETELL_AXI_VALUE=${1-} node - <<'NODE'
+process.stdout.write(JSON.stringify(process.env.RETELL_AXI_VALUE || ""));
+NODE
+}
+
+auth_missing() {
+  cat <<EOF
+auth:
+  status: missing
+  checked: RETELL_API_KEY, 1Password item "$OP_ITEM"
+error:
+  type: auth_missing
+  message: Retell API key was not found
+help[4]:
+  Export RETELL_API_KEY in the calling environment
+  Sign in to 1Password with \`op signin\`, then retry
+  Keep the key in 1Password item "$OP_ITEM"; retell-axi will read it without printing it
+  Run \`retell-axi auth check\`
+EOF
+}
+
+op_secret() {
+  [ "${RETELL_AXI_NO_OP:-0}" = "1" ] && return 1
+  op_bin=${OP_BIN:-/usr/local/bin/op}
+  if [ ! -x "$op_bin" ]; then
+    op_bin=$(command -v op 2>/dev/null || true)
+  fi
+  [ -n "$op_bin" ] || return 1
+
+  if ! item_json=$("$op_bin" item get "$OP_ITEM" --reveal --format json 2>/dev/null); then
+    vault=$("$op_bin" item list --format json 2>/dev/null | RETELL_AXI_OP_ITEM=$OP_ITEM node -e '
+const fs = require("fs");
+const wanted = process.env.RETELL_AXI_OP_ITEM || "";
+let items = [];
+try { items = JSON.parse(fs.readFileSync(0, "utf8") || "[]"); } catch {}
+const match = items.find((item) => item.title === wanted);
+if (match && match.vault) process.stdout.write(match.vault.name || match.vault.id || "");
+') || return 1
+    [ -n "$vault" ] || return 1
+    item_json=$("$op_bin" item get "$OP_ITEM" --vault "$vault" --reveal --format json 2>/dev/null) || return 1
+  fi
+  RETELL_AXI_OP_JSON=$item_json node - <<'NODE'
+function visitFields(root, out) {
+  if (!root) return;
+  if (Array.isArray(root.fields)) out.push(...root.fields);
+  if (Array.isArray(root.sections)) {
+    for (const section of root.sections) visitFields(section, out);
+  }
+}
+
+let item;
+try {
+  item = JSON.parse(process.env.RETELL_AXI_OP_JSON || "{}");
+} catch {
+  process.exit(1);
+}
+
+const fields = [];
+visitFields(item, fields);
+const scored = [];
+for (const field of fields) {
+  const value = typeof field.value === "string" ? field.value.trim() : "";
+  if (!value) continue;
+  const label = String(field.label || field.id || "").toLowerCase();
+  const type = String(field.type || field.purpose || "").toLowerCase();
+  let score = 0;
+  if (/retell|api|key|token|secret|credential/.test(label)) score += 100;
+  if (/concealed|password/.test(type)) score += 50;
+  if (/password|credential/.test(label)) score += 25;
+  scored.push({ score, value });
+}
+scored.sort((a, b) => b.score - a.score);
+if (!scored.length) process.exit(1);
+process.stdout.write(scored[0].value);
+NODE
+}
+
+load_api_key() {
+  if [ "$API_KEY_LOADED" -eq 1 ]; then
+    [ -n "$API_KEY" ]
+    return
+  fi
+  API_KEY_LOADED=1
+
+  if [ -n "${RETELL_API_KEY:-}" ]; then
+    API_KEY=$RETELL_API_KEY
+    AUTH_SOURCE=RETELL_API_KEY
+    return 0
+  fi
+
+  if secret=$(op_secret); then
+    if [ -n "$secret" ]; then
+      API_KEY=$secret
+      AUTH_SOURCE="1password:$OP_ITEM"
+      return 0
+    fi
+  fi
+
+  auth_missing
+  return 1
+}
+
+tmpfile() {
+  mktemp "${TMPDIR:-/tmp}/retell-axi.XXXXXX"
+}
+
+cleanup_files() {
+  for file in "$@"; do
+    [ -n "$file" ] && [ -f "$file" ] && rm -f "$file"
+  done
+}
+
+request_to_file() {
+  method=$1
+  path=$2
+  out=$3
+  body=${4-}
+
+  command -v curl >/dev/null 2>&1 || {
+    cat <<'EOF'
+error:
+  type: missing_tool
+  message: curl is required for retell-axi
+help[1]:
+  Install curl, then retry
+EOF
+    return 1
+  }
+
+  load_api_key || return 1
+
+  url=$API_BASE$path
+  if [ -n "$body" ]; then
+    code=$(curl -sS -o "$out" -w '%{http_code}' \
+      --request "$method" \
+      --url "$url" \
+      --header "Authorization: Bearer $API_KEY" \
+      --header 'Content-Type: application/json' \
+      --data "$body")
+  else
+    code=$(curl -sS -o "$out" -w '%{http_code}' \
+      --request "$method" \
+      --url "$url" \
+      --header "Authorization: Bearer $API_KEY" \
+      --header 'Content-Type: application/json')
+  fi
+  curl_status=$?
+  if [ "$curl_status" -ne 0 ]; then
+    cat <<EOF
+error:
+  type: network
+  message: Retell API request failed
+  curl_status: $curl_status
+help[2]:
+  Check network connectivity to $API_BASE
+  Run \`retell-axi auth check\`
+EOF
+    return 1
+  fi
+  HTTP_CODE=$code
+}
+
+is_success_code() {
+  case $1 in
+    2??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+emit_http_error() {
+  code=$1
+  file=$2
+  RETELL_AXI_STATUS=$code RETELL_AXI_FILE=$file node - <<'NODE'
+const fs = require("fs");
+const status = process.env.RETELL_AXI_STATUS || "unknown";
+let payload = "";
+try { payload = fs.readFileSync(process.env.RETELL_AXI_FILE, "utf8"); } catch {}
+let message = payload.trim();
+try {
+  const json = JSON.parse(payload || "{}");
+  message = json.message || json.error || json.status || message;
+} catch {}
+message = String(message || "Retell API returned an error").replace(/\s+/g, " ").slice(0, 500);
+console.log("error:");
+console.log("  type: http");
+console.log(`  status: ${status}`);
+console.log(`  message: ${message}`);
+if (status === "401") {
+  console.log("help[2]:");
+  console.log("  Confirm RETELL_API_KEY or the 1Password item is active");
+  console.log("  Run `retell-axi auth check`");
+} else if (status === "429") {
+  console.log("help[1]:");
+  console.log("  Retell rate limited the request; retry later or reduce frequency");
+} else {
+  console.log("help[2]:");
+  console.log("  Re-run with a smaller --limit when listing resources");
+  console.log("  Check https://docs.retellai.com/api-references/overview");
+}
+NODE
+}
+
+api_or_exit() {
+  method=$1
+  path=$2
+  out=$3
+  body=${4-}
+  request_to_file "$method" "$path" "$out" "$body" || exit 1
+  code=$HTTP_CODE
+  if ! is_success_code "$code"; then
+    emit_http_error "$code" "$out"
+    exit 1
+  fi
+}
+
+format_file() {
+  mode=$1
+  file=$2
+  RETELL_AXI_MODE=$mode RETELL_AXI_FILE=$file RETELL_AXI_FULL_TRANSCRIPT=${FULL_TRANSCRIPT:-0} node - <<'NODE'
+const fs = require("fs");
+const mode = process.env.RETELL_AXI_MODE;
+const fullTranscript = process.env.RETELL_AXI_FULL_TRANSCRIPT === "1";
+
+function readJson(file) {
+  const raw = fs.readFileSync(file, "utf8");
+  return raw.trim() ? JSON.parse(raw) : null;
+}
+function oneLine(value, max = 120) {
+  if (value === undefined || value === null) return "";
+  let s = String(value).replace(/[\r\n\t]+/g, " ").replace(/,/g, ";").trim();
+  if (s.length > max) s = `${s.slice(0, max)}...(${s.length} chars)`;
+  return s;
+}
+function iso(ms) {
+  if (!ms) return "";
+  const d = new Date(Number(ms));
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+function listItems(data) {
+  if (Array.isArray(data)) return { items: data, has_more: false };
+  return { items: Array.isArray(data.items) ? data.items : [], has_more: Boolean(data.has_more), pagination_key: data.pagination_key, total: data.total };
+}
+function printHelp(lines) {
+  console.log(`help[${lines.length}]:`);
+  for (const line of lines) console.log(`  ${line}`);
+}
+
+const data = readJson(process.env.RETELL_AXI_FILE);
+
+if (mode === "agents-list") {
+  const { items, has_more, pagination_key } = listItems(data);
+  console.log(`agents[${items.length}]{agent_id,agent_name,channel,modified}:`);
+  for (const a of items) console.log(`  ${oneLine(a.agent_id)},${oneLine(a.agent_name)},${oneLine(a.channel)},${iso(a.user_modified_timestamp)}`);
+  console.log(`has_more: ${has_more}`);
+  if (pagination_key) console.log(`pagination_key: ${oneLine(pagination_key, 80)}`);
+  printHelp(["Run `retell-axi agents view <id>`", "Run `retell-axi calls list --agent <id>`"]);
+} else if (mode === "agent-view") {
+  console.log("agent:");
+  console.log(`  agent_id: ${oneLine(data.agent_id)}`);
+  console.log(`  agent_name: ${oneLine(data.agent_name)}`);
+  console.log(`  channel: ${oneLine(data.channel || "voice")}`);
+  console.log(`  version: ${oneLine(data.version)}`);
+  console.log(`  published: ${oneLine(data.is_published)}`);
+  console.log(`  tags: ${oneLine(Array.isArray(data.assigned_tags) ? data.assigned_tags.join("|") : Object.keys(data.tags || {}).join("|"))}`);
+  console.log(`  voice_id: ${oneLine(data.voice_id)}`);
+  const engine = data.response_engine || {};
+  console.log(`  response_engine: ${oneLine(engine.type || data.response_engine_type)}`);
+  console.log(`  webhook_url: ${oneLine(data.webhook_url, 160)}`);
+  console.log(`  storage: ${oneLine(data.data_storage_setting)}`);
+  console.log(`  modified: ${iso(data.last_modification_timestamp || data.user_modified_timestamp)}`);
+  printHelp(["Run `retell-axi calls list --agent <id>`", "Use Retell MCP for create/update/publish workflows after read-first review"]);
+} else if (mode === "calls-list") {
+  const { items, has_more, pagination_key, total } = listItems(data);
+  if (total !== undefined) console.log(`total: ${total}`);
+  console.log(`calls[${items.length}]{call_id,agent,status,type,started,duration_sec}:`);
+  for (const c of items) {
+    const duration = c.duration_ms === undefined || c.duration_ms === null ? "" : Math.round(Number(c.duration_ms) / 1000);
+    const agent = c.agent_name || c.agent_id || "";
+    console.log(`  ${oneLine(c.call_id)},${oneLine(agent)},${oneLine(c.call_status)},${oneLine(c.call_type)},${iso(c.start_timestamp)},${duration}`);
+  }
+  console.log(`has_more: ${has_more}`);
+  if (pagination_key) console.log(`pagination_key: ${oneLine(pagination_key, 80)}`);
+  printHelp(["Run `retell-axi calls view <id>`", "Use `retell-axi calls view <id> --full-transcript` only when the full transcript is necessary"]);
+} else if (mode === "call-view") {
+  console.log("call:");
+  console.log(`  call_id: ${oneLine(data.call_id)}`);
+  console.log(`  agent: ${oneLine(data.agent_name || data.agent_id)}`);
+  console.log(`  agent_id: ${oneLine(data.agent_id)}`);
+  console.log(`  status: ${oneLine(data.call_status)}`);
+  console.log(`  type: ${oneLine(data.call_type)}`);
+  console.log(`  direction: ${oneLine(data.direction)}`);
+  console.log(`  started: ${iso(data.start_timestamp)}`);
+  console.log(`  ended: ${iso(data.end_timestamp)}`);
+  console.log(`  duration_sec: ${data.duration_ms === undefined || data.duration_ms === null ? "" : Math.round(Number(data.duration_ms) / 1000)}`);
+  console.log(`  disconnection_reason: ${oneLine(data.disconnection_reason)}`);
+  const analysis = data.call_analysis || {};
+  console.log(`  sentiment: ${oneLine(analysis.user_sentiment)}`);
+  console.log(`  successful: ${oneLine(analysis.call_successful)}`);
+  console.log(`  summary: ${oneLine(analysis.call_summary, 500)}`);
+  const transcript = typeof data.transcript === "string" ? data.transcript : "";
+  if (fullTranscript) {
+    const rendered = transcript.length > 8000 ? `${transcript.slice(0, 8000)}\n...(truncated, ${transcript.length} chars total)` : transcript;
+    console.log("transcript: |-");
+    for (const line of rendered.split(/\r?\n/)) console.log(`  ${line}`);
+  } else {
+    console.log(`  transcript: hidden (${transcript.length} chars; use --full-transcript only when needed)`);
+  }
+  printHelp(["Prefer summaries and targeted excerpts over full transcript dumps", "Check webhooks or QA in the Retell dashboard/MCP when deeper analysis is needed"]);
+} else if (mode === "phone-numbers-list") {
+  const { items, has_more, pagination_key } = listItems(data);
+  console.log(`phone_numbers[${items.length}]{phone_number,nickname,type,inbound_agents,outbound_agents}:`);
+  for (const p of items) {
+    const inbound = Array.isArray(p.inbound_agents) ? p.inbound_agents.length : 0;
+    const outbound = Array.isArray(p.outbound_agents) ? p.outbound_agents.length : 0;
+    console.log(`  ${oneLine(p.phone_number_pretty || p.phone_number)},${oneLine(p.nickname)},${oneLine(p.phone_number_type)},${inbound},${outbound}`);
+  }
+  console.log(`has_more: ${has_more}`);
+  if (pagination_key) console.log(`pagination_key: ${oneLine(pagination_key, 80)}`);
+  printHelp(["Use Retell MCP or REST docs for import/provision/update workflows", "Read phone-number bindings before changing production routing"]);
+} else if (mode === "voices-list") {
+  const { items } = listItems(data);
+  console.log(`voices[${items.length}]{voice_id,voice_name,provider,gender,accent}:`);
+  for (const v of items) console.log(`  ${oneLine(v.voice_id)},${oneLine(v.voice_name)},${oneLine(v.provider)},${oneLine(v.gender)},${oneLine(v.accent)}`);
+  printHelp(["Run `retell-axi agents view <id>` to see an agent's voice_id", "Use Retell MCP or dashboard for voice cloning/add-voice workflows"]);
+} else if (mode === "knowledge-bases-list") {
+  const { items } = listItems(data);
+  console.log(`knowledge_bases[${items.length}]{knowledge_base_id,name,status,sources,auto_refresh}:`);
+  for (const kb of items) {
+    const sources = Array.isArray(kb.knowledge_base_sources) ? kb.knowledge_base_sources.length : 0;
+    console.log(`  ${oneLine(kb.knowledge_base_id)},${oneLine(kb.knowledge_base_name)},${oneLine(kb.status)},${sources},${oneLine(kb.enable_auto_refresh)}`);
+  }
+  printHelp(["Use Retell MCP for create/update/source attachment workflows", "Inspect KB status before relying on it in tests or production calls"]);
+}
+NODE
+}
+
+format_home() {
+  concurrency_file=$1
+  agents_file=$2
+  calls_file=$3
+  RETELL_AXI_BIN=$(display_path) RETELL_AXI_AUTH_SOURCE=$AUTH_SOURCE RETELL_AXI_CONCURRENCY_FILE=$concurrency_file RETELL_AXI_AGENTS_FILE=$agents_file RETELL_AXI_CALLS_FILE=$calls_file node - <<'NODE'
+const fs = require("fs");
+function read(file) { try { return JSON.parse(fs.readFileSync(file, "utf8") || "{}"); } catch { return {}; } }
+function oneLine(value, max = 120) {
+  if (value === undefined || value === null) return "";
+  let s = String(value).replace(/[\r\n\t]+/g, " ").replace(/,/g, ";").trim();
+  if (s.length > max) s = `${s.slice(0, max)}...(${s.length} chars)`;
+  return s;
+}
+function iso(ms) {
+  if (!ms) return "";
+  const d = new Date(Number(ms));
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+const c = read(process.env.RETELL_AXI_CONCURRENCY_FILE);
+const agents = read(process.env.RETELL_AXI_AGENTS_FILE);
+const calls = read(process.env.RETELL_AXI_CALLS_FILE);
+const agentItems = Array.isArray(agents.items) ? agents.items : [];
+const callItems = Array.isArray(calls.items) ? calls.items : [];
+console.log(`bin: ${process.env.RETELL_AXI_BIN}`);
+console.log("description: Inspect Retell AI agents, calls, phone numbers, voices, and knowledge bases with compact read-only output");
+console.log(`auth: ok (${process.env.RETELL_AXI_AUTH_SOURCE})`);
+console.log("concurrency:");
+console.log(`  current: ${oneLine(c.current_concurrency)}`);
+console.log(`  limit: ${oneLine(c.concurrency_limit)}`);
+console.log(`  burst_enabled: ${oneLine(c.concurrency_burst_enabled)}`);
+console.log(`agents[${agentItems.length}]{agent_id,agent_name,channel,modified}:`);
+for (const a of agentItems.slice(0, 5)) console.log(`  ${oneLine(a.agent_id)},${oneLine(a.agent_name)},${oneLine(a.channel)},${iso(a.user_modified_timestamp)}`);
+console.log(`calls[${callItems.length}]{call_id,agent,status,type,started}:`);
+for (const call of callItems.slice(0, 5)) console.log(`  ${oneLine(call.call_id)},${oneLine(call.agent_name || call.agent_id)},${oneLine(call.call_status)},${oneLine(call.call_type)},${iso(call.start_timestamp)}`);
+console.log("help[5]:");
+console.log("  Run `retell-axi agents list`");
+console.log("  Run `retell-axi calls list --total`");
+console.log("  Run `retell-axi phone-numbers list`");
+console.log("  Run `retell-axi mcp-config`");
+console.log("  Use Retell MCP for write workflows after read-first review");
+NODE
+}
+
+print_mcp_config() {
+  cat <<'EOF'
+mcp:
+  server: retell
+  url: https://mcp.retellai.com
+  auth_header: Authorization: Bearer ${RETELL_API_KEY}
+cursor_or_claude_desktop_json: |-
+  {
+    "mcpServers": {
+      "retell": {
+        "url": "https://mcp.retellai.com",
+        "headers": {
+          "Authorization": "Bearer ${RETELL_API_KEY}"
+        }
+      }
+    }
+  }
+codex_toml: |-
+  [mcp_servers.retell]
+  url = "https://mcp.retellai.com"
+  bearer_token_env_var = "RETELL_API_KEY"
+claude_code_command: |-
+  claude mcp add --transport http retell https://mcp.retellai.com --header "Authorization: Bearer ${RETELL_API_KEY}"
+help[3]:
+  Store the real key in RETELL_API_KEY or 1Password; do not paste it into chat
+  The hosted MCP server can create/update/publish/delete, so keep client confirmations enabled
+  Prefer `retell-axi` for routine read-only inspection before MCP write workflows
+EOF
+}
+
+limit_arg() {
+  value=${1:-$DEFAULT_LIMIT}
+  case $value in
+    ''|*[!0-9]*) printf '%s\n' "$DEFAULT_LIMIT" ;;
+    *)
+      if [ "$value" -lt 1 ]; then printf '1\n'; elif [ "$value" -gt 1000 ]; then printf '1000\n'; else printf '%s\n' "$value"; fi
+      ;;
+  esac
+}
+
+json_body_agents() {
+  channel=$1
+  query=$2
+  RETELL_AXI_CHANNEL=$channel RETELL_AXI_QUERY=$query node - <<'NODE'
+const body = {};
+const filter = {};
+const channel = process.env.RETELL_AXI_CHANNEL || "";
+const query = process.env.RETELL_AXI_QUERY || "";
+if (channel) filter.channel = { type: "string", op: "eq", value: channel };
+if (query) filter.query = query;
+if (Object.keys(filter).length) body.filter_criteria = filter;
+process.stdout.write(JSON.stringify(body));
+NODE
+}
+
+json_body_calls() {
+  limit=$1
+  agent=$2
+  status=$3
+  include_total=$4
+  RETELL_AXI_LIMIT=$limit RETELL_AXI_AGENT=$agent RETELL_AXI_STATUS_FILTER=$status RETELL_AXI_INCLUDE_TOTAL=$include_total node - <<'NODE'
+const body = { limit: Number(process.env.RETELL_AXI_LIMIT || 10), sort_order: "descending" };
+const filter = {};
+const agent = process.env.RETELL_AXI_AGENT || "";
+const status = process.env.RETELL_AXI_STATUS_FILTER || "";
+if (agent) filter.agent = [{ agent_id: agent }];
+if (status) filter.call_status = { type: "enum", op: "in", value: [status] };
+if (Object.keys(filter).length) body.filter_criteria = filter;
+if (process.env.RETELL_AXI_INCLUDE_TOTAL === "1") body.include_total = true;
+process.stdout.write(JSON.stringify(body));
+NODE
+}
+
+validate_id() {
+  id=$1
+  case $id in
+    ''|*/*|*'?'*|*'#'*|*'%'*)
+      cat <<'EOF'
+error:
+  type: invalid_id
+  message: id must be a plain Retell identifier without URL metacharacters
+EOF
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+cmd_home() {
+  concurrency_file=$(tmpfile) || exit 1
+  agents_file=$(tmpfile) || { cleanup_files "$concurrency_file"; exit 1; }
+  calls_file=$(tmpfile) || { cleanup_files "$concurrency_file" "$agents_file"; exit 1; }
+  api_or_exit GET "/get-concurrency" "$concurrency_file"
+  api_or_exit POST "/v2/list-agents?limit=5" "$agents_file" "{}"
+  api_or_exit POST "/v3/list-calls" "$calls_file" '{"limit":5,"sort_order":"descending"}'
+  format_home "$concurrency_file" "$agents_file" "$calls_file"
+  cleanup_files "$concurrency_file" "$agents_file" "$calls_file"
+}
+
+cmd_auth_check() {
+  out=$(tmpfile) || exit 1
+  api_or_exit GET "/get-concurrency" "$out"
+  RETELL_AXI_AUTH_SOURCE=$AUTH_SOURCE RETELL_AXI_FILE=$out node - <<'NODE'
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync(process.env.RETELL_AXI_FILE, "utf8") || "{}");
+console.log("auth:");
+console.log("  status: ok");
+console.log(`  source: ${process.env.RETELL_AXI_AUTH_SOURCE}`);
+console.log("concurrency:");
+console.log(`  current: ${c.current_concurrency ?? ""}`);
+console.log(`  limit: ${c.concurrency_limit ?? ""}`);
+console.log("help[2]:");
+console.log("  Run `retell-axi` for live account context");
+console.log("  Run `retell-axi agents list`");
+NODE
+  cleanup_files "$out"
+}
+
+cmd_agents_list() {
+  limit=$DEFAULT_LIMIT
+  channel=""
+  query=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) shift; limit=$(limit_arg "${1:-}") ;;
+      --channel) shift; channel=${1:-} ;;
+      --query) shift; query=${1:-} ;;
+      --help) usage; return 0 ;;
+      *) echo "error:"; echo "  type: usage"; echo "  message: unknown agents list option $1"; return 1 ;;
+    esac
+    shift || true
+  done
+  case $channel in ''|voice|chat) ;; *) echo "error:"; echo "  type: usage"; echo "  message: --channel must be voice or chat"; return 1 ;; esac
+  body=$(json_body_agents "$channel" "$query")
+  out=$(tmpfile) || exit 1
+  api_or_exit POST "/v2/list-agents?limit=$limit" "$out" "$body"
+  format_file agents-list "$out"
+  cleanup_files "$out"
+}
+
+cmd_agents_view() {
+  id=${1:-}
+  validate_id "$id" || return 1
+  out=$(tmpfile) || exit 1
+  request_to_file GET "/get-agent/$id" "$out" || exit 1
+  code=$HTTP_CODE
+  if ! is_success_code "$code"; then
+    request_to_file GET "/get-chat-agent/$id" "$out" || exit 1
+    code=$HTTP_CODE
+  fi
+  if ! is_success_code "$code"; then
+    emit_http_error "$code" "$out"
+    exit 1
+  fi
+  format_file agent-view "$out"
+  cleanup_files "$out"
+}
+
+cmd_calls_list() {
+  limit=$DEFAULT_LIMIT
+  agent=""
+  status=""
+  include_total=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) shift; limit=$(limit_arg "${1:-}") ;;
+      --agent) shift; agent=${1:-} ;;
+      --status) shift; status=${1:-} ;;
+      --total) include_total=1 ;;
+      --help) usage; return 0 ;;
+      *) echo "error:"; echo "  type: usage"; echo "  message: unknown calls list option $1"; return 1 ;;
+    esac
+    shift || true
+  done
+  body=$(json_body_calls "$limit" "$agent" "$status" "$include_total")
+  out=$(tmpfile) || exit 1
+  api_or_exit POST "/v3/list-calls" "$out" "$body"
+  format_file calls-list "$out"
+  cleanup_files "$out"
+}
+
+cmd_calls_view() {
+  id=""
+  FULL_TRANSCRIPT=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --full-transcript) FULL_TRANSCRIPT=1 ;;
+      --help) usage; return 0 ;;
+      *) if [ -z "$id" ]; then id=$1; else echo "error:"; echo "  type: usage"; echo "  message: unexpected calls view argument $1"; return 1; fi ;;
+    esac
+    shift || true
+  done
+  validate_id "$id" || return 1
+  out=$(tmpfile) || exit 1
+  api_or_exit GET "/v2/get-call/$id" "$out"
+  format_file calls-view "$out"
+  cleanup_files "$out"
+}
+
+cmd_phone_numbers_list() {
+  limit=$DEFAULT_LIMIT
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) shift; limit=$(limit_arg "${1:-}") ;;
+      --help) usage; return 0 ;;
+      *) echo "error:"; echo "  type: usage"; echo "  message: unknown phone-numbers list option $1"; return 1 ;;
+    esac
+    shift || true
+  done
+  out=$(tmpfile) || exit 1
+  api_or_exit GET "/v2/list-phone-numbers?limit=$limit" "$out"
+  format_file phone-numbers-list "$out"
+  cleanup_files "$out"
+}
+
+cmd_voices_list() {
+  limit=$DEFAULT_LIMIT
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) shift; limit=$(limit_arg "${1:-}") ;;
+      --help) usage; return 0 ;;
+      *) echo "error:"; echo "  type: usage"; echo "  message: unknown voices list option $1"; return 1 ;;
+    esac
+    shift || true
+  done
+  out=$(tmpfile) || exit 1
+  api_or_exit GET "/list-voices" "$out"
+  if [ "$limit" -lt 1000 ]; then
+    RETELL_AXI_FILE=$out RETELL_AXI_LIMIT=$limit node - <<'NODE'
+const fs = require("fs");
+const file = process.env.RETELL_AXI_FILE;
+const limit = Number(process.env.RETELL_AXI_LIMIT || 10);
+const data = JSON.parse(fs.readFileSync(file, "utf8") || "[]");
+fs.writeFileSync(file, JSON.stringify(Array.isArray(data) ? data.slice(0, limit) : data));
+NODE
+  fi
+  format_file voices-list "$out"
+  cleanup_files "$out"
+}
+
+cmd_knowledge_bases_list() {
+  out=$(tmpfile) || exit 1
+  api_or_exit GET "/list-knowledge-bases" "$out"
+  format_file knowledge-bases-list "$out"
+  cleanup_files "$out"
+}
+
+case ${1:-} in
+  "") cmd_home ;;
+  --help|-h|help) usage ;;
+  auth)
+    shift
+    case ${1:-} in
+      check) cmd_auth_check ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  mcp-config) print_mcp_config ;;
+  agents)
+    shift
+    case ${1:-} in
+      list) shift; cmd_agents_list "$@" ;;
+      view) shift; cmd_agents_view "${1:-}" ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  calls)
+    shift
+    case ${1:-} in
+      list) shift; cmd_calls_list "$@" ;;
+      view) shift; cmd_calls_view "$@" ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  phone-numbers)
+    shift
+    case ${1:-} in
+      list) shift; cmd_phone_numbers_list "$@" ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  voices)
+    shift
+    case ${1:-} in
+      list) shift; cmd_voices_list "$@" ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  knowledge-bases)
+    shift
+    case ${1:-} in
+      list) shift; cmd_knowledge_bases_list "$@" ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  *) usage; exit 1 ;;
+esac
