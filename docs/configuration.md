@@ -141,4 +141,10 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# orchestrator dashboard (bin/fm-layout.sh); see docs/orchestrator-layout.md
+FM_LAYOUT_REFRESH=2                # seconds between watch/summary pane refreshes
+FM_LAYOUT_LABEL_MAX=30             # max worker feature-label width before truncation
+FM_LAYOUT_KEY_ARRANGE=O           # prefix key bound to arrange by `fm-layout.sh bind`
+FM_LAYOUT_KEY_PICK=P              # prefix key bound to the picker by `fm-layout.sh bind`
+FM_LAYOUT_INCLUDE_SECONDMATES=    # set to 1 to also watch secondmate homes
 ```

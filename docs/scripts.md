@@ -31,6 +31,10 @@ Each file also starts with a short header comment.
 | `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a direct-report window; exits non-zero on confirmed swallowed Enter; bare `kind=secondmate` targets are marked as from-firstmate; slash commands and codex `$...` skill invocations get popup-settle before Enter; text sends pause `FM_SEND_SETTLE` seconds after success |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
+| `fm-layout.sh`           | Arrange the orchestrator window into a left command column (chat + worker summary) and three swappable worker watch slots; `arrange`/`workers`/`slots`/`assign`/`pick`/`bind` subcommands ([docs](orchestrator-layout.md)) |
+| `fm-layout-lib.sh`       | Shared live-worker discovery, terse repo/label derivation, and slot-file helpers sourced by the layout scripts      |
+| `fm-watch-pane.sh`       | Read-only refresh loop for one dashboard pane: a `capture-pane` mirror of an assigned worker, or the active-worker summary |
+| `fm-layout-pick.sh`      | Interactive keyboard picker popup that reassigns a watch slot to any live worker                                    |
 | `fm-pr-check.sh`         | Record `pr=` and a verified `pr_head=` when available for a PR-ready task, then arm the watcher's merge poll        |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, and prints the backlog reminder |
