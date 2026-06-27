@@ -16,7 +16,7 @@ Each file also starts with a short header comment.
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`; ship/scout spawns require an isolated treehouse worktree; secondmate spawns locally sync the home before launch |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
-| `fm-open-file.sh`        | Open a firstmate-home report or file in a detached tmux review tab using `glow`, `bat`, or `less`; `--lavish` runs `lavish-axi` for HTML review artifacts, and relative paths such as `data/<id>/report.md` resolve from the firstmate home |
+| `fm-open-file.sh`        | Open a firstmate-home report or file without dumping content into chat: one Markdown/text path opens a terminal review tab with `glow`, `bat`, or `less`; multiple paths open one WezTerm tab with clickable links; `--lavish` runs `lavish-axi` for HTML review artifacts; relative paths such as `data/<id>/report.md` resolve from the firstmate home |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |

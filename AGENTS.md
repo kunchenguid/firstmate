@@ -136,6 +136,7 @@ Treat any harness memory of these preferences as a recall cache only; `data/capt
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
 Use `gh-axi` for all GitHub operations, `chrome-devtools-axi` for all browser operations, and `lavish-axi` when a decision, structured report, plan, comparison, or complex UI/design audit is easier to review as a rich surface than raw Markdown.
+For local report artifacts, use `bin/fm-open-file.sh`: single Markdown/text files open in the terminal review surface, while multiple local review targets open in one WezTerm tab with clickable links.
 Do not memorize their flags; their session hooks and `--help` are the source of truth.
 If the captain names a different crewmate harness at bootstrap or later, write it to `config/crew-harness` (local, gitignored); that is the whole switch.
 
@@ -430,7 +431,7 @@ With `--force`, teardown is the explicit discard path for child windows, child w
 A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold the brief with `bin/fm-brief.sh <id> <repo> --scout`, spawn with `--scout` - then diverges after the work:
 
 - There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
-- Relay the findings to the captain: plain chat for a focused answer, `bin/fm-open-file.sh data/<id>/report.md` for a simple Markdown report the captain should inspect directly, and lavish-axi when the report has structure worth a visual (multiple findings, options, a plan, comparison, or complex UI/design audit).
+- Relay the findings to the captain: plain chat for a focused answer, `bin/fm-open-file.sh data/<id>/report.md` for a simple Markdown report the captain should inspect directly, `bin/fm-open-file.sh <path> <path>...` when the review target is a set of local files that should appear as one clickable WezTerm tab, and lavish-axi when the report has structure worth a visual (multiple findings, options, a plan, comparison, or complex UI/design audit).
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when compatible tasks-axi is available, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
@@ -563,7 +564,7 @@ Reaches the captain immediately:
 
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
-Do not leave a bare local path such as `data/<id>/report.md` or `.lavish/<name>.html` as the only way to access a captain-facing artifact. Open simple Markdown or text reports first with `bin/fm-open-file.sh data/<id>/report.md`, then tell the captain the tmux tab name the helper printed. For Lavish HTML artifacts, run `bin/fm-open-file.sh --lavish .lavish/<name>.html` or use `lavish-axi <html-file>` directly when a rich review surface is the right presentation.
+Do not leave a bare local path such as `data/<id>/report.md` or `.lavish/<name>.html` as the only way to access a captain-facing artifact. Open simple Markdown or text reports first with `bin/fm-open-file.sh data/<id>/report.md`, then tell the captain the tab name the helper printed. When the captain needs several local review targets or clickable local links, pass all paths in one call, such as `bin/fm-open-file.sh data/<id>/report.md .lavish/<name>.html`, so the helper opens one WezTerm tab with clickable links instead of several tmux windows. For Lavish HTML artifacts, run `bin/fm-open-file.sh --lavish .lavish/<name>.html` or use `lavish-axi <html-file>` directly when a rich review surface is the right presentation. Use a tmux review tab only when the captain explicitly asks for one or when terminal text is the right surface.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
 Whenever you reference a PR to the captain - review-ready work, a requested status answer, or a recent-work summary - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable.
 A shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same message.
