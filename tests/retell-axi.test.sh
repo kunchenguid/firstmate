@@ -22,6 +22,18 @@ test_auth_missing_is_structured() {
   pass "retell-axi auth missing output is structured and secret-free"
 }
 
+test_home_auth_missing_is_structured() {
+  local out status
+  set +e
+  out=$(RETELL_API_KEY= RETELL_AXI_NO_OP=1 "$ROOT/bin/retell-axi" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "home auth missing should exit nonzero"
+  assert_contains "home auth missing" "$out" "type: auth_missing"
+  assert_contains "home auth missing" "$out" '1Password item "Recall.it API Key"'
+  printf '%s\n' "$out" | grep -F 'Bearer ' >/dev/null && fail "home auth missing leaked a bearer header"
+  pass "retell-axi home auth missing output is structured and secret-free"
+}
+
 test_invalid_id_is_structured() {
   local out status
   set +e
@@ -42,5 +54,6 @@ test_mcp_config_uses_env_placeholder() {
 }
 
 test_auth_missing_is_structured
+test_home_auth_missing_is_structured
 test_invalid_id_is_structured
 test_mcp_config_uses_env_placeholder
