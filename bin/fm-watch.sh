@@ -110,7 +110,7 @@ afk_present() { [ -e "$STATE/.afk" ]; }
 triage_log() {
   local sz
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$TRIAGE_LOG" 2>/dev/null || return 0
-  sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null || echo 0)
+  sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$sz" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$sz" -ge "$TRIAGE_LOG_MAX_BYTES" ]; then
     tail -n 2000 "$TRIAGE_LOG" > "$TRIAGE_LOG.tmp" 2>/dev/null && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
@@ -392,7 +392,10 @@ EOF
           else
             since=$(cat "$ssf" 2>/dev/null || true)
             case "$since" in
-              ''|*[!0-9]*) : ;;
+              ''|*[!0-9]*)
+                date +%s > "$ssf"
+                triage_log "absorbed non-terminal stale timer reset: $w"
+                ;;
               *)
                 age=$(( $(date +%s) - since ))
                 if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then

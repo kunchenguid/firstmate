@@ -45,6 +45,20 @@ wait_live() {
   return 0
 }
 
+wait_numeric_file() {
+  local file=$1 limit=${2:-30} i=0 value
+  while [ "$i" -lt "$limit" ]; do
+    value=$(cat "$file" 2>/dev/null || true)
+    case "$value" in
+      ''|*[!0-9]*) ;;
+      *) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -236,6 +250,82 @@ test_nonterminal_stale_absorbed_then_escalated() {
   pass "non-terminal stale is absorbed on first sight, then escalated as a possible wedge past the threshold"
 }
 
+test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
+  local dir state fakebin out capture_file window key pane_hash sig pid since
+  dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-quiet-timer"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet-timer.meta"
+  printf 'working: still compiling\n' > "$state/quiet-timer.status"
+  sig=$(seen_sig "$state/quiet-timer.status"); printf '%s' "$sig" > "$state/.seen-quiet-timer_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "missing stale-since repair enqueued a wake"; }
+  reap "$pid"
+
+  printf 'corrupt\n' > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
+  [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
+  reap "$pid"
+  pass "matching non-terminal stale suppressors repair missing or corrupt stale-since timers"
+}
+
+# --- triage debug log stays size capped -------------------------------------
+
+test_triage_log_size_cap_accepts_spaced_wc_counts() {
+  local dir state fakebin out status_file pid lines i
+  dir=$(make_case triage-log-spaced-wc); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  i=1
+  while [ "$i" -le 3000 ]; do
+    printf 'old line %04d\n' "$i" >> "$state/.watch-triage.log"
+    i=$((i + 1))
+  done
+  cat > "$fakebin/wc" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "-c" ]; then
+  printf '   999999\n'
+  exit 0
+fi
+exit 127
+SH
+  chmod +x "$fakebin/wc"
+  status_file="$state/task.status"
+  printf 'working: compiling step 2\n' > "$status_file"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCH_TRIAGE_LOG_MAX_BYTES=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a benign signal while testing log capping: $(cat "$out")"
+  fi
+  lines=$(awk 'END { print NR + 0 }' "$state/.watch-triage.log")
+  [ "$lines" -le 2000 ] || { reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
+  reap "$pid"
+  pass "triage log capping handles wc byte counts with leading spaces"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -329,6 +419,8 @@ test_turn_ended_marker_absorbed
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_nonterminal_stale_absorbed_then_escalated
+test_nonterminal_stale_repairs_missing_or_corrupt_timer
+test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
