@@ -13,12 +13,11 @@
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full per-wake responsiveness.
-# When afk is off, the daemon stays quiet — it self-handles routine wakes and
-# buffers escalations without injecting, so the base one-shot fm-watch.sh
-# protocol is the active mechanism. Escalations that arrive while afk is off
-# survive in state/.subsuper-escalations and are flushed on the next
-# "while you were out" catch-up or when afk is re-entered.
+# user message clears it and firstmate resumes full responsiveness.
+# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# Any buffered daemon escalations that remain while afk is off survive in
+# state/.subsuper-escalations and are flushed on the next "while you were out"
+# catch-up or when afk is re-entered.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
@@ -29,10 +28,12 @@
 # human share one input channel — so they live together under /afk.
 #
 # Reliability model (see the /afk skill):
-#   - Nothing is lost: the #29 watcher enqueues every wake to state/.wake-queue
-#     BEFORE advancing its suppression markers, so a crash/restart/missed
-#     injection is recovered on the next fm-wake-drain.sh. The daemon does not
-#     touch the queue; it only reads the watcher's stdout reason.
+#   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
+#     to daemon-owned one-shot behavior and enqueues every wake to
+#     state/.wake-queue BEFORE advancing its suppression markers, so a
+#     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
+#     The daemon does not touch the queue; it only reads the watcher's stdout
+#     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane is escalated only after it has been
@@ -581,8 +582,8 @@ inject_msg() {  # <message> [state]
   local msg=$1 state target retries sleep_s verdict
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the base one-shot
-  # watcher. Escalations buffer and survive for the next catch-up flush.
+  # daemon self-handles and stays quiet; firstmate drives the normal always-on
+  # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats

@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
-# Blocks until supervision work is due, then exits printing one reason line:
-#   signal: <file>...     a crewmate wrote a status line or a turn-end hook fired; signals
-#                         landing within FM_SIGNAL_GRACE of each other coalesce into one wake
-#   stale: <window>       a crewmate pane stopped changing and shows no busy signature
-#   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
-#   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
-# For normal supervision, re-arm after each wake by running bin/fm-watch-arm.sh
-# through the harness's tracked background mechanism. Direct duplicate
-# invocations of this script still no-op through the watcher singleton lock.
+# Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
+# and keeps blocking; it queues and exits only for actionable wakes. While
+# state/.afk exists, the daemon owns triage and this watcher queues and exits on
+# every wake. Printed reason lines:
+#   signal: <file>...      status/turn-end signals, surfaced only when a listed
+#                          status has a captain-relevant verb unless afk is active
+#   stale: <window>        terminal stale pane, or non-terminal stale past the
+#                          wedge threshold, unless afk is active
+#   check: <script>: <out> per-task check output, always actionable
+#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
+#                          status, unless afk is active
+# For normal supervision, re-arm after each printed reason by running
+# bin/fm-watch-arm.sh through the harness's tracked background mechanism. Direct
+# duplicate invocations of this script still no-op through the watcher singleton
+# lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,7 +78,7 @@ else
 fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat wakes
+HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
@@ -162,9 +168,9 @@ wake() {
   exit 0
 }
 
-# Check and heartbeat cadence must survive restarts: the watcher exits on every
-# wake and is relaunched, so in-memory counters never reach their threshold on
-# a busy fleet. Persist the schedule as file mtimes instead.
+# Check and heartbeat cadence must survive actionable exits and restarts: the
+# watcher may be relaunched before in-memory counters reach their threshold on a
+# busy fleet. Persist the schedule as file mtimes instead.
 age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
   m=$(stat_mtime "$f") || { echo 999999; return; }
@@ -178,8 +184,9 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # mtime-vs-a-startup-touch, so signals that land while no watcher is running
 # are caught by the next one, and same-second writes cannot slip through a
 # strict -nt comparison. Pure read: prints one "<seen-file>\t<sig>\t<file>"
-# line per changed file; .seen-* is updated only when a wake is reported, so
-# a watcher killed mid-cycle never swallows a signal.
+# line per changed file. .seen-* is updated only after the wake is either
+# surfaced or intentionally absorbed, so a watcher killed mid-cycle never
+# swallows a signal.
 scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
@@ -293,10 +300,10 @@ while :; do
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
-  # waking: a crewmate's final status write and the same turn's turn-end hook
-  # land seconds apart, and reporting them as separate wakes costs a full
-  # firstmate turn each. The re-scan also picks up a newer signature for an
-  # already-pending file (last write wins below).
+  # classifying: a crewmate's final status write and the same turn's turn-end
+  # hook land seconds apart, and reporting them as separate actionable wakes
+  # costs a full firstmate turn each. The re-scan also picks up a newer
+  # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -343,7 +350,8 @@ EOF
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
-  # stale state is reported once (.stale-* remembers the hash already reported).
+  # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
+  # remembers the hash already classified).
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
@@ -420,9 +428,10 @@ EOF
     fi
   done < <(recorded_windows)
 
-  # Heartbeat: firstmate reviews the whole fleet at a regular cadence no matter
+  # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
-  # heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any other wake.
+  # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
+  # surfaced non-heartbeat wake.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))

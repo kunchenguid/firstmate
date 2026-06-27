@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Safe, home-scoped (re-)arm of the firstmate watcher, with honest verification.
 #
-# The watcher (bin/fm-watch.sh) is one-shot: it blocks until a wake is due, prints
-# one reason line, and exits. Reliability depends on re-arming through a mechanism
-# that SURVIVES the call and NOTIFIES on exit, so firstmate must run this script as
-# the harness's own tracked background task (e.g. run_in_background). Run it as
-# its own standalone background task, never bundled onto the tail of another
-# command. NEVER fire it and forget with a shell `&` inside another call: that
-# backgrounded child is reaped when the call returns, leaving NO watcher running
-# and a false "already running" off the dying process. That exact mistake
-# silently took supervision down for ~30 minutes.
+# The watcher (bin/fm-watch.sh) blocks until it has an actionable wake to
+# surface, then prints one reason line and exits. While state/.afk exists the
+# daemon owns triage and the watcher exits on every wake for the daemon to
+# classify. Reliability depends on arming through a mechanism that SURVIVES the
+# call and NOTIFIES on exit, so firstmate must run this script as the harness's
+# own tracked background task (e.g. run_in_background). Run it as its own
+# standalone background task, never bundled onto the tail of another command.
+# NEVER fire it and forget with a shell `&` inside another call: that backgrounded
+# child is reaped when the call returns, leaving NO watcher running and a false
+# "already running" off the dying process. That exact mistake silently took
+# supervision down for ~30 minutes.
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the

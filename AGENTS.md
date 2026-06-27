@@ -173,7 +173,7 @@ Reconcile reality with your records before doing anything else:
 7. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.
    Each secondmate is a firstmate in its own home, so it reconciles only work that is already its own and then idles; it never creates new work during recovery.
-8. If `state/.afk` is present, load `/afk`, ensure the daemon is running, do not arm the one-shot watcher because the daemon owns it, and resume away-mode supervision.
+8. If `state/.afk` is present, load `/afk`, ensure the daemon is running, do not separately arm the watcher because the daemon owns it, and resume away-mode supervision.
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
@@ -454,7 +454,7 @@ That is what eliminates the quiet-stretch churn: during a long crew validation t
 The classifier lives in `bin/fm-classify-lib.sh` and is shared: the same captain-relevant verb set and signal/stale/heartbeat predicates back both this always-on watcher and the away-mode daemon, so the two can never drift apart.
 While `state/.afk` exists the daemon owns supervision, so the watcher reverts to one-shot - it surfaces every wake for the daemon to classify - and never double-triages.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
-The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
+The printed reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
 The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
 Each cycle is one harness-tracked background task that blocks until an actionable wake is due (benign wakes are absorbed in bash without ending the task), fires with one reason line, and ends, so the chain survives only when firstmate starts the next cycle after each fire.
