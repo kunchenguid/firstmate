@@ -230,6 +230,7 @@ if [ "$path_count" -gt 1 ]; then
   [ -n "$list_base" ] || list_base=links
   name=$(unique_wezterm_name "$list_base")
   list_file=$(mktemp "${TMPDIR:-/tmp}/firstmate-review-links.XXXXXX") || { echo "error: could not create temporary link list" >&2; exit 1; }
+  trap 'rm -f "$list_file"' EXIT
   {
     printf 'Firstmate review links\n\n'
     idx=1
@@ -244,6 +245,7 @@ if [ "$path_count" -gt 1 ]; then
   qlist=$(quote "$list_file")
   cmd="trap 'rm -f $qlist' EXIT; cat $qlist; read _"
   spawn_wezterm_tab "$name" "$cmd"
+  trap - EXIT
   echo "opened: $path_count files in WezTerm tab $name"
   exit 0
 fi
