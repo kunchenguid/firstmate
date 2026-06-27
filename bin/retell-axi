@@ -205,6 +205,7 @@ EOF
   url=$API_BASE$path
   if [ -n "$body" ]; then
     code=$(curl -sS -o "$out" -w '%{http_code}' \
+      --connect-timeout 10 --max-time 60 \
       --request "$method" \
       --url "$url" \
       --header @"$auth_header_file" \
@@ -212,6 +213,7 @@ EOF
       --data "$body")
   else
     code=$(curl -sS -o "$out" -w '%{http_code}' \
+      --connect-timeout 10 --max-time 60 \
       --request "$method" \
       --url "$url" \
       --header @"$auth_header_file" \
