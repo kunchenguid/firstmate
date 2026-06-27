@@ -26,6 +26,12 @@ into:
   a live worker's pane (a `capture-pane` loop). Workers keep running in their own
   windows, untouched; nothing here ever sends keys, moves, or kills a worker.
 
+## Requirements
+
+The dashboard needs **tmux >= 3.1**. `arrange` sizes its panes with the
+`split-window -l <pct>%` percentage form, which tmux only understands from 3.1
+onward (older tmux used `-p <pct>`); on tmux < 3.1 `arrange` fails.
+
 ## Commands
 
 All live in `bin/`. Run them from your firstmate terminal.
