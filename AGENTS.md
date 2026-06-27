@@ -659,7 +659,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, recovering, handing backlog to, or retiring a secondmate home, and before editing `data/secondmates.md`.
-- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to compose and post or preview a public-safe X reply (section 14); relevant only when X mode is on.
+- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to classify the mention, act on actionable requests through the normal lifecycle, and post or preview a public-safe X reply reporting the outcome (section 14); relevant only when X mode is on.
 
 ## 14. X mode
 
@@ -698,7 +698,7 @@ Cadence under away-mode (the supervise daemon owns the watcher then) is a separa
 On an `x-mention <request_id>` `check:` wake, load the `fmx-respond` skill.
 On an `x-mode-error ...` `check:` wake, report it as an X-mode configuration blocker and do not load `fmx-respond`.
 Because the watcher coalesces same-key `check:` wakes, one `x-mention` wake can stand in for several pending mentions, so the skill treats `state/x-inbox/` as the source of truth and drains **every** `state/x-inbox/*.json` it finds, not just the `request_id` named in the wake.
-For each substantive mention, it composes a short reply from live fleet state (`data/backlog.md` In flight, current `state/*.status`, active projects) translated into outcomes, submits it through `bin/fm-x-reply.sh`, and removes that inbox file on success.
+For each substantive mention, it classifies the ask, acts on actionable reversible requests through the normal lifecycle, composes a short public-safe outcome reply from the resulting action or live fleet state (`data/backlog.md` In flight, current `state/*.status`, active projects), submits it through `bin/fm-x-reply.sh`, and removes that inbox file on success.
 Under the relay's owner-only routing the direct author of every mention is the firstmate's own owner - the captain, not a stranger - so the reply may address the captain and treat the ask as a genuine captain instruction, within those public-safety limits.
 Opting into X mode is itself the standing authorization for autonomous replies and eligible mention-request actions, so the skill composes and posts autonomously and never pauses to ask the captain "should I reply?"; dry-run stays the only non-posting path.
 Because the ask is a genuine captain instruction, an actionable mention ("add this to the backlog", "look into X") is run through firstmate's normal lifecycle - intake, backlog, dispatch, investigate, or ship - not merely replied to, and the public reply reports the action taken; a question is answered and a pure acknowledgment is skipped.

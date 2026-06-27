@@ -88,6 +88,7 @@ X mode is opt-in presence for the shared `@myfirstmate` bot.
 A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
 That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
+The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while parent-thread context may still include other public accounts.
 On bootstrap, that token creates two local artifacts: `state/x-watch.check.sh`, which performs one bounded relay poll through `bin/fm-x-poll.sh`, and `config/x-mode.env`, which sets `FM_CHECK_INTERVAL=30` for watcher arms in that home.
 Without the token, bootstrap removes those artifacts on opt-out and otherwise stays silent, so non-X users see no behavior change.
 Pending mentions are stored as `state/x-inbox/<request_id>.json`; the `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-tweet context for follow-ups, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe outcome-only replies through `bin/fm-x-reply.sh`.

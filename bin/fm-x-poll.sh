@@ -15,7 +15,7 @@
 #       "x-mention <request_id>" (which becomes the watcher's check: wake payload)
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
-# preserved for fmx-respond to answer follow-ups with continuity.
+# preserved for fmx-respond to handle follow-ups with continuity.
 #
 # Config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN (required),
 # FMX_RELAY_URL (default https://myfirstmate.io). Auth: Authorization: Bearer
@@ -80,8 +80,8 @@ REQ=$(jq -r '.request_id // empty' "$BODY_FILE" 2>/dev/null) || exit 0
 # A pending mention only reaches the agent when it has non-empty text.
 # Semantic worthiness is decided by fmx-respond, so acknowledgments can still be
 # stashed here and deliberately skipped there.
-# Empty/absent/null text must not stash an inbox file or wake a public reply flow
-# for nothing - stay inert (exit 0).
+# Empty/absent/null text must not stash an inbox file or wake a public X flow for
+# nothing - stay inert (exit 0).
 TEXT=$(jq -r '(.text // "") | gsub("[[:space:]]+"; " ") | gsub("^ +| +$"; "")' "$BODY_FILE" 2>/dev/null) || exit 0
 [ -n "$TEXT" ] || { clear_error; exit 0; }
 
