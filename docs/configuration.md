@@ -49,6 +49,8 @@ On first launch the first mate detects what its required toolchain is missing or
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 If compatible `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent or incompatible, firstmate keeps hand-editing `data/backlog.md` exactly as before.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
+Bootstrap also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms; local-only and no-origin skips stay silent.
 Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable reason, and `NUDGE_SECONDMATES:` only when a running home advanced and its instruction surface changed.
 

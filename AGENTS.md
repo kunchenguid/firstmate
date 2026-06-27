@@ -422,7 +422,8 @@ The script refuses if the worktree holds uncommitted changes or committed work t
 This recognizes the common squash-merge-then-delete-branch flow, where the branch's own commits live nowhere on a remote yet the change is fully in `main`; a merged-and-deleted branch now tears down cleanly instead of false-refusing.
 Genuinely unlanded work (no matching merged PR head and content not in the default branch) and dirty worktrees still refuse, and a gh lookup error falls back to the content check rather than silently allowing.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
+After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so safe clone states catch up to the merge, clean detached ancestor drift self-heals, and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
+Unsafe drift is reported as `STUCK:` and left untouched.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the compatible tool is available, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
 Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 

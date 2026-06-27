@@ -5,8 +5,8 @@ Each file also starts with a short header comment.
 
 | Script                   | Description                                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `fm-bootstrap.sh`        | Detect required toolchain and version problems, optional capability facts, and primary-checkout `TANGLE:` problems; locally sync live secondmate homes; set up opt-in X mode; refresh clones best-effort; install tools only after consent |
-| `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
+| `fm-bootstrap.sh`        | Detect required toolchain and version problems, optional capability facts, primary-checkout `TANGLE:` problems, and actionable clone refresh outcomes; refresh project clones best-effort; locally sync live secondmate homes; set up opt-in X mode; install tools only after consent |
+| `fm-fleet-sync.sh`       | Fetch clones, fast-forward safe default-branch states, self-heal clean detached ancestor drift, report unsafe drift as `STUCK:`, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |

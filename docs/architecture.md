@@ -106,7 +106,11 @@ The full ownership rule - what is project-intrinsic versus fleet-private, and ho
 
 ## Local clones stay fresh
 
-Bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
+Bootstrap and PR-based teardown refresh remote-backed project clones when the clone is safe to move.
+Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
+Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
+The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
 ## Self-updates stay safe
 
