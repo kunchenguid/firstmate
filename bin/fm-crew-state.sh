@@ -74,7 +74,9 @@ KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
-[ -n "$WT" ] && [ -d "$WT" ] || emit unknown none "worktree gone (torn down?)"
+if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  emit unknown none "worktree gone (torn down?)"
+fi
 
 # --- status log ------------------------------------------------------------
 
