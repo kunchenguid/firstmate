@@ -55,7 +55,10 @@ test_signal_catchup_without_running_watcher() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   status_file="$state/task.status"
-  printf 'working: first\n' > "$status_file"
+  # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
+  # watcher absorbs benign working: notes without queuing or exiting). Use a
+  # captain-relevant verb so the wake is surfaced and the catch-up path is tested.
+  printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
@@ -71,7 +74,7 @@ test_signal_catchup_without_running_watcher() {
 }
 
 test_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash
+  local dir state fakebin out drain_out capture_file window key pane_hash sig
   dir=$(make_case stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -81,6 +84,13 @@ test_stale_enqueue_before_suppressor() {
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
+  # The always-on watcher absorbs a NON-terminal stale (a crew quiet mid-work).
+  # A stale pane sitting on a captain-relevant (terminal) status is actionable, so
+  # give the window one and prime the .seen-* marker to its current signature so
+  # the per-poll signal scan does not pre-empt the stale wake with a signal wake.
+  printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
+  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
+  printf '%s' "$sig" > "$state/.seen-stale_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"

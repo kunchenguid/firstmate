@@ -124,6 +124,12 @@ wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
 Only captain-relevant events escalate to firstmate's context, and even then as
 one pre-read, single-line, batched digest.
+The classification predicates (the captain-relevant verb set, the signal/stale
+tests, and the fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same
+library the always-on watcher uses for its own triage when afk is off, so the two
+modes apply one identical policy. While `state/.afk` exists the daemon owns the
+watcher, so the watcher reverts to one-shot and lets the daemon do the triage -
+the two never run their triage at the same time.
 
 Classify each wake this way:
 

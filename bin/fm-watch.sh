@@ -19,6 +19,11 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
+# predicates), the SAME library the away-mode daemon uses, so the triage policy
+# has one definition.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -77,6 +82,41 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working..."
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
+# Always-on wake triage: most wakes during a long crew validation are benign
+# (working: notes, bare turn-ended, a crew gone quiet mid-validation, a no-change
+# heartbeat). Rather than wake firstmate's LLM for each, this watcher classifies
+# every wake in bash and ABSORBS the benign majority - it advances the
+# suppression marker, logs to a debug log, and keeps blocking WITHOUT enqueuing or
+# exiting. Only an ACTIONABLE wake (a captain-relevant signal, any check, a
+# terminal stale, a non-terminal stale that persists past the threshold, or
+# anything unknown) is written to the durable queue and exits, which is what wakes
+# the LLM through the background-task completion. The same classifier
+# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
+# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
+# wake) and never double-triages.
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a non-terminal stale escalates as a possible wedge
+TRIAGE_LOG="$STATE/.watch-triage.log"
+TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
+
+# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
+# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
+# every wake) and let the daemon classify - never absorb here, or the daemon's
+# digest/injection layer would never see the wake.
+afk_present() { [ -e "$STATE/.afk" ]; }
+
+# Append one line to the triage debug log explaining an absorbed (benign) wake,
+# size-capped so a long benign stretch cannot grow it without bound. Best-effort:
+# a logging hiccup never affects supervision.
+triage_log() {
+  local sz
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$TRIAGE_LOG" 2>/dev/null || return 0
+  sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null || echo 0)
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -ge "$TRIAGE_LOG_MAX_BYTES" ]; then
+    tail -n 2000 "$TRIAGE_LOG" > "$TRIAGE_LOG.tmp" 2>/dev/null && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
+    rm -f "$TRIAGE_LOG.tmp" 2>/dev/null || true
+  fi
+}
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
@@ -165,6 +205,57 @@ run_check() {
   fi
 }
 
+# Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
+# captain-relevant status line it SURFACED (woke firstmate for) in
+# .hb-surfaced-<task>, the watcher's analogue of the daemon's
+# .subsuper-seen-status. Unlike .seen-* (a size:mtime signature advanced on BOTH
+# surface and absorb), .hb-surfaced is advanced ONLY on surface, so the heartbeat
+# fleet-scan can tell apart a captain-relevant status that already woke firstmate
+# from one that has not - the latter being a per-wake-path miss it must surface.
+_hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+
+# Record a status file's captain-relevant last line as surfaced (no-op for a
+# non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
+# enqueue-before-suppress ordering holds for this marker too.
+mark_surfaced() {  # <status-file>
+  local f=$1 task last
+  task=$(basename "$f"); task="${task%.status}"
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 0
+  status_is_captain_relevant "$last" || return 0
+  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+}
+
+# Mark every current captain-relevant status as surfaced. Called after the
+# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
+# by the next heartbeat.
+mark_all_captain_relevant_surfaced() {
+  local f task last
+  while IFS=$(printf '\t') read -r f task last; do
+    [ -n "$f" ] || continue
+    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  done < <(scan_captain_relevant_statuses "$STATE")
+}
+
+# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
+# any captain-relevant status has NOT already been surfaced to firstmate (its
+# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
+# effects: the caller enqueues first, then marks surfaced. Because every
+# captain-relevant signal/stale already marks itself surfaced when it wakes
+# firstmate, this normally finds nothing and the heartbeat is absorbed; it
+# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
+# the fail-safe backstop.
+heartbeat_scan_finds_actionable() {
+  local f task last surfaced
+  while IFS=$(printf '\t') read -r f task last; do
+    [ -n "$f" ] || continue
+    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+    [ "$surfaced" = "$last" ] && continue
+    return 0
+  done < <(scan_captain_relevant_statuses "$STATE")
+  return 1
+}
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -218,19 +309,36 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
-    while IFS=$(printf '\t') read -r sf sig f; do
-      [ -n "$sf" ] || continue
-      fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-    done <<EOF
+    # Triage: a signal is ACTIONABLE if any of its status files carries a
+    # captain-relevant verb (and the away-mode daemon, when present, owns triage
+    # and wants every wake). Actionable -> enqueue, advance .seen-* markers, exit.
+    # Benign (working: notes, bare turn-ended) in always-on mode -> advance the
+    # markers so it will not re-fire, log, and keep blocking without enqueuing.
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+    if afk_present || signal_reason_is_actionable $files; then
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+      done <<EOF
 $pending
 EOF
-    while IFS=$(printf '\t') read -r sf sig f; do
-      [ -n "$sf" ] || continue
-      printf '%s' "$sig" > "$sf"
-    done <<EOF
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        printf '%s' "$sig" > "$sf"
+        mark_surfaced "$f"
+      done <<EOF
 $pending
 EOF
-    wake "$reason"
+      wake "$reason"
+    else
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        printf '%s' "$sig" > "$sf"
+      done <<EOF
+$pending
+EOF
+      triage_log "absorbed benign $reason"
+    fi
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
@@ -246,6 +354,7 @@ EOF
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
+    ssf="$STATE/.stale-since-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -254,15 +363,57 @@ EOF
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
-        if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-          fm_wake_append stale "$w" "stale: $w" || exit 1
-          printf '%s' "$h" > "$sf"
-          wake "stale: $w"
+        # The pane is idle/stale at hash $h. Triage decides whether this wakes
+        # firstmate. Detection itself is unchanged from above.
+        if afk_present; then
+          # Daemon owns triage: one-shot per distinct stale hash, as before.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            fm_wake_append stale "$w" "stale: $w" || exit 1
+            printf '%s' "$h" > "$sf"
+            wake "stale: $w"
+          fi
+        elif stale_is_terminal "$w" "$STATE"; then
+          # Terminal status under a stale pane: actionable -> enqueue + exit.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            fm_wake_append stale "$w" "stale: $w" || exit 1
+            printf '%s' "$h" > "$sf"
+            rm -f "$ssf"
+            mark_surfaced "$STATE/$(window_to_task "$w").status"
+            wake "stale: $w"
+          fi
+        else
+          # Non-terminal stale: a crew gone quiet mid-work. Benign on first sight -
+          # absorb and record when it went idle - but BOUND it: if it stays stale
+          # past STALE_ESCALATE_SECS it escalates as a possible wedge.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            printf '%s' "$h" > "$sf"
+            date +%s > "$ssf"
+            triage_log "absorbed non-terminal stale: $w"
+          else
+            since=$(cat "$ssf" 2>/dev/null || true)
+            case "$since" in
+              ''|*[!0-9]*) : ;;
+              *)
+                age=$(( $(date +%s) - since ))
+                if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+                  fm_wake_append stale "$w" "stale: $w (idle ${age}s, possible wedge)" || exit 1
+                  rm -f "$ssf"
+                  wake "stale: $w (idle ${age}s, possible wedge)"
+                fi
+                ;;
+            esac
+          fi
         fi
+      else
+        # Pane busy or not yet stably stale: it is alive, so clear any pending
+        # non-terminal-stale escalation timer.
+        rm -f "$ssf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      # Pane content changed: the crew is active again, so reset the escalation timer.
+      rm -f "$ssf"
     fi
   done < <(recorded_windows)
 
@@ -274,9 +425,28 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    fm_wake_append heartbeat heartbeat heartbeat || exit 1
-    touch "$STATE/.last-heartbeat"
-    wake "heartbeat"
+    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
+    # turns up a captain-relevant status the per-wake path missed. Absorb the
+    # no-change case (advance the schedule and back off exactly as wake() would,
+    # without exiting); the away-mode daemon, when present, owns triage and wants
+    # every heartbeat.
+    if afk_present; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat"
+    elif heartbeat_scan_finds_actionable; then
+      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
+      # Enqueue first, then mark every captain-relevant status surfaced so the next
+      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      mark_all_captain_relevant_surfaced
+      wake "heartbeat"
+    else
+      touch "$STATE/.last-heartbeat"
+      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+      triage_log "absorbed heartbeat (no captain-relevant change)"
+    fi
   fi
 
   sleep "$POLL"

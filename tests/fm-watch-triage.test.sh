@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# tests/fm-watch-triage.test.sh - the always-on wake triage built into
+# bin/fm-watch.sh and the shared classifier (bin/fm-classify-lib.sh). The watcher
+# now absorbs the benign majority of wakes in bash and exits ONLY on an actionable
+# wake, so firstmate's LLM re-arms once per actionable event instead of once per
+# wake. These tests cover the classifier predicates as pure functions, then drive
+# a real fm-watch.sh subprocess to assert the behavioral contract: benign absorbed
+# (no exit, no queue entry, suppressor advanced, beacon fresh), actionable
+# surfaced (queue + exit), non-terminal-stale absorbed-then-escalated past the
+# threshold, the heartbeat backstop fail-safe, and afk coherence (no double-triage
+# while the away-mode daemon owns supervision).
+#
+# Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
+# liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
+# fm-wake-queue.test.sh.
+set -u
+
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
+
+WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+
+# Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
+# test overrides them, so a test only exercises the path it targets.
+watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
+  local state=$1 fakebin=$2 out=$3
+  shift 3
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+}
+
+# Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
+wait_live() {
+  local pid=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
+# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
+file_mtime() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
+# Signature a primed .seen-* marker must hold so the per-poll signal scan does not
+# fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
+seen_sig() {
+  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+}
+
+reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# --- pure classifier predicates (fm-classify-lib.sh) ------------------------
+
+test_signal_reason_is_actionable_classifier() {
+  local dir state
+  dir=$(make_case classify-signal); state="$dir/state"
+  printf 'working: step 1\nworking: step 2\n' > "$state/a.status"
+  signal_reason_is_actionable "$state/a.status" && fail "benign working: signal classified actionable"
+  printf 'working: x\nneeds-decision: pick A or B\n' > "$state/b.status"
+  signal_reason_is_actionable "$state/b.status" || fail "captain-relevant signal classified benign"
+  : > "$state/c.turn-ended"
+  signal_reason_is_actionable "$state/c.turn-ended" && fail "a bare turn-ended marker classified actionable"
+  # Coalesced batch: one benign + one captain-relevant -> actionable.
+  signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
+  pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
+}
+
+test_stale_is_terminal_classifier() {
+  local dir state
+  dir=$(make_case classify-stale); state="$dir/state"
+  printf 'done: ready in branch fm/x\n' > "$state/term.status"
+  stale_is_terminal "sess:fm-term" "$state" || fail "terminal stale status not classified terminal"
+  printf 'working: compiling\n' > "$state/nonterm.status"
+  stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
+  stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
+  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
+}
+
+test_scan_captain_relevant_statuses_classifier() {
+  local dir state out
+  dir=$(make_case classify-scan); state="$dir/state"
+  printf 'working: a\n' > "$state/one.status"
+  printf 'blocked: no perms\n' > "$state/two.status"
+  printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "two.status" >/dev/null || fail "scan missed a blocked: status"
+  printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
+  printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
+  pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+}
+
+test_classifier_primitives() {
+  local dir state
+  dir=$(make_case classify-primitives); state="$dir/state"
+  printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
+  status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
+  status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
+  [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
+  FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
+  FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
+}
+
+# --- benign wakes are absorbed (no exit, no queue, suppressor advanced) ------
+
+test_benign_signal_absorbed() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case benign-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: compiling step 2\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a benign working: signal (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "benign signal printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "benign signal enqueued a durable wake record"
+  [ -s "$state/.seen-task_status" ] || fail "benign signal did not advance its .seen-* suppressor"
+  [ -e "$state/.last-watcher-beat" ] || fail "watcher beacon was not touched while absorbing"
+  reap "$pid"
+  pass "benign working: signal is absorbed (no exit, no queue, suppressor advanced, beacon present)"
+}
+
+test_turn_ended_marker_absorbed() {
+  local dir state fakebin out pid
+  dir=$(make_case benign-turn-ended); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a bare turn-ended marker (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "bare turn-ended printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "bare turn-ended enqueued a durable wake record"
+  reap "$pid"
+  pass "a bare turn-ended marker (no captain-relevant status) is absorbed"
+}
+
+# --- actionable wakes are surfaced (queue + exit) ---------------------------
+
+test_actionable_signal_surfaced() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for an actionable needs-decision signal"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
+  [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
+  pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+test_terminal_stale_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done"
+  printf 'finished, awaiting review' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/done.status"
+  sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$state/.seen-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
+  pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
+}
+
+# --- non-terminal stale: absorbed, then escalated past the threshold ---------
+
+test_nonterminal_stale_absorbed_then_escalated() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-quiet"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet.meta"
+  # Non-terminal status, and prime .seen-* so the signal scan does not pre-empt
+  # the stale path.
+  printf 'working: still compiling\n' > "$state/quiet.status"
+  sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$state/.seen-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: a high escalation threshold means the first sighting is absorbed.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a fresh non-terminal stale (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "fresh non-terminal stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "fresh non-terminal stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
+  [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
+  reap "$pid"
+
+  # Phase B: backdate the idle timer past the threshold; the next run escalates.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not escalate a non-terminal stale past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
+  pass "non-terminal stale is absorbed on first sight, then escalated as a possible wedge past the threshold"
+}
+
+# --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
+
+test_heartbeat_no_change_absorbed() {
+  local dir state fakebin out pid
+  dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A truly quiet fleet (no windows, no statuses) with a fast heartbeat cadence.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a no-change heartbeat (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
+  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
+  reap "$pid"
+  pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
+}
+
+test_heartbeat_backstop_surfaces_unsurfaced_status() {
+  local dir state fakebin out drain_out sig pid
+  dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # A captain-relevant status whose .seen-* signature ALREADY matches (so the
+  # per-poll signal scan stays quiet) but which was never surfaced (no
+  # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
+  # fleet-scan backstop must catch it and wake firstmate.
+  printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
+  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
+  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
+    || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
+  pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+}
+
+# --- beacon stays fresh while absorbing -------------------------------------
+
+test_beacon_stays_fresh_while_absorbing() {
+  local dir state fakebin out status_file pid m1 m2 now
+  dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: a\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
+  m1=$(file_mtime "$state/.last-watcher-beat")
+  # A second benign signal keeps it absorbing; the beacon must keep advancing.
+  printf 'working: b\n' >> "$status_file"
+  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
+  m2=$(file_mtime "$state/.last-watcher-beat")
+  now=$(date +%s)
+  [ -n "$m1" ] && [ -n "$m2" ] || { reap "$pid"; fail "watcher beacon missing while absorbing"; }
+  [ "$m2" -ge "$m1" ] || { reap "$pid"; fail "beacon mtime regressed while absorbing"; }
+  [ "$(( now - m2 ))" -lt 10 ] || { reap "$pid"; fail "beacon went stale while absorbing (age $(( now - m2 ))s)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing benign signals enqueued a wake"; }
+  reap "$pid"
+  pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
+}
+
+# --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
+
+test_afk_present_reverts_watcher_to_one_shot() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: routine note\n' > "$status_file"
+  date '+%s' > "$state/.afk"   # away mode: the supervise-daemon owns triage
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "with .afk present the watcher did not exit one-shot for a benign signal"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the afk-mode signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+    || fail "afk-mode benign signal was not queued for the daemon to classify"
+  pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
+}
+
+test_signal_reason_is_actionable_classifier
+test_stale_is_terminal_classifier
+test_scan_captain_relevant_statuses_classifier
+test_classifier_primitives
+test_benign_signal_absorbed
+test_turn_ended_marker_absorbed
+test_actionable_signal_surfaced
+test_terminal_stale_surfaced
+test_nonterminal_stale_absorbed_then_escalated
+test_heartbeat_no_change_absorbed
+test_heartbeat_backstop_surfaces_unsurfaced_status
+test_beacon_stays_fresh_while_absorbing
+test_afk_present_reverts_watcher_to_one_shot

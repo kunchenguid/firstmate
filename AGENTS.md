@@ -87,8 +87,9 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
-  .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
+  .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); fm-guard.sh reads it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -443,13 +444,20 @@ From there the task is an ordinary ship task through its mode-specific validatio
 
 The watcher is the backbone.
 Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
-It costs zero tokens while running and exits with one reason line when something needs you.
-It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
+It costs zero tokens while running.
+**Always-on wake triage.**
+The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you.
+A `signal` whose status carries no captain-relevant verb (a `working:` note, a bare turn-ended), a non-terminal `stale` (a crewmate gone quiet mid-validation), and a `heartbeat` with no captain-relevant change are each advanced past their suppression marker and logged to `state/.watch-triage.log` while the watcher keeps blocking - no queue entry, no exit, no LLM turn.
+It exits with one reason line only on an *actionable* wake: a `signal` carrying a captain-relevant verb (`needs-decision:`/`blocked:`/`failed:`/`done:`/`PR ready`/`checks green`/`ready in branch`/`merged`), any `check`, a terminal `stale`, a non-terminal `stale` that stays idle past the wedge threshold (`FM_STALE_ESCALATE_SECS`, default 240s), or the heartbeat fleet-scan's fail-safe backstop catching a captain-relevant status the per-wake path missed.
+Only an actionable wake is written to the durable queue at `state/.wake-queue` - before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat` - and only an actionable wake ends the background task, so you re-arm exactly once per actionable event instead of once per wake.
+That is what eliminates the quiet-stretch churn: during a long crew validation the benign `turn-ended`/`working:`/non-terminal-stale/no-change-heartbeat wakes are all absorbed in bash, the liveness beacon (`state/.last-watcher-beat`) stays fresh the whole time so `fm-guard.sh` never false-alarms, and your LLM is woken only when something genuinely needs you.
+The classifier lives in `bin/fm-classify-lib.sh` and is shared: the same captain-relevant verb set and signal/stale/heartbeat predicates back both this always-on watcher and the away-mode daemon, so the two can never drift apart.
+While `state/.afk` exists the daemon owns supervision, so the watcher reverts to one-shot - it surfaces every wake for the daemon to classify - and never double-triages.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
 The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
-Each cycle is one harness-tracked background task that blocks until a wake is due, fires with one reason line, and ends, so the chain survives only when firstmate starts the next cycle after each fire.
+Each cycle is one harness-tracked background task that blocks until an actionable wake is due (benign wakes are absorbed in bash without ending the task), fires with one reason line, and ends, so the chain survives only when firstmate starts the next cycle after each fire.
 After handling the drained wakes, re-arm before you end the turn by running `bin/fm-watch-arm.sh` as its own background task.
 Arm or re-arm the watcher only through the harness's own tracked background mechanism - the one that survives the call and notifies you when the process exits - so the cycle actually persists and the next wake reaches you.
 Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
@@ -486,13 +494,13 @@ On wake, in order of cheapness:
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge); act on it.
-5. `heartbeat:` review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
-   A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
+5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
+   Do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
-Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
+Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
 tmux is the ground truth.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
