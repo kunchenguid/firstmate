@@ -49,12 +49,6 @@ auth lookup order:
 EOF
 }
 
-json_string() {
-  RETELL_AXI_VALUE=${1-} node - <<'NODE'
-process.stdout.write(JSON.stringify(process.env.RETELL_AXI_VALUE || ""));
-NODE
-}
-
 auth_missing() {
   cat <<EOF
 auth:
@@ -188,6 +182,17 @@ error:
   message: curl is required for retell-axi
 help[1]:
   Install curl, then retry
+EOF
+    return 1
+  }
+
+  command -v node >/dev/null 2>&1 || {
+    cat <<'EOF'
+error:
+  type: missing_tool
+  message: node is required for retell-axi
+help[1]:
+  Install Node.js, then retry
 EOF
     return 1
   }
