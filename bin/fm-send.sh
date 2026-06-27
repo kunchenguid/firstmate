@@ -12,6 +12,8 @@
 # instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
 # The composer/submit logic is shared with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Slash commands, and codex `$...` skill invocations resolved through harness
+# meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
 # From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
