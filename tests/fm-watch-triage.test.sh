@@ -383,7 +383,10 @@ test_beacon_stays_fresh_while_absorbing() {
   wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
   m2=$(file_mtime "$state/.last-watcher-beat")
   now=$(date +%s)
-  [ -n "$m1" ] && [ -n "$m2" ] || { reap "$pid"; fail "watcher beacon missing while absorbing"; }
+  if [ -z "$m1" ] || [ -z "$m2" ]; then
+    reap "$pid"
+    fail "watcher beacon missing while absorbing"
+  fi
   [ "$m2" -ge "$m1" ] || { reap "$pid"; fail "beacon mtime regressed while absorbing"; }
   [ "$(( now - m2 ))" -lt 10 ] || { reap "$pid"; fail "beacon went stale while absorbing (age $(( now - m2 ))s)"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing benign signals enqueued a wake"; }
