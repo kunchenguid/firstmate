@@ -105,6 +105,11 @@ default_checked_out_elsewhere() {
     | grep -Fxq -- "$DEFAULT"
 }
 
+local_default_safe_for_recovery() {
+  ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
+    || git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
+}
+
 # Human-readable name for the unsafe state the clone is in, used in the STUCK
 # warning. Reads $cur (current branch, empty when detached), $dirty, and the
 # HEAD-vs-$BASE ancestry to pick the most informative description.
@@ -118,6 +123,8 @@ stuck_state() {
     s="detached HEAD with unique commits"
   elif default_checked_out_elsewhere; then
     s="detached HEAD ($DEFAULT checked out in another worktree)"
+  elif ! local_default_safe_for_recovery; then
+    s="detached HEAD (local $DEFAULT diverged from $BASE)"
   else
     s="detached HEAD"
   fi
@@ -194,7 +201,8 @@ sync_project() {
     # reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
-        && ! default_checked_out_elsewhere; then
+        && ! default_checked_out_elsewhere \
+        && local_default_safe_for_recovery; then
       if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0

@@ -123,6 +123,27 @@ test_detached_unique_commit_is_stuck_untouched() {
   pass "detached HEAD with unique commits is reported STUCK and left untouched"
 }
 
+test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched() {
+  local home clone out before local_main
+  home=$(new_home)
+  clone=$(build_pair "$home" beta-local-default)
+  commit_file "$clone" local.txt local "local divergent main commit"
+  local_main=$(git -C "$clone" rev-parse main)
+  git -C "$clone" checkout --detach --quiet HEAD^
+  before=$(head_sha "$clone")
+  advance_origin "$home" beta-local-default C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "beta-local-default: STUCK:" "diverged local default reports STUCK"
+  assert_contains "$out" "local main diverged from origin/main" "STUCK names the unsafe local default"
+  assert_not_contains "$out" "recovered" "diverged local default is never recovered"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "detached HEAD was moved"
+  ! git -C "$clone" symbolic-ref -q HEAD >/dev/null || fail "clone re-attached to local default"
+  [ "$(git -C "$clone" rev-parse main)" = "$local_main" ] || fail "local default branch was moved"
+  pass "detached clean ancestor with diverged local default is reported STUCK and left untouched"
+}
+
 test_dirty_is_stuck_untouched() {
   local home clone out before
   home=$(new_home)
@@ -273,6 +294,7 @@ test_bootstrap_relays_recovered_and_stuck() {
 
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
+test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
