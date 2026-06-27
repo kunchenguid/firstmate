@@ -264,7 +264,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -278,6 +278,15 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' "$fakebin"
 }
 

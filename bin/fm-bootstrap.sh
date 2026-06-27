@@ -20,6 +20,8 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
+#          no-mistakes is also MISSING when its installed version is older than
+#          1.31.2.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
 #          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
 #          line and never prompts an install.
@@ -128,9 +130,34 @@ install_cmd() {
 }
 
 TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+NO_MISTAKES_MIN_MAJOR=1
+NO_MISTAKES_MIN_MINOR=31
+NO_MISTAKES_MIN_PATCH=2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+}
+
+no_mistakes_version_parts() {
+  local output
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  output=$(no-mistakes --version 2>/dev/null) || return 1
+  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
+}
+
+no_mistakes_compatible() {
+  local parts major minor patch
+  parts=$(no_mistakes_version_parts) || return 1
+  set -- $parts
+  [ $# -eq 3 ] || return 1
+  major=$1
+  minor=$2
+  patch=$3
+  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
+  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
+  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
+  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
+  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
 if [ "${1:-}" = "install" ]; then
@@ -150,6 +177,9 @@ for t in $TOOLS; do
 done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+fi
+if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
+  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
