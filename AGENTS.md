@@ -113,6 +113,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
+  For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the firstmate primary checkout (the repo root, `FM_ROOT`) is stranded on a feature branch instead of its default branch: a crewmate working firstmate-on-itself branched/committed in the primary instead of its own isolated worktree (section 8). The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree. This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
@@ -371,17 +372,17 @@ For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
-The no-mistakes pipeline owns every validation fix on the crewmate's branch in its own worktree; the crewmate advances each gate with `no-mistakes axi respond`, and must never hand-edit, commit, reset, checkout, abort, or re-run while a run is active.
-When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
+The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
+Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 Judge a validating crewmate by the run's step status, never by whether its shell is still running; read it cheaply with `no-mistakes axi status`.
 
 - `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
-  The crewmate owes a `respond`; if it is idle-waiting for the run to advance on its own, steer it to drive the gate, because a parked gate never self-resolves.
+  The crewmate owes a response; if it is idle-waiting for the run to advance on its own, steer it to follow no-mistakes' active-gate help.
 - Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
-  Steer it back to respond-only: the pipeline applies every fix on the branch from `axi respond`, including the fix for a real bug the review found in the crewmate's own code, and hand-fixing forces a full re-validation.
+  Steer it back to no-mistakes' respond flow; the pipeline, not the crewmate, applies validation fixes.
 
 ### PR ready
 
@@ -603,7 +604,8 @@ Map firstmate's real backlog operations to the approved commands:
 
 Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
 The ship-brief Setup opens with a worktree-isolation assertion ahead of the branch step: the crewmate confirms it is in its own treehouse worktree, not the primary checkout, and stops with `blocked: launched in primary checkout, not an isolated worktree` if not - the upstream half of the worktree-tangle guard (section 8).
-For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the harness-appropriate no-mistakes validation pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
+For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` stops after the implementation commit, then firstmate triggers the harness-appropriate no-mistakes validation pipeline; `direct-PR` has the crewmate push and open the PR itself, and `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
+The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
