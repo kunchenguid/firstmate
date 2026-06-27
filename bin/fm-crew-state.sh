@@ -119,6 +119,12 @@ pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 
+trim() {
+  local s=${1:-}
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
 strip_quotes() { local s=${1:-}; s=${s#\"}; s=${s%\"}; printf '%s' "$s"; }
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
@@ -144,6 +150,57 @@ nm_field() {  # <key>
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
+}
+nm_gate_step_row() {
+  local row step rest status findings
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  step=$(trim "${row%%,*}")
+  rest=${row#*,}
+  status=$(strip_quotes "$(trim "${rest%%,*}")")
+  rest=${rest#*,}
+  findings=$(trim "${rest%%,*}")
+  printf '%s|%s|%s' "$step" "$status" "$findings"
+}
+nm_gate_status() {
+  local s row
+  s=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$' | head -1)
+  if [ -n "$s" ]; then
+    s=$(strip_quotes "$(trim "${s#*:}")")
+    printf '%s' "$s"
+    return
+  fi
+  row=$(nm_gate_step_row)
+  [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
+}
+nm_gate_name() {
+  local gate row step
+  gate=$(strip_quotes "$(nm_field gate)")
+  [ -n "$gate" ] && { printf '%s' "$gate"; return; }
+  step=$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)")
+  [ -n "$step" ] && { printf '%s' "$step"; return; }
+  row=$(nm_gate_step_row)
+  [ -n "$row" ] && printf '%s' "${row%%|*}"
+}
+nm_gate_findings_count() {
+  local f row rest
+  f=$(nm_findings_count)
+  [ -n "$f" ] && { printf '%s' "$f"; return; }
+  row=$(nm_gate_step_row)
+  [ -n "$row" ] || return 0
+  rest=${row#*|}
+  rest=${rest#*|}
+  rest=${rest%%|*}
+  case "$rest" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$rest"
+}
+log_reports_ci_ready() {
+  [ "$LOG_VERB" = "done" ] || return 1
+  case "$(log_note_of "$LOG_LINE")" in
+    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 # Most recent run id whose branch matches, from the `no-mistakes axi` run list.
 nm_run_id_for_branch() {  # <branch> <list-output>
@@ -188,6 +245,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   status=$(strip_quotes "$(nm_field status)")
   outcome=$(strip_quotes "$(nm_field outcome)")
   awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+  gate_status=$(nm_gate_status)
 
   RUN_STATE=working
   RUN_DETAIL=""
@@ -199,13 +257,14 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
       *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
     esac
-  elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ]; then
-    gate=$(strip_quotes "$(nm_field gate)")
+  elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ]; then
+    gate=$(nm_gate_name)
     [ -n "$gate" ] || gate=$status
+    [ -n "$gate" ] || gate=$gate_status
     [ -n "$gate" ] || gate=gate
     RUN_STATE=parked
     RUN_DETAIL="parked at $gate"
-    fcount=$(nm_findings_count)
+    fcount=$(nm_gate_findings_count)
     [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
     if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
       RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
@@ -220,6 +279,10 @@ if [ "$HAVE_RUN" = 1 ]; then
       "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
       *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
     esac
+  fi
+
+  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+    emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

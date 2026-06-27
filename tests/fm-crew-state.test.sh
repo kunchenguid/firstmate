@@ -156,6 +156,26 @@ gate: review
 EOF
 }
 
+run_parked_in_gate_block() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "abc1234"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate:
+  step: review
+  status: fix_review
+steps[3]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,fix_review,1,0
+  test,pending,0,0
+EOF
+}
+
 run_passed() {  # <branch>
   cat <<EOF
 run:
@@ -179,6 +199,23 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_ci_monitoring() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
 EOF
 }
 
@@ -245,6 +282,39 @@ test_genuine_parked_not_superseded() {
   assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
   pass "genuine parked run is not flagged superseded"
+}
+
+test_gate_block_parked_not_superseded() {
+  reset_fakes
+  local d; d=$(new_case parked-gate-block)
+  make_repo_on_branch "$d/wt" fm/feat-cb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cb.meta" "window=fm:fm-feat-cb" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-cb.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_in_gate_block fm/feat-cb)"
+  local out; out=$(run_crew_state "$d" feat-cb)
+  assert_contains "$out" "state: parked" "gate block wait -> parked"
+  assert_contains "$out" "source: run-step" "gate block wait -> run-step source"
+  assert_contains "$out" "parked at review" "gate block wait names the gate"
+  assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
+  assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
+  pass "gate block parked run is not flagged superseded"
+}
+
+test_ci_ready_done_log_beats_monitoring_run() {
+  reset_fakes
+  local d; d=$(new_case ci-ready)
+  make_repo_on_branch "$d/wt" fm/feat-ci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  local out; out=$(run_crew_state "$d" feat-ci)
+  assert_contains "$out" "state: done" "ci-ready status log -> done"
+  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
+  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
+  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
+  pass "ci-ready status log beats monitoring run"
 }
 
 # (d) terminal run-step is authoritative
@@ -462,6 +532,8 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_gate_block_parked_not_superseded
+test_ci_ready_done_log_beats_monitoring_run
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_list
