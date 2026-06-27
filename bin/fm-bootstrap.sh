@@ -4,7 +4,8 @@
 #          Detect: prints one line per problem or capability fact and exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
-#                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
+#                 "CREW_HARNESS_OVERRIDE: <name>",
+#                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
@@ -84,6 +85,8 @@ fleet_sync() {
       *': skipped: local-only project') ;;
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
+      *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
+      *': recovered:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
