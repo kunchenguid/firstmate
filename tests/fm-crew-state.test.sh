@@ -156,6 +156,20 @@ gate: review
 EOF
 }
 
+run_parked_scalar_gate_running() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "abc1234"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate: review
+EOF
+}
+
 run_parked_in_gate_block() {  # <branch>
   cat <<EOF
 run:
@@ -284,6 +298,23 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+test_scalar_gate_parked_not_superseded() {
+  reset_fakes
+  local d; d=$(new_case parked-scalar-gate)
+  make_repo_on_branch "$d/wt" fm/feat-cs
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cs.meta" "window=fm:fm-feat-cs" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-cs.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_scalar_gate_running fm/feat-cs)"
+  local out; out=$(run_crew_state "$d" feat-cs)
+  assert_contains "$out" "state: parked" "scalar gate wait -> parked"
+  assert_contains "$out" "source: run-step" "scalar gate wait -> run-step source"
+  assert_contains "$out" "parked at review" "scalar gate wait names the gate"
+  assert_contains "$out" "1 finding(s)" "scalar gate wait includes finding count"
+  assert_not_contains "$out" "superseded" "scalar gate wait not flagged stale"
+  pass "scalar gate parked run is not flagged superseded"
+}
+
 test_gate_block_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-gate-block)
@@ -365,6 +396,26 @@ EOF
   assert_contains "$out" "state: working" "this branch's own run attributed via list"
   assert_contains "$out" "source: run-step" "list-resolved run -> run-step source"
   pass "cross-branch run is attributed via the run list"
+}
+
+test_cross_branch_attribution_unquoted_run_list() {
+  reset_fakes
+  local d; d=$(new_case crossbranch-unquoted)
+  make_repo_on_branch "$d/wt" fm/feat-fq
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_LIST="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER, "fm/other-crew" ,running,aa,""
+  01MINE, "fm/feat-fq" ,running,bb,""
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-fq)"
+  local out; out=$(run_crew_state "$d" feat-fq)
+  assert_contains "$out" "state: working" "unquoted run id attributed via list"
+  assert_contains "$out" "source: run-step" "unquoted list-resolved run -> run-step source"
+  pass "unquoted run-list row is attributed"
 }
 
 # A different-branch run with NO matching list row must NOT be misattributed.
@@ -532,11 +583,13 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_list
+test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_idle_pane_uses_log

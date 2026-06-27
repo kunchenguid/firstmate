@@ -125,7 +125,14 @@ trim() {
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
 }
-strip_quotes() { local s=${1:-}; s=${s#\"}; s=${s%\"}; printf '%s' "$s"; }
+strip_quotes() {
+  local s
+  s=$(trim "${1:-}")
+  case "$s" in
+    \"*\") s=${s#\"}; s=${s%\"} ;;
+  esac
+  trim "$s"
+}
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
 HAVE_TIMEOUT=none
@@ -174,12 +181,21 @@ nm_gate_status() {
   row=$(nm_gate_step_row)
   [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
 }
-nm_gate_name() {
-  local gate row step
+nm_has_gate() {
+  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
+}
+nm_gate_line_name() {
+  local gate step
   gate=$(strip_quotes "$(nm_field gate)")
   [ -n "$gate" ] && { printf '%s' "$gate"; return; }
-  step=$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)")
-  [ -n "$step" ] && { printf '%s' "$step"; return; }
+  step=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*gate:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)
+  step=$(strip_quotes "$step")
+  [ -n "$step" ] && printf '%s' "$step"
+}
+nm_gate_name() {
+  local gate row
+  gate=$(nm_gate_line_name)
+  [ -n "$gate" ] && { printf '%s' "$gate"; return; }
   row=$(nm_gate_step_row)
   [ -n "$row" ] && printf '%s' "${row%%|*}"
 }
@@ -204,14 +220,28 @@ log_reports_ci_ready() {
 }
 # Most recent run id whose branch matches, from the `no-mistakes axi` run list.
 nm_run_id_for_branch() {  # <branch> <list-output>
-  local branch=$1 list=$2 row id rest br
-  printf '%s\n' "$list" | grep -E '^[[:space:]]*"[^"]+",' | while IFS= read -r row; do
-    row=${row#"${row%%[![:space:]]*}"}
+  local branch=$1 list=$2 row id rest br in_runs=0 found=""
+  while IFS= read -r row; do
+    if [[ $(trim "$row") =~ ^runs\[[0-9]+\]\{.*\}:$ ]]; then
+      in_runs=1
+      continue
+    fi
+    [ "$in_runs" = 1 ] || continue
+    case "$row" in
+      '') continue ;;
+      [[:space:]]*) ;;
+      *) break ;;
+    esac
+    row=$(trim "$row")
+    case "$row" in
+      *,*) ;;
+      *) continue ;;
+    esac
     id=${row%%,*}; id=$(strip_quotes "$id")
     rest=${row#*,}
-    br=${rest%%,*}
+    br=${rest%%,*}; br=$(strip_quotes "$br")
     if [ "$br" = "$branch" ]; then printf '%s\n' "$id"; break; fi
-  done | head -1
+  done <<< "$list" | { IFS= read -r found || true; printf '%s' "$found"; }
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -246,6 +276,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   outcome=$(strip_quotes "$(nm_field outcome)")
   awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   gate_status=$(nm_gate_status)
+  has_gate=0
+  nm_has_gate && has_gate=1
 
   RUN_STATE=working
   RUN_DETAIL=""
@@ -257,10 +289,13 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
       *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
     esac
-  elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ]; then
-    gate=$(nm_gate_name)
+  elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    if [ "$has_gate" = 1 ]; then
+      gate=$(nm_gate_line_name)
+    else
+      gate=$(nm_gate_name)
+    fi
     [ -n "$gate" ] || gate=$status
-    [ -n "$gate" ] || gate=$gate_status
     [ -n "$gate" ] || gate=gate
     RUN_STATE=parked
     RUN_DETAIL="parked at $gate"
