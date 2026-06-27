@@ -24,7 +24,10 @@ case "$slot" in
 esac
 
 # Snapshot live workers: idx<TAB>window<TAB>repo<TAB>label.
-mapfile -t WORKERS < <("$LAYOUT" workers)
+WORKERS=()
+while IFS= read -r line; do
+  WORKERS+=("$line")
+done < <("$LAYOUT" workers)
 
 echo "== assign watch slot $slot =="
 if [ "${#WORKERS[@]}" -eq 0 ]; then
