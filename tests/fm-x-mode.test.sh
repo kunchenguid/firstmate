@@ -796,6 +796,27 @@ test_link_records_request_and_timestamp() {
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
 }
 
+test_meta_rewrites_do_not_depend_on_tmpdir() {
+  local home badtmp meta out rc
+  home="$TMP_ROOT/link-local-tmp"; mkdir -p "$home/state"
+  badtmp="$home/missing-tmp"
+  meta="$home/state/fix-meta-k4.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  out=$(TMPDIR="$badtmp" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    "$ROOT/bin/fm-x-link.sh" fix-meta-k4 req-local); rc=$?
+  expect_code 0 "$rc" "link with unusable TMPDIR exit"
+  [ "$out" = "linked fix-meta-k4 to X request req-local" ] \
+    || fail "link with unusable TMPDIR must still succeed (got: $out)"
+  assert_grep "x_request=req-local" "$meta" "link must record request with an unusable TMPDIR"
+  out=$(TMPDIR="$badtmp" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000001 FMX_FOLLOWUP_MAX_AGE_SECS=0 \
+    "$ROOT/bin/fm-x-followup.sh" --check fix-meta-k4 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "expired check with unusable TMPDIR exit"
+  [ -z "$out" ] || fail "expired check must stay silent (got: $out)"
+  assert_no_grep "x_request=" "$meta" "clear must remove request with an unusable TMPDIR"
+  assert_grep "kind=ship" "$meta" "clear must preserve other meta lines"
+  pass "meta rewrites are independent of TMPDIR"
+}
+
 test_link_rejects_unsafe_and_missing() {
   local home rc
   home="$TMP_ROOT/link-bad"; mkdir -p "$home/state"
@@ -987,6 +1008,7 @@ test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
 test_reply_followup_thread_dry_run
 test_link_records_request_and_timestamp
+test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
 test_followup_check_states
 test_followup_check_expired_prunes_link

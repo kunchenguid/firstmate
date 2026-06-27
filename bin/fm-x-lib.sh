@@ -149,13 +149,22 @@ fmx_meta_get() {
   printf '%s' "${line#*=}"
 }
 
+fmx_meta_tmp() {
+  local meta=$1 dir base
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  [ -d "$dir" ] || return 1
+  mktemp "$dir/.${base}.fm-x.XXXXXX"
+}
+
 # fmx_meta_link_set <meta> <request_id> <epoch>: atomically (re)write the
 # x_request/x_request_ts lines, dropping any prior link and preserving every
 # other meta line. Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
   local meta=$1 rid=$2 ts=$3 tmp
   [ -f "$meta" ] || return 1
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-x-meta.XXXXXX") || return 1
+  tmp=$(fmx_meta_tmp "$meta") || return 1
   if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
@@ -170,7 +179,7 @@ fmx_meta_link_set() {
 fmx_meta_link_clear() {
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-x-meta.XXXXXX") || return 1
+  tmp=$(fmx_meta_tmp "$meta") || return 1
   if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
