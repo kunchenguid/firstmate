@@ -15,7 +15,7 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
-#   (h) dead pane ignores stale status log                         -> unknown/none
+#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
 set -u
@@ -490,19 +490,41 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
-test_dead_window_ignores_matching_run() {
+# A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
+# run-step, not the shell. The common case is a finished crew whose agent has
+# exited and closed its window (the normal gap between completion and teardown) -
+# it must still report its terminal run-step state (e.g. done), never unknown.
+test_dead_window_still_reports_terminal_run_step() {
   reset_fakes
-  local d; d=$(new_case dead-window-run)
-  make_repo_on_branch "$d/wt" fm/feat-dead-run
+  local d; d=$(new_case dead-window-done)
+  make_repo_on_branch "$d/wt" fm/feat-dead-done
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dead-run.meta" "window=fm:fm-feat-dead-run" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-run)"
+  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
+  FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
+  local out; out=$(run_crew_state "$d" feat-dead-done)
+  assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
+  assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
+  assert_not_contains "$out" "state: unknown" "closed pane with a run must never be unknown"
+  pass "closed pane still reports a terminal run-step"
+}
+
+# The same for an active run: an agent pane that crashed mid-validation while the
+# daemon-backed run continues must report the live run-step, not unknown.
+test_dead_window_still_reports_active_run_step() {
+  reset_fakes
+  local d; d=$(new_case dead-window-active)
+  make_repo_on_branch "$d/wt" fm/feat-dead-act
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-act.meta" "window=fm:fm-feat-dead-act" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-act)"
   FM_FAKE_TMUX_MISSING=1
-  local out; out=$(run_crew_state "$d" feat-dead-run)
-  assert_contains "$out" "state: unknown" "dead window with matching run -> unknown"
-  assert_contains "$out" "source: none" "dead window with matching run -> none source"
-  assert_not_contains "$out" "source: run-step" "dead window does not use run-step"
-  pass "dead window ignores matching run"
+  local out; out=$(run_crew_state "$d" feat-dead-act)
+  assert_contains "$out" "state: working" "closed pane still reports active run-step"
+  assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
+  assert_not_contains "$out" "state: unknown" "closed pane with an active run must never be unknown"
+  pass "closed pane still reports an active run-step"
 }
 
 test_no_timeout_uses_perl_bound() {
@@ -594,7 +616,8 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_idle_pane_uses_log
 test_dead_window_ignores_stale_status_log
-test_dead_window_ignores_matching_run
+test_dead_window_still_reports_terminal_run_step
+test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree

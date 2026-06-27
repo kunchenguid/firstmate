@@ -112,12 +112,13 @@ map_log_state() {  # <verb>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(log_verb_of "$LOG_LINE")
 
+# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
+# stays authoritative regardless of pane liveness - judge by the run-step, not the
+# shell - so a finished crew whose window has closed still reports its run-step
+# state (e.g. done) instead of being masked as unknown.
 pane_readable() {  # <target>
   tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
 }
-
-[ -n "$WIN" ] || emit unknown none "no window recorded"
-pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 
@@ -340,10 +341,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
-# --- fallback: pane busy-signature + status log ----------------------------
+# --- fallback: no run attributed to this crew ------------------------------
+# The run-step path above already handled any crew with a run, regardless of pane
+# liveness, so a finished-but-pane-closed crew never reaches here. Down here there
+# is no run to consult, so a dead/unreadable window means the crew is gone: report
+# unknown rather than trusting a possibly-stale status log as the current state.
+[ -n "$WIN" ] || emit unknown none "no window recorded"
+pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
-# Secondmates idle on their own watcher (idle pane = healthy), so pane-busy is
-# not a meaningful signal for them; read their state from the status log only.
+# Secondmates idle on their own watcher (idle pane = healthy), so the busy
+# signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
   emit working pane "harness busy"
 fi
