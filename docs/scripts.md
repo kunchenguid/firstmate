@@ -41,3 +41,4 @@ Each file also starts with a short header comment.
 | `fm-x-reply.sh`          | Post or dry-run preview a composed public-safe X answer or `--followup`, auto-splitting long text into `{request_id,text,texts}` threads; reads text from an argument, stdin, or `--text-file` |
 | `fm-x-link.sh`           | Link a spawned task to its originating X mention by recording `x_request=` and `x_request_ts=` in `state/<id>.meta` |
 | `fm-x-followup.sh`       | Detect, post, and clear the single completion follow-up for an X-linked task, enforcing the local 24h window and retrying only when the relay post fails |
+| `retell-axi`             | Read-only Retell AI inspection CLI used by the `retellai` skill: lists and views agents, calls, phone numbers, voices, and knowledge bases, prints safe MCP config templates, and checks auth without exposing the key |
