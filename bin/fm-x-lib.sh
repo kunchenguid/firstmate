@@ -126,3 +126,53 @@ fmx_auth_header_file() {
   printf 'Authorization: Bearer %s\n' "$FMX_TOKEN" > "$file" || { rm -f "$file"; return 1; }
   printf '%s\n' "$file"
 }
+
+# --- task <-> X-request link (state/<id>.meta backed) -----------------------
+#
+# When an X mention spawns real work, the task is linked to its originating
+# mention by two lines in state/<id>.meta:
+#   x_request=<request_id>     the relay-issued id the follow-up posts against
+#   x_request_ts=<epoch>       when the link was made, for the 24h follow-up window
+# On the task's terminal completion firstmate posts ONE follow-up reply to that
+# request (within the window) and clears the link. These helpers own the
+# read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit meta and
+# the rewrite stays atomic and preserves every other meta line.
+
+# fmx_meta_get <meta> <key>: print the value of the last "key=value" line in
+# <meta>, or nothing (and succeed) when the file or key is absent. Callers treat
+# empty output as "unset".
+fmx_meta_get() {
+  local meta=$1 key=$2 line
+  [ -f "$meta" ] || return 0
+  line=$(grep -E "^${key}=" "$meta" 2>/dev/null | tail -n1) || return 0
+  [ -n "$line" ] || return 0
+  printf '%s' "${line#*=}"
+}
+
+# fmx_meta_link_set <meta> <request_id> <epoch>: atomically (re)write the
+# x_request/x_request_ts lines, dropping any prior link and preserving every
+# other meta line. Returns non-zero if <meta> is missing or the rewrite fails.
+fmx_meta_link_set() {
+  local meta=$1 rid=$2 ts=$3 tmp
+  [ -f "$meta" ] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-x-meta.XXXXXX") || return 1
+  if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}
+
+# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts lines
+# while preserving every other meta line. Idempotent: succeeds whether or not a
+# link is present, and is a no-op when <meta> is missing.
+fmx_meta_link_clear() {
+  local meta=$1 tmp
+  [ -f "$meta" ] || return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-x-meta.XXXXXX") || return 1
+  if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}

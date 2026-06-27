@@ -4,17 +4,27 @@
 # Usage: fm-x-reply.sh <request_id> <text>
 #        fm-x-reply.sh <request_id> --text-file <path>   # read the reply from a file
 #        fm-x-reply.sh <request_id> -                    # read the reply from stdin
+#        fm-x-reply.sh <request_id> --followup ...       # post a completion follow-up
 #
 # The --text-file / stdin forms exist so a caller never has to inline reply text
 # (which may be influenced by a public mention) into a shell command, where shell
 # expansion or quote-breakage could bite. fmx-respond uses them; the positional
 # <text> form is kept for back-compat and tests.
 #
-# POSTs to $RELAY/connector/answer with the bearer token. The relay binds the
-# reply to the exact tweet it recorded for that request_id, so this client only
-# ever echoes the relay-issued request_id and NEVER names a tweet id. On success
-# it echoes ONLY that request_id; on a non-2xx (or transport failure) it exits
-# non-zero so the caller knows the post did not land.
+# Two endpoints, one client. By default the reply is the single answer to a
+# mention, POSTed to $RELAY/connector/answer. With --followup it is instead the
+# ONE later "done - here's the result" reply for a mention that spawned real
+# work, POSTed to $RELAY/connector/followup; the relay retains the
+# request->tweet binding for a 24h window after the initial answer and accepts a
+# single thread-bound follow-up. --followup may appear anywhere after the
+# request_id; everything else (thread-split, payload shape, dry-run, never-inline
+# safety) is identical, so only the endpoint and the dry-run marker differ.
+#
+# POSTs to $RELAY/connector/<answer|followup> with the bearer token. The relay
+# binds the reply to the exact tweet it recorded for that request_id, so this
+# client only ever echoes the relay-issued request_id and NEVER names a tweet id.
+# On success it echoes ONLY that request_id; on a non-2xx (or transport failure)
+# it exits non-zero so the caller knows the post did not land.
 #
 # Long replies auto-split into a numbered thread (premium-independent: each tweet
 # stays within FMX_X_REPLY_MAX_CHARS, default 280). A reply that fits in one tweet
@@ -31,7 +41,9 @@
 # Instead the full would-be POST body ({request_id, text}, or {request_id, text,
 # texts} for a thread) is recorded to state/x-outbox/<request_id>.json and a
 # "DRY RUN" summary is printed to stderr; stdout still echoes the request_id and
-# the exit is 0, so the loop runs end to end without a public tweet. Dry-run
+# the exit is 0, so the loop runs end to end without a public tweet. A follow-up
+# dry-run additionally carries an "endpoint":"followup" marker in the recorded
+# body so a preview is self-describing; the live POST body is unchanged. Dry-run
 # needs neither a token nor the relay.
 set -u
 
@@ -42,16 +54,40 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
+usage() {
+  echo "usage: fm-x-reply.sh <request_id> [--followup] <text> | [--followup] --text-file <path> | [--followup] -" >&2
+}
+
 REQ=${1:-}
-if [ -z "$REQ" ] || [ "$#" -lt 2 ]; then
-  echo "usage: fm-x-reply.sh <request_id> <text> | <request_id> --text-file <path> | <request_id> -" >&2
+if [ -z "$REQ" ]; then
+  usage
   exit 2
 fi
 shift
+
+# --followup selects the relay's /connector/followup endpoint instead of
+# /connector/answer; it may appear anywhere after the request_id, so strip it out
+# and process the remaining args (the text source) exactly as the answer path
+# always has.
+FOLLOWUP=0
+ARGS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --followup) FOLLOWUP=1 ;;
+    *) ARGS+=("$1") ;;
+  esac
+  shift
+done
+if [ "${#ARGS[@]}" -lt 1 ]; then
+  usage
+  exit 2
+fi
+set -- "${ARGS[@]}"
+
 case "$1" in
   --text-file)
     if [ "$#" -lt 2 ]; then
-      echo "usage: fm-x-reply.sh <request_id> --text-file <path>" >&2
+      echo "usage: fm-x-reply.sh <request_id> [--followup] --text-file <path>" >&2
       exit 2
     fi
     TEXT=$(cat -- "$2") || { echo "fm-x-reply: cannot read text file: $2" >&2; exit 1; }
@@ -66,6 +102,14 @@ esac
 if [ -z "$TEXT" ]; then
   echo "fm-x-reply: empty reply text" >&2
   exit 2
+fi
+
+# The endpoint is the only behavioral difference between an answer and a
+# follow-up; everything below (split, payload, dry-run, post) is shared.
+if [ "$FOLLOWUP" = 1 ]; then
+  ENDPOINT=followup
+else
+  ENDPOINT=answer
 fi
 
 fmx_load_config
@@ -110,16 +154,25 @@ if [ -n "$FMX_DRY" ]; then
     echo "fm-x-reply: cannot create dry-run outbox: $outbox_dir" >&2
     exit 1
   }
-  printf '%s\n' "$PAYLOAD" > "$outbox_file" 2>/dev/null || {
+  # The recorded body is the would-be POST body; a follow-up preview additionally
+  # carries an "endpoint":"followup" marker so an outbox record is self-describing
+  # (the live POST body stays exactly {request_id, text[, texts]} for both paths).
+  if [ "$FOLLOWUP" = 1 ]; then
+    OUTREC=$(printf '%s' "$PAYLOAD" | jq -c '. + {endpoint:"followup"}') || {
+      echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
+  else
+    OUTREC=$PAYLOAD
+  fi
+  printf '%s\n' "$OUTREC" > "$outbox_file" 2>/dev/null || {
     echo "fm-x-reply: cannot write dry-run outbox: $outbox_file" >&2
     exit 1
   }
   if [ "$N" -le 1 ]; then
-    printf 'fm-x-reply: DRY RUN - would POST to %s/connector/answer (recorded: state/x-outbox/%s.json): %s\n' \
-      "$FMX_RELAY" "$REQ" "$(printf '%s' "$CHUNKS" | jq -r '.[0]')" >&2
+    printf 'fm-x-reply: DRY RUN - would POST to %s/connector/%s (recorded: state/x-outbox/%s.json): %s\n' \
+      "$FMX_RELAY" "$ENDPOINT" "$REQ" "$(printf '%s' "$CHUNKS" | jq -r '.[0]')" >&2
   else
-    printf 'fm-x-reply: DRY RUN - would POST a %s-tweet thread to %s/connector/answer (recorded: state/x-outbox/%s.json):\n' \
-      "$N" "$FMX_RELAY" "$REQ" >&2
+    printf 'fm-x-reply: DRY RUN - would POST a %s-tweet thread to %s/connector/%s (recorded: state/x-outbox/%s.json):\n' \
+      "$N" "$FMX_RELAY" "$ENDPOINT" "$REQ" >&2
     printf '%s' "$CHUNKS" | jq -r '.[]' | while IFS= read -r __chunk; do printf '  %s\n' "$__chunk" >&2; done
   fi
   printf '%s\n' "$REQ"
@@ -142,7 +195,7 @@ code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
   -H "@$AUTH_HEADER_FILE" \
   -H 'Content-Type: application/json' \
   --data "$PAYLOAD" \
-  "$FMX_RELAY/connector/answer" 2>/dev/null) || {
+  "$FMX_RELAY/connector/$ENDPOINT" 2>/dev/null) || {
   echo "fm-x-reply: request to relay failed" >&2
   exit 1
 }

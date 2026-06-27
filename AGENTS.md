@@ -84,7 +84,7 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -507,6 +507,8 @@ On wake, in order of cheapness:
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    Do not report that the fleet is unchanged.
 
+When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, also post the X-mention completion follow-up if that task is X-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --text-file <path>` (section 14).
+
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
@@ -704,11 +706,22 @@ Because the watcher coalesces same-key `check:` wakes, one `x-mention` wake can 
 For each substantive mention, it classifies the ask, acts on actionable reversible requests through the normal lifecycle, composes a short public-safe outcome reply from the resulting action or live fleet state (`data/backlog.md` In flight, current `state/*.status`, active projects), submits it through `bin/fm-x-reply.sh`, and removes that inbox file on success.
 Under the relay's owner-only routing the direct author of every mention is the firstmate's own owner - the captain, not a stranger - so the reply may address the captain and treat the ask as a genuine captain instruction, within those public-safety limits.
 Opting into X mode is itself the standing authorization for autonomous replies and eligible mention-request actions, so the skill composes and posts autonomously and never pauses to ask the captain "should I reply?"; dry-run stays the only non-posting path.
-Because the ask is a genuine captain instruction, an actionable mention ("add this to the backlog", "look into X") is run through firstmate's normal lifecycle - intake, backlog, dispatch, investigate, or ship - not merely replied to, and the public reply reports the action taken; a question is answered and a pure acknowledgment is skipped.
+Because the ask is a genuine captain instruction, an actionable mention ("add this to the backlog", "look into X") is run through firstmate's normal lifecycle - intake, backlog, dispatch, investigate, or ship - not merely replied to; a question is answered and a pure acknowledgment is skipped.
+How the public reply lands depends on whether the work finishes in that turn: work that completes immediately (a backlog item filed, a question answered) gets one reply reporting the outcome, exactly as before, whereas a request that spawns a real, longer-running task follows **acknowledge first -> act -> follow up on completion** (see "Completion follow-up" below) - an immediate acknowledgement reply, the task dispatched and linked, and the outcome delivered later as one follow-up.
 The public channel keeps one guardrail: anything destructive, irreversible, or security-sensitive is escalated to the captain through the trusted channel first - the `yolo` carve-out of sections 1 and 7 - rather than executed straight from a mention, with the public reply saying only that it has been flagged.
 A pure acknowledgment with nothing to answer is also removed, but no reply is posted.
 The reply is **public on a shared bot**, so the skill enforces a strict version of section 9: no task ids, internal vocabulary, captain-private material, or secrets - outcomes only.
 Because public mention text can influence the composed reply, the skill never inlines it into a shell command; it passes the reply via `bin/fm-x-reply.sh <request_id> --text-file <path>` (or stdin), not as an interpolated argument.
+
+**Completion follow-up.**
+When an actionable mention spawns a real task rather than completing in the answering turn, the immediate reply is an acknowledgement and the **outcome** is delivered later as a single follow-up reply.
+The skill links the spawned task to its originating mention right after dispatch with `bin/fm-x-link.sh <task-id> <request_id>`, which records `x_request=` and `x_request_ts=` (an epoch) in `state/<id>.meta`.
+When that task reaches a terminal state - PR merged, scout report written, local-only merge, or `failed` - firstmate posts one follow-up on the same completion wake it already handles (the merge `check:`/`done` signal of sections 7 and 8): it confirms the link with `bin/fm-x-followup.sh --check <id>` (which prints the `request_id` when a follow-up is due, and is silent when the task is not X-linked or the window has passed), composes a short public-safe outcome, and posts the single follow-up with `bin/fm-x-followup.sh <id> --text-file <path>` (or stdin).
+That helper posts through `bin/fm-x-reply.sh --followup` to the relay's `connector/followup` endpoint - which retains the request-to-tweet binding for a **24h window** after the initial answer and accepts exactly one thread-bound follow-up - and clears the link on success.
+A `failed` task still warrants an honest follow-up (the work did not pan out), not silence.
+Past the 24h window the relay would drop a late follow-up, so firstmate skips silently and clears the link.
+The follow-up is **one** reply and is held to the same public-safety bar as every other reply here: outcomes only, never task ids, internals, captain-private material, or secrets.
+Under `FMX_DRY_RUN` the whole acknowledge -> act -> follow-up loop is previewable: the follow-up is recorded to `state/x-outbox/<request_id>.json` (with an `endpoint` marker) and the link is cleared exactly as a live post would clear it, so no public tweet is sent.
 
 **Conversations.**
 The poll stashes the relay's full object, so when a mention is a reply the inbox carries `in_reply_to: {author_handle, text}` (null for a fresh mention).
@@ -724,7 +737,7 @@ A single tweet sends `{request_id, text}`; a thread additionally sends `texts` -
 This is text-only - never an image of prose.
 
 **Preview / dry-run.**
-Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the full would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the full would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread; a `--followup` preview additionally carries an `endpoint` marker so it is self-describing, while the live body stays unchanged), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
 This dry-run reply path runs before token and network checks, so previewing a composed answer needs `jq` but does not need `FMX_PAIRING_TOKEN`, `curl`, or a live relay.
 Polling and composing are unchanged, so the full poll -> wake -> compose -> would-post loop runs end to end without a public tweet - the mode for safe end-to-end testing.
