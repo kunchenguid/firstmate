@@ -15,8 +15,9 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
-#   (h) kind=scout skips the run lookup                           -> pane/status-log
-#   (i) torn-down worktree / missing meta                         -> unknown/none
+#   (h) dead pane ignores stale status log                         -> unknown/none
+#   (i) kind=scout skips the run lookup                           -> pane/status-log
+#   (j) torn-down worktree / missing meta                         -> unknown/none
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -61,7 +62,11 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  display-message)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    printf '%%1\n' ;;
   capture-pane)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -91,7 +96,8 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_AXI_LIST=""
   FM_FAKE_BUSY=0
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_LIST FM_FAKE_BUSY
+  FM_FAKE_TMUX_MISSING=0
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -335,7 +341,24 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
-# (h) kind=scout skips the run lookup entirely (its deliverable is a report).
+test_dead_window_ignores_stale_status_log() {
+  reset_fakes
+  local d; d=$(new_case dead-window)
+  make_repo_on_branch "$d/wt" fm/feat-dead
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead.meta" "window=fm:fm-feat-dead" "worktree=$d/wt" "kind=ship"
+  printf 'done: old completion event\n' > "$d/state/feat-dead.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_AXI_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead)
+  assert_contains "$out" "state: unknown" "dead window -> unknown"
+  assert_contains "$out" "source: none" "dead window -> none source"
+  assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
+  pass "dead window ignores stale status log"
+}
+
+# (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
   local d; d=$(new_case scout)
@@ -351,7 +374,7 @@ test_scout_skips_run_lookup() {
   pass "scout skips the run lookup"
 }
 
-# (i) torn-down worktree and missing meta are graceful (unknown/none, exit 0)
+# (j) torn-down worktree and missing meta are graceful (unknown/none, exit 0)
 test_torn_down_worktree() {
   reset_fakes
   local d; d=$(new_case torndown)
@@ -396,6 +419,7 @@ test_cross_branch_attribution_via_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_idle_pane_uses_log
+test_dead_window_ignores_stale_status_log
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

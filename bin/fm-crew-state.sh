@@ -147,6 +147,10 @@ nm_run_id_for_branch() {  # <branch> <list-output>
   done | head -1
 }
 
+pane_readable() {  # <target>
+  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -232,9 +236,12 @@ fi
 
 # --- fallback: pane busy-signature + status log ----------------------------
 
+[ -n "$WIN" ] || emit unknown none "no window recorded"
+pane_readable "$WIN" || emit unknown none "window gone: $WIN"
+
 # Secondmates idle on their own watcher (idle pane = healthy), so pane-busy is
 # not a meaningful signal for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && [ -n "$WIN" ] && fm_pane_is_busy "$WIN"; then
+if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
   emit working pane "harness busy"
 fi
 
