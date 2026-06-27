@@ -76,6 +76,17 @@ SH
   printf '%s\n' "$fb"
 }
 
+make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
+  local dir=$1 tb="$1/notimeoutbin" tool real
+  mkdir -p "$tb"
+  for tool in bash git grep sed head cut tail dirname perl; do
+    real=$(command -v "$tool" || true)
+    [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
+    ln -s "$real" "$tb/$tool"
+  done
+  printf '%s\n' "$tb"
+}
+
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
@@ -358,6 +369,44 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+test_dead_window_ignores_matching_run() {
+  reset_fakes
+  local d; d=$(new_case dead-window-run)
+  make_repo_on_branch "$d/wt" fm/feat-dead-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-run.meta" "window=fm:fm-feat-dead-run" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-run)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-run)
+  assert_contains "$out" "state: unknown" "dead window with matching run -> unknown"
+  assert_contains "$out" "source: none" "dead window with matching run -> none source"
+  assert_not_contains "$out" "source: run-step" "dead window does not use run-step"
+  pass "dead window ignores matching run"
+}
+
+test_no_timeout_uses_perl_bound() {
+  reset_fakes
+  local d toolbin out start elapsed
+  d=$(new_case no-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-timeout
+  make_fakebin "$d" >/dev/null
+  cat > "$d/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+while :; do :; done
+SH
+  chmod +x "$d/fakebin/no-mistakes"
+  toolbin=$(make_no_timeout_toolbin "$d")
+  fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_BUSY=1
+  start=$SECONDS
+  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  elapsed=$((SECONDS - start))
+  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
+  assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
+  [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
+  pass "no timeout command uses perl bound"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -420,6 +469,8 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_idle_pane_uses_log
 test_dead_window_ignores_stale_status_log
+test_dead_window_ignores_matching_run
+test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

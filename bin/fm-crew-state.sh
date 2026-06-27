@@ -49,6 +49,7 @@ ID=${1:-}
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
+case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -109,6 +110,13 @@ map_log_state() {  # <verb>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(log_verb_of "$LOG_LINE")
 
+pane_readable() {  # <target>
+  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
+}
+
+[ -n "$WIN" ] || emit unknown none "no window recorded"
+pane_readable "$WIN" || emit unknown none "window gone: $WIN"
+
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 
 strip_quotes() { local s=${1:-}; s=${s#\"}; s=${s%\"}; printf '%s' "$s"; }
@@ -117,12 +125,14 @@ strip_quotes() { local s=${1:-}; s=${s#\"}; s=${s%\"}; printf '%s' "$s"; }
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
+elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
     timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
     gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        ( cd "$WT" && no-mistakes "$@" ) 2>/dev/null || true ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
+    *)        true ;;
   esac
 }
 
@@ -145,10 +155,6 @@ nm_run_id_for_branch() {  # <branch> <list-output>
     br=${rest%%,*}
     if [ "$br" = "$branch" ]; then printf '%s\n' "$id"; break; fi
   done | head -1
-}
-
-pane_readable() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -235,9 +241,6 @@ if [ "$HAVE_RUN" = 1 ]; then
 fi
 
 # --- fallback: pane busy-signature + status log ----------------------------
-
-[ -n "$WIN" ] || emit unknown none "no window recorded"
-pane_readable "$WIN" || emit unknown none "window gone: $WIN"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so pane-busy is
 # not a meaningful signal for them; read their state from the status log only.
