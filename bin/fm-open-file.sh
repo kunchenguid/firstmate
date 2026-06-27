@@ -152,7 +152,7 @@ unique_tmux_name() {  # <session> <base>
     keep=$((28 - ${#suffix}))
     [ "$keep" -gt 0 ] || keep=24
     prefix=$(printf "%.*s" "$keep" "$base" | sed 's/[.-]*$//; s/-*$//')
-    [ -n "$prefix" ] || prefix=file
+    [ -n "$prefix" ] || prefix="file"
     name="$prefix$suffix"
     i=$((i + 1))
   done
@@ -181,7 +181,7 @@ unique_wezterm_name() {  # <base>
     keep=$((28 - ${#suffix}))
     [ "$keep" -gt 0 ] || keep=24
     prefix=$(printf "%.*s" "$keep" "$base" | sed 's/[.-]*$//; s/-*$//')
-    [ -n "$prefix" ] || prefix=file
+    [ -n "$prefix" ] || prefix="file"
     name="$prefix$suffix"
     i=$((i + 1))
   done
@@ -210,7 +210,7 @@ file_uri() {  # <absolute-path>
 }
 
 base=$(base_for_path "$FILE_REAL" "$rel_path")
-[ -n "$base" ] || base=file
+[ -n "$base" ] || base="file"
 qfile=$(quote "$FILE_REAL")
 
 if [ "$path_count" -gt 1 ]; then

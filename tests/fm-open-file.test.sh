@@ -123,7 +123,12 @@ run_open -- data/fix-login-k3/report.md .lavish/plan.html data/audit-x9/report.m
 expect_code 0 "$?" "multi-path open exits 0"
 assert_contains "$OUT" "opened: 3 files in WezTerm tab " "multi-path opens a single WezTerm tab"
 assert_not_contains "$OUT" "secret-sentinel-XYZ" "multi-path opened line must not dump content"
-LIST_FILE=$(ls "$TMP_ROOT"/firstmate-review-links.* 2>/dev/null | head -1)
+LIST_FILE=""
+for _candidate in "$TMP_ROOT"/firstmate-review-links.*; do
+  [ -e "$_candidate" ] || continue
+  LIST_FILE=$_candidate
+  break
+done
 [ -n "$LIST_FILE" ] || fail "no generated review-links list file found"
 assert_grep "file:///" "$LIST_FILE" "link list uses file:// hyperlinks"
 for rel in data/fix-login-k3/report.md .lavish/plan.html data/audit-x9/report.md; do
