@@ -1,3 +1,9 @@
+---
+name: retellai
+description: Reusable Retell AI interface. Use when the task involves Retell AI voice or chat agents, phone calls, phone numbers, voices, knowledge bases, test or QA workflows, webhooks, Retell MCP setup, custom telephony, custom LLM integrations, or safe operational inspection of a Retell workspace. Prefer the read-only retell-axi command first, then fall back to Retell's hosted MCP server or REST docs; authenticates via RETELL_API_KEY or the captain's 1Password item without printing secrets.
+user-invocable: true
+---
+
 # Retell AI
 
 Use this skill when the task involves Retell AI voice agents, chat agents, phone calls, phone numbers, voices, knowledge bases, test or QA workflows, webhooks, Retell MCP setup, custom telephony, custom LLM integrations, or safe operational inspection of a Retell workspace.

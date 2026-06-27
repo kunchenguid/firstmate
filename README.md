@@ -132,6 +132,7 @@ Claude uses the slash form shown here; codex uses the same names with `$`, such 
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
+| `/retellai`        | Reusable Retell AI interface: inspect a Retell workspace read-only with the `retell-axi` command first, then fall back to Retell's hosted MCP server or REST docs, authenticating without exposing secrets |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
