@@ -151,8 +151,21 @@ load_api_key() {
   return 1
 }
 
+TMP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/retell-axi-reg.XXXXXX" 2>/dev/null || true)
+
+cleanup_all() {
+  [ -n "$TMP_REGISTRY" ] && [ -f "$TMP_REGISTRY" ] || return 0
+  while IFS= read -r file; do
+    [ -n "$file" ] && [ -f "$file" ] && rm -f "$file"
+  done < "$TMP_REGISTRY"
+  rm -f "$TMP_REGISTRY"
+}
+trap cleanup_all EXIT
+
 tmpfile() {
-  mktemp "${TMPDIR:-/tmp}/retell-axi.XXXXXX"
+  file=$(mktemp "${TMPDIR:-/tmp}/retell-axi.XXXXXX") || return 1
+  [ -n "$TMP_REGISTRY" ] && printf '%s\n' "$file" >> "$TMP_REGISTRY"
+  printf '%s\n' "$file"
 }
 
 cleanup_files() {
@@ -180,22 +193,26 @@ EOF
 
   load_api_key || return 1
 
+  auth_header_file=$(tmpfile) || return 1
+  printf 'Authorization: Bearer %s\n' "$API_KEY" > "$auth_header_file"
+
   url=$API_BASE$path
   if [ -n "$body" ]; then
     code=$(curl -sS -o "$out" -w '%{http_code}' \
       --request "$method" \
       --url "$url" \
-      --header "Authorization: Bearer $API_KEY" \
+      --header @"$auth_header_file" \
       --header 'Content-Type: application/json' \
       --data "$body")
   else
     code=$(curl -sS -o "$out" -w '%{http_code}' \
       --request "$method" \
       --url "$url" \
-      --header "Authorization: Bearer $API_KEY" \
+      --header @"$auth_header_file" \
       --header 'Content-Type: application/json')
   fi
   curl_status=$?
+  cleanup_files "$auth_header_file"
   if [ "$curl_status" -ne 0 ]; then
     cat <<EOF
 error:
@@ -623,7 +640,7 @@ cmd_calls_view() {
   validate_id "$id" || return 1
   out=$(tmpfile) || exit 1
   api_or_exit GET "/v2/get-call/$id" "$out"
-  format_file calls-view "$out"
+  format_file call-view "$out"
   cleanup_files "$out"
 }
 

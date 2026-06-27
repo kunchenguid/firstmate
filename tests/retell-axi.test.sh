@@ -53,7 +53,17 @@ test_mcp_config_uses_env_placeholder() {
   pass "retell-axi MCP config uses safe placeholders"
 }
 
+test_format_modes_are_handled() {
+  local bin="$ROOT/bin/retell-axi" mode
+  for mode in $(grep -oE 'format_file [a-z-]+' "$bin" | awk '{print $2}' | sort -u); do
+    grep -F "mode === \"$mode\"" "$bin" >/dev/null \
+      || fail "format_file mode '$mode' has no handler in the formatter"
+  done
+  pass "every format_file mode has a matching formatter branch"
+}
+
 test_auth_missing_is_structured
 test_home_auth_missing_is_structured
 test_invalid_id_is_structured
 test_mcp_config_uses_env_placeholder
+test_format_modes_are_handled
