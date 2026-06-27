@@ -431,8 +431,12 @@ function iso(ms) {
 const c = read(process.env.RETELL_AXI_CONCURRENCY_FILE);
 const agents = read(process.env.RETELL_AXI_AGENTS_FILE);
 const calls = read(process.env.RETELL_AXI_CALLS_FILE);
-const agentItems = Array.isArray(agents.items) ? agents.items : [];
-const callItems = Array.isArray(calls.items) ? calls.items : [];
+function items(data) {
+  if (Array.isArray(data)) return data;
+  return data && Array.isArray(data.items) ? data.items : [];
+}
+const agentItems = items(agents);
+const callItems = items(calls);
 console.log(`bin: ${process.env.RETELL_AXI_BIN}`);
 console.log("description: Inspect Retell AI agents, calls, phone numbers, voices, and knowledge bases with compact read-only output");
 console.log(`auth: ok (${process.env.RETELL_AXI_AUTH_SOURCE})`);
