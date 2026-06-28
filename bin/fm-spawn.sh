@@ -33,7 +33,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -268,7 +268,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -329,6 +329,13 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    kimi)
+      # kimi-cli --afk --print runs the prompt non-interactively and exits when done.
+      # --mcp-config-file points to an empty MCP config so a broken server in the user's
+      # default ~/.kimi/mcp.json cannot block launch; the agent still has the built-in shell
+      # and file tools. The trailing '; touch __TURNEND__' signals the watcher after exit.
+      printf '%s' "kimi-cli --afk --print --mcp-config-file '$FM_HOME/config/kimi-empty-mcp.json' --prompt \"\$(cat __BRIEF__)\"; touch __TURNEND__"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -680,7 +687,12 @@ case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
-    fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+    if [ "$KIND" != secondmate ]; then
+      # Disable oh-my-zsh auto-update prompts that can swallow/mangle the typed command.
+      fm_backend_tmux_send_text_line "$T" 'DISABLE_AUTO_UPDATE=true ZSH_DISABLE_COMPFIX=true treehouse get'
+    else
+      fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+    fi
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -935,6 +947,11 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    kimi*)
+      # kimi-cli exits after the prompt finishes; the '; touch __TURNEND__' in the
+      # launch template writes the marker without needing a project-local hook.
+      ;;
+    ;;
   esac
 fi
 

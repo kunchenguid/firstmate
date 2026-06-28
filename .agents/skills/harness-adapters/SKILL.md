@@ -192,3 +192,21 @@ The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals 
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+## kimi / kimi-cli (VERIFIED 2026-06-28)
+
+| Fact | Value |
+|---|---|
+| Launch binary | `kimi-cli` |
+| Launch flags | `--afk --print --mcp-config-file <empty-config> --prompt "$(cat <brief>)"` |
+| Busy-pane signature | `TurnBegin(...)` / `StepBegin(n=...)` output streaming; idle when shell prompt returns |
+| Exit command | n/a (exits automatically when the prompt finishes) |
+| Interrupt | Ctrl-C in the pane, or `tmux send-keys C-c` |
+| Turn-end signal | `fm-spawn` appends `; touch <turnend>` to the launch command; marker written after `kimi-cli` exits |
+
+Kimi CLI runs the prompt in non-interactive `--print` mode and exits once it believes the task is done.
+`--afk` auto-dismisses `AskUserQuestion` and auto-approves tool calls, so the crewmate can run unattended.
+`--mcp-config-file` is pointed at an empty MCP config to prevent a broken server in the user's default `~/.kimi/mcp.json` from blocking launch; the agent still has the built-in shell and file tools.
+If you want Stripe / Playwright / Umami MCP tools available, fix or remove the broken server in `~/.kimi/mcp.json` first, then update `config/kimi-empty-mcp.json` or remove the `--mcp-config-file` override.
+
+Firstmate detects the current harness as `kimi` when the process ancestry contains `kimi`, `kimi-cli`, or `kimi-code`.
