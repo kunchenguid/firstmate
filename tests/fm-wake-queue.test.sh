@@ -104,6 +104,45 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
+# Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
+# whose crew is NOT provably working is surfaced immediately. That new path must keep
+# the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
+# suppressor - so a watcher killed between the two never swallows the surfaced finish.
+test_not_working_stale_enqueue_before_suppressor() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  dir=$(make_case stale-stopped)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  capture_file="$dir/pane.txt"
+  window="test:fm-stopped"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
+  # signal scan does not pre-empt the stale path.
+  printf 'working: implementing\n' > "$state/stopped.status"
+  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
+  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # NOT provably working: no running pipeline, idle pane. (make_case installed the
+  # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
+  unset FM_FAKE_CREW_STATE
+  pass "a not-provably-working stale wake is queued before its suppressor is advanced"
+}
+
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
@@ -192,6 +231,7 @@ test_drain_asserts_watcher_liveness() {
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
+test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates

@@ -54,7 +54,32 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
+}
+
+# Install a hermetic fake fm-crew-state.sh into <fakebin> and echo its path. The
+# watcher's absorb-only-when-provably-working triage calls this (via
+# FM_CREW_STATE_BIN) to read a crew's current state on the no-verb path; the fake
+# returns a canned "state: <s> · source: <src> · <detail>" verdict line so a test
+# can fix the provably-working decision without a real worktree or no-mistakes.
+# A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
+# FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
+# safe default so a test that forgets to set one surfaces rather than absorbs.
+make_fake_crew_state() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+id=${1:-}
+key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+var="FM_FAKE_CREW_STATE_$key"
+val=${!var:-${FM_FAKE_CREW_STATE:-}}
+printf '%s\n' "${val:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  printf '%s\n' "$fakebin/fm-crew-state.sh"
 }
 
 make_supercase() {
