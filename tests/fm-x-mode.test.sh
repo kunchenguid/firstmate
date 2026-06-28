@@ -64,6 +64,9 @@ case "$url" in
   */connector/followup)
     printf '%s' "${FAKE_FOLLOWUP_CODE:-${FAKE_ANSWER_CODE:-200}}"
     ;;
+  */connector/dismiss)
+    printf '%s' "${FAKE_DISMISS_CODE:-200}"
+    ;;
 esac
 exit 0
 SH
@@ -773,6 +776,126 @@ test_reply_followup_thread_dry_run() {
   pass "fm-x-reply --followup auto-splits a long follow-up into a marked thread"
 }
 
+# --- fm-x-dismiss: drop a mention at the relay without replying ---------------
+
+test_dismiss_success_posts_request_only() {
+  local home fakebin log out rc data keys
+  home="$TMP_ROOT/dismiss-ok"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  printf 'FMX_PAIRING_TOKEN=tok-d\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_DISMISS_CODE=200 \
+    "$ROOT/bin/fm-x-dismiss.sh" "req-9"); rc=$?
+  expect_code 0 "$rc" "dismiss success exit"
+  [ "$out" = "req-9" ] || fail "dismiss must echo only the request_id (got: $out)"
+  assert_grep "url=https://relay.test/connector/dismiss" "$log" "dismiss must POST /connector/dismiss"
+  assert_grep "method=POST" "$log" "dismiss must use POST"
+  assert_grep "auth=Authorization: Bearer tok-d" "$log" "dismiss must send the bearer token"
+  grep '^argv=' "$log" | grep -F 'tok-d' >/dev/null 2>&1 \
+    && fail "dismiss must not expose the bearer token in curl argv"
+  # The body must be exactly {request_id} - no text, no tweet id.
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  [ "$(printf '%s' "$data" | jq -r .request_id)" = "req-9" ] || fail "dismiss body request_id"
+  keys=$(printf '%s' "$data" | jq -r 'keys|join(",")')
+  [ "$keys" = "request_id" ] || fail "dismiss body must carry only request_id (got: $keys)"
+  pass "fm-x-dismiss posts a request-bound dismiss and echoes only the request_id"
+}
+
+test_dismiss_dry_run_records_not_posts() {
+  local home fakebin log out rc
+  home="$TMP_ROOT/dismiss-dry"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  printf 'FMX_PAIRING_TOKEN=tok-d\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_DRY_RUN=1 FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-x-dismiss.sh" "req-1" 2>"$home/err"); rc=$?
+  expect_code 0 "$rc" "dry-run dismiss exit"
+  [ "$out" = "req-1" ] || fail "dry-run dismiss must still echo the request_id (got: $out)"
+  # It must NOT have posted: the fake curl is never invoked, so no POST is logged.
+  [ -f "$log" ] && grep -q "method=POST" "$log" && fail "dry-run dismiss must not POST to the relay"
+  assert_present "$home/state/x-outbox/req-1.json" "dry-run dismiss must record the would-be body"
+  [ "$(jq -r .request_id "$home/state/x-outbox/req-1.json")" = "req-1" ] \
+    || fail "dismiss outbox record must hold the request_id"
+  [ "$(jq -r '.endpoint' "$home/state/x-outbox/req-1.json")" = "dismiss" ] \
+    || fail "dismiss dry-run preview must carry the endpoint marker"
+  assert_grep "DRY RUN" "$home/err" "dry-run dismiss must surface a DRY RUN summary on stderr"
+  assert_grep "/connector/dismiss" "$home/err" "dry-run dismiss summary must name the dismiss endpoint"
+  pass "fm-x-dismiss dry-run records the would-be body and never posts"
+}
+
+test_dismiss_dry_run_needs_no_token() {
+  local home out rc
+  home="$TMP_ROOT/dismiss-dry-notoken"; mkdir -p "$home"
+  # No token at all: dry-run still previews (it neither authenticates nor posts).
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-dismiss.sh" "req-2" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "dry-run no-token dismiss exit"
+  [ "$out" = "req-2" ] || fail "dry-run dismiss without a token must still echo the request_id (got: $out)"
+  assert_present "$home/state/x-outbox/req-2.json" "dry-run dismiss without a token must still record the preview"
+  pass "fm-x-dismiss dry-run works without a token"
+}
+
+test_dismiss_non_2xx_fails() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/dismiss-500"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-d\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_DISMISS_CODE=500 \
+    "$ROOT/bin/fm-x-dismiss.sh" "req-9" 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "dismiss must exit non-zero on a non-2xx response"
+  [ -z "$out" ] || fail "a failed dismiss must not echo the request_id (got: $out)"
+  assert_grep "HTTP 500" "$err" "dismiss must report the failing status"
+  pass "fm-x-dismiss exits non-zero on a non-2xx relay response"
+}
+
+test_dismiss_transport_failure_fails() {
+  local home fakebin err out rc
+  home="$TMP_ROOT/dismiss-transport"; mkdir -p "$home"
+  fakebin=$(fm_fakebin "$home")
+  # A curl that fails to reach the relay (non-zero exit, no HTTP code).
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$fakebin/curl"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-d\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    "$ROOT/bin/fm-x-dismiss.sh" "req-9" 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "dismiss must exit non-zero on a transport failure"
+  [ -z "$out" ] || fail "a transport-failed dismiss must not echo the request_id (got: $out)"
+  assert_grep "request to relay failed" "$err" "dismiss must report the transport failure"
+  pass "fm-x-dismiss exits non-zero on a transport failure"
+}
+
+test_dismiss_unsafe_request_id_rejected() {
+  local home err out rc
+  home="$TMP_ROOT/dismiss-unsafe"; mkdir -p "$home"
+  err="$home/err.txt"
+  # Path-traversal-shaped id must be refused before it becomes an outbox filename.
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-dismiss.sh" "../evil" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "dismiss unsafe id exit"
+  [ -z "$out" ] || fail "dismiss must not echo an unsafe request_id (got: $out)"
+  assert_grep "unsafe request_id" "$err" "dismiss must reject an unsafe request_id"
+  assert_absent "$home/state/../evil.json" "dismiss must not touch a path for an unsafe id"
+  pass "fm-x-dismiss rejects an unsafe request_id (path-traversal guard)"
+}
+
+test_dismiss_usage_error() {
+  local home rc
+  home="$TMP_ROOT/dismiss-usage"; mkdir -p "$home"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-dismiss.sh" >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "dismiss missing-arg usage exit"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-dismiss.sh" req-1 extra >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "dismiss extra-arg usage exit"
+  pass "fm-x-dismiss rejects missing or extra arguments with a usage error"
+}
+
 # --- fm-x-link: task <-> X-request association in meta -----------------------
 
 test_link_records_request_and_timestamp() {
@@ -1007,6 +1130,13 @@ test_reply_followup_live_posts_to_followup_endpoint
 test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
 test_reply_followup_thread_dry_run
+test_dismiss_success_posts_request_only
+test_dismiss_dry_run_records_not_posts
+test_dismiss_dry_run_needs_no_token
+test_dismiss_non_2xx_fails
+test_dismiss_transport_failure_fails
+test_dismiss_unsafe_request_id_rejected
+test_dismiss_usage_error
 test_link_records_request_and_timestamp
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
