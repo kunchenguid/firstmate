@@ -335,7 +335,7 @@ cmd_insert_ref() {  # -p <pane> -w <window>
       *) shift ;;
     esac
   done
-  [ -n "$pane" ] && [ -n "$window" ] || die "usage: fm-layout.sh insert-ref -p <pane> -w <window>"
+  if [ -z "$pane" ] || [ -z "$window" ]; then die "usage: fm-layout.sh insert-ref -p <pane> -w <window>"; fi
   local rec ref
   rec=$(worker_record "$window")
   if [ -z "$rec" ]; then
@@ -383,7 +383,7 @@ usage() {
 # ---- dispatch --------------------------------------------------------------
 
 cmd=${1:-arrange}
-[ $# -gt 0 ] && shift || true
+if [ $# -gt 0 ]; then shift; fi
 case "$cmd" in
   arrange) cmd_arrange "$@" ;;
   workers) cmd_workers ;;
