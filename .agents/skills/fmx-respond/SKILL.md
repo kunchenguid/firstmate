@@ -54,7 +54,7 @@ Never include:
 - Task ids, branch names, worktree paths, PR/issue numbers, or repo-internal identifiers.
 - Tooling/internal vocabulary: crewmate, scout, ship, secondmate, harness names, watcher, heartbeat, brief, teardown, no-mistakes, yolo, delivery modes.
 - Captain-private material: the captain's name, product strategy, unreleased plans, revenue, internal URLs, file contents, or anything the captain has not made public.
-- Secrets of any kind: tokens, keys, credentials, hostnames.
+- Secrets of any kind: tokens, keys, credentials, the pairing token, hostnames.
 
 Speak only in **outcomes**. When in doubt, say less.
 
