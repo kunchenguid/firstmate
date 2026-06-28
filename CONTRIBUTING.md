@@ -43,6 +43,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
+- Agent skill files under `.agents/skills/` have an approximate 20 KB load limit; keep each `SKILL.md` well under that ceiling or it will silently fail to appear in `available_skills` at session start.
 - In Markdown, put each full sentence on its own line.
 
 ## Development
