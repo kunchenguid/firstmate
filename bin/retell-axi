@@ -4,7 +4,7 @@
 set -u
 
 API_BASE=${RETELL_AXI_API_BASE:-https://api.retellai.com}
-OP_ITEM=${RETELL_AXI_OP_ITEM:-Recall.it API Key}
+OP_ITEM=${RETELL_AXI_OP_ITEM:-RetellAi Api Credentials}
 API_KEY_LOADED=0
 API_KEY=""
 AUTH_SOURCE=""
@@ -45,7 +45,7 @@ commands:
 
 auth lookup order:
   1. RETELL_API_KEY environment variable
-  2. 1Password item "Recall.it API Key" via op
+  2. 1Password item "RetellAi Api Credentials" via op
 EOF
 }
 
