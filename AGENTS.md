@@ -664,7 +664,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, recovering, handing backlog to, or retiring a secondmate home, and before editing `data/secondmates.md`.
-- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to classify the mention, act on actionable requests through the normal lifecycle, post or preview a public-safe outcome reply for work that completes immediately, or acknowledge and link spawned work so one completion follow-up posts later (section 14); relevant only when X mode is on.
+- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to classify the mention, act on actionable requests through the normal lifecycle, post or preview a public-safe outcome reply for work that completes immediately, dismiss pure acknowledgments at the relay without replying, or acknowledge and link spawned work so one completion follow-up posts later (section 14); relevant only when X mode is on.
 
 ## 14. X mode
 
@@ -742,7 +742,8 @@ This is text-only - never an image of prose.
 
 **Preview / dry-run.**
 Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the full would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread; a `--followup` preview additionally carries an `endpoint` marker so it is self-describing, while the live body stays unchanged), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+The same dry-run switch makes `bin/fm-x-dismiss.sh` record `{request_id, endpoint:"dismiss"}` to `state/x-outbox/<request_id>.json` instead of calling the relay, then echo the `request_id` and exit 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
-This dry-run reply path runs before token and network checks, so previewing a composed answer needs `jq` but does not need `FMX_PAIRING_TOKEN`, `curl`, or a live relay.
+These dry-run paths run before token and network checks, so previewing a composed answer or dismiss needs `jq` but does not need `FMX_PAIRING_TOKEN`, `curl`, or a live relay.
 Polling and composing are unchanged, so the full poll -> wake -> compose -> would-post loop runs end to end without a public tweet - the mode for safe end-to-end testing.
 Inspect `state/x-outbox/` to see exactly what would have gone out.

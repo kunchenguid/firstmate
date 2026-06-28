@@ -148,11 +148,12 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
 
 ## Dry-run / preview mode
 
-When `FMX_DRY_RUN` is set (truthy, in the environment or `.env`), `bin/fm-x-reply.sh` does **not** post.
-It records the full would-be reply payload to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+When `FMX_DRY_RUN` is set (truthy, in the environment or `.env`), `bin/fm-x-reply.sh` does **not** post and `bin/fm-x-dismiss.sh` does **not** call the relay.
+The reply client records the full would-be reply payload to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+The dismiss client records `{request_id, endpoint:"dismiss"}` to the same outbox path, prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
 Dry-run needs `jq` to build the JSON payload, but it needs neither `FMX_PAIRING_TOKEN` nor the relay because it runs before token and network checks.
-Your procedure does not change: compose as usual and call `bin/fm-x-reply.sh ... --text-file <path>`.
+Your procedure does not change: compose as usual and call `bin/fm-x-reply.sh ... --text-file <path>`, or call `bin/fm-x-dismiss.sh <request_id>` for a skip.
 Because the call still succeeds, the loop completes normally (clear the inbox file as in step 2f); the only difference is nothing reaches X.
 This is the mode for end-to-end testing the poll -> compose -> would-post loop without a public tweet.
 Inspect `state/x-outbox/` to see exactly what would have been posted.
