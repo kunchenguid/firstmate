@@ -327,6 +327,11 @@ For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for 
 
 Write the brief per section 11.
 
+When dispatching a crewmate on the `claude` harness, pass `--model=<model-id>` to `fm-spawn.sh` to target a specific model for the task:
+- `--model=claude-opus-4-8` for architect/design scouts (complex reasoning tasks)
+- `--model=claude-sonnet-4-6` for implementation ship tasks (balanced; default when omitted)
+- `--model=claude-haiku-4-5-20251001` for cheap mechanical tasks (fast, low-cost)
+
 ### Spawn
 
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
@@ -334,6 +339,7 @@ Load `harness-adapters` before spawning or recovering any direct report so trust
 ```sh
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
+bin/fm-spawn.sh <id> projects/<repo> --model=claude-opus-4-8   # per-task model override (claude only)
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
@@ -343,7 +349,7 @@ bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batc
 Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, a shared `--scout` applies to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 
-The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
+The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, `yolo=`, and `model=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
