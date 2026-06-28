@@ -22,6 +22,8 @@
 #   assign <1|2|3> <window|->            assign a worker to a slot (- clears it)
 #   pick [1|2|3]                        open the interactive picker popup
 #   mouse-pick -p <pane> -c <client>    right-click handler (resolves slot from pane)
+#   ref -p <pane> [-c <client>]         worker-reference picker: type a worker ref into the composer
+#   insert-ref -p <pane> -w <window>    type one worker's reference into a pane
 #   bind [--mouse]                      install opt-in runtime keybindings
 #   unbind                              remove them
 #
@@ -44,6 +46,9 @@ BIN="$SCRIPT_DIR"
 # captain whose config already uses them can pick others.
 KEY_ARRANGE="${FM_LAYOUT_KEY_ARRANGE:-O}"
 KEY_PICK="${FM_LAYOUT_KEY_PICK:-P}"
+# The worker-reference chord. A bare '#' cannot be intercepted inside an agent
+# composer (see docs/orchestrator-layout.md), so this is a prefix chord: prefix #.
+KEY_REF="${FM_LAYOUT_KEY_REF:-#}"
 
 die() { echo "fm-layout: $*" >&2; exit 1; }
 
@@ -266,6 +271,81 @@ cmd_mouse_pick() {  # -p <pane> -c <client>
   fi
 }
 
+# ---- worker-reference shortcut (the "#"-style picker) ----------------------
+
+# cmd_ref: open a worker picker and type the chosen worker's reference into the
+# composer pane. This is the closest practical analog to an "@"/"#" mention: a
+# bare '#' cannot be trapped inside a third-party agent composer, so it is reached
+# via a prefix chord (prefix #) that captures the active pane, then a tmux
+# display-menu (keyboard-navigable AND mouse-clickable, like the @/ pickers).
+# Selecting a worker runs `insert-ref`, which send-keys the reference (default the
+# tmux target) into the composer so the captain never hand-copies a terminal
+# target. With --print it prints the menu targets instead (used by tests).
+cmd_ref() {  # -p <pane> [-c <client>] [--print]
+  require_tmux
+  local pane="" client="" printonly=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -p) pane=$2; shift 2 ;;
+      -c) client=$2; shift 2 ;;
+      --print) printonly=1; shift ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$pane" ] || pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+
+  local workers menu=() i=0 win repo label key
+  workers=$(fm_layout_workers)
+  while IFS=$'\t' read -r win repo label; do
+    [ -n "$win" ] || continue
+    i=$((i + 1))
+    if [ "$printonly" -eq 1 ]; then
+      printf '%d\t%s\t%s\n' "$i" "$win" "$(fm_layout_ref "$win")"
+      continue
+    fi
+    if [ "$i" -le 9 ]; then key=$i; else key=""; fi
+    menu+=("$repo - $label" "$key" "run-shell \"$BIN/fm-layout.sh insert-ref -p $pane -w $win\"")
+  done <<EOF
+$workers
+EOF
+
+  [ "$printonly" -eq 1 ] && return 0
+  if [ "$i" -eq 0 ]; then
+    tmux display-message "fm-layout: no active workers to reference"
+    return 0
+  fi
+  [ -n "$client" ] || client=$(tmux display-message -p '#{client_name}' 2>/dev/null || true)
+  if [ -n "$client" ]; then
+    tmux display-menu -c "$client" -T " #worker -> composer " "${menu[@]}"
+  else
+    tmux display-menu -T " #worker -> composer " "${menu[@]}"
+  fi
+}
+
+# cmd_insert_ref: type a worker's reference token into a target pane. Validates the
+# window is a live worker first, then send-keys the reference (FM_LAYOUT_REF_FORMAT)
+# plus a trailing space so the captain keeps typing the rest of the message.
+cmd_insert_ref() {  # -p <pane> -w <window>
+  require_tmux
+  local pane="" window=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -p) pane=$2; shift 2 ;;
+      -w) window=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$pane" ] && [ -n "$window" ] || die "usage: fm-layout.sh insert-ref -p <pane> -w <window>"
+  local rec ref
+  rec=$(worker_record "$window")
+  if [ -z "$rec" ]; then
+    tmux display-message "fm-layout: '$window' is no longer a live worker" 2>/dev/null || true
+    return 0
+  fi
+  ref=$(fm_layout_ref "$window")
+  tmux send-keys -t "$pane" -l "$ref "
+}
+
 # ---- keybindings (opt-in, runtime-only) ------------------------------------
 
 cmd_bind() {
@@ -274,7 +354,8 @@ cmd_bind() {
   [ "${1:-}" = "--mouse" ] && mouse=1
   tmux bind-key "$KEY_ARRANGE" run-shell "$BIN/fm-layout.sh arrange --window '#{window_id}'"
   tmux bind-key "$KEY_PICK" display-popup -E "$BIN/fm-layout-pick.sh"
-  echo "bound: prefix+$KEY_ARRANGE = arrange/refresh, prefix+$KEY_PICK = pick worker"
+  tmux bind-key "$KEY_REF" run-shell "$BIN/fm-layout.sh ref -p '#{pane_id}' -c '#{client_name}'"
+  echo "bound: prefix+$KEY_ARRANGE = arrange/refresh, prefix+$KEY_PICK = pick worker, prefix+$KEY_REF = insert worker reference"
   if [ "$mouse" -eq 1 ]; then
     tmux set -g mouse on
     tmux bind-key -n MouseDown3Pane \
@@ -289,8 +370,9 @@ cmd_unbind() {
   require_tmux
   tmux unbind-key "$KEY_ARRANGE" 2>/dev/null || true
   tmux unbind-key "$KEY_PICK" 2>/dev/null || true
+  tmux unbind-key "$KEY_REF" 2>/dev/null || true
   tmux unbind-key -n MouseDown3Pane 2>/dev/null || true
-  echo "unbound prefix+$KEY_ARRANGE, prefix+$KEY_PICK, and right-click."
+  echo "unbound prefix+$KEY_ARRANGE, prefix+$KEY_PICK, prefix+$KEY_REF, and right-click."
   echo "mouse mode left unchanged; run 'tmux set -g mouse off' to disable it if you enabled it here."
 }
 
@@ -309,8 +391,10 @@ case "$cmd" in
   assign) cmd_assign "$@" ;;
   pick) cmd_pick "$@" ;;
   mouse-pick) cmd_mouse_pick "$@" ;;
+  ref) cmd_ref "$@" ;;
+  insert-ref) cmd_insert_ref "$@" ;;
   bind) cmd_bind "$@" ;;
   unbind) cmd_unbind ;;
   -h|--help|help) usage ;;
-  *) die "unknown subcommand '$cmd' (try: arrange, workers, slots, assign, pick, bind, unbind)" ;;
+  *) die "unknown subcommand '$cmd' (try: arrange, workers, slots, assign, pick, ref, bind, unbind)" ;;
 esac

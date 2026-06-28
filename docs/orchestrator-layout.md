@@ -43,6 +43,7 @@ All live in `bin/`. Run them from your firstmate terminal.
 | `fm-layout.sh workers` | List the live workers (`idx`, window, repo, label). |
 | `fm-layout.sh slots` | Show the three current slot assignments. |
 | `fm-layout.sh assign <1\|2\|3> <window\|->` | Assign a worker to a slot (`-` clears it). |
+| `fm-layout.sh ref` | Open the worker-reference picker and type the chosen worker's reference into the composer (see [Worker references](#worker-references-the--shortcut)). |
 | `fm-layout.sh bind [--mouse]` | Install opt-in tmux keybindings (see below). |
 | `fm-layout.sh unbind` | Remove those keybindings. |
 
@@ -81,11 +82,12 @@ panes are created or destroyed.
 server with `bind-key`, never your `~/.tmux.conf`):
 
 - `prefix O` - arrange/refresh the dashboard.
-- `prefix P` - open the picker popup.
+- `prefix P` - open the slot picker popup.
+- `prefix #` - open the worker-reference picker (types a worker reference into the composer; see [Worker references](#worker-references-the--shortcut)).
 
-The keys are capitals to avoid clobbering tmux defaults; override them with
-`FM_LAYOUT_KEY_ARRANGE` / `FM_LAYOUT_KEY_PICK`. Remove them with
-`fm-layout.sh unbind`.
+The arrange/pick keys are capitals to avoid clobbering tmux defaults; override them
+with `FM_LAYOUT_KEY_ARRANGE` / `FM_LAYOUT_KEY_PICK` / `FM_LAYOUT_KEY_REF`. Remove
+them all with `fm-layout.sh unbind`.
 
 ### Mouse / right-click (best-effort, fragile - opt-in)
 
@@ -106,6 +108,68 @@ binding is offered for captains who knowingly accept the trade-off. `unbind` rem
 the right-click binding; it leaves `mouse` mode as-is (run `tmux set -g mouse off`
 yourself if you want it off).
 
+## Worker references (the `#` shortcut)
+
+When you message the orchestrator about a specific worker, you often need that
+worker's terminal target ("which one is worker 3?"). The reference shortcut lets
+you pick a worker from a menu and have its reference **typed straight into your
+composer**, so you stop hand-copying terminal targets:
+
+```
+Captain types:  <prefix> #   ->  picks "portals-cx - close issues"
+Composer becomes:  firstmate:fm-close-portals-resolved-issues-h6 ▮
+                   ...then continue typing: "refactor is done, now add X"
+```
+
+`fm-layout.sh bind` wires this to **`prefix #`**. Pressing it opens a tmux
+`display-menu` of the live workers (keyboard-navigable with `1`-`9`/arrows, and
+mouse-clickable - the same feel as an `@`/`/` picker); choosing one types that
+worker's reference into the pane you were in, plus a trailing space.
+
+### Why a prefix chord and not a bare `#`
+
+The ask was for a bare `#` (typed in the composer) to open the picker, mirroring
+`@`/`/`. **That is not feasible to intercept reliably**, and here is why for each
+layer:
+
+- **Agent composers (Claude, OpenCode, Codex, pi):** their `@`/`/` pickers are
+  built into each program. There is no public hook to register a new trigger
+  character from the outside; intercepting `#` would mean patching every harness.
+- **cmux:** its control CLI can `send` text to a surface and enumerate workspaces,
+  and it has configurable shortcuts - but those shortcuts only rebind cmux's own
+  built-in actions, there is no "bind `#` to run a script" facility, and no
+  `#`/`@` mention-trigger in its text box. Its control socket is also
+  password-gated, so an agent cannot drive it without the captain's credential.
+- **tmux:** binding a literal `#` in the root key table would hijack **every** `#`
+  you type (code, Markdown headings, shell comments), which is unacceptable.
+
+So the closest robust, harness-agnostic workflow is a tmux **prefix chord**
+(`prefix #`) that types the reference into whatever composer is focused. It works
+the same under any agent harness and needs no credentials.
+
+### Reference format
+
+`FM_LAYOUT_REF_FORMAT` chooses what gets typed:
+
+| Value | Inserts | Use |
+| --- | --- | --- |
+| `target` (default) | `firstmate:fm-<id>` | the literal tmux target - usable with `tmux`, and resolved by `fm-send`/`fm-peek`. |
+| `window` | `fm-<id>` | the bare window name firstmate's tools resolve. |
+| `select` | `tmux select-window -t firstmate:fm-<id>` | a ready-to-run command to jump to that worker. |
+
+The same reference is shown in each watch pane's header `(…)`, so the dashboard and
+the typed token always agree. `fm-layout.sh ref --print` lists the menu's targets
+(used by tests and scripting).
+
+### Optional: cmux delivery
+
+On cmux, `cmux send <surface> <text>` can deliver a reference to a surface's text
+box instead of typing locally. firstmate does not depend on this (the cmux control
+socket is password-gated and environment-specific), but if you have the socket
+password set (`CMUX_SOCKET_PASSWORD` or cmux Settings), `cmux workspace list` /
+`cmux tree` enumerate workers and `cmux send` routes text - the same reference
+strings `fm-layout.sh ref --print` produces apply.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -113,15 +177,17 @@ yourself if you want it off).
 | `FM_LAYOUT_REFRESH` | `2` | Seconds between watch/summary refreshes. |
 | `FM_LAYOUT_LABEL_MAX` | `30` | Max feature-label width before truncation. |
 | `FM_LAYOUT_KEY_ARRANGE` | `O` | Prefix key bound to arrange by `bind`. |
-| `FM_LAYOUT_KEY_PICK` | `P` | Prefix key bound to the picker by `bind`. |
+| `FM_LAYOUT_KEY_PICK` | `P` | Prefix key bound to the slot picker by `bind`. |
+| `FM_LAYOUT_KEY_REF` | `#` | Prefix key bound to the worker-reference picker by `bind`. |
+| `FM_LAYOUT_REF_FORMAT` | `target` | What the reference picker types: `target`, `window`, or `select`. |
 | `FM_LAYOUT_INCLUDE_SECONDMATES` | unset | Set to `1` to watch secondmate homes too. |
 
 ## Implementation
 
-- `bin/fm-layout.sh` - arrange/assign/pick/bind CLI.
-- `bin/fm-layout-lib.sh` - shared worker discovery and slot helpers.
+- `bin/fm-layout.sh` - arrange/assign/pick/ref/bind CLI.
+- `bin/fm-layout-lib.sh` - shared worker discovery, slot, and reference helpers.
 - `bin/fm-watch-pane.sh` - the per-pane mirror/summary refresh loop.
-- `bin/fm-layout-pick.sh` - the interactive popup picker.
+- `bin/fm-layout-pick.sh` - the interactive slot-picker popup.
 
 Slot assignments live in `state/.layout-slot-<n>` (gitignored runtime state, in the
 `.layout-*` namespace the watcher never touches). The watch panes only
@@ -131,8 +197,9 @@ Slot assignments live in `state/.layout-slot-<n>` (gitignored runtime state, in 
 
 The behavior is covered by `tests/fm-layout.test.sh` (real tmux on a private
 socket): discovery/exclusion, label truncation, assign/clear/reject, arrange
-geometry, idempotent re-run, the worker-window and unexpected-pane refusals, and the
-rendered summary/mirror content. To watch it by hand:
+geometry, idempotent re-run, the worker-window and unexpected-pane refusals, the
+rendered summary/mirror content, and the worker-reference resolver/insertion. To
+watch it by hand:
 
 ```sh
 # from a firstmate window with a few workers in flight:
@@ -140,4 +207,5 @@ bin/fm-layout.sh arrange      # builds the dashboard
 bin/fm-layout.sh workers      # see who is live
 bin/fm-layout.sh pick 3       # assign a 4th worker into slot 3
 bin/fm-layout.sh arrange      # safe to re-run; geometry unchanged
+bin/fm-layout.sh bind         # then press: prefix #  -> pick a worker, ref is typed in
 ```

@@ -169,4 +169,34 @@ assert_contains "$slot" "portals-cx · beta" "watch pane header shows the assign
 assert_contains "$slot" "beta-line" "watch pane mirrors the live worker's output"
 pass "summary renders terse bullets and a watch pane mirrors its worker"
 
+# --- 8. worker-reference shortcut (#-style picker) -------------------------
+# fm_layout_ref reference formats (lib already sourced above).
+[ "$(fm_layout_ref firstmate:fm-foo-k9)" = "firstmate:fm-foo-k9" ] \
+  || fail "ref default (target) format should be the session:window"
+[ "$(fm_layout_ref firstmate:fm-foo-k9 window)" = "fm-foo-k9" ] \
+  || fail "ref window format should be the bare window name"
+[ "$(fm_layout_ref firstmate:fm-foo-k9 select)" = "tmux select-window -t firstmate:fm-foo-k9" ] \
+  || fail "ref select format should be a runnable tmux command"
+
+# `ref --print` lists every live worker with its reference token.
+refs=$("$LAYOUT" ref --print -p dummy)
+assert_contains "$refs" "itest:fm-alpha-aa" "ref --print lists the alpha worker reference"
+assert_contains "$refs" "itest:fm-gamma-cc" "ref --print lists the gamma worker reference"
+assert_not_contains "$refs" "fm-second-dd" "ref --print excludes the secondmate"
+
+# insert-ref types the chosen worker's reference into a composer pane.
+TM new-window -t itest -n composer 'cat'
+CPANE=$(TM list-panes -t itest:composer -F '#{pane_id}')
+"$LAYOUT" insert-ref -p "$CPANE" -w itest:fm-beta-bb
+sleep 0.4
+typed=$(TM capture-pane -p -t "$CPANE")
+assert_contains "$typed" "itest:fm-beta-bb" "insert-ref types the worker reference into the composer pane"
+
+# insert-ref refuses a dead worker - nothing typed.
+"$LAYOUT" insert-ref -p "$CPANE" -w itest:fm-nope-zz >/dev/null 2>&1 || true
+sleep 0.2
+typed2=$(TM capture-pane -p -t "$CPANE")
+assert_not_contains "$typed2" "fm-nope-zz" "insert-ref never types a dead worker reference"
+pass "worker-reference picker resolves refs and types them into the composer"
+
 echo "# all fm-layout tests passed"

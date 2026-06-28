@@ -92,3 +92,22 @@ fm_layout_workers() {
 fm_layout_slot_file() {
   printf '%s/.layout-slot-%s\n' "$1" "$2"
 }
+
+# fm_layout_ref <window> [format]: the worker-reference token to type into the
+# composer for a worker, given its session:window. The format (default from
+# FM_LAYOUT_REF_FORMAT, else "target") chooses what reaches the captain's message
+# so they stop hand-copying terminal targets:
+#   target  - "session:window" as-is (e.g. firstmate:fm-foo-k9); the literal tmux
+#             target, directly usable with tmux and resolvable by fm-send/fm-peek.
+#   window  - just "fm-foo-k9" (the bare window name firstmate's tools resolve).
+#   select  - a ready-to-run "tmux select-window -t session:window" command.
+# An unknown format falls back to target. This is pure string work (no tmux call),
+# so it is trivially testable.
+fm_layout_ref() {
+  local window=$1 format=${2:-${FM_LAYOUT_REF_FORMAT:-target}}
+  case "$format" in
+    window) printf '%s' "${window##*:}" ;;
+    select) printf 'tmux select-window -t %s' "$window" ;;
+    target|*) printf '%s' "$window" ;;
+  esac
+}
