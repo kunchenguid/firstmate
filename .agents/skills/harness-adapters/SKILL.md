@@ -116,3 +116,18 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
+
+## kimi-cli (VERIFIED 2026-06-28, kimi-cli 1.47.0)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | Bullet-prefixed reasoning (`• `) and `Used <tool> (...)` lines while a tool call is in flight. |
+| Exit command | None — the agent stops on its own and returns to the shell prompt. Send `C-c` to interrupt. |
+| Interrupt | `C-c` (Control+c) via `tmux send-keys`. |
+| Skill invocation | Natural language; `kimi-cli` has no verified slash/skill command syntax. |
+
+`kimi-cli` is launched with `-y` (auto-approve) and a prompt from the brief via `-p`. It runs interactively until the agent decides to finish, then exits to the shell prompt.
+There is no native turn-end hook; firstmate relies on status-file writes and pane staleness for supervision.
+`kimi-cli` is a Python script (`kimi_cli.__main__`); detection matches `kimi` and `kimi-cli` command names and `kimi_cli` in interpreter args.
+The launch template uses a crewmate-specific `--mcp-config-file` to avoid the broken `gscServer` entry in the user's default `~/.kimi/mcp.json`.
+Keep prompts as a single `-p` argument; the launch template reads the brief with `$(cat __BRIEF__)`.

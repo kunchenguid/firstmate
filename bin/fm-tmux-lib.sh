@@ -35,8 +35,8 @@
 # returns) so they can be sourced into either context.
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; kimi-cli: "• " / "Used ...".
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|^• |Used (Shell|Read|Write|Edit|Grep|FetchURL|WebSearch|Bash)'
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,

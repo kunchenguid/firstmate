@@ -37,6 +37,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -140,6 +141,7 @@ launch_template() {
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    kimi-cli) printf '%s' 'kimi-cli -y --mcp-config-file __MCP__ -p "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -161,6 +163,49 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# Generate a crewmate-specific MCP config for kimi-cli. If the user has provided
+# $CONFIG/kimi-cli-mcp.json, use it. Otherwise filter ~/.kimi/mcp.json to drop
+# servers whose command is missing/broken (e.g. a stale gscServer path), falling
+# back to an empty server list when no source config exists.
+generate_kimi_cli_mcp_config() {
+  local id=$1 dst src
+  dst="$STATE/$id.kimi-cli-mcp.json"
+  mkdir -p "$STATE"
+  if [ -f "$CONFIG/kimi-cli-mcp.json" ]; then
+    cp "$CONFIG/kimi-cli-mcp.json" "$dst"
+    printf '%s\n' "$dst"
+    return 0
+  fi
+  src="${HOME:-}/.kimi/mcp.json"
+  if [ -f "$src" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$src" "$dst" <<'PY'
+import json, os, shutil, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    cfg = json.load(f)
+servers = cfg.get('mcpServers', {})
+filtered = {}
+for name, srv in servers.items():
+    cmd = srv.get('command', '')
+    if not cmd:
+        continue
+    if os.path.isabs(cmd):
+        ok = os.path.isfile(cmd) and os.access(cmd, os.X_OK)
+    else:
+        ok = shutil.which(cmd) is not None
+    if ok:
+        filtered[name] = srv
+with open(dst, 'w') as f:
+    json.dump({'mcpServers': filtered}, f, indent=2)
+PY
+  else
+    printf '{"mcpServers": {}}\n' > "$dst"
+  fi
+  printf '%s\n' "$dst"
+}
+
+[ "$HARNESS" = "kimi-cli" ] && KIMI_CLI_MCP=$(generate_kimi_cli_mcp_config "$ID")
 
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
@@ -483,9 +528,11 @@ mkdir -p "$STATE"
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_mcp=$(shell_quote "${KIMI_CLI_MCP:-$CONFIG/kimi-cli-mcp.json}")
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__MCP__/$sq_mcp}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
