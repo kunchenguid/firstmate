@@ -400,21 +400,20 @@ fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  # Acquire a durable leased worktree from treehouse. The --lease mode reserves
+  # the worktree in persistent state and prints its absolute path; it is never
+  # handed out to another get and never pruned, even with no process inside,
+  # until teardown calls 'treehouse return'. This avoids the subshell-mode race
+  # where a long-running crewmate's worktree can be reclaimed mid-flight.
+  if ! WT=$(cd "$PROJ_ABS" && treehouse get --lease 2>/dev/null); then
+    echo "error: treehouse get --lease failed for $PROJ_ABS; inspect window $T" >&2
     exit 1
   fi
+  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+    echo "error: treehouse get --lease returned invalid worktree '$WT' for $PROJ_ABS" >&2
+    exit 1
+  fi
+  tmux send-keys -t "$T" "cd $(shell_quote "$WT")" Enter
 
   # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
   # a real git worktree root, distinct from the project's primary checkout
