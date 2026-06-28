@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Shared wake classifier: the single source of truth for deciding whether a
-# watcher wake is captain-relevant (must reach firstmate's LLM) or benign
-# (absorbed in bash). Sourced by BOTH the always-on watcher (bin/fm-watch.sh)
-# and the away-mode daemon (bin/fm-supervise-daemon.sh) so the triage policy
-# lives in one place instead of two copies that can drift apart.
+# Shared wake classifier: the common source of truth for captain-relevant status
+# tests and, for the always-on watcher, the provably-working predicate that makes
+# no-verb wakes safe to absorb. Sourced by BOTH the always-on watcher
+# (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
+# overlapping triage policy lives in one place instead of two copies that can
+# drift apart.
 #
 # Most functions are pure, side-effect-free reads of status files: each takes
 # what it needs as arguments and touches no globals beyond the optional
@@ -29,9 +30,10 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
-# firstmate must see; everything else (working: notes, bare turn-ended) is
-# benign. FM_CAPTAIN_RE overrides the whole set when a home needs a custom verb
-# vocabulary; absent, this default applies.
+# firstmate must see. Lines without these verbs are no-verb signals: the watcher
+# absorbs them only with positive provably-working evidence, while the daemon uses
+# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
+# needs a custom verb vocabulary; absent, this default applies.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
@@ -128,9 +130,9 @@ signal_crew_provably_working() {  # <file> ...
 }
 
 # 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 (non-terminal/benign) otherwise, including the no-status
-# case. A non-terminal stale is a crew gone quiet mid-work: benign on first sight,
-# but the caller bounds it with an idle-time escalation threshold.
+# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
+# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
+# while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
   last=$(last_status_line "$state/$(window_to_task "$win").status")

@@ -4,11 +4,12 @@
 # now absorbs the benign majority of wakes in bash and exits ONLY on an actionable
 # wake, so firstmate's LLM re-arms once per actionable event instead of once per
 # wake. These tests cover the classifier predicates as pure functions, then drive
-# a real fm-watch.sh subprocess to assert the behavioral contract: benign absorbed
-# (no exit, no queue entry, suppressor advanced, beacon fresh), actionable
-# surfaced (queue + exit), non-terminal-stale absorbed-then-escalated past the
-# threshold, the heartbeat backstop fail-safe, and afk coherence (no double-triage
-# while the away-mode daemon owns supervision).
+# a real fm-watch.sh subprocess to assert the behavioral contract:
+# provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
+# advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
+# provably-working non-terminal-stale absorbed-then-escalated past the threshold,
+# the heartbeat backstop fail-safe, and afk coherence (no double-triage while the
+# away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
