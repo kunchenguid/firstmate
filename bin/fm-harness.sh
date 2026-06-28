@@ -25,6 +25,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       pi) echo pi; return ;;
+      kimi|kimi-cli|kimi-code) echo kimi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -33,6 +34,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *" pi "*|*/pi) echo pi; return ;;
+          *kimi-cli*|*/kimi-cli|*kimi-code*|*/kimi-code) echo kimi; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

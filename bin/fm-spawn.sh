@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|kimi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
@@ -88,7 +88,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -139,6 +139,13 @@ launch_template() {
       else
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
+      ;;
+    kimi)
+      # kimi-cli --afk --print runs the prompt non-interactively and exits when done.
+      # --mcp-config-file points to an empty MCP config so a broken server in the user's
+      # default ~/.kimi/mcp.json cannot block launch; the agent still has the built-in shell
+      # and file tools. The trailing '; touch __TURNEND__' signals the watcher after exit.
+      printf '%s' "kimi-cli --afk --print --mcp-config-file '$FM_HOME/config/kimi-empty-mcp.json' --prompt \"\$(cat __BRIEF__)\"; touch __TURNEND__"
       ;;
     *) return 1 ;;
   esac
@@ -355,7 +362,8 @@ fi
 
 tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  # Disable oh-my-zsh auto-update prompts that can swallow/mangle the typed command.
+  tmux send-keys -t "$T" 'DISABLE_AUTO_UPDATE=true ZSH_DISABLE_COMPFIX=true treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
@@ -445,6 +453,10 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    kimi*)
+      # kimi-cli exits after the prompt finishes; the '; touch __TURNEND__' in the
+      # launch template writes the marker without needing a project-local hook.
       ;;
   esac
 fi

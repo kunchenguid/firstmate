@@ -116,3 +116,21 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
+
+## kimi / kimi-cli (VERIFIED 2026-06-28)
+
+| Fact | Value |
+|---|---|
+| Launch binary | `kimi-cli` |
+| Launch flags | `--afk --print --mcp-config-file <empty-config> --prompt "$(cat <brief>)"` |
+| Busy-pane signature | `TurnBegin(...)` / `StepBegin(n=...)` output streaming; idle when shell prompt returns |
+| Exit command | n/a (exits automatically when the prompt finishes) |
+| Interrupt | Ctrl-C in the pane, or `tmux send-keys C-c` |
+| Turn-end signal | `fm-spawn` appends `; touch <turnend>` to the launch command; marker written after `kimi-cli` exits |
+
+Kimi CLI runs the prompt in non-interactive `--print` mode and exits once it believes the task is done.
+`--afk` auto-dismisses `AskUserQuestion` and auto-approves tool calls, so the crewmate can run unattended.
+`--mcp-config-file` is pointed at an empty MCP config to prevent a broken server in the user's default `~/.kimi/mcp.json` from blocking launch; the agent still has the built-in shell and file tools.
+If you want Stripe / Playwright / Umami MCP tools available, fix or remove the broken server in `~/.kimi/mcp.json` first, then update `config/kimi-empty-mcp.json` or remove the `--mcp-config-file` override.
+
+Firstmate detects the current harness as `kimi` when the process ancestry contains `kimi`, `kimi-cli`, or `kimi-code`.
