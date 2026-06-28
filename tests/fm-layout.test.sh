@@ -171,10 +171,12 @@ pass "summary renders terse bullets and a watch pane mirrors its worker"
 
 # --- 8. worker-reference shortcut (#-style picker) -------------------------
 # fm_layout_ref reference formats (lib already sourced above).
-[ "$(fm_layout_ref firstmate:fm-foo-k9)" = "firstmate:fm-foo-k9" ] \
-  || fail "ref default (target) format should be the session:window"
+[ "$(fm_layout_ref firstmate:fm-foo-k9)" = "fm-foo-k9" ] \
+  || fail "ref default (window) format should be the bare window name"
 [ "$(fm_layout_ref firstmate:fm-foo-k9 window)" = "fm-foo-k9" ] \
   || fail "ref window format should be the bare window name"
+[ "$(fm_layout_ref firstmate:fm-foo-k9 target)" = "firstmate:fm-foo-k9" ] \
+  || fail "ref target format should be the session:window"
 [ "$(fm_layout_ref firstmate:fm-foo-k9 select)" = "tmux select-window -t firstmate:fm-foo-k9" ] \
   || fail "ref select format should be a runnable tmux command"
 
@@ -190,7 +192,7 @@ CPANE=$(TM list-panes -t itest:composer -F '#{pane_id}')
 "$LAYOUT" insert-ref -p "$CPANE" -w itest:fm-beta-bb
 sleep 0.4
 typed=$(TM capture-pane -p -t "$CPANE")
-assert_contains "$typed" "itest:fm-beta-bb" "insert-ref types the worker reference into the composer pane"
+assert_contains "$typed" "fm-beta-bb" "insert-ref types the worker reference into the composer pane"
 
 # insert-ref refuses a dead worker - nothing typed.
 "$LAYOUT" insert-ref -p "$CPANE" -w itest:fm-nope-zz >/dev/null 2>&1 || true

@@ -35,7 +35,7 @@ if [ "${#WORKERS[@]}" -eq 0 ]; then
   echo "(0 clears the slot)"
 fi
 
-for row in "${WORKERS[@]}"; do
+for row in "${WORKERS[@]+"${WORKERS[@]}"}"; do
   IFS=$'\t' read -r idx win repo label <<<"$row"
   printf '  %s) %s - %s  (%s)\n' "$idx" "$repo" "$label" "$win"
 done
@@ -49,7 +49,7 @@ if [ "$choice" = 0 ]; then
   exit 0
 fi
 
-for row in "${WORKERS[@]}"; do
+for row in "${WORKERS[@]+"${WORKERS[@]}"}"; do
   IFS=$'\t' read -r idx win repo label <<<"$row"
   if [ "$choice" = "$idx" ]; then
     "$LAYOUT" assign "$slot" "$win"

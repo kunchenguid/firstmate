@@ -117,7 +117,7 @@ composer**, so you stop hand-copying terminal targets:
 
 ```
 Captain types:  <prefix> #   ->  picks "portals-cx - close issues"
-Composer becomes:  firstmate:fm-close-portals-resolved-issues-h6 ▮
+Composer becomes:  fm-close-portals-resolved-issues-h6 ▮
                    ...then continue typing: "refactor is done, now add X"
 ```
 
@@ -153,8 +153,8 @@ the same under any agent harness and needs no credentials.
 
 | Value | Inserts | Use |
 | --- | --- | --- |
-| `target` (default) | `firstmate:fm-<id>` | the literal tmux target - usable with `tmux`, and resolved by `fm-send`/`fm-peek`. |
-| `window` | `fm-<id>` | the bare window name firstmate's tools resolve. |
+| `window` (default) | `fm-<id>` | the short, human-readable window name firstmate's tools resolve. |
+| `target` | `firstmate:fm-<id>` | the literal tmux target - usable with `tmux`, and resolved by `fm-send`/`fm-peek`. |
 | `select` | `tmux select-window -t firstmate:fm-<id>` | a ready-to-run command to jump to that worker. |
 
 The same reference is shown in each watch pane's header `(…)`, so the dashboard and
@@ -179,7 +179,7 @@ strings `fm-layout.sh ref --print` produces apply.
 | `FM_LAYOUT_KEY_ARRANGE` | `O` | Prefix key bound to arrange by `bind`. |
 | `FM_LAYOUT_KEY_PICK` | `P` | Prefix key bound to the slot picker by `bind`. |
 | `FM_LAYOUT_KEY_REF` | `#` | Prefix key bound to the worker-reference picker by `bind`. |
-| `FM_LAYOUT_REF_FORMAT` | `target` | What the reference picker types: `target`, `window`, or `select`. |
+| `FM_LAYOUT_REF_FORMAT` | `window` | What the reference picker types: `window`, `target`, or `select`. |
 | `FM_LAYOUT_INCLUDE_SECONDMATES` | unset | Set to `1` to watch secondmate homes too. |
 
 ## Implementation

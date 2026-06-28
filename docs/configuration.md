@@ -147,6 +147,6 @@ FM_LAYOUT_LABEL_MAX=30             # max worker feature-label width before trunc
 FM_LAYOUT_KEY_ARRANGE=O           # prefix key bound to arrange by `fm-layout.sh bind`
 FM_LAYOUT_KEY_PICK=P              # prefix key bound to the slot picker by `fm-layout.sh bind`
 FM_LAYOUT_KEY_REF=#               # prefix key bound to the worker-reference picker by `fm-layout.sh bind`
-FM_LAYOUT_REF_FORMAT=target       # what the reference picker types: target|window|select
+FM_LAYOUT_REF_FORMAT=window       # what the reference picker types: window|target|select
 FM_LAYOUT_INCLUDE_SECONDMATES=    # set to 1 to also watch secondmate homes
 ```

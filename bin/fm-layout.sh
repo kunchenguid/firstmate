@@ -279,7 +279,7 @@ cmd_mouse_pick() {  # -p <pane> -c <client>
 # via a prefix chord (prefix #) that captures the active pane, then a tmux
 # display-menu (keyboard-navigable AND mouse-clickable, like the @/ pickers).
 # Selecting a worker runs `insert-ref`, which send-keys the reference (default the
-# tmux target) into the composer so the captain never hand-copies a terminal
+# short window name) into the composer so the captain never hand-copies a terminal
 # target. With --print it prints the menu targets instead (used by tests).
 cmd_ref() {  # -p <pane> [-c <client>] [--print]
   require_tmux
