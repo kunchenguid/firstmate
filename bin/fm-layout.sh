@@ -301,7 +301,7 @@ usage() {
 # ---- dispatch --------------------------------------------------------------
 
 cmd=${1:-arrange}
-[ $# -gt 0 ] && shift || true
+if [ $# -gt 0 ]; then shift; fi
 case "$cmd" in
   arrange) cmd_arrange "$@" ;;
   workers) cmd_workers ;;
