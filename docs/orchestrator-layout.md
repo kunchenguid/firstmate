@@ -157,9 +157,11 @@ the same under any agent harness and needs no credentials.
 | `target` | `firstmate:fm-<id>` | the literal tmux target - usable with `tmux`, and resolved by `fm-send`/`fm-peek`. |
 | `select` | `tmux select-window -t firstmate:fm-<id>` | a ready-to-run command to jump to that worker. |
 
-The same reference is shown in each watch pane's header `(…)`, so the dashboard and
-the typed token always agree. `fm-layout.sh ref --print` lists the menu's targets
-(used by tests and scripting).
+Each watch pane's header shows the worker's full `session:window` target in `(…)`;
+the typed reference is that same target, or in the default `window` form its
+window-name part, so the dashboard and the typed token always point at the same
+worker. `fm-layout.sh ref --print` lists the menu's targets (used by tests and
+scripting).
 
 ### Optional: cmux delivery
 
