@@ -200,16 +200,28 @@ cs_pool_slot_from_display() {
 # returns the gh exit status. They are exercised live in test/cs-live-test.sh,
 # which is skipped automatically when the token lacks codespace scope.
 
+# _cs_gh - run gh with whichever scoped credential is available. When GH_TOKEN is
+# set (token-file path B, loaded above), gh already prefers it over GITHUB_TOKEN,
+# so call gh directly. Otherwise (stored-login path A) the integration GITHUB_TOKEN
+# would shadow the stored scoped cred, so strip it and let gh use ~/.config/gh.
+_cs_gh() {
+  if [ -n "${GH_TOKEN:-}" ]; then
+    gh "$@"
+  else
+    env -u GITHUB_TOKEN gh "$@"
+  fi
+}
+
 cs_have_scope() {
   # Cheap probe: list works on any token, but a management dry-run (ssh --config)
   # 403s on the integration token. We treat a successful `gh codespace list` plus
   # a non-403 ssh-config attempt as "scoped". Callers needing certainty should
   # just attempt the op and handle failure.
-  gh codespace list --limit 1 >/dev/null 2>&1
+  _cs_gh codespace list --limit 1 >/dev/null 2>&1
 }
 
 cs_list_json() {
-  gh codespace list --json name,displayName,repository,state,machineName,gitStatus "$@"
+  _cs_gh codespace list --json name,displayName,repository,state,machineName,gitStatus "$@"
 }
 
 # cs_pool_free <repo> - name of a FREE pool codespace for repo, else empty.
@@ -220,28 +232,28 @@ cs_pool_free() {
 
 # cs_set_label <cs> <label> - set the display name (the lightweight lease hint).
 cs_set_label() {
-  gh codespace edit -c "$1" --display-name "$2"
+  _cs_gh codespace edit -c "$1" --display-name "$2"
 }
 
 # cs_ssh <cs> -- <cmd...> - run a command in the codespace over SSH.
 cs_ssh() {
   local cs=$1; shift
   [ "${1:-}" = "--" ] && shift
-  gh codespace ssh -c "$cs" -- "$@"
+  _cs_gh codespace ssh -c "$cs" -- "$@"
 }
 
 # cs_start <cs> - ensure the codespace is running (ssh implicitly starts it).
 cs_start() {
-  gh codespace ssh -c "$1" -- true
+  _cs_gh codespace ssh -c "$1" -- true
 }
 
-cs_stop()   { gh codespace stop -c "$1"; }
-cs_delete() { gh codespace delete -c "$1" --force; }
+cs_stop()   { _cs_gh codespace stop -c "$1"; }
+cs_delete() { _cs_gh codespace delete -c "$1" --force; }
 
 # cs_create <repo> <branch> <display> [machine] - create a codespace, print name.
 cs_create() {
   local repo=$1 branch=$2 display=$3 machine=${4:-xLargePremiumLinux}
-  gh codespace create --repo "$repo" --branch "$branch" \
+  _cs_gh codespace create --repo "$repo" --branch "$branch" \
     --machine "$machine" --display-name "$display" \
     --idle-timeout 30m --retention-period 720h --default-permissions
 }
