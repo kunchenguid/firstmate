@@ -191,6 +191,10 @@ shell_quote() {
   printf "'"
 }
 
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
@@ -408,7 +412,9 @@ fi
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
-TURNEND="$STATE/$ID.turn-ended"
+mkdir -p "$STATE"
+STATE_REAL=$(cd "$STATE" && pwd -P)
+TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -464,20 +470,40 @@ EOF
       # always trusted and load on first launch with no gate. So the turn-end hook
       # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
       # guarded no-op for every non-firstmate grok session: it fires only when the
-      # current workspace holds a .fm-grok-turnend pointer, and touches the path that
-      # pointer names. firstmate then drops that per-task pointer (gitignored, like
-      # the other harnesses' worktree hook files) naming this task's turn-end file.
+      # current workspace holds a .fm-grok-turnend token pointer that matches the
+      # firstmate-owned hook registry. firstmate then drops that per-task pointer
+      # (gitignored, like the other harnesses' worktree hook files).
       # Result: the hook is outside the worktree, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
-      mkdir -p "$GROK_HOOKS_DIR"
-      # Quoted heredoc: $GROK_WORKSPACE_ROOT and the inner shell vars stay literal so
-      # grok's hook runner expands them per-session at turn end, not here at spawn.
-      cat > "$GROK_HOOKS_DIR/fm-turn-end.json" <<'EOF'
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"p=\"$GROK_WORKSPACE_ROOT/.fm-grok-turnend\"; [ -f \"$p\" ] && t=$(cat \"$p\" 2>/dev/null) && [ -n \"$t\" ] && touch \"$t\" 2>/dev/null; exit 0"}]}]}}
+      GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
+      mkdir -p "$GROK_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
+      sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
+      cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_grok_auth_dir
+workspace=\${GROK_WORKSPACE_ROOT:-}
+[ -n "\$workspace" ] || exit 0
+p="\$workspace/.fm-grok-turnend"
+[ -f "\$p" ] || exit 0
+token=\$(sed -n 's/^token=//p' "\$p" 2>/dev/null | head -n 1)
+case "\$token" in ''|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch "\$t" 2>/dev/null || true
+exit 0
 EOF
-      # Per-task pointer inside the worktree (gitignored): the absolute turn-end path.
-      printf '%s\n' "$TURNEND" > "$WT/.fm-grok-turnend"
+      chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
+      hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
+      printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
   esac
@@ -499,7 +525,6 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
-mkdir -p "$STATE"
 {
   echo "window=$T"
   echo "worktree=$WT"
