@@ -26,7 +26,7 @@ ok "blank skipped"  "$(grep -c '^$' "$FM_STATE_OVERRIDE/task-a.status"; true)" "
 EVENTS="$TMP/remote-events"
 : > "$EVENTS"
 export FM_CS_RELAY_SOURCE_CMD="tail -n +1 -F '$EVENTS' 2>/dev/null"
-"$ROOT/bin/fm-cs-relay.sh" task-b dummy-cs &
+"$ROOT/bin/fm-cs-relay.sh" task-b dummy-cs >/dev/null 2>&1 &
 RELAY_PID=$!
 sleep 0.5
 printf 'working: started\n' >> "$EVENTS"
