@@ -188,6 +188,18 @@ cs_pool_free_from_json() {
     ] | (.[0].name // empty)' 
 }
 
+# cs_pool_free_entry_from_json <repo> < codespaces-json
+# Like cs_pool_free_from_json but prints "name<TAB>displayName" for the first FREE
+# pool codespace, so callers can recover the pool slot from the FREE label.
+cs_pool_free_entry_from_json() {
+  local repo=$1
+  jq -r --arg repo "$repo" '
+    [ .[]
+      | select(.repository == $repo)
+      | select(.displayName | test("(^| )pool-[a-z0-9-]+ FREE($| )"))
+    ] | (.[0] // empty) | select(. != null) | [.name, .displayName] | @tsv'
+}
+
 # cs_pool_slot_from_display <display-name> - extract the "pool-xxx" slot token.
 cs_pool_slot_from_display() {
   printf '%s\n' "$1" | grep -oE 'pool-[a-z0-9-]+' | head -1
@@ -228,6 +240,17 @@ cs_list_json() {
 cs_pool_free() {
   local repo=$1
   cs_list_json | cs_pool_free_from_json "$repo"
+}
+
+# cs_pool_free_entry <repo> - "name<TAB>displayName" of a FREE pool cs, else empty.
+cs_pool_free_entry() {
+  local repo=$1
+  cs_list_json | cs_pool_free_entry_from_json "$repo"
+}
+
+# cs_default_branch <repo> - the repo's default branch name (for cold-create).
+cs_default_branch() {
+  _cs_gh repo view "$1" --json defaultBranchRef -q .defaultBranchRef.name
 }
 
 # cs_set_label <cs> <label> - set the display name (the lightweight lease hint).
