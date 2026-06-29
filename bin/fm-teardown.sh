@@ -495,18 +495,25 @@ fi
 # branch, OR a merged PR whose head equals the codespace HEAD). Mirrors the
 # local landed-work contract over SSH, so releasing a created (deleted-on-release)
 # codespace never silently discards unlanded work.
+# FAIL-CLOSED: the probe must positively prove SSH reached the repo dir (the
+# __FM_OK__ sentinel). A connection failure, an unstarted codespace, or a wrong
+# repo_dir yields no sentinel, so the function refuses (return 1) rather than
+# mistaking an empty error result for a clean, landed tree.
 cs_work_is_landed() {
-  local cs=$1 rdir=$2 pr_url=$3 dirty unpushed head pr_state pr_head
-  dirty=$(cs_ssh "$cs" -- "cd '$rdir' && git status --porcelain 2>/dev/null | head -1" 2>/dev/null || true)
+  local cs=$1 rdir=$2 pr_url=$3 out dirty unpushed head pr_state pr_head
+  out=$(cs_ssh "$cs" -- "cd '$rdir' 2>/dev/null || exit 0; printf '__FM_OK__\\n'; printf '__DIRTY__\\n'; git status --porcelain 2>/dev/null; printf '__UNPUSHED__\\n'; git log --oneline HEAD --not --remotes -- 2>/dev/null") || return 1
+  printf '%s\n' "$out" | grep -qx '__FM_OK__' || return 1
+  dirty=$(printf '%s\n' "$out" | awk '/^__DIRTY__$/{f=1;next} /^__UNPUSHED__$/{f=0} f{print}' | head -1)
   [ -z "$dirty" ] || return 1
-  unpushed=$(cs_ssh "$cs" -- "cd '$rdir' && git log --oneline HEAD --not --remotes -- 2>/dev/null | head -1" 2>/dev/null || true)
+  unpushed=$(printf '%s\n' "$out" | awk '/^__UNPUSHED__$/{f=1;next} f{print}' | head -1)
   [ -z "$unpushed" ] && return 0
   [ -n "$pr_url" ] || return 1
-  head=$(cs_ssh "$cs" -- "cd '$rdir' && git rev-parse HEAD 2>/dev/null" 2>/dev/null || true)
+  head=$(cs_ssh "$cs" -- "cd '$rdir' 2>/dev/null && git rev-parse HEAD 2>/dev/null") || return 1
+  [ -n "$head" ] || return 1
   pr_state=$(_cs_gh pr view "$pr_url" --json state -q .state 2>/dev/null || true)
   pr_head=$(_cs_gh pr view "$pr_url" --json headRefOid -q .headRefOid 2>/dev/null || true)
   case "$pr_state" in MERGED|merged) ;; *) return 1 ;; esac
-  [ -n "$head" ] && [ "$head" = "$pr_head" ]
+  [ -n "$pr_head" ] && [ "$head" = "$pr_head" ]
 }
 
 if [ -n "$CODESPACE" ]; then
