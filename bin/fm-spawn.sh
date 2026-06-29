@@ -124,7 +124,19 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # Crewmates (ship/scout) launch under a SCOPED permission allowlist via
+    # __CLAUDEPERMS__ (substituted below), not full bypass: off-list tool calls
+    # pause with an in-pane dialog for firstmate to assess+grant, shrinking the
+    # blast radius of an autonomous agent. A secondmate is itself a supervisor
+    # whose pane nobody watches turn-by-turn, so gating it would wedge it on its
+    # own prompts; it keeps full autonomy.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __CLAUDEPERMS__ "$(cat __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -483,9 +495,55 @@ mkdir -p "$STATE"
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+
+# Scoped claude crew permissions (see launch_template). The default allowlist
+# auto-runs the safe, expected tools for code work; anything off it (bare Bash,
+# rm, curl/network, dep installs) pauses for firstmate to assess and grant.
+# Passed as a --settings JSON blob, NOT --allowedTools: the variadic flag would
+# greedily swallow the trailing brief positional (verified). Each rule is
+# JSON-quoted into permissions.allow; the brief stays the final positional so
+# nothing follows the flag to be consumed.
+#
+# Rules are NEWLINE-delimited (not space) because a rule such as 'Bash(git *)'
+# legitimately contains a space inside its glob. Override per dispatch with
+# FM_CREW_ALLOWED_TOOLS, one rule per line (e.g. $'Read\nBash(git *)\n...').
+default_crew_allowed_tools='Read
+Edit
+Write
+Bash(git *)
+Bash(npx tsc *)
+Bash(npx expo *)
+Bash(npm run *)
+Bash(gh-axi *)
+Bash(grep *)
+Bash(rg *)
+Bash(ls *)
+Bash(cat *)
+Bash(find *)
+Bash(sed *)
+Bash(echo *)
+Bash(mkdir *)
+Bash(node *)
+Bash(jq *)
+Bash(head *)
+Bash(tail *)
+Bash(pwd)'
+claude_perms_flag() {
+  local rules=${FM_CREW_ALLOWED_TOOLS:-$default_crew_allowed_tools} json="" rule
+  while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    rule=${rule//\\/\\\\}; rule=${rule//\"/\\\"}
+    json="$json${json:+,}\"$rule\""
+  done <<EOF
+$rules
+EOF
+  printf -- '--settings %s' "$(shell_quote "{\"permissions\":{\"allow\":[$json]}}")"
+}
+
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__CLAUDEPERMS__/$(claude_perms_flag)}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

@@ -54,6 +54,15 @@ First launch in a fresh worktree, or first ever on a machine, may show a trust o
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, and verify the brief started processing.
 
+**Scoped permissions (ship/scout crews).** Crewmates do NOT run with `--dangerously-skip-permissions`.
+`fm-spawn.sh` launches a claude ship/scout crew under a scoped `--settings` permission allowlist: safe, expected tools (Read/Edit/Write, git, tsc, expo, gh-axi, common read commands) auto-run, and anything off the list - bare `Bash`, `rm`, `curl`/network, dependency installs - pauses with an in-pane approval dialog.
+The default allowlist lives in `fm-spawn.sh`; override per dispatch with `FM_CREW_ALLOWED_TOOLS` (one rule per line).
+It is passed as a `--settings` JSON blob, never `--allowedTools` (the variadic flag greedily swallows the trailing brief positional - verified).
+When a crewmate pauses on an off-list tool, the pane goes idle and the watcher surfaces it as a `stale` wake; peek, assess whether the requested action is safe, then grant it (answer the dialog via `bin/fm-send.sh`, selecting an always-allow option for clearly-safe recurring categories) or decline.
+Crewmate status appends and approved tool dialogs commonly chain safe commands with `&&`, which won't match per-command allow rules, so early-task prompts are expected; this is the intended review friction, not a fault.
+Secondmates are the exception: a secondmate is itself a supervisor whose pane nobody watches turn-by-turn, so gating it would wedge it on its own prompts - it keeps full autonomy (`--dangerously-skip-permissions`).
+This gates which tool calls run, not OS-level access; it shrinks blast radius but is not a sandbox.
+
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
