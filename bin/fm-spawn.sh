@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   opencode|pi|grok) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
@@ -88,7 +88,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|claude|codex|opencode|pi|grok)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -140,6 +140,14 @@ launch_template() {
         printf '%s' 'pi -e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
+    # session. --always-approve auto-approves every tool execution (verified: the
+    # crewmate runs fully autonomously, no permission gate), which an unattended
+    # crewmate needs; it is the targeted equivalent of claude's
+    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # launch command - it is a Stop-event hook installed below (global hook +
+    # per-task pointer), so the template is identical for ship/scout/secondmate.
+    grok) printf '%s' 'grok --always-approve "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -445,6 +453,32 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    grok*)
+      # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
+      # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
+      # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
+      # after the folder is granted hook-trust, which is not automatic and which
+      # firstmate cannot establish at launch without editing grok's own managed
+      # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
+      # always trusted and load on first launch with no gate. So the turn-end hook
+      # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
+      # guarded no-op for every non-firstmate grok session: it fires only when the
+      # current workspace holds a .fm-grok-turnend pointer, and touches the path that
+      # pointer names. firstmate then drops that per-task pointer (gitignored, like
+      # the other harnesses' worktree hook files) naming this task's turn-end file.
+      # Result: the hook is outside the worktree, needs no trust grant, and never
+      # touches grok's managed config - only firstmate-owned files.
+      GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
+      mkdir -p "$GROK_HOOKS_DIR"
+      # Quoted heredoc: $GROK_WORKSPACE_ROOT and the inner shell vars stay literal so
+      # grok's hook runner expands them per-session at turn end, not here at spawn.
+      cat > "$GROK_HOOKS_DIR/fm-turn-end.json" <<'EOF'
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"p=\"$GROK_WORKSPACE_ROOT/.fm-grok-turnend\"; [ -f \"$p\" ] && t=$(cat \"$p\" 2>/dev/null) && [ -n \"$t\" ] && touch \"$t\" 2>/dev/null; exit 0"}]}]}}
+EOF
+      # Per-task pointer inside the worktree (gitignored): the absolute turn-end path.
+      printf '%s\n' "$TURNEND" > "$WT/.fm-grok-turnend"
+      exclude_path '.fm-grok-turnend'
       ;;
   esac
 fi
