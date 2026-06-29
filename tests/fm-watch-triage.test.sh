@@ -789,6 +789,33 @@ test_signal_notifier_no_open_pr_for_local_only() {
   pass "watcher omits --open for a local-only task (no PR to open)"
 }
 
+test_signal_notifier_no_open_pr_for_decision_class() {
+  # A mixed wake - one task needs-decision, another done: with a PR URL - is
+  # classified as a decision wake (needs-decision wins). The Open PR button is
+  # reserved for review/done-state toasts, so --open must be omitted: an urgent
+  # decision toast must not also carry a button pointing at a different item.
+  local dir state fakebin out notifylog fake pid args url
+  dir=$(make_case notify-decision-no-open); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+  # Two tasks wake together; the done: task is non-local-only so it would normally
+  # earn --open. The decision classification must still suppress the button.
+  printf 'window=s:fm-don\nmode=no-mistakes\n' > "$state/don.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/don.status"
+  printf 'needs-decision: pick A or B\n' > "$state/dec.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the mixed decision+done wake"
+  [ -s "$notifylog" ] || fail "a mixed decision+done wake should still toast"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "decision-class toast should still request focus"
+  assert_contains "$args" "need your decision" "mixed wake should classify as a decision wake"
+  assert_not_contains "$args" "--open" "a decision-class wake must not carry --open"
+  assert_not_contains "$args" "$url" "the PR URL must not ride a decision-class toast"
+  pass "watcher suppresses --open when the wake is classified as a decision"
+}
+
 test_signal_reason_is_actionable_classifier
 test_status_pr_url_extractor
 test_task_is_local_only_from_meta
@@ -819,3 +846,4 @@ test_signal_notifier_error_does_not_change_wake
 test_signal_notifier_skipped_while_afk
 test_signal_notifier_open_pr_for_done_with_url
 test_signal_notifier_no_open_pr_for_local_only
+test_signal_notifier_no_open_pr_for_decision_class

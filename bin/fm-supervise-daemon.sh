@@ -460,21 +460,29 @@ notify_open_url_for_buffer() {  # <state> <buffer-file>
 }
 
 notify_escalation() {  # <state> <count>
-  local state=$1 n=$2 buf notify summary open_url
+  local state=$1 n=$2 buf notify summary open_url decision=0
   fm_notify_enabled || return 0
   notify="${FM_NOTIFY_CMD:-$FM_DAEMON_DIR/fm-notify.sh}"
   [ -x "$notify" ] || return 0
   buf="$state/.subsuper-escalations"
   if grep -qiE 'needs-decision|blocked|failed' "$buf" 2>/dev/null; then
     summary="$n item(s) need your decision"
+    decision=1
   elif grep -qiE 'done|merged|checks green|ready|PR ' "$buf" 2>/dev/null; then
     summary="$n item(s) ready for review"
   else
     summary="$n update(s) need your attention"
   fi
   # A done-state escalation carrying a PR/MR URL (non-local-only task) also gets
-  # the "Open PR" button via --open. Best-effort, like the rest of the hook.
-  open_url=$(notify_open_url_for_buffer "$state" "$buf")
+  # the "Open PR" button via --open. Best-effort, like the rest of the hook. The
+  # button is reserved for review/done-state digests: a digest classified as a
+  # decision wake never carries --open, even if a done: line is also buffered, so
+  # the action stays consistent with the notification class.
+  if [ "$decision" = 1 ]; then
+    open_url=""
+  else
+    open_url=$(notify_open_url_for_buffer "$state" "$buf")
+  fi
   if [ -n "$open_url" ]; then
     "$notify" "Firstmate" "$summary" --focus --open "$open_url" >/dev/null 2>&1 || true
   else

@@ -250,9 +250,52 @@ SH
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
     FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "second escalate_flush failed"
+  # Positive check first: a local-only done: must STILL fire the notifier (with
+  # --focus); otherwise the --open absence below would also pass on an empty log.
+  [ -s "$notifylog" ] || fail "local-only done: should still fire the notifier"
   args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "local-only done: should still request focus"
   assert_not_contains "$args" "--open" "a local-only done: must not pass --open (no PR)"
   pass "escalate_flush passes --open for a done: PR escalation, gated out for local-only"
+}
+
+test_escalate_flush_decision_class_suppresses_open() {
+  # A digest classified as a DECISION wake (needs-decision/blocked/failed) must not
+  # carry --open even when a done: PR line is also buffered: the Open PR button is
+  # reserved for review/done-state toasts, so the action stays consistent with the
+  # notification class instead of pointing the captain at a different item.
+  local dir state fakebin sent capture notifylog fakenotify args url
+  dir=$(make_supercase notify-decision-no-open)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+
+  # A mixed buffer: one needs-decision item AND a non-local-only done: + PR URL.
+  printf 'window=s:fm-dec-t9\nmode=no-mistakes\n' > "$state/dec-t9.meta"
+  printf 'window=s:fm-don-t9\nmode=no-mistakes\n' > "$state/don-t9.meta"
+  escalate_add "$state" "dec-t9.status: needs-decision: pick A or B"
+  escalate_add "$state" "don-t9.status: done: PR $url checks green"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed"
+  [ -s "$notifylog" ] || fail "a decision+done digest should still fire the notifier"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "decision digest should still request focus"
+  assert_contains "$args" "need your decision" "mixed digest should classify as a decision wake"
+  assert_not_contains "$args" "--open" "a decision-class digest must not carry --open"
+  assert_not_contains "$args" "$url" "the PR URL must not ride a decision-class toast"
+  pass "escalate_flush suppresses --open when the digest is a decision wake"
 }
 
 test_notify_off_gates_even_custom_cmd() {
@@ -824,6 +867,7 @@ test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
 test_escalate_flush_fires_notify
 test_escalate_flush_passes_open_pr_url
+test_escalate_flush_decision_class_suppresses_open
 test_notify_off_gates_even_custom_cmd
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup

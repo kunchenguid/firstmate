@@ -321,6 +321,11 @@ notify_signal_statuses() {  # <file> ...
   else
     summary="$n update(s) need your attention"
   fi
+  # The "Open PR" button is reserved for review/done-state toasts: a wake
+  # classified as a decision (needs-decision/blocked/failed wins over a done: line
+  # in the same batch) never carries --open, so the action stays consistent with
+  # the notification class instead of pointing at a different item.
+  [ "$decision" = 1 ] && open_url=""
   # The toast text is an id-free count-and-class summary (lock-screen safe), the
   # same shape the daemon emits. With a PR URL it also carries --open so the toast
   # gets the "Open PR" button. Error-isolated either way.
