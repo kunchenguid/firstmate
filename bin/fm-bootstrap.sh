@@ -6,7 +6,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "TASKS_AXI: available",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
@@ -17,9 +17,6 @@
 #          Already-current or no-instruction-change homes are silently left alone.
 #          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs for
 #          live secondmate homes; no-op/current and successful updates stay quiet.
-#          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
-#          on a feature branch instead of its default branch - a crewmate's work
-#          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -46,8 +43,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-tangle-lib.sh
-. "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -290,14 +285,6 @@ if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
-# Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
-# default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
-# primary only; detached-HEAD worktrees and secondmate homes never trip it.
-tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
-if [ -n "$tangle_branch" ]; then
-  tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
-fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

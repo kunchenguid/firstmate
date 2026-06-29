@@ -43,6 +43,11 @@ SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# Codespace backend: ship/scout crewmates live in a leased codespace, not a worktree.
+# shellcheck source=bin/fm-cs-lib.sh
+. "$SCRIPT_DIR/fm-cs-lib.sh"
+# shellcheck source=bin/fm-cs-pool.sh
+. "$SCRIPT_DIR/fm-cs-pool.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -54,6 +59,9 @@ T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+CODESPACE=$(grep '^codespace=' "$META" | cut -d= -f2- || true)
+REPO_DIR=$(grep '^repo_dir=' "$META" | cut -d= -f2- || true)
+RELAY_PID=$(grep '^relay_pid=' "$META" | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -479,6 +487,64 @@ if [ "$KIND" = secondmate ]; then
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
+fi
+
+# --- Codespace backend teardown (ship/scout crewmates leased a codespace) -----
+# cs_work_is_landed <cs> <rdir> <pr-url> - 0 when the crewmate's work is safe to
+# release: no uncommitted changes AND (HEAD reachable from a remote-tracking
+# branch, OR a merged PR whose head equals the codespace HEAD). Mirrors the
+# local landed-work contract over SSH, so releasing a created (deleted-on-release)
+# codespace never silently discards unlanded work.
+cs_work_is_landed() {
+  local cs=$1 rdir=$2 pr_url=$3 dirty unpushed head pr_state pr_head
+  dirty=$(cs_ssh "$cs" -- "cd '$rdir' && git status --porcelain 2>/dev/null | head -1" 2>/dev/null || true)
+  [ -z "$dirty" ] || return 1
+  unpushed=$(cs_ssh "$cs" -- "cd '$rdir' && git log --oneline HEAD --not --remotes -- 2>/dev/null | head -1" 2>/dev/null || true)
+  [ -z "$unpushed" ] && return 0
+  [ -n "$pr_url" ] || return 1
+  head=$(cs_ssh "$cs" -- "cd '$rdir' && git rev-parse HEAD 2>/dev/null" 2>/dev/null || true)
+  pr_state=$(_cs_gh pr view "$pr_url" --json state -q .state 2>/dev/null || true)
+  pr_head=$(_cs_gh pr view "$pr_url" --json headRefOid -q .headRefOid 2>/dev/null || true)
+  case "$pr_state" in MERGED|merged) ;; *) return 1 ;; esac
+  [ -n "$head" ] && [ "$head" = "$pr_head" ]
+}
+
+if [ -n "$CODESPACE" ]; then
+  if [ "$FORCE" != "--force" ]; then
+    if [ "$KIND" = scout ]; then
+      REPORT="$DATA/$ID/report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+        echo "The report is the work product. Have the crewmate write it (or get the captain's explicit OK to discard, then --force)." >&2
+        exit 1
+      fi
+    else
+      if ! cs_work_is_landed "$CODESPACE" "$REPO_DIR" "$PR_URL"; then
+        echo "REFUSED: codespace task $ID has work not landed (uncommitted changes, or HEAD not on a remote and no merged PR for it)." >&2
+        echo "Land its PR, push the branch, or get the captain's explicit OK to discard, then --force." >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # Best-effort: clear the crewmate's remote work files BEFORE releasing (after
+  # release a pooled codespace is stopped and a created one is gone).
+  cs_ssh "$CODESPACE" -- "rm -f \$HOME/.fm/$ID.brief.md \$HOME/.fm/$ID.run.sh \$HOME/.fm/$ID.inbox \$HOME/.fm/$ID.events" >/dev/null 2>&1 || true
+
+  # Stop the supervision relay (it also self-exits once meta is gone).
+  if [ -n "$RELAY_PID" ]; then kill "$RELAY_PID" 2>/dev/null || true; fi
+
+  # Release the lease: stop + relabel FREE (pooled) or delete (created).
+  cs_pool_release "$CODESPACE" || echo "warning: codespace release failed for $CODESPACE; lease kept for inspection" >&2
+
+  tmux kill-window -t "$T" 2>/dev/null || true
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta"
+  if [ "$KIND" != scout ]; then
+    "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
+  fi
+  echo "teardown $ID complete (window $T, codespace $CODESPACE released)"
+  backlog_refresh_reminder
+  exit 0
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then

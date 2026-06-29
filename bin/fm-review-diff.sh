@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-cs-lib.sh
+. "$SCRIPT_DIR/fm-cs-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -35,6 +37,34 @@ esac
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
+CODESPACE=$(grep '^codespace=' "$META" | cut -d= -f2- || true)
+if [ -n "$CODESPACE" ]; then
+  # Codespace crewmate: the branch lives in the codespace; diff over SSH against
+  # the authoritative origin/<default> base, mirroring the local path.
+  RDIR=$(grep '^repo_dir=' "$META" | cut -d= -f2- || true)
+  [ -n "$RDIR" ] || { echo "error: meta for task $ID is missing repo_dir=" >&2; exit 1; }
+  remote=$(cat <<EOF
+set -e
+cd '$RDIR'
+DEFAULT=\$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+[ -n "\$DEFAULT" ] || { for b in main master; do git show-ref --verify --quiet "refs/heads/\$b" && DEFAULT=\$b && break; done; }
+[ -n "\$DEFAULT" ] || { echo "error: cannot determine default branch" >&2; exit 1; }
+BRANCH='fm/$ID'
+git rev-parse --verify --quiet "refs/heads/\$BRANCH" >/dev/null || BRANCH=\$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "\$BRANCH" ] || { echo "error: branch fm/$ID missing and HEAD detached" >&2; exit 1; }
+git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT" --quiet 2>/dev/null || true
+BASE="origin/\$DEFAULT"
+git rev-parse --verify --quiet "\$BASE^{commit}" >/dev/null || BASE="\$DEFAULT"
+echo "diff base: \$BASE"
+if git diff --quiet "\$BASE...\$BRANCH" --; then echo "no changes vs \$BASE"; exit 0; fi
+git diff --stat "\$BASE...\$BRANCH" --
+if [ "$STAT_ONLY" != true ]; then echo; git diff "\$BASE...\$BRANCH" --; fi
+EOF
+)
+  cs_ssh "$CODESPACE" -- "$remote"
+  exit $?
+fi
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
