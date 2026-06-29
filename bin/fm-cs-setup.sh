@@ -28,10 +28,22 @@ MISSING=""
 note() { printf 'fm-cs-setup: %s\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# A bare `gh codespace ssh -- cmd` runs a non-login shell that lacks the
+# codespace's injected GITHUB_TOKEN and ~/.local/bin. Recover both from a login
+# shell so the auth check below is meaningful and a freshly user-installed gh is
+# visible. (The crewmate itself is always launched via `bash -lc`, so it gets
+# this environment natively; this only makes the cold-setup self-contained.)
+case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+export PATH
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  _login_tok=$(bash -lc 'printf %s "${GITHUB_TOKEN:-}"' 2>/dev/null)
+  [ -n "$_login_tok" ] && export GITHUB_TOKEN="$_login_tok"
+fi
+
 # --- baseline toolchain (preinstalled in standard codespaces; verify only) ---
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
-for t in git gh node npm curl; do
+for t in git node npm curl; do
   if have "$t"; then
     note "$t present ($("$t" --version 2>/dev/null | head -1))"
   else
@@ -39,6 +51,31 @@ for t in git gh node npm curl; do
     MISSING="$MISSING $t"
   fi
 done
+
+# --- gh CLI: not every codespace image ships it (e.g. rfeltis/vscode lacks it),
+# and the crewmate's no-mistakes pipeline needs it for PR creation. Install a
+# sudo-free user-local binary when absent (latest release resolved from the
+# GitHub redirect; pinned fallback if the redirect is unreadable). ---
+if have gh; then
+  note "gh present ($(gh --version 2>/dev/null | head -1))"
+else
+  note "installing gh (user-local binary)"
+  mkdir -p "$HOME/.local/bin"
+  gh_ver=$(curl -fsSI https://github.com/cli/cli/releases/latest 2>/dev/null \
+    | grep -i '^location:' | sed -E 's#.*/tag/v##' | tr -d '\r\n ')
+  [ -n "$gh_ver" ] || gh_ver=2.62.0
+  gh_arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+  gh_tgz="gh_${gh_ver}_linux_${gh_arch}"
+  if curl -fsSL "https://github.com/cli/cli/releases/download/v${gh_ver}/${gh_tgz}.tar.gz" 2>/dev/null \
+       | tar xz -C /tmp 2>/dev/null \
+     && cp "/tmp/${gh_tgz}/bin/gh" "$HOME/.local/bin/gh" 2>/dev/null; then
+    export PATH="$HOME/.local/bin:$PATH"
+    note "gh installed ($("$HOME/.local/bin/gh" --version 2>/dev/null | head -1))"
+  else
+    note "gh install FAILED (no-mistakes PR step will be unavailable)"
+    MISSING="$MISSING gh"
+  fi
+fi
 
 if have node; then
   node_v=$(node --version 2>/dev/null | sed 's/^v//')
