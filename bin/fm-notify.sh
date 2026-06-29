@@ -122,7 +122,9 @@ _fm_notify_pane_file() {
 # _b64_utf16: base64 of the UTF-16LE bytes of a string. The toast title/message
 # are passed to PowerShell this way (decoded inside) so arbitrary text - including
 # an escalation summary - can never break out of the script or need quoting.
-_b64_utf16() { printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w0 2>/dev/null; }
+# `base64 | tr -d '\n'` instead of GNU-only `base64 -w0`: BSD/macOS base64 has no
+# -w flag, and stripping newlines yields the same single-line output everywhere.
+_b64_utf16() { printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 2>/dev/null | tr -d '\n'; }
 
 # _xml_escape: escape the five XML metacharacters so a value is safe inside an XML
 # attribute. The "Open PR" action's URL is interpolated into the toast XML as an
@@ -229,7 +231,7 @@ fm_notify_windows() {
   command -v iconv >/dev/null 2>&1 || return 0
   command -v base64 >/dev/null 2>&1 || return 0
   ps=$(_build_windows_ps "$title" "$msg" "$focus" "$open_url")
-  enc=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w0 2>/dev/null) || return 0
+  enc=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 2>/dev/null | tr -d '\n') || return 0
   [ -n "$enc" ] || return 0
   _run_bg powershell.exe -NoProfile -NonInteractive -EncodedCommand "$enc"
 }
@@ -398,7 +400,7 @@ fm_notify_record_pane() {
 # Prints a short human summary. The launcher and protocol command carry no captain
 # secrets; only local filesystem paths.
 fm_notify_install() {
-  local self_dir focus_sh pane_file platform
+  local self_dir focus_sh pane_file platform home
   self_dir=$(_fm_notify_self_dir)
   focus_sh="$self_dir/fm-focus.sh"
 
@@ -426,7 +428,7 @@ fm_notify_install() {
   command -v cmd.exe   >/dev/null 2>&1 || { printf 'fm-notify: cmd.exe not found - cannot resolve %%LOCALAPPDATA%%\n' >&2; return 1; }
 
   # Resolve a stable Windows-accessible launcher dir under %LOCALAPPDATA%.
-  local appdata_win appdata_wsl vbs_dir vbs_wsl vbs_win wsl_cmd
+  local appdata_win appdata_wsl vbs_dir vbs_wsl vbs_win wsl_cmd vbs_focus vbs_home vbs_distro
   appdata_win=$(cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r\n')
   [ -n "$appdata_win" ] || { printf 'fm-notify: could not resolve %%LOCALAPPDATA%%\n' >&2; return 1; }
   appdata_wsl=$(wslpath -u "$appdata_win" 2>/dev/null)
@@ -437,12 +439,19 @@ fm_notify_install() {
 
   # The hidden launcher: window style 0 so no console flashes. Pin the distro so a
   # multi-distro host still reaches the right bash, and run fm-focus.sh in the
-  # firstmate distro. focus_sh is wrapped in VBS-escaped double quotes ("") so a
-  # checkout path containing spaces reaches bash as a single argument.
+  # firstmate distro under the SAME FM_HOME that armed the pane file - so a custom
+  # home clicks into the pane it recorded, matching the macOS/Linux backends which
+  # also pass FM_HOME through. The distro, FM_HOME, and focus_sh are each
+  # VBS-escaped (embedded " -> "") and wrapped in VBS double quotes, so a distro
+  # name or checkout path containing spaces reaches wsl.exe/bash as one argument.
+  home=$(_fm_notify_home)
+  vbs_focus=${focus_sh//\"/\"\"}
+  vbs_home=${home//\"/\"\"}
   if [ -n "${WSL_DISTRO_NAME:-}" ]; then
-    wsl_cmd="wsl.exe -d ${WSL_DISTRO_NAME} -e bash \"\"${focus_sh}\"\""
+    vbs_distro=${WSL_DISTRO_NAME//\"/\"\"}
+    wsl_cmd="wsl.exe -d \"\"${vbs_distro}\"\" -e env FM_HOME=\"\"${vbs_home}\"\" bash \"\"${vbs_focus}\"\""
   else
-    wsl_cmd="wsl.exe -e bash \"\"${focus_sh}\"\""
+    wsl_cmd="wsl.exe -e env FM_HOME=\"\"${vbs_home}\"\" bash \"\"${vbs_focus}\"\""
   fi
   printf 'CreateObject("WScript.Shell").Run "%s", 0, False\r\n' "$wsl_cmd" > "$vbs_wsl" \
     || { printf 'fm-notify: could not write the launcher %s\n' "$vbs_wsl" >&2; return 1; }
@@ -471,6 +480,7 @@ fm_notify_install() {
 # Entry point.
 # ---------------------------------------------------------------------------
 fm_notify_main() {
+  local usage='usage: fm-notify.sh "<title>" "<message>" [--focus|--no-focus] [--open <url>]  |  fm-notify.sh install'
   # Subcommand: arm click-to-focus (protocol + launcher + pane id).
   case "${1:-}" in
     install|ensure|--install) fm_notify_install; return $? ;;
@@ -484,8 +494,17 @@ fm_notify_main() {
     case "$1" in
       --focus) focus=1 ;;
       --no-focus) focus=0 ;;
-      --open) shift; open_url=${1:-} ;;
-      --open=*) open_url=${1#--open=} ;;
+      --open)
+        # --open requires a following URL; reject a bare --open instead of
+        # silently dropping the button and reporting success.
+        [ $# -ge 2 ] || { echo "$usage" >&2; return 2; }
+        shift
+        open_url=$1
+        ;;
+      --open=*)
+        open_url=${1#--open=}
+        [ -n "$open_url" ] || { echo "$usage" >&2; return 2; }
+        ;;
       --) shift; break ;;
       *)
         case $nargs in
@@ -503,8 +522,10 @@ fm_notify_main() {
     nargs=$((nargs + 1)); shift
   done
 
-  if [ -z "$title" ]; then
-    echo "usage: fm-notify.sh \"<title>\" \"<message>\" [--focus|--no-focus] [--open <url>]  |  fm-notify.sh install" >&2
+  # The documented usage requires BOTH a title and a message; reject either
+  # missing so a miswired notifier call fails fast instead of looking successful.
+  if [ -z "$title" ] || [ -z "$msg" ]; then
+    echo "$usage" >&2
     return 2
   fi
 

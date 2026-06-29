@@ -80,12 +80,18 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# Portable base64 codec so this suite runs on BSD/macOS too, not just GNU/Linux:
+# GNU uses `-d`/`-w0`, BSD uses `-D` and wraps differently. Decode tries `-d` then
+# falls back to `-D`; encode strips newlines after a flagless base64.
+b64_decode() { local d; d=$(cat); printf '%s' "$d" | base64 -d 2>/dev/null || printf '%s' "$d" | base64 -D 2>/dev/null; }
+b64_encode_oneline() { base64 2>/dev/null | tr -d '\n'; }
+
 # Decode fm-notify's PowerShell -EncodedCommand back to UTF-8 text. The arg after
 # -EncodedCommand in the NUL-delimited log is base64 of the UTF-16LE script.
 decode_encoded_command() {
   local log=$1 enc
   enc=$(tr '\0' '\n' < "$log" | awk 'p{print;exit} /^-EncodedCommand$/{p=1}')
-  printf '%s' "$enc" | base64 -d 2>/dev/null | iconv -f UTF-16LE -t UTF-8 2>/dev/null
+  printf '%s' "$enc" | b64_decode | iconv -f UTF-16LE -t UTF-8 2>/dev/null
 }
 
 # --- platform detection -----------------------------------------------------
@@ -113,10 +119,10 @@ test_enabled_toggle() {
   for v in '' on On weird; do
     FM_NOTIFY="$v" fm_notify_enabled || fail "FM_NOTIFY='$v' should be enabled"
   done
-  for v in off OFF 0 false no disabled; do
+  for v in off OFF 0 false no disable disabled; do
     FM_NOTIFY="$v" fm_notify_enabled && fail "FM_NOTIFY='$v' should be disabled"
   done
-  pass "fm_notify_enabled: on by default, disabled by off/0/false/no/disabled"
+  pass "fm_notify_enabled: on by default, disabled by off/0/false/no/disable/disabled"
 }
 
 # --- argument handling ------------------------------------------------------
@@ -127,6 +133,29 @@ test_missing_title_usage() {
   expect_code 2 "$rc" "no args should exit 2"
   assert_contains "$out" "usage: fm-notify.sh" "missing-title did not print usage"
   pass "fm-notify: missing title prints usage and exits 2"
+}
+
+test_missing_message_usage() {
+  # The documented usage requires BOTH a title and a message; a title-only call is
+  # an incomplete invocation and must fail fast instead of looking successful.
+  local out rc
+  out=$(bash "$NOTIFY" "only a title" 2>&1); rc=$?
+  expect_code 2 "$rc" "title-only should exit 2"
+  assert_contains "$out" "usage: fm-notify.sh" "missing-message did not print usage"
+  pass "fm-notify: a title with no message prints usage and exits 2"
+}
+
+test_open_without_url_rejected() {
+  # --open with no following URL is a miswired call: reject it (exit 2 + usage)
+  # rather than silently dropping the button and reporting success.
+  local out rc
+  out=$(bash "$NOTIFY" "Firstmate" "ready" --open 2>&1); rc=$?
+  expect_code 2 "$rc" "--open with no URL should exit 2"
+  assert_contains "$out" "usage: fm-notify.sh" "--open with no URL did not print usage"
+  # The --open=<empty> form is rejected the same way.
+  out=$(bash "$NOTIFY" "Firstmate" "ready" --open= 2>&1); rc=$?
+  expect_code 2 "$rc" "--open= (empty) should exit 2"
+  pass "fm-notify: --open with no URL is rejected (exit 2), not silently dropped"
 }
 
 test_off_short_circuits_dispatch() {
@@ -393,8 +422,8 @@ test_title_message_carried_as_base64_not_injected() {
   PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=MINGW64_NT-10.0 \
     bash "$NOTIFY" "$title" "$msg" || fail "windows inject-case exited non-zero"
   ps=$(decode_encoded_command "$log")
-  tb=$(printf '%s' "$title" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
-  mb=$(printf '%s' "$msg" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+  tb=$(printf '%s' "$title" | iconv -f UTF-8 -t UTF-16LE | b64_encode_oneline)
+  mb=$(printf '%s' "$msg" | iconv -f UTF-8 -t UTF-16LE | b64_encode_oneline)
   assert_contains "$ps" "FromBase64String('$tb')" "title not carried as base64"
   assert_contains "$ps" "FromBase64String('$mb')" "message not carried as base64"
   assert_not_contains "$ps" "Remove-Item C:\\ -Recurse" "raw dangerous text leaked into the script"
@@ -506,13 +535,17 @@ SH
   assert_contains "$reg" 'wscript.exe //B //Nologo "C:\fake\fm-launch.vbs" "%1"' "open command not wired to the launcher"
   vbs=$(cat "$dir/appdata/firstmate/fm-launch.vbs")
   assert_contains "$vbs" 'WScript.Shell' "launcher is not a WScript.Shell .Run"
-  assert_contains "$vbs" 'wsl.exe -d TestDistro -e bash' "launcher does not pin the distro and run bash"
+  # The distro is pinned AND VBS-quoted ("") so a name with spaces survives.
+  assert_contains "$vbs" 'wsl.exe -d ""TestDistro"" -e env' "launcher does not pin and quote the distro"
   assert_contains "$vbs" ', 0, False' "launcher does not run hidden (window style 0)"
+  # The launcher passes the SAME FM_HOME that armed the pane file, so a custom
+  # home clicks into the pane it recorded (not the repo-root default).
+  assert_contains "$vbs" "FM_HOME=\"\"$home\"\"" "launcher does not preserve FM_HOME for the recorded pane"
   focus_sh="$ROOT/bin/fm-focus.sh"
   # The fm-focus.sh path is wrapped in VBS-escaped quotes ("") so a checkout path
   # with spaces still reaches bash as one argument.
-  assert_contains "$vbs" "-e bash \"\"$focus_sh\"\"" "launcher does not quote the fm-focus.sh path for spaces"
-  pass "fm_notify_install registers the firstmate: protocol + hidden launcher (quoted path) on WSL"
+  assert_contains "$vbs" "bash \"\"$focus_sh\"\"" "launcher does not quote the fm-focus.sh path for spaces"
+  pass "fm_notify_install registers the firstmate: protocol + hidden launcher (FM_HOME-preserving, quoted) on WSL"
 }
 
 test_install_fails_when_any_registry_write_fails() {
@@ -555,6 +588,8 @@ SH
 test_platform_detection
 test_enabled_toggle
 test_missing_title_usage
+test_missing_message_usage
+test_open_without_url_rejected
 test_off_short_circuits_dispatch
 test_linux_persistent_plain_when_no_action_support
 test_linux_action_when_supported
