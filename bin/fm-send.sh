@@ -5,6 +5,12 @@
 #   this home's state/<id>.meta, or explicit session:window.
 # Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
 #
+# Codespace crewmates: when the target's meta records codespace=, the crewmate is
+# a headless driver loop inside a leased codespace that reads steers from a remote
+# inbox file, not the pane stdin. fm-send appends the steer to that inbox via
+# cs_send_steer (bin/fm-cs-lib.sh) and the driver resumes the harness session;
+# --key is rejected for such targets (no interactive composer).
+#
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
 # Enter is positively confirmed (the text is still sitting in the composer after
@@ -88,6 +94,33 @@ case "$RAW_TARGET" in
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
       TARGET_HARNESS=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    fi
+    ;;
+esac
+
+# Codespace crewmate steering: a ship/scout crewmate runs a headless driver loop
+# INSIDE its leased codespace, which reads steers from a remote inbox file (not
+# the pane's stdin), so tmux send-keys would not reach it. Append the steer to
+# that remote inbox via cs_send_steer; the driver resumes the harness session.
+# Only a bare fm-<id> target whose meta records codespace= takes this path; the
+# --key path has no meaning for a non-interactive driver and is rejected.
+case "$RAW_TARGET" in
+  fm-*)
+    cs_meta="$STATE/${RAW_TARGET#fm-}.meta"
+    if [ -f "$cs_meta" ]; then
+      CS=$(grep '^codespace=' "$cs_meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      if [ -n "$CS" ]; then
+        if [ "${1:-}" = "--key" ]; then
+          echo "error: --key is not supported for codespace crewmate $RAW_TARGET (headless driver, no interactive composer)" >&2
+          exit 1
+        fi
+        # shellcheck source=bin/fm-cs-lib.sh
+        . "$SCRIPT_DIR/fm-cs-lib.sh"
+        cs_send_steer "$CS" "${RAW_TARGET#fm-}" "$*" || {
+          echo "error: could not append steer to codespace inbox for $RAW_TARGET" >&2; exit 1; }
+        echo "steered $RAW_TARGET via codespace inbox"
+        exit 0
+      fi
     fi
     ;;
 esac

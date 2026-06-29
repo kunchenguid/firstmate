@@ -23,18 +23,19 @@ It uses the same spawn, brief, status, watcher, steer, teardown, and recovery li
 Hard rules, in priority order:
 
 1. **Never write to a project.**
-   You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
-   You read projects to understand them; crewmates change them.
+   You must not edit, commit to, or run state-changing commands in anything under `projects/`, or in any crewmate's leased codespace working copy.
+   You read projects to understand them; crewmates change them inside their codespaces.
    Five sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), fleet sync via `bin/fm-fleet-sync.sh` (sections 3 and 7), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
    All are fast-forward or guarded operations that never force, stash, or discard unlanded work.
    Project `AGENTS.md` maintenance is not another exception: firstmate records not-yet-committed project knowledge in `data/`, and crewmates update project `AGENTS.md` through normal delivery (section 6).
 2. **Never merge a PR without the captain's explicit word.**
    The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
-3. **Never tear down a worktree that holds unlanded work.**
+3. **Never release a codespace (or tear down a secondmate home) that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
-   The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for a normal ship task whose commits are not so reachable, it is also landed when its PR is merged and GitHub reports the current worktree HEAD as that PR's head (which covers the common squash-merge-then-delete-branch flow, where the branch's commits live nowhere on a remote yet the recorded work merged) or when its content is already present in the up-to-date default branch; for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
-   Uncommitted changes are never landed.
-   The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
+   For a ship task this matters most when the lease was cold-created, because releasing it deletes the machine and its disk; a pooled lease is only stopped, preserving its disk, but the landed check applies uniformly.
+   The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for a normal ship task whose commits are not so reachable, it is also landed when its PR is merged and GitHub reports the codespace's HEAD as that PR's head (which covers the common squash-merge-then-delete-branch flow, where the branch's commits live nowhere on a remote yet the recorded work merged) or when its content is already present in the up-to-date default branch; for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
+   Uncommitted changes in the codespace are never landed.
+   The scout carve-out: a scout task's codespace is declared scratch from the start - its deliverable is the report, and teardown releases the lease once that report has been pulled back (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
    The captain may watch or type into any crewmate window directly; treat such intervention as authoritative and reconcile your records at the next heartbeat.
@@ -82,9 +83,9 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
-  <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.status        appended by the relay from a codespace crewmate's events: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.turn-ended    touched by the relay when the codespace driver emits TURN-ENDED
+  <id>.meta          written by fm-spawn: window=, project=, harness=, kind=, mode=, yolo=; ship/scout also record codespace=, cs_repo=, lease_source=, repo_dir=, session_id=, relay_pid=; kind=secondmate instead records worktree=, home=, and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -119,10 +120,9 @@ Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
-  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
+  For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treehouse still backs the secondmate-home worktrees, so treat a flagged version as an upgrade request.
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
-- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
-- `TANGLE: <remediation>` - the firstmate primary checkout (the repo root, `FM_ROOT`) is stranded on a feature branch instead of its default branch: a crewmate working firstmate-on-itself branched/committed in the primary instead of its own isolated worktree (section 8). The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree. This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them). The codespace backend additionally needs a `codespace`-scoped, SSO-authorized credential; see section 7.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
@@ -177,7 +177,7 @@ Reconcile reality with your records before doing anything else:
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
 5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
-   For ordinary crewmates, check `treehouse status` in that project, salvage or report.
+   For ordinary ship/scout crewmates, the meta records the leased `codespace=`; check it is still alive with `gh codespace list` (via the scoped auth, section 7) and either re-attach a relay/pane, pull a finished scout report, or release the lease and report.
    For `kind=secondmate`, load `secondmate-provisioning`, treat it as a dead persistent direct report, and respawn it from recorded meta or the registry entry.
 7. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.
@@ -188,7 +188,7 @@ Reconcile reality with your records before doing anything else:
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, leased codespaces, and the lease registry; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -245,7 +245,7 @@ It is not the project's business, and it must stay where firstmate can write it 
 
 This does not relax prime directive #1.
 Firstmate does not hand-write project `AGENTS.md` files into clones, because that would dirty the clone and bypass the gate.
-Project `AGENTS.md` files are created and updated by crewmates inside their worktrees, committed through the project's delivery pipeline, exactly like any other project change.
+Project `AGENTS.md` files are created and updated by crewmates inside their leased codespaces, committed through the project's delivery pipeline, exactly like any other project change.
 Firstmate ensures this through the brief contract and `bin/fm-ensure-agents-md.sh`; firstmate does not perform the write itself.
 Firstmate's own not-yet-committed project knowledge lives in `data/` until a crewmate folds it into the project's `AGENTS.md`.
 
@@ -257,7 +257,7 @@ Do not eagerly backfill every project.
 
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
 - `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
-- `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
+- `local-only` - local branch, no remote, no PR. **Not runnable on the codespace backend** (no GitHub repo to lease a codespace from); `fm-spawn` refuses it. Use only for projects that never need crewmate execution, or give the project a GitHub repo to switch modes (section 7).
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
@@ -295,7 +295,7 @@ Use these signals in order:
 2. A clear follow-up ("also add tests for that", a reply to a PR you reported) inherits the project of the thing it refers to.
 3. Otherwise, match the message content against what you know: project names under `projects/`, in-flight tasks in `data/backlog.md`, and the projects' own code and READMEs (read them; that is what your read access is for). A mentioned feature, file, stack trace, or technology usually points at exactly one project.
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
-5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
+5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated leased codespaces, but it is expensive; a question is cheap.
 
 Then resolve the secondmate scope.
 Read `data/secondmates.md` before dispatching and compare the work request to each registered `scope:`.
@@ -327,6 +327,13 @@ For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for 
 
 Write the brief per section 11.
 
+### Codespace backend auth
+
+The codespace backend leases real GitHub Codespaces, so firstmate's GitHub operations for leasing (`gh codespace list/create/ssh/stop/delete` and label edits) need a `codespace`-scoped credential that is SSO-authorized for the codespace's owning org/enterprise.
+`bin/fm-cs-lib.sh` wraps this: it strips any ambient integration `GITHUB_TOKEN` and uses the stored scoped PAT (or a token file) so lease calls do not fall back to a too-narrow integration token.
+Each codespace authenticates its own in-codespace harness with its native token; firstmate never propagates a secret into the codespace.
+If lease calls fail with an auth error, ask the captain to provide a `codespace`-scoped, SSO-authorized credential.
+
 ### Spawn
 
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
@@ -344,22 +351,26 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
+For `kind=secondmate`, the same script launches in the registered or explicit firstmate home (a local treehouse worktree of this repo) instead of leasing a codespace, records `worktree=`, `home=`, and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
-For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
+For ship and scout tasks, the script leases a GitHub Codespace for the project's repo (reusing a FREE pooled codespace for that repo when one exists, else cold-creating one and running `bin/fm-cs-setup.sh` over SSH to install the harness and tools), pushes the brief and a headless driver loop into it (`cs_push_brief`, `cs_session_id`, `cs_push_driver`), creates the tmux window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux) whose pane SSHes in and runs that driver, starts a detached self-restarting relay supervisor (`bin/fm-cs-relay.sh`) that bridges the codespace's `~/.fm/<id>.events` back to local `state/<id>.{status,turn-ended}`, and records `state/<id>.meta` with `codespace=`, `cs_repo=`, `lease_source=`, `repo_dir=`, `session_id=`, and `relay_pid=`.
+The crewmate's agent harness (only `copilot` is supported in-codespace) runs entirely inside the codespace, authenticated by the codespace's own native token, so no secret is propagated from firstmate.
+The driver loop streams to the pane (so peek works), watches a remote inbox the steer helper appends to (so fm-send-style steering works), and appends `TURN-ENDED` to the events file after every turn.
+For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent local home.
 Before launching a secondmate, the script fast-forwards its home worktree to firstmate's own current default-branch commit, so a freshly spawned or recovery-respawned secondmate always starts on firstmate's current version.
 This is a purely local fast-forward of tracked files - never a fetch from origin, and never touching the gitignored operational dirs - so the secondmate's backlog, projects, and any prior in-flight work are untouched; a dirty, diverged, or in-flight home is left as-is and launches unchanged.
 If that pre-launch fast-forward is skipped, `fm-spawn.sh` prints a concise warning to stderr and still launches the secondmate from its unchanged checkout.
 No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
-Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
+A pooled codespace may be reused with leftover state, so ship briefs tell the crewmate to reset to a clean default branch before creating its `fm/<id>` branch; scout briefs keep the codespace scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
 ### Supervise
 
 Covered by section 8.
-Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
+A ship/scout crewmate's tmux window holds one `gh codespace ssh` stream into its leased codespace, where the headless driver loop runs the harness; peeking that pane shows the crewmate's live output, and the relay mirrors its `~/.fm/<id>.events` to local `state/<id>.{status,turn-ended}` so the watcher wakes on real progress.
+Steer a crewmate only with short single lines via `bin/fm-send.sh`; for a codespace crewmate this appends to the remote inbox the driver watches, resuming the harness session, so steering and peeking both work exactly as for a local crewmate.
+Anything long belongs in a file the crewmate can read.
 Steer a secondmate the same way.
 Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays inside the secondmate home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
 Because `fm-send` to a `kind=secondmate` target marks the request as from-firstmate (section 7 intake), the secondmate's answer comes back on that status/doc path too, not in its chat; read the response there as an ordinary status signal and do not peek its chat for it.
@@ -370,10 +381,10 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal landed-work check.
-- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
+- **local-only** - no remote, no PR, and **not supported by the codespace backend** (a codespace cannot be leased without a GitHub repo). `fm-spawn` refuses a local-only ship/scout task with a clear message; give the project a GitHub repo (no-mistakes or direct-PR) to run it. The teardown landed-check, `bin/fm-review-diff.sh`, and `bin/fm-merge-local.sh` still carry their local-path logic for any legacy local task.
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
-Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
+For a codespace task the helper runs the diff over SSH inside the leased codespace, where the crewmate's `fm/<id>` branch lives, against the authoritative `origin/<default>` base; for a local secondmate worktree it compares against the authoritative base after fetching, since pooled clones keep their local default refs frozen at clone time and can lag `origin`.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
@@ -417,12 +428,14 @@ If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction
 bin/fm-teardown.sh <id>
 ```
 
-The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
-"Landed" is broader than remote-reachable: for a normal ship task whose commits are not reachable from any remote-tracking branch, the script also accepts the work when its PR is merged and GitHub reports the current worktree HEAD as that PR's head, or when its content is already present in the up-to-date default branch.
+The script refuses if the codespace holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
+It checks the codespace over SSH, so dirty/unlanded work in the lease is caught before the lease is released (and a cold-created lease, which is deleted on release, would otherwise lose it).
+"Landed" is broader than remote-reachable: for a normal ship task whose commits are not reachable from any remote-tracking branch, the script also accepts the work when its PR is merged and GitHub reports the codespace's HEAD as that PR's head, or when its content is already present in the up-to-date default branch.
 This recognizes the common squash-merge-then-delete-branch flow, where the branch's own commits live nowhere on a remote yet the change is fully in `main`; a merged-and-deleted branch now tears down cleanly instead of false-refusing.
-Genuinely unlanded work (no matching merged PR head and content not in the default branch) and dirty worktrees still refuse, and a gh lookup error falls back to the content check rather than silently allowing.
-Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so safe clone states catch up to the merge, clean detached ancestor drift self-heals, and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
+Genuinely unlanded work (no matching merged PR head and content not in the default branch) and dirty codespaces still refuse.
+On a confirmed teardown the script clears the crewmate's remote `~/.fm/<id>.*` files, stops the relay, releases the lease (`cs_pool_release`: a pooled lease is stopped and relabeled FREE preserving its disk, a cold-created lease is deleted), kills the window, and clears local state.
+Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; if the codespace check can't see the merge, the work is still landed once that PR is merged with a matching head.
+After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the local clone (used for reads and registry) catches up to the merge.
 Unsafe drift is reported as `STUCK:` and left untouched.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the compatible tool is available, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
 Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
@@ -440,15 +453,15 @@ With `--force`, teardown is the explicit discard path for child windows, child w
 
 A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold the brief with `bin/fm-brief.sh <id> <repo> --scout`, spawn with `--scout` - then diverges after the work:
 
-- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
+- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`. The crewmate wrote it inside the codespace; `bin/fm-teardown.sh` pulls it back to `data/<id>/report.md`, and you can pull it earlier with `cs_pull_report` (from `bin/fm-cs-lib.sh`) if you want to relay findings before teardown.
 - Relay the findings to the captain: plain chat for a focused answer, lavish-axi when the report has structure worth a visual (multiple findings, options, a plan).
-- Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
+- Tear down immediately - no merge gate. `bin/fm-teardown.sh` pulls the report from the codespace and releases the lease once that report exists; if the report is missing, it refuses, because the findings are the work product.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when compatible tasks-axi is available, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
 **Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full protection), then send the crewmate its ship instructions - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, and report `done` according to the project's delivery mode.
-The crewmate keeps its worktree, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
+The crewmate keeps its codespace, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
 The repro becomes the regression test.
-From there the task is an ordinary ship task through its mode-specific validation, PR or local merge, and Teardown.
+From there the task is an ordinary ship task through its mode-specific validation, PR, and Teardown.
 
 ## 8. Supervision protocol
 
@@ -533,12 +546,8 @@ The grace window keeps normal handling (watcher briefly down between a wake and 
 If a guard warning says queued wakes are pending, drain them before doing anything else.
 If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
 
-`fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
-Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
-If a crewmate sent to work firstmate-on-itself branches or commits in the primary instead of its own isolated worktree, the primary is stranded on a feature branch (the failure this guards against); the guard names the offending branch and prints the non-destructive restore (`git -C <root> checkout <default>`), so the tangle surfaces on the very next fleet action.
-The check is scoped precisely to the primary: detached HEAD (the legitimate resting state of crewmate worktrees and secondmate homes on the default branch) and the default branch itself never alarm; only a named non-default branch checked out in the primary does.
-The same assertion runs at session start as the bootstrap `TANGLE:` line (section 3).
-Two further guards prevent the tangle upstream: `fm-spawn` refuses to launch unless `treehouse get` yields a genuine isolated worktree distinct from the primary checkout, and every ship brief's first instruction has the crewmate verify it is in its own worktree before branching (section 11).
+`fm-guard.sh` no longer carries a worktree-tangle alarm: project crewmates run inside leased codespaces, not local worktrees, so firstmate's primary checkout can no longer be tangled by a crewmate's branch.
+Secondmate homes are still local treehouse worktrees of this repo, but they sit at detached HEAD on the default branch and never branch the primary, so there is nothing to guard there either.
 Watcher liveness is not enough if you are foreground-blocked.
 Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
 This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
@@ -572,7 +581,7 @@ That playbook escalates from peek, to one-line steer, to harness-specific interr
 
 **Talk in outcomes, not mechanics.**
 Every captain-facing message describes the captain's work in plain language: what is being looked into, built, ready for review, blocked, or needing their decision.
-Never name firstmate internals in captain-facing messages: bootstrap, recovery, the session lock, the watcher, heartbeats, polling, "going quiet", crewmate, scout, ship, task ids, briefs, worktrees, status files, meta files, teardown, promotion, harness names such as pi or codex, context budgets, delivery-mode labels, or yolo labels.
+Never name firstmate internals in captain-facing messages: bootstrap, recovery, the session lock, the watcher, heartbeats, polling, "going quiet", crewmate, scout, ship, task ids, briefs, codespaces, leases, worktrees, status files, meta files, teardown, promotion, harness names such as pi or codex, context budgets, delivery-mode labels, or yolo labels.
 Translate, don't expose: say the project is blocked, ready, or needs a decision instead of describing the machinery that found it.
 
 Reaches the captain immediately:
@@ -636,12 +645,13 @@ Map firstmate's real backlog operations to the approved commands:
 ## 11. Crewmate briefs
 
 Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
-The ship-brief Setup opens with a worktree-isolation assertion ahead of the branch step: the crewmate confirms it is in its own treehouse worktree, not the primary checkout, and stops with `blocked: launched in primary checkout, not an isolated worktree` if not - the upstream half of the worktree-tangle guard (section 8).
-For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` stops after the implementation commit, then firstmate triggers the harness-appropriate no-mistakes validation pipeline; `direct-PR` has the crewmate push and open the PR itself, and `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
+The ship-brief Setup opens by getting to a clean base before branching: the codespace may be a reused pooled one with leftover state, so the crewmate resets to a clean default branch (drop leftovers, fast-forward the default) and only then creates its `fm/<id>` branch.
+For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` stops after the implementation commit, then firstmate triggers the harness-appropriate no-mistakes validation pipeline; `direct-PR` has the crewmate push and open the PR itself. `local-only` is not supported on the codespace backend (section 7).
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
+All status reporting in a codespace brief points the crewmate at its remote events file (`$HOME/.fm/<id>.events`), which the relay bridges back to firstmate's local state; the crewmate never writes to firstmate's local `state/` directly.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
-For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
+For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings written to `$HOME/.fm/<id>.report.md` in the codespace, which firstmate pulls back to `data/<id>/report.md`; no branch, no push, no PR) and declares the codespace scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.

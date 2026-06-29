@@ -369,6 +369,19 @@ fi
 # tmux pane that holds one `gh codespace ssh` stream. No local worktree, so the
 # worktree/treehouse/isolation/turn-end-hook machinery below is secondmate-only.
 if [ "$KIND" != secondmate ]; then
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOFM
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOFM
+
+  # local-only projects have no GitHub remote, so a codespace cannot be leased
+  # for them. The codespace backend does not support local-only execution.
+  if [ "$MODE" = local-only ]; then
+    echo "error: project $PROJ_NAME is local-only (no github remote); the codespace backend cannot lease a codespace for it." >&2
+    echo "Give the project a github repo (no-mistakes or direct-PR mode) to run it on the codespace backend." >&2
+    exit 1
+  fi
+
   REPO=$(cs_repo_for_project "$PROJ_ABS") || {
     echo "error: cannot resolve a github origin for project $PROJ_ABS; the codespace backend needs a github repo" >&2; exit 1; }
 
@@ -384,11 +397,6 @@ if [ "$KIND" != secondmate ]; then
   cs_push_brief "$CS" "$ID" "$BRIEF" >/dev/null || { echo "error: could not push brief to $CS" >&2; exit 1; }
   SID=$(cs_session_id)
   RRUN=$(cs_push_driver "$CS" "$ID" "$RDIR" "$SID" "$HARNESS") || { echo "error: could not push driver to $CS" >&2; exit 1; }
-
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOFM
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOFM
 
   # Window: a local pane that SSHes into the codespace and runs the driver loop.
   tmux new-window -d -t "$SES" -n "$W" -c "$FM_HOME"
