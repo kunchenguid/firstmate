@@ -353,13 +353,22 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS")
+# Pin the window name. The captain's tmux may have automatic-rename/allow-rename on,
+# which would rename the window away from fm-<id> once treehouse cd's into the worktree,
+# breaking firstmate's name-based targeting ($SES:$W). Disable both on this window.
+tmux set-window-option -t "$WID" automatic-rename off 2>/dev/null || true
+tmux set-window-option -t "$WID" allow-rename off 2>/dev/null || true
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  tmux send-keys -t "$WID" 'treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Target the stable window id, not the name: if the name is ever lost (e.g. an
+  # automatic-rename slips through), display-message -t <bad-name> falls back to the
+  # active client's window, which would misread firstmate's OWN pane path as the
+  # worktree and tangle a hook into the primary checkout. The window id never lies.
   for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    p=$(tmux display-message -p -t "$WID" '#{pane_current_path}' 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
