@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+# Tests for the secondmate-vs-crewmate harness split and the primary->secondmate
+# inheritable-config propagation.
+#
+# Two capabilities are under test:
+#   A) Harness split. config/secondmate-harness sets the harness the PRIMARY uses
+#      to launch SECONDMATE agents, independent of config/crew-harness (the
+#      crewmate harness). fm-harness.sh secondmate resolves the fallback chain
+#      config/secondmate-harness -> config/crew-harness -> own; an absent or
+#      "default" secondmate-harness behaves exactly as the crew harness did before
+#      this knob existed (full backward-compat). fm-spawn.sh resolves a secondmate
+#      launch through that mode, durably (every respawn re-resolves), while an
+#      explicit per-spawn harness arg still wins.
+#   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
+#      (gitignored) config items - config/crew-harness today - down into each
+#      secondmate home's config/, so the secondmate's OWN crewmates inherit the
+#      primary's settings. It is primary-authoritative (re-pushed at secondmate
+#      spawn and on the bootstrap secondmate sweep) and config/secondmate-harness
+#      is deliberately NOT inherited (secondmates do not spawn secondmates).
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$ROOT/bin/fm-config-inherit-lib.sh"
+
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+fm_git_identity fmtest fmtest@example.com
+TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
+
+# ===========================================================================
+# A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
+# ===========================================================================
+# detect_own is pinned to claude via CLAUDECODE=1 so the "fall through to own"
+# cases are reproducible. Each row sets crew-harness / secondmate-harness in a
+# fresh config dir (a literal '-' means leave the file absent) and asserts BOTH
+# the secondmate resolution AND that crew resolution is unchanged (backward-compat).
+#   <label>^<crew-harness>^<secondmate-harness>^<expect-secondmate>^<expect-crew>
+test_harness_resolution() {
+  local label crew sm exp_sm exp_crew case_dir cfg got_sm got_crew n
+  n=0
+  while IFS='^' read -r label crew sm exp_sm exp_crew; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/harness-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    [ "$crew" = "-" ] || printf '%s\n' "$crew" > "$cfg/crew-harness"
+    [ "$sm" = "-" ] || printf '%s\n' "$sm" > "$cfg/secondmate-harness"
+    got_sm=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+    got_crew=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
+    [ "$got_sm" = "$exp_sm" ] || fail "$label: secondmate resolved '$got_sm', expected '$exp_sm'"
+    [ "$got_crew" = "$exp_crew" ] || fail "$label: crew resolved '$got_crew', expected '$exp_crew'"
+  done <<'ROWS'
+both absent -> own (backward-compat)^-^-^claude^claude
+crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
+crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
+crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
+secondmate=default defers to crew^codex^default^codex^codex
+crew=default resolves to own, secondmate follows^default^-^claude^claude
+secondmate=default with crew absent -> own^-^default^claude^claude
+ROWS
+  pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
+}
+
+# ===========================================================================
+# B) propagate_inheritable_config unit behavior
+# ===========================================================================
+test_propagate_lib() {
+  local d src dest m1 m2
+  d="$TMP_ROOT/prop-lib"
+  src="$d/src"
+  dest="$d/dest"
+  mkdir -p "$src" "$dest"
+
+  # 1. present source is copied
+  printf 'codex\n' > "$src/crew-harness"
+  propagate_inheritable_config "$src" "$dest" || fail "propagate returned non-zero"
+  [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
+
+  # 2. idempotent: an unchanged re-run does not churn the mtime
+  m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
+  sleep 1
+  propagate_inheritable_config "$src" "$dest"
+  m2=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
+  [ "$m1" = "$m2" ] || fail "idempotent re-run churned mtime ($m1 -> $m2)"
+
+  # 3. a changed source value converges downstream
+  printf 'claude\n' > "$src/crew-harness"
+  propagate_inheritable_config "$src" "$dest"
+  [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
+
+  # 4. removing the source mirrors absence downstream (primary-authoritative)
+  rm -f "$src/crew-harness"
+  propagate_inheritable_config "$src" "$dest"
+  [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
+
+  # 5. secondmate-harness is never inherited
+  printf 'grok\n' > "$src/secondmate-harness"
+  printf 'codex\n' > "$src/crew-harness"
+  rm -rf "$d/dest2"
+  mkdir -p "$d/dest2"
+  propagate_inheritable_config "$src" "$d/dest2"
+  [ -e "$d/dest2/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
+  [ "$(cat "$d/dest2/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
+
+  # 6. nothing to propagate -> destination dir is never created (a true no-op)
+  rm -rf "$d/src3" "$d/dest3"
+  mkdir -p "$d/src3"
+  propagate_inheritable_config "$d/src3" "$d/dest3/config"
+  [ -e "$d/dest3/config" ] && fail "empty-source propagation created a destination dir"
+
+  pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op"
+}
+
+# ===========================================================================
+# B/A integration: a secondmate spawn resolves the secondmate harness and
+# propagates the crew harness into the home's config.
+# ===========================================================================
+
+# A tmux stub that accepts every subcommand and prints nothing, so no window
+# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+make_noop_tmux() {
+  local dir=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# A minimal seeded secondmate home (validate_firstmate_home_for_spawn needs the
+# seed marker, AGENTS.md, bin/, and a charter to launch). config/ is intentionally
+# left absent so the spawn's propagation is what creates it.
+make_seeded_home() {
+  local home=$1 id=$2
+  mkdir -p "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+}
+
+# spawn_secondmate <world> <id> <home> [explicit-harness]
+# Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
+# resolves), the primary config dir is <world>/home/config, and CLAUDECODE pins
+# detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
+# non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
+spawn_secondmate() {
+  local world=$1 id=$2 home=$3 harness=${4:-} fakebin
+  mkdir -p "$world/home/state" "$world/home/data"
+  fakebin=$(make_noop_tmux "$world/tmux-$id")
+  # An empty harness must contribute zero args, not an empty positional; build the
+  # arg list explicitly so the optional harness is omitted cleanly.
+  local spawn_args=("$id" "$home")
+  [ -n "$harness" ] && spawn_args+=("$harness")
+  spawn_args+=(--secondmate)
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
+}
+
+meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
+# AGENT launches on codex; its own crewmates inherit claude; secondmate-harness
+# does not flow into the home.
+test_spawn_split_and_inherit() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-split"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm"
+
+  meta="$w/home/state/sm.meta"
+  [ -f "$meta" ] || fail "split: no meta written"
+  [ "$(meta_harness "$meta")" = codex ] \
+    || fail "split: secondmate launched on '$(meta_harness "$meta")', expected codex"
+  [ "$(cat "$sm/config/crew-harness" 2>/dev/null)" = claude ] \
+    || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
+  [ -e "$sm/config/secondmate-harness" ] \
+    && fail "split: secondmate-harness leaked into the secondmate home"
+  pass "B2 spawn: secondmate runs the secondmate harness; its crewmates inherit the crew harness"
+}
+
+# Backward-compat: secondmate-harness absent -> the secondmate launches on the
+# crew harness, exactly as before this knob existed, and that crew value is the
+# one inherited.
+test_spawn_backward_compat_crew_fallback() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-compat"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_harness "$meta")" = codex ] \
+    || fail "compat: secondmate launched on '$(meta_harness "$meta")', expected the crew harness codex"
+  [ "$(cat "$sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "compat: home crew-harness not inherited as codex"
+  pass "B3 spawn: an absent secondmate-harness falls back to the crew harness (backward-compat)"
+}
+
+# Bare backward-compat: no config at all. The secondmate falls through to its own
+# harness (claude here), and with no inheritable file the home is left untouched -
+# no config/ side effects.
+test_spawn_bare_backward_compat() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-bare"
+  sm="$w/sm"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_harness "$meta")" = claude ] \
+    || fail "bare: secondmate launched on '$(meta_harness "$meta")', expected own harness claude"
+  [ -e "$sm/config/crew-harness" ] && fail "bare: an unset primary still created a home crew-harness"
+  pass "B4 spawn: no config at all -> own harness and no propagation side effects"
+}
+
+# An explicit per-spawn harness arg wins over config/secondmate-harness.
+test_spawn_explicit_harness_wins() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-explicit"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm" claude
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_harness "$meta")" = claude ] \
+    || fail "explicit: launched on '$(meta_harness "$meta")', expected explicit claude over config codex"
+  pass "B5 spawn: an explicit per-spawn harness arg overrides config/secondmate-harness"
+}
+
+# The unverified-adapter guard holds on the resolved secondmate path: an unknown
+# config/secondmate-harness aborts the spawn (no meta written) and names the source.
+test_spawn_unverified_secondmate_harness_refused() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-unverified"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'bogus\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "unverified: spawn should have failed"
+  assert_contains "$(cat "$err")" "no launch template for harness 'bogus'" \
+    "unverified: error names the rejected harness"
+  assert_contains "$(cat "$err")" "config/secondmate-harness" \
+    "unverified: error names the secondmate-harness source"
+  [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
+  pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
+}
+
+# ===========================================================================
+# B integration: the bootstrap secondmate sweep propagates inheritable config and
+# keeps it converged on the primary (independent of the tracked-files ff status).
+# ===========================================================================
+
+# A PRIMARY firstmate repo on main with one commit + a home dir, mirroring the
+# real gitignore (config/crew-harness ignored, so a propagated value never dirties
+# the secondmate worktree on a later sweep). Echoes the world dir.
+new_world() {
+  local name=$1 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
+  touch "$w/home/state/.last-watcher-beat"
+  git init -q -b main "$w/main"
+  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\nconfig/secondmate-harness\n' \
+    > "$w/main/.gitignore"
+  printf 'v1\n' > "$w/main/AGENTS.md"
+  printf 'r1\n' > "$w/main/README.md"
+  mkdir -p "$w/main/bin"
+  printf 'echo a\n' > "$w/main/bin/tool.sh"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm c1
+  printf '%s\n' "$w"
+}
+
+# A live secondmate home as a DETACHED worktree of the primary at <commit>, with
+# its seed marker and a live kind=secondmate meta.
+add_sm_worktree() {
+  local w=$1 id=$2 commit=$3
+  git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'home=%s/%s\n' "$w" "$id"
+  } > "$w/home/state/$id.meta"
+}
+
+make_fake_toolchain() {
+  local dir=$1 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease]'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf '%s\n' "$fakebin"
+}
+
+run_bootstrap() {
+  local w=$1 fakebin
+  fakebin=$(make_fake_toolchain "$w")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+}
+
+# The sweep pushes the primary's crew-harness into a live home, re-converges it
+# when the primary changes it, and mirrors absence when the primary clears it -
+# all while never inheriting secondmate-harness.
+test_bootstrap_sweep_propagates_and_reconverges() {
+  local w c1
+  w=$(new_world boot-prop)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$c1"
+
+  # Initial push: primary crew-harness=codex, secondmate-harness=grok (must NOT flow).
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'grok\n' > "$w/home/config/secondmate-harness"
+  run_bootstrap "$w" >/dev/null
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "sweep: crew-harness not pushed into the live home"
+  [ -e "$w/sm/config/secondmate-harness" ] \
+    && fail "sweep: secondmate-harness was inherited (must not be)"
+
+  # Re-converge: primary changes crew-harness; the home follows on the next sweep.
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  run_bootstrap "$w" >/dev/null
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
+    || fail "sweep: home did not re-converge to the primary's new crew-harness"
+
+  # Mirror absence: primary clears crew-harness; the home's copy is removed.
+  rm -f "$w/home/config/crew-harness"
+  run_bootstrap "$w" >/dev/null
+  [ -e "$w/sm/config/crew-harness" ] \
+    && fail "sweep: home crew-harness not removed after the primary cleared it"
+  pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
+}
+
+# Convergence is independent of the tracked-files fast-forward: a home already
+# current on tracked files still receives a config change.
+test_bootstrap_sweep_propagates_when_tracked_current() {
+  local w head
+  w=$(new_world boot-prop-current)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"   # already on the primary's HEAD (ff is a no-op)
+
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  run_bootstrap "$w" >/dev/null
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "config did not propagate to a tracked-current home"
+  pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
+}
+
+# Backward-compat: with no inheritable config set, the sweep is a no-op for the
+# home's config/ - exactly as before this feature - and ordinary sweep behavior
+# (fast-forward) is unaffected.
+test_bootstrap_sweep_no_inheritance_is_noop() {
+  local w c1
+  w=$(new_world boot-noop)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$c1"
+  # Advance the primary so the sweep has a real fast-forward to perform.
+  printf 'v2\n' > "$w/main/AGENTS.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm c2
+  local head
+  head=$(git -C "$w/main" rev-parse HEAD)
+
+  run_bootstrap "$w" >/dev/null
+
+  [ -e "$w/sm/config/crew-harness" ] && fail "no-inheritance sweep created a home crew-harness"
+  [ -e "$w/sm/config" ] && fail "no-inheritance sweep created a home config/ dir"
+  [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] \
+    || fail "no-inheritance sweep did not still fast-forward the tracked files"
+  pass "B9 bootstrap sweep with no inheritable config is a config no-op and still fast-forwards"
+}
+
+test_harness_resolution
+test_propagate_lib
+test_spawn_split_and_inherit
+test_spawn_backward_compat_crew_fallback
+test_spawn_bare_backward_compat
+test_spawn_explicit_harness_wins
+test_spawn_unverified_secondmate_harness_refused
+test_bootstrap_sweep_propagates_and_reconverges
+test_bootstrap_sweep_propagates_when_tracked_current
+test_bootstrap_sweep_no_inheritance_is_noop
+
+echo "# all fm-secondmate-harness tests passed"

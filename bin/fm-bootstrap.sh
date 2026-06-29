@@ -50,6 +50,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
@@ -125,6 +127,17 @@ secondmate_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
+  # Inheritable-config propagation: push the primary's declared LOCAL config
+  # (config/crew-harness today) into every VALIDATED live secondmate home swept
+  # above (FF_SEEN_HOMES is exactly that set). config/ is gitignored, so this is a
+  # separate copy from the tracked-files fast-forward; primary-authoritative, so
+  # it runs whether or not the home's tracked files advanced, keeping the fleet
+  # converged on the primary. Silent (fm-config-inherit-lib.sh); a primary with no
+  # inheritable config set is a complete no-op.
+  local home
+  for home in $FF_SEEN_HOMES; do
+    propagate_inheritable_config "$CONFIG" "$home/config" || true
+  done
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }

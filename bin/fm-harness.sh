@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh         print own harness: claude|codex|opencode|pi|grok|unknown
-#        fm-harness.sh crew    print the effective crewmate harness
-#                              (config/crew-harness; "default" resolves to own)
+# Usage: fm-harness.sh             print own harness: claude|codex|opencode|pi|grok|unknown
+#        fm-harness.sh crew        print the effective CREWMATE harness
+#                                  (config/crew-harness; "default" resolves to own)
+#        fm-harness.sh secondmate  print the harness the PRIMARY uses to launch
+#                                  SECONDMATE agents: config/secondmate-harness ->
+#                                  config/crew-harness -> own. "default" or absent
+#                                  defers to the crew resolution, so an unset
+#                                  secondmate-harness behaves exactly as the crew
+#                                  harness did before this knob existed.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
 set -u
@@ -49,10 +55,28 @@ detect_own() {
   echo unknown
 }
 
-if [ "${1:-}" = "crew" ]; then
-  crew=
+# Resolve the effective crewmate harness: config/crew-harness (a bare adapter
+# name) wins; absent or "default" mirrors firstmate's own harness.
+resolve_crew() {
+  local crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
-else
-  detect_own
-fi
+}
+
+# Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
+# chain config/secondmate-harness -> config/crew-harness -> own. An absent or
+# "default" config/secondmate-harness defers to the crew resolution, so an unset
+# secondmate-harness behaves exactly as before this knob existed (a secondmate
+# launched on the crew harness). config/secondmate-harness is the PRIMARY's own
+# setting and is never inherited downstream - secondmates do not spawn secondmates.
+resolve_secondmate() {
+  local sm=
+  [ -f "$CONFIG/secondmate-harness" ] && sm=$(tr -d '[:space:]' < "$CONFIG/secondmate-harness" || true)
+  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
+}
+
+case "${1:-}" in
+  crew) resolve_crew ;;
+  secondmate) resolve_secondmate ;;
+  *) detect_own ;;
+esac

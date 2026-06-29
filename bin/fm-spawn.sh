@@ -3,10 +3,17 @@
 # its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
-#   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
-#   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi|grok) overrides it for this spawn. A non-flag string containing whitespace
-#   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   With no harness arg, the harness comes from fm-harness.sh: a crewmate/scout
+#   spawn resolves the CREW harness (config/crew-harness, falling back to firstmate's
+#   own); a --secondmate spawn resolves the SECONDMATE harness (config/secondmate-harness
+#   -> config/crew-harness -> own), so the secondmate-vs-crewmate split is DURABLE
+#   across every respawn (recovery, /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok) overrides it for this spawn (either kind). A
+#   non-flag string containing whitespace is treated as a RAW launch command - the
+#   escape hatch for verifying new adapters.
+#   A --secondmate spawn also propagates the primary's declared inheritable config
+#   (config/crew-harness today) into the secondmate home's config/, so the
+#   secondmate's OWN crewmates inherit the primary's settings (fm-config-inherit-lib.sh).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -40,9 +47,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -163,8 +173,21 @@ case "$ARG3" in
     done
     ;;
   '')
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    # No explicit harness: resolve from config. A secondmate AGENT launches on the
+    # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
+    # every other kind uses the crew harness. Resolving here on every spawn is what
+    # makes the split DURABLE - a respawn (recovery, /updatefirstmate, restart)
+    # re-resolves, so config/secondmate-harness keeps governing secondmate launches
+    # across restarts. The launch_template lookup below is the unverified-adapter
+    # guard for both kinds: a harness with no template aborts the spawn.
+    if [ "$KIND" = secondmate ]; then
+      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+      harness_src='config/secondmate-harness (falling back to config/crew-harness)'
+    else
+      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+      harness_src='config/crew-harness'
+    fi
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
@@ -340,6 +363,15 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
+  # Inheritable-config propagation: push the primary's declared LOCAL config
+  # (config/crew-harness today) into this secondmate home's config/, so the
+  # secondmate's OWN crewmates inherit the primary's settings. config/ is
+  # gitignored, so this is a separate copy from the local-HEAD fast-forward above;
+  # primary-authoritative and re-pushed on every convergence. config/secondmate-harness
+  # is the primary's own knob and is deliberately NOT in the inheritable set
+  # (fm-config-inherit-lib.sh). A primary with no inheritable config set is a no-op.
+  propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
+    || echo "warning: secondmate $ID config inheritance failed for $PROJ_ABS/config" >&2
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else

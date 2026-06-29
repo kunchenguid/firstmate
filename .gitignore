@@ -6,4 +6,5 @@ data/
 .DS_Store
 .env
 config/crew-harness
+config/secondmate-harness
 config/x-mode.env

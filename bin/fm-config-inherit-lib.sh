@@ -1,0 +1,59 @@
+# shellcheck shell=bash
+# Inheritable-config propagation: the PRIMARY firstmate pushes a declared,
+# extensible set of LOCAL (gitignored) config items down into each secondmate
+# home's config/, so a secondmate's OWN crewmates inherit the primary's settings
+# (e.g. primary config/crew-harness=codex makes a secondmate's crewmates spawn on
+# codex too).
+#
+# Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
+#
+# Why this is separate from the tracked-files fast-forward (fm-ff-lib.sh): config/
+# is gitignored, so a tracked-files fast-forward never carries these items. This
+# is an explicit copy run at the two convergence points the primary owns - a
+# secondmate spawn (bin/fm-spawn.sh) and the bootstrap secondmate sweep
+# (bin/fm-bootstrap.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins and
+# is re-pushed on every convergence, so the fleet stays converged on the primary;
+# an item the primary does not set is mirrored as absence downstream.
+#
+# Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
+# config-dir-relative items the primary propagates. Add an item there and every
+# convergence point inherits it - no other change needed. Only crew-harness is
+# wired today. config/secondmate-harness is deliberately NOT in the list: it is
+# the primary's own setting for launching secondmates, and a secondmate never
+# spawns secondmates, so it must not flow downstream.
+
+# The declared inheritable set (space-separated, config-dir-relative item paths).
+# Extend here to inherit more of the primary's local config; override via the
+# environment only in tests. Items must not contain whitespace.
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-harness}"
+
+# propagate_inheritable_config <src-config-dir> <dest-config-dir>
+# Copy each declared inheritable item from the primary's config dir (src) into a
+# secondmate home's config dir (dest). SILENT on success - callers parse stdout,
+# so this writes nothing there. A source item that is present is copied only when
+# its content differs (idempotent: a re-run never churns mtimes). A source item
+# that is absent is mirrored as a missing destination item, so clearing the
+# primary's value clears it downstream too (primary-authoritative). The
+# destination dir is created lazily, only when there is actually something to
+# write, so a primary with no inheritable config set is a complete no-op (it
+# leaves the secondmate home exactly as it was - the backward-compatible path).
+# Returns non-zero only when the destination cannot be created or written.
+propagate_inheritable_config() {
+  local src_config=$1 dest_config=$2 item src dest
+  [ -n "$src_config" ] || return 1
+  [ -n "$dest_config" ] || return 1
+  for item in $FM_INHERITABLE_CONFIG; do
+    src="$src_config/$item"
+    dest="$dest_config/$item"
+    if [ -f "$src" ]; then
+      if [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+        mkdir -p "$dest_config" 2>/dev/null || return 1
+        cp "$src" "$dest" 2>/dev/null || return 1
+      fi
+    elif [ -e "$dest" ]; then
+      # Primary has no value for this item: mirror the absence downstream.
+      rm -f "$dest" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
