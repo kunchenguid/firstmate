@@ -102,6 +102,25 @@ fm_tmux_strip_ghost() {
   '
 }
 
+# fm_tmux_composer_text: print the normalized cursor/composer line of <target>.
+# The result has dim/faint ghost text removed, composer borders stripped, and
+# surrounding whitespace trimmed. Returns non-zero if the pane cannot be read.
+fm_tmux_composer_text() {  # <target>
+  local target=$1 cy raw line stripped
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || return 1
+  line=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
+  # Strip the composer box borders (literal glyphs — no character classes).
+  stripped=${line//│/}      # U+2502 light vertical (claude)
+  stripped=${stripped//┃/}  # U+2503 heavy vertical
+  stripped=${stripped//|/}  # ASCII pipe
+  # Trim surrounding whitespace.
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  printf '%s' "$stripped"
+}
+
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
 #   empty   - no pending input (blank, a bare prompt, a busy footer, or only dim
 #             ghost/placeholder text). Safe to inject; also the positive
@@ -118,18 +137,8 @@ fm_tmux_strip_ghost() {
 # substitution (bash 3.2 safe, locale-independent — no \u escapes, no multibyte
 # character classes), and asks whether anything real is left.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw line stripped
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
-  line=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
-  # Strip the composer box borders (literal glyphs — no character classes).
-  stripped=${line//│/}      # U+2502 light vertical (claude)
-  stripped=${stripped//┃/}  # U+2503 heavy vertical
-  stripped=${stripped//|/}  # ASCII pipe
-  # Trim surrounding whitespace.
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  local target=$1 stripped
+  stripped=$(fm_tmux_composer_text "$target") || { printf 'unknown'; return 0; }
   # Nothing left inside the box = empty composer.
   [ -n "$stripped" ] || { printf 'empty'; return 0; }
   if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \

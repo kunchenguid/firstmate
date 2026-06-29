@@ -34,6 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-tests.XXXXXX")
+export FM_WATCH_KEEPALIVE=0
 
 make_case() {
   local name=$1 dir fakebin
@@ -407,6 +408,29 @@ test_live_stale_watch_lock_is_actionable() {
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
   grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
   pass "live watcher lock with stale heartbeat is actionable"
+}
+
+test_keepalive_rearms_stale_missing_watcher() {
+  local dir state fakebin out pid watcher_pid beat_age
+  dir=$(make_case keepalive-rearm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/keepalive.out"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_KEEPALIVE=1 FM_WATCH_KEEPALIVE_INTERVAL=1 \
+    FM_WATCHER_STALE_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" --keepalive > "$out" &
+  pid=$!
+  sleep 2.5
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "keepalive did not start a one-shot watcher"
+  is_live_non_zombie "$watcher_pid" || fail "keepalive watcher pid is not live"
+  beat_age=$(FM_STATE_OVERRIDE="$state" . "$LIB"; fm_path_age "$state/.last-watcher-beat")
+  [ "$beat_age" -lt 3 ] || fail "keepalive watcher did not refresh heartbeat (age=$beat_age)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  is_live_non_zombie "$watcher_pid" && fail "keepalive did not clean up child watcher on exit"
+  pass "watch keepalive re-arms a stale missing watcher"
 }
 
 test_guard_warns_on_pending_queue() {
@@ -1046,7 +1070,11 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '│ > │\n' > "$COMPOSER"
+        if [ -n "${FM_FAKE_AFTER_ENTER_TEXT:-}" ]; then
+          printf '│ > %s │\n' "$FM_FAKE_AFTER_ENTER_TEXT" > "$COMPOSER"
+        else
+          printf '│ > │\n' > "$COMPOSER"
+        fi
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
@@ -1258,6 +1286,18 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
   pass "fm-send exits non-zero on a confirmed swallow, zero on a clean submit"
 }
 
+test_fm_send_ambiguous_pending_without_sent_text_succeeds() {
+  local dir fakebin err
+  dir=$(make_bordered_case send-ambiguous-pending)
+  fakebin="$dir/fakebin"; err="$dir/send.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+    FM_FAKE_AFTER_ENTER_TEXT='windows bridge redraw' FM_SEND_SLEEP=0.05 FM_SEND_AMBIGUOUS_SETTLE=0.05 \
+    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
+    || fail "fm-send failed on ambiguous pending without sent text: $(cat "$err")"
+  grep -F 'reported pending' "$err" >/dev/null || fail "fm-send did not warn on ambiguous pending: $(cat "$err")"
+  pass "fm-send treats ambiguous pending without sent text as delivered"
+}
+
 test_fm_send_exits_nonzero_on_initial_send_failure() {
   local dir fakebin err
   dir=$(make_bordered_case send-type-failure)
@@ -1281,6 +1321,7 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
+test_keepalive_rearms_stale_missing_watcher
 test_guard_warns_on_pending_queue
 test_guard_rearms_after_draining_pending_queue
 # Sub-supervisor (fm-supervise-daemon.sh) classifier + batching + housekeeping.
@@ -1331,4 +1372,5 @@ test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_fm_send_exits_nonzero_on_confirmed_swallow
+test_fm_send_ambiguous_pending_without_sent_text_succeeds
 test_fm_send_exits_nonzero_on_initial_send_failure

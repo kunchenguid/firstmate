@@ -58,8 +58,25 @@ else
   verdict=$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")
   case "$verdict" in
     pending)
-      echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
-      exit 1
+      # Some WSL-hosted Windows-agent panes can report the cursor row as
+      # pending after a successful submit. Fail only when the sent text itself is
+      # still observable in the normalized composer after one longer settle.
+      sleep "${FM_SEND_AMBIGUOUS_SETTLE:-1.5}"
+      if fm_pane_is_busy "$T"; then
+        echo "warning: submit to $T reported pending, but pane is busy; treating as delivered" >&2
+        exit 0
+      fi
+      state2=$(fm_tmux_composer_state "$T")
+      [ "$state2" != pending ] && exit 0
+      composer_text=$(fm_tmux_composer_text "$T" 2>/dev/null || true)
+      case "$composer_text" in
+        *"$*"*)
+          echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+          exit 1
+          ;;
+      esac
+      echo "warning: submit to $T reported pending, but sent text is no longer in composer; treating as delivered" >&2
+      exit 0
       ;;
     send-failed)
       echo "error: text not sent to $T (tmux send-keys failed)" >&2
