@@ -41,6 +41,12 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# Codespace backend: ship/scout crewmates run their agent INSIDE a leased GitHub
+# codespace (firstmate SSHes in from a local tmux pane). Secondmates stay LOCAL.
+# shellcheck source=bin/fm-cs-lib.sh
+. "$SCRIPT_DIR/fm-cs-lib.sh"
+# shellcheck source=bin/fm-cs-pool.sh
+. "$SCRIPT_DIR/fm-cs-pool.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -144,6 +150,10 @@ launch_template() {
   esac
 }
 
+# Local launch templates apply only to secondmates (and the raw-command escape
+# hatch). Ship/scout crewmates run inside a codespace via the copilot driver and
+# resolve their harness from cs_harness in the codespace block below.
+if [ "$KIND" = secondmate ] || case "$ARG3" in *' '*) true ;; *) false ;; esac; then
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -161,6 +171,7 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+fi
 
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
@@ -353,145 +364,93 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+# --- Codespace backend: ship/scout crewmates run inside a leased codespace ----
+# The agent (copilot) runs INSIDE the codespace; firstmate drives it from a local
+# tmux pane that holds one `gh codespace ssh` stream. No local worktree, so the
+# worktree/treehouse/isolation/turn-end-hook machinery below is secondmate-only.
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  REPO=$(cs_repo_for_project "$PROJ_ABS") || {
+    echo "error: cannot resolve a github origin for project $PROJ_ABS; the codespace backend needs a github repo" >&2; exit 1; }
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
+  # Codespace crewmates use the codespace-native harness (copilot).
+  HARNESS=$(cs_harness)
 
-  # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
-  # a real git worktree root, distinct from the project's primary checkout
-  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a treehouse-get
-  # misfire can leave the pane in (or in a subdir of, or a symlink to) the primary
-  # checkout; branching/committing there would tangle the primary onto a feature
-  # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
-  # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=
-  if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
-    proj_real=
-  fi
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
-    exit 1
-  fi
-fi
+  echo "acquiring codespace for $REPO (task $ID)..." >&2
+  CS=$(cs_pool_acquire "$REPO" "$ID") || { echo "error: could not acquire a codespace for $REPO" >&2; exit 1; }
+  LEASE_SOURCE=$(cs_lease_get "$CS" source)
 
-# Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
-# agent finishes a turn. Worktree-resident hooks are kept out of git's view so
-# they never block teardown's dirty check or leak into a commit.
-TURNEND="$STATE/$ID.turn-ended"
-exclude_path() {
-  local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
-  [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
-}
-if [ "$KIND" != secondmate ]; then
-  case "$HARNESS" in
-    claude*)
-      mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
-EOF
-      exclude_path '.claude/settings.local.json'
-      ;;
-    opencode*)
-      mkdir -p "$WT/.opencode/plugins"
-      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
-export const FmTurnEnd = async ({ \$ }) => ({
-  event: async ({ event }) => {
-    if (event.type === "session.idle") await \$\`touch $TURNEND\`
-  },
-})
-EOF
-      exclude_path '.opencode/plugins/fm-turn-end.js'
-      ;;
-    pi*)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-      cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
-// Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
-// (fires once, only when the whole run exits): the watcher needs a signal at
-// every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile } from "node:child_process";
-export default function (pi: any) {
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
-}
-EOF
-      ;;
-    codex*)
-      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
-      ;;
-  esac
-fi
+  RDIR=$(cs_repo_dir "$CS") || { echo "error: cannot resolve repo dir in $CS" >&2; exit 1; }
+  [ -n "$RDIR" ] || { echo "error: empty repo dir in $CS" >&2; exit 1; }
+  cs_push_brief "$CS" "$ID" "$BRIEF" >/dev/null || { echo "error: could not push brief to $CS" >&2; exit 1; }
+  SID=$(cs_session_id)
+  RRUN=$(cs_push_driver "$CS" "$ID" "$RDIR" "$SID" "$HARNESS") || { echo "error: could not push driver to $CS" >&2; exit 1; }
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
-if [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
   PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
+  read -r MODE YOLO <<EOFM
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
+EOFM
+
+  # Window: a local pane that SSHes into the codespace and runs the driver loop.
+  tmux new-window -d -t "$SES" -n "$W" -c "$FM_HOME"
+  PANE_CMD=$(cs_pane_launch_cmd "$CS" "$RRUN" "$HARNESS") || { echo "error: could not build pane launch for $CS" >&2; exit 1; }
+  tmux send-keys -t "$T" -l "$PANE_CMD"
+  sleep 0.3
+  tmux send-keys -t "$T" Enter
+
+  # Meta first (the relay supervisor keys off codespace=), then the relay.
+  mkdir -p "$STATE"
+  {
+    echo "window=$T"
+    echo "codespace=$CS"
+    echo "cs_repo=$REPO"
+    echo "lease_source=$LEASE_SOURCE"
+    echo "repo_dir=$RDIR"
+    echo "session_id=$SID"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=$MODE"
+    echo "yolo=$YOLO"
+  } > "$STATE/$ID.meta"
+
+  # Supervision relay: a detached, self-restarting bridge that mirrors the
+  # crewmate's remote ~/.fm/<id>.events to local state/<id>.{status,turn-ended}
+  # so the watcher wakes on remote progress. It exits once the lease is gone.
+  RELAY_SUP="while grep -qx 'codespace=$CS' '$STATE/$ID.meta' 2>/dev/null; do '$FM_ROOT/bin/fm-cs-relay.sh' '$ID' '$CS' >/dev/null 2>&1 || true; sleep 3; done"
+  setsid bash -c "$RELAY_SUP" </dev/null >/dev/null 2>&1 &
+  RELAY_PID=$!
+  echo "relay_pid=$RELAY_PID" >> "$STATE/$ID.meta"
+
+  echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T codespace=$CS repo=$REPO"
+  exit 0
 fi
+
+# --- Secondmate (LOCAL) path -------------------------------------------------
+tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+
+# Secondmates record mode=secondmate, yolo=off, plus home= and projects=.
+SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+MODE=secondmate
+YOLO=off
 
 mkdir -p "$STATE"
 {
   echo "window=$T"
-  echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
-  if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
-  fi
+  echo "home=$PROJ_ABS"
+  echo "projects=$SECONDMATE_PROJECTS"
 } > "$STATE/$ID.meta"
 
 sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
-fi
+sq_home=$(shell_quote "$PROJ_ABS")
+LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T home=$PROJ_ABS"
