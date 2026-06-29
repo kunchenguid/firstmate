@@ -12,8 +12,9 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
-#   path is a real git worktree root distinct from the primary project checkout.
+#   Ship/scout spawns use `treehouse get --lease` to durably acquire a worktree and
+#   capture its path directly; they refuse unless the path is a genuine isolated
+#   worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -353,31 +354,21 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+# For ship/scout tasks: acquire the worktree with a durable lease so the exact
+# path comes from treehouse's stdout, not from pane-cwd polling (which is racy
+# and can resolve to the wrong directory under some tmux configurations).
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease) || {
+    echo "error: treehouse get --lease failed in $PROJ_ABS; check the treehouse pool" >&2
     exit 1
-  fi
+  }
+  [ -n "$WT" ] || { echo "error: treehouse get --lease returned an empty path" >&2; exit 1; }
 
   # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
   # a real git worktree root, distinct from the project's primary checkout
-  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a treehouse-get
-  # misfire can leave the pane in (or in a subdir of, or a symlink to) the primary
-  # checkout; branching/committing there would tangle the primary onto a feature
-  # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
-  # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
+  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a lease misfire
+  # can resolve to the primary checkout; branching/committing there would tangle
+  # the primary onto a feature branch (see fm-tangle-lib.sh).
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -392,10 +383,15 @@ if [ "$KIND" != secondmate ]; then
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
+    echo "error: treehouse get --lease did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout" >&2
+    ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null || true
     exit 1
   fi
 fi
+
+# Create the tmux window. For ship/scout tasks start directly in the leased
+# worktree; for secondmate tasks start in the home (WT equals PROJ_ABS).
+tmux new-window -d -t "$SES" -n "$W" -c "${WT:-$PROJ_ABS}"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -412,9 +408,18 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      _hook_settings="$WT/.claude/settings.local.json"
+      if [ -s "$_hook_settings" ] && command -v jq >/dev/null 2>&1 \
+         && jq --arg c "touch '$TURNEND'" \
+              '.hooks.Stop=[{"hooks":[{"type":"command","command":$c}]}]' \
+              "$_hook_settings" > "$_hook_settings.tmp" 2>/dev/null; then
+        mv "$_hook_settings.tmp" "$_hook_settings"
+      else
+        rm -f "$_hook_settings.tmp"
+        cat > "$_hook_settings" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
+      fi
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
