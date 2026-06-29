@@ -75,12 +75,11 @@ ok "harness override" "$(cs_harness)" "codex"
 SID="$(cs_session_id)"
 if [[ "$SID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: session id not a uuid: [$SID]"; fi
 
-PANE="$(cs_pane_launch_cmd 'mycs-z' 'fix-login-k3' copilot)"
+PANE="$(cs_pane_launch_cmd 'mycs-z' '/home/node/.fm/fix-login-k3.run.sh' copilot)"
 has "pane strips token"  "$PANE" "env -u GITHUB_TOKEN gh codespace ssh -c 'mycs-z'"
 has "pane login shell"   "$PANE" 'bash -lc'
-has "pane runs driver"   "$PANE" '/.fm/fix-login-k3.run.sh'
-has "pane home unexpanded" "$PANE" '\$HOME/.fm/fix-login-k3.run.sh'
-cs_pane_launch_cmd c i claude >/dev/null 2>&1; ok "pane rejects non-copilot" "$?" "1"
+has "pane runs driver"   "$PANE" "bash /home/node/.fm/fix-login-k3.run.sh"
+cs_pane_launch_cmd c /r/x.run.sh claude >/dev/null 2>&1; ok "pane rejects non-copilot" "$?" "1"
 cs_push_driver c i d s claude >/dev/null 2>&1; ok "driver rejects non-copilot" "$?" "1"
 
 echo "----"

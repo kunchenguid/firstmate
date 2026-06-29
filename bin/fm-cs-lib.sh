@@ -367,13 +367,14 @@ EOF
   printf '%s\n' "$script" | cs_ssh "$cs" -- "mkdir -p \$HOME/.fm && cat > \$HOME/.fm/$id.run.sh && chmod +x \$HOME/.fm/$id.run.sh && printf '%s\\n' \$HOME/.fm/$id.run.sh"
 }
 
-# cs_pane_launch_cmd <cs> <id> [harness] - print the exact local command line for
-# `tmux send-keys -l` that launches the crewmate driver inside the codespace over
-# one SSH connection. The driver (pushed by cs_push_driver) streams to the pane
-# (peekable) and watches the inbox for steers (send-able). Only the codespace-
-# native `copilot` harness is supported.
+# cs_pane_launch_cmd <cs> <remote-run-path> [harness] - print the exact local
+# command line for `tmux send-keys -l` that launches the crewmate driver inside
+# the codespace over one SSH connection. <remote-run-path> is the ABSOLUTE path
+# printed by cs_push_driver (no $HOME/tilde, so nothing needs shell expansion or
+# escaping). The driver streams to the pane (peekable) and watches the inbox for
+# steers (send-able). Only the codespace-native `copilot` harness is supported.
 cs_pane_launch_cmd() {
-  local cs=$1 id=$2 harness=${3:-$(cs_harness)}
+  local cs=$1 rrun=$2 harness=${3:-$(cs_harness)}
   case "$harness" in
     copilot) ;;
     *)
@@ -381,7 +382,7 @@ cs_pane_launch_cmd() {
       return 1
       ;;
   esac
-  printf '%s' "[ -f '$FM_CS_TOKEN_FILE' ] && . '$FM_CS_TOKEN_FILE'; exec env -u GITHUB_TOKEN gh codespace ssh -c '$cs' -- bash -lc \"bash \\\$HOME/.fm/$id.run.sh\""
+  printf '%s' "[ -f '$FM_CS_TOKEN_FILE' ] && . '$FM_CS_TOKEN_FILE'; exec env -u GITHUB_TOKEN gh codespace ssh -c '$cs' -- \"bash -lc 'bash $rrun'\""
 }
 
 # cs_send_steer <cs> <id> <text> - append a one-line steer to the crewmate's
