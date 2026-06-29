@@ -169,6 +169,8 @@ The split is durable: every secondmate respawn (recovery, `/updatefirstmate`, re
 
 `config/crew-harness` is inherited; `config/secondmate-harness` is not.
 The primary pushes its declared inheritable config (`config/crew-harness` today) down into each secondmate home's `config/` - at secondmate spawn and on the bootstrap secondmate sweep (section 3) - so a secondmate's OWN crewmates use the primary's settings (primary `config/crew-harness=codex` makes a secondmate's crewmates spawn on codex too).
+Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
+If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
 The mechanism is generic over a single declared list (`fm-config-inherit-lib.sh`), primary-authoritative (re-pushed every convergence, mirroring absence), and easy to extend; `config/secondmate-harness` is deliberately excluded because secondmates never spawn secondmates.
 
 Each adapter splits into mechanics and knowledge.

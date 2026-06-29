@@ -16,6 +16,8 @@ Secondmates have their own harness knob, so a secondmate can run on a different 
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
 An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
 `config/crew-harness` is inherited by secondmate homes (the primary pushes it down so a secondmate's own crewmates use the primary's value), while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
+Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
+If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
 
 Each adapter splits into mechanics and knowledge.
 The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
