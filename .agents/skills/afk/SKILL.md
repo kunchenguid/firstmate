@@ -154,6 +154,17 @@ marker, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
 the marker lets firstmate distinguish it from a real captain message.
 
+On a **confirmed** flush (a successful inject, never a routine self-handled
+wake), `escalate_flush` also fires a best-effort native OS notification through
+`bin/fm-notify.sh "Firstmate" "<id-free count-and-class summary>" --focus`, so
+the captain is pinged out of band while away from the pane. This is the issue
+#106 notifier hook: the summary carries no task ids or internal vocabulary
+(it can surface on a lock screen), the `FM_NOTIFY` toggle silences it
+(`FM_NOTIFY=off`), and a missing or failing notifier never affects escalation
+delivery. `FM_NOTIFY_CMD` overrides the notifier path for tests; the hook checks
+`fm_notify_enabled` before running anything, so `FM_NOTIFY=off` silences even a
+custom `FM_NOTIFY_CMD` that would not consult the toggle itself.
+
 ## Injection hardening
 
 - **Single-line digest** - embedded newlines are collapsed to a literal

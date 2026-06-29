@@ -24,6 +24,10 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
+# Keep this e2e from firing real OS notifications when the daemon flushes an
+# escalation (escalate_flush -> notify_escalation -> bin/fm-notify.sh).
+export FM_NOTIFY=off
+
 # Source the daemon's pure functions (its main loop is guarded out under sourcing).
 if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   export FM_TEST_DAEMON_SOURCED=1

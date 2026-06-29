@@ -27,6 +27,10 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
+# Keep this e2e from firing real OS notifications when the daemon flushes an
+# escalation (escalate_flush -> notify_escalation -> bin/fm-notify.sh).
+export FM_NOTIFY=off
+
 # Skip gracefully if tmux is not installed.
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 

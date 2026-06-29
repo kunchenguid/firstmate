@@ -116,6 +116,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# The notifier's pure helpers, for ONE definition of the FM_NOTIFY toggle. The
+# escalation notifier hook (notify_escalation) gates on fm_notify_enabled BEFORE
+# running any command, so FM_NOTIFY=off silences even an FM_NOTIFY_CMD override
+# whose own script would not consult the toggle. Source-safe (BASH_SOURCE guard).
+# shellcheck source=bin/fm-notify.sh
+. "$FM_DAEMON_DIR/fm-notify.sh"
+
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 INJECT_SKIP_DEFAULT="heartbeat"
@@ -415,6 +422,34 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+# Fire a best-effort native OS notification (and focus the host terminal) the
+# moment an away-mode escalation digest is actually delivered to the captain, so
+# they get pinged out of band while away from the pane. This is the issue #106
+# notifier hook. It runs ONLY on a confirmed inject of a classified escalation -
+# never on routine self-handled wakes - so it cannot ping for benign churn. The
+# toast text is a clean count-and-class summary with no task ids or internal
+# vocabulary, since it can surface on a lock screen. Fully best-effort: the
+# notifier honors FM_NOTIFY=off itself and a missing/failing notifier never
+# affects escalation delivery. FM_NOTIFY_CMD overrides the notifier path (tests).
+# The FM_NOTIFY=off gate is enforced HERE, before any command runs, so a custom
+# FM_NOTIFY_CMD that does not consult the toggle is silenced too (the built-in
+# notifier also self-gates, but the override must not be a bypass).
+notify_escalation() {  # <state> <count>
+  local state=$1 n=$2 buf notify summary
+  fm_notify_enabled || return 0
+  notify="${FM_NOTIFY_CMD:-$FM_DAEMON_DIR/fm-notify.sh}"
+  [ -x "$notify" ] || return 0
+  buf="$state/.subsuper-escalations"
+  if grep -qiE 'needs-decision|blocked|failed' "$buf" 2>/dev/null; then
+    summary="$n item(s) need your decision"
+  elif grep -qiE 'done|merged|checks green|ready|PR ' "$buf" 2>/dev/null; then
+    summary="$n item(s) ready for review"
+  else
+    summary="$n update(s) need your attention"
+  fi
+  "$notify" "Firstmate" "$summary" --focus >/dev/null 2>&1 || true
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
@@ -428,7 +463,12 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    # Captain-relevant digest delivered: fire the out-of-band notifier (best-
+    # effort) BEFORE clearing the buffer so the summary can read its contents.
+    notify_escalation "$state" "$n"
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
+  fi
   return 1
 }
 

@@ -20,6 +20,12 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# Keep the suite from firing real OS notifications via the escalation hook
+# (escalate_flush -> notify_escalation -> bin/fm-notify.sh): a confirmed flush on
+# a developer's WSL/macOS box would otherwise pop a toast per flush. The hook's
+# own behavior is covered deterministically by test_escalate_flush_fires_notify.
+export FM_NOTIFY=off
+
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
 
@@ -154,6 +160,85 @@ test_escalate_batches_into_one_digest() {
   n=$(grep -c '\[ENTER\]' "$sent")
   [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
   pass "multiple escalations flush as a single batched digest"
+}
+
+test_escalate_flush_fires_notify() {
+  # The issue #106 hook: a CONFIRMED escalation flush fires the native notifier
+  # (best-effort) with a clean, id-free summary, and only after a successful
+  # inject. A failed inject (afk off) must NOT notify. FM_NOTIFY_CMD points the
+  # daemon at a fake notifier that logs its args, so this is deterministic and
+  # never pops a real toast.
+  local dir state fakebin sent capture notifylog fakenotify
+  dir=$(make_supercase notify-hook)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+
+  # Successful flush -> notifier fired.
+  escalate_add "$state" "fin-t5.status: needs-decision: pick A or B"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed"
+  [ -s "$notifylog" ] || fail "confirmed flush did not fire the notifier"
+  local args
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "Firstmate" "notifier title missing"
+  assert_contains "$args" "--focus" "notifier was not asked to focus the host"
+  assert_contains "$args" "need your decision" "summary did not reflect the needs-decision class"
+  assert_not_contains "$args" "fin-t5" "task id leaked into the notification summary"
+  assert_not_contains "$args" ".status" "internal status filename leaked into the summary"
+
+  # Failed flush (afk inactive -> inject deferred) must NOT notify.
+  : > "$notifylog"
+  afk_exit "$state"
+  escalate_add "$state" "done: PR https://x/y/pull/1"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" \
+    && fail "escalate_flush should fail while afk inactive"
+  [ -s "$notifylog" ] && fail "notifier fired on a failed (un-delivered) flush"
+  pass "escalate_flush fires the native notifier only on a confirmed delivery"
+}
+
+test_notify_off_gates_even_custom_cmd() {
+  # Security gate (CodeRabbit): FM_NOTIFY=off must silence the notifier even when
+  # FM_NOTIFY_CMD points at a custom command that would not consult the toggle
+  # itself. The off-check short-circuits BEFORE any command runs, so the override
+  # is never a bypass. A confirmed inject still happens; only the toast is gated.
+  local dir state fakebin sent capture notifylog fakenotify
+  dir=$(make_supercase notify-off-gate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+
+  escalate_add "$state" "fin-t6.status: needs-decision: pick A or B"
+  afk_enter "$state"
+  # FM_NOTIFY=off with a custom FM_NOTIFY_CMD: inject confirmed, notifier NOT run.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY=off \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed under FM_NOTIFY=off"
+  [ -s "$sent" ] || fail "the escalation digest was not injected (the off-gate must not block delivery)"
+  [ -s "$notifylog" ] && fail "FM_NOTIFY=off still ran the custom FM_NOTIFY_CMD notifier"
+  pass "FM_NOTIFY=off gates the notifier even with a custom FM_NOTIFY_CMD, without blocking delivery"
 }
 
 test_escalate_batch_age_uses_first_append() {
@@ -692,6 +777,8 @@ test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
+test_escalate_flush_fires_notify
+test_notify_off_gates_even_custom_cmd
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate

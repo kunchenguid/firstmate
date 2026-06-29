@@ -36,6 +36,11 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# The notifier's pure helpers, for ONE definition of the FM_NOTIFY toggle shared
+# with bin/fm-notify.sh and the daemon. The normal-mode outbound notifier hook
+# (notify_signal_statuses) gates on fm_notify_enabled. Source-safe (BASH_SOURCE guard).
+# shellcheck source=bin/fm-notify.sh
+. "$SCRIPT_DIR/fm-notify.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -256,6 +261,66 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
+# Outbound notifier path: FM_NOTIFY_CMD overrides (tests), else the sibling
+# bin/fm-notify.sh, mirroring the daemon's notify_escalation.
+NOTIFY_CMD="${FM_NOTIFY_CMD:-$SCRIPT_DIR/fm-notify.sh}"
+# Per-task content dedup marker for the notify hook - the watcher's analogue of
+# the daemon's .subsuper-seen-status-<task>: the last captain-relevant status line
+# already toasted, so the same status is never toasted twice.
+_notify_seen_path() { printf '%s/.notify-seen-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+
+# Outbound notifier hook for NORMAL (non-afk) supervision: fire a best-effort OS
+# toast when a signal wake involves NEW captain-relevant status lines, so the
+# captain is pinged out of band even when not away. It MIRRORS the daemon's
+# notify_escalation filtering (the same decision/review summary classes) so the
+# two paths cannot drift, and it is held to four hard properties:
+#   - gated on fm_notify_enabled, so FM_NOTIFY=off silences it;
+#   - ONLY captain-relevant verbs (working:/turn-end/heartbeat never toast);
+#   - deduped per task by content (.notify-seen-<task>), so the same status is
+#     not toasted twice (e.g. a status write + the same turn's turn-end);
+#   - fully ERROR-ISOLATED and backgrounded: it always returns 0 and the toast is
+#     detached, so a missing, failing, or slow notifier can NEVER change the
+#     watcher's wake/exit behavior. FM_WATCH_NOTIFY_BG=0 runs it synchronously
+#     (deterministic for tests); it is still error-swallowed there.
+# Pass the same space-separated status-path list as the signal triage.
+notify_signal_statuses() {  # <file> ...
+  fm_notify_enabled || return 0
+  [ -x "$NOTIFY_CMD" ] || return 0
+  local f last task seen n=0 decision=0 review=0 summary
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    last=$(last_status_line "$f")
+    status_is_captain_relevant "$last" || continue
+    task=$(basename "$f"); task="${task%.status}"
+    seen=$(_notify_seen_path "$task")
+    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+    printf '%s' "$last" > "$seen" 2>/dev/null || true
+    n=$((n + 1))
+    if printf '%s' "$last" | grep -qiE 'needs-decision|blocked|failed'; then
+      decision=1
+    elif printf '%s' "$last" | grep -qiE 'done|merged|checks green|ready|PR '; then
+      review=1
+    fi
+  done
+  [ "$n" -gt 0 ] || return 0
+  if [ "$decision" = 1 ]; then
+    summary="$n item(s) need your decision"
+  elif [ "$review" = 1 ]; then
+    summary="$n item(s) ready for review"
+  else
+    summary="$n update(s) need your attention"
+  fi
+  # The toast text is an id-free count-and-class summary (lock-screen safe), the
+  # same shape the daemon emits. Error-isolated either way.
+  if [ "${FM_WATCH_NOTIFY_BG:-1}" = 0 ]; then
+    "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 || true
+  else
+    ( "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 & ) 2>/dev/null || true
+  fi
+  return 0
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -356,6 +421,11 @@ EOF
       done <<EOF
 $pending
 EOF
+      # Normal-mode outbound notifier: toast NEW captain-relevant statuses. Skipped
+      # while afk, where the daemon owns notifications (notify_escalation). Fully
+      # error-isolated, so it can never affect the enqueue/wake/exit below.
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      afk_present || notify_signal_statuses $files || true
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do

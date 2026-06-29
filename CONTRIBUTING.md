@@ -61,8 +61,10 @@ shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
-tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, and afk one-shot coherence
-tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
+tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, afk one-shot coherence, and the normal-mode outbound notifier hook (captain-relevant fire, FM_NOTIFY gate, content dedup, error isolation, afk skip)
+tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, fm-send submit, escalation notifier-hook, and FM_NOTIFY=off-with-FM_NOTIFY_CMD gate tests
+tests/fm-notify.test.sh                   # out-of-band notifier: platform detection, FM_NOTIFY=off short-circuit, the always-on persistent+sounding+click-to-focus Windows toast (bare-call default and --no-focus opt-out), macOS terminal-notifier (sound + -execute) and osascript-with-sound fallback, Linux critical + --action click-to-focus, pane-id recording, firstmate: protocol install, and base64 injection-safety
+tests/fm-focus.test.sh                    # click-to-focus handler: dynamic window+pane resolution in a non-firstmate session and the cwd-of-home fallback, plus the per-platform terminal raise on macOS (osascript) and Linux (wmctrl/xdotool) with graceful degrade, all with host tools stubbed
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence

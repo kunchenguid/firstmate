@@ -93,7 +93,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .notify-seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); fm-guard.sh reads it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -562,6 +562,32 @@ Inline facts that must survive without a loaded skill:
 - Any other unmarked message means the captain is back: clear `state/.afk`, stop the daemon, flush catch-up from `state/.wake-queue`, `state/.subsuper-escalations`, and `state/.subsuper-inject-wedged`, then re-arm normal watcher supervision.
 - Afk never changes approval authority; PR merges, ask-user findings, destructive actions, irreversible actions, and security-sensitive choices still require the same approval they required before.
 - Bias ambiguous cases toward exit because a present captain beats token savings and a false exit is self-correcting.
+
+### Out-of-band notifier
+
+`bin/fm-notify.sh` fires a native OS notification so the captain gets pinged off the pane the moment captain-relevant work needs them.
+It is the first backend of the pluggable notifier in issue #106, and it fires in BOTH supervision modes.
+In normal operation the always-on watcher (`bin/fm-watch.sh`) fires it from its signal path the moment a signal wake carries a captain-relevant verb (`done`/`needs-decision`/`blocked`/`failed`/`merged`/`checks green`/`PR ready`/`ready in branch`), never on `working:`/turn-end/heartbeat wakes.
+In away mode the sub-supervisor calls it only when it actually delivers a captain-relevant escalation digest, never on routine self-handled wakes (and the watcher hook stands down while afk, so the captain is never double-pinged).
+Both paths share the same filtering and emit the same id-free count-and-class summary (a "needs your decision" vs "ready for review" class), dedupe per task by content so the same status is never toasted twice, and are fully error-isolated and backgrounded so a missing, failing, or slow notifier never changes supervision.
+Usage is `bin/fm-notify.sh "<title>" "<message>" [--focus|--no-focus]`; it detects the platform and routes to the right native notifier, is dependency-light and non-blocking, and exits quietly when no notifier is reachable.
+Every notification pops, sounds, and persists by default, and click-to-focus is on by default - a bare `bin/fm-notify.sh "T" "M"`, the daemon hook, and the watcher hook all produce the same full notification (the captain hit a silent drop when a toast fired without the focus action, so focus-on is now the default; `--no-focus` exists only for tests).
+On WSL/Windows the toast is a raw WinRT toast via `powershell.exe` (no modules): `scenario="reminder"` (ToastGeneric) so it pops as a banner and stays until acted on instead of dropping silently into the notification center, with an explicit `<audio>` so it always sounds (a quiet-dropped toast otherwise makes no sound), and a "Go to firstmate" click-to-focus action.
+The two platforms below mirror that behavior as closely as each robustly allows; they were implemented and unit-tested for dispatch and argument-building but NOT end-to-end verified, since firstmate develops on WSL.
+On macOS the notifier uses `terminal-notifier` when present (a persistent alert - which requires the captain to set terminal-notifier's notification style to "Alerts" in System Settings - plus a sound and an `-execute` click-to-focus that runs `bin/fm-focus.sh`); without it, it falls back to `osascript display notification` WITH a sound, which sounds but cannot persist or click-to-focus.
+On Linux the notifier uses `notify-send --urgency=critical` for persistence, a best-effort sound via `canberra-gtk-play`/`paplay`/`aplay` when one is installed (guarded, never fatal), and `notify-send --action` click-to-focus where the desktop's notification daemon supports actions (GNOME-style libnotify does; many do not), degrading to persistent+sound where it does not.
+What each non-Windows path delivers depends on installed tools: macOS click-to-focus needs `terminal-notifier`, Linux click-to-focus needs an action-capable `notify-send` daemon plus `wmctrl` or `xdotool` to raise the window, and a sound needs a player; the tmux pane select still lands even when no window-raise tool is present.
+The `FM_NOTIFY` env toggle gates it: it is on by default, and `FM_NOTIFY=off` (also `0`/`false`/`no`/`disabled`) silences every notification.
+That gate is enforced wherever the notifier is fired so a custom notifier cannot become a bypass: the script self-gates, and both the daemon's escalation hook (`notify_escalation`) and the watcher's signal hook (`notify_signal_statuses`) check `fm_notify_enabled` before running anything, so `FM_NOTIFY=off` silences the toast even when `FM_NOTIFY_CMD` points at an override that would not consult the toggle itself.
+
+Focus is click-to-focus, never auto-focus (the notification never steals the foreground on its own, which was rejected as invasive); it is on by default and `--no-focus` opts out (tests only).
+The click action is wired per platform: on Windows it carries a "Go to firstmate" action (and a body launch) wired to the registered `firstmate:` URL protocol; on macOS it is `terminal-notifier -execute`; on Linux it is `notify-send --action`.
+All three run `bin/fm-focus.sh`, which raises the host terminal (Windows Terminal via `powershell.exe`, the macOS Terminal/iTerm via `osascript`, or an X window via `wmctrl`/`xdotool`) and then selects the firstmate tmux window AND pane.
+That window+pane resolution is shared across all platforms in `bin/fm-focus-lib.sh` (so the notifier and the handler cannot drift): it is resolved dynamically at click time with nothing hardcoded - no session name, window index, or pane literal - so it survives a session rename, a window move, and a firstmate restart.
+The primary signal is the pane id firstmate records to `state/.fm-tmux-pane` (under the firstmate home, derived from `$FM_HOME`); if that pane is gone, `fm-focus.sh` falls back to the claude pane whose cwd is the firstmate home.
+On Windows the protocol points at a hidden `wscript` VBS launcher (window style 0, so no console flashes) that runs `bin/fm-focus.sh`; run `bin/fm-notify.sh install` once to arm it: it records the pane id and, on WSL/Windows only, registers the `firstmate:` protocol under `HKCU` and writes the launcher pointing at the installed `bin/fm-focus.sh`; it is idempotent (safe to re-run) and a clean no-op off WSL/Windows (macOS/Linux carry the focus command inline on each notification, so they need no install step).
+Focusing a Windows Terminal tab by session is out of scope (unsupported by Windows Terminal; window+pane focus is the captain's chosen design).
+The script keeps a marked seam for later out-of-band backends (a phone push via ntfy or Pushover for the captain's iPhone), so adding one does not touch the native path.
 
 ### Stuck-crewmate recovery
 
