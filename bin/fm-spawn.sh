@@ -907,6 +907,18 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+
+# no-mistakes gate refresh: for a no-mistakes-mode ship task, make sure the
+# project's shared gate hook is current before the crewmate pushes through it,
+# so a stale old-version hook can't fail the push with "invalid gate path" and
+# silently skip the pipeline run (bin/fm-nm-gate.sh). The gate is shared by the
+# main clone and every worktree of it, so refreshing the main clone (PROJ_ABS)
+# heals the one bare repo the worktree pushes to. Best-effort: never block the
+# spawn, and keep its status line off this script's parseable stdout.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null || true
+fi
+
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
