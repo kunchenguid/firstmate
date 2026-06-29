@@ -513,9 +513,12 @@ if [ -n "$CODESPACE" ]; then
   if [ "$FORCE" != "--force" ]; then
     if [ "$KIND" = scout ]; then
       REPORT="$DATA/$ID/report.md"
+      # The scout writes its report inside the codespace; pull it local before the
+      # gate (and before release stops/deletes the machine).
+      cs_pull_report "$CODESPACE" "$ID" "$REPORT" >/dev/null 2>&1 || true
       if [ ! -f "$REPORT" ]; then
         echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-        echo "The report is the work product. Have the crewmate write it (or get the captain's explicit OK to discard, then --force)." >&2
+        echo "The report is the work product. Have the crewmate write it to ~/.fm/$ID.report.md (or get the captain's explicit OK to discard, then --force)." >&2
         exit 1
       fi
     else
@@ -529,7 +532,7 @@ if [ -n "$CODESPACE" ]; then
 
   # Best-effort: clear the crewmate's remote work files BEFORE releasing (after
   # release a pooled codespace is stopped and a created one is gone).
-  cs_ssh "$CODESPACE" -- "rm -f \$HOME/.fm/$ID.brief.md \$HOME/.fm/$ID.run.sh \$HOME/.fm/$ID.inbox \$HOME/.fm/$ID.events" >/dev/null 2>&1 || true
+  cs_ssh "$CODESPACE" -- "rm -f \$HOME/.fm/$ID.brief.md \$HOME/.fm/$ID.run.sh \$HOME/.fm/$ID.inbox \$HOME/.fm/$ID.events \$HOME/.fm/$ID.report.md" >/dev/null 2>&1 || true
 
   # Stop the supervision relay (it also self-exits once meta is gone).
   if [ -n "$RELAY_PID" ]; then kill "$RELAY_PID" 2>/dev/null || true; fi

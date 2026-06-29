@@ -392,3 +392,18 @@ cs_send_steer() {
   local cs=$1 id=$2 text=$3
   printf '%s\n' "$text" | cs_ssh "$cs" -- "mkdir -p \$HOME/.fm && cat >> \$HOME/.fm/$id.inbox"
 }
+
+# cs_pull_report <cs> <id> <local-dest> - copy a scout crewmate's report from the
+# codespace (~/.fm/<id>.report.md) to a local path, creating the parent dir. The
+# crewmate writes its report inside the codespace; firstmate needs it locally to
+# relay findings and to satisfy teardown's scout-report gate. Best-effort: prints
+# the dest and returns 0 on success, returns 1 (quietly) when the remote report
+# is absent so callers can decide how to handle a missing report.
+cs_pull_report() {
+  local cs=$1 id=$2 dest=$3 content
+  content=$(cs_ssh "$cs" -- "cat \$HOME/.fm/$id.report.md 2>/dev/null" 2>/dev/null || true)
+  [ -n "$content" ] || return 1
+  mkdir -p "$(dirname "$dest")"
+  printf '%s\n' "$content" > "$dest"
+  printf '%s\n' "$dest"
+}

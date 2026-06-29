@@ -9,7 +9,8 @@
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
 #        fm-brief.sh <task-id> --secondmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   data/<task-id>/report.md (no branch, no push, no PR). The crewmate writes the
+#   report inside its codespace and firstmate pulls it back at teardown.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -24,7 +25,9 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship/scout crewmates run INSIDE a leased GitHub Codespace; ship briefs begin by
+# resetting to a clean default branch (the codespace may be a reused pooled one)
+# before creating the fm/<id> branch. Secondmates stay LOCAL firstmate homes.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
@@ -60,6 +63,13 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
+# Codespace crewmates (ship/scout) run INSIDE a leased codespace and cannot write
+# to firstmate's local state/. They append status + write reports to remote files
+# under ~/.fm/, which the relay (fm-cs-relay.sh) bridges back to local state/.
+# Secondmates are LOCAL firstmate homes, so they keep the local status path above.
+CS_EVENTS="\$HOME/.fm/$ID.events"
+CS_REPORT="\$HOME/.fm/$ID.report.md"
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -136,29 +146,28 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are running INSIDE a leased GitHub Codespace for $REPO; the repo is checked out and ready in your working directory.
 This is a SCOUT task: the deliverable is a written report, not a PR.
-The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
+The codespace is your laboratory - install, run, edit, and make scratch commits freely; the whole machine is released (and, if it was cold-created for you, deleted) at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+2. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Report status by appending one line to your events file:
+   \`echo "{state}: {one short line}" >> $CS_EVENTS\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+4. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+5. If a decision belongs to a human (product choices, destructive actions),
+   append \`needs-decision: {summary of options}\` to the events file and stop. Firstmate will steer you with the decision.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to \`$CS_REPORT\` (firstmate pulls this file back to its own \`data/$ID/report.md\`).
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+When the report is complete, append \`done: {one-line conclusion}\` to the events file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
@@ -229,31 +238,30 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are running INSIDE a leased GitHub Codespace for $REPO; the repo is checked out and ready in your working directory.
+The codespace may be a fresh machine or a reused pooled one, so do NOT assume a clean tree or the default branch.
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable treehouse worktree you were launched in, typically a path under a \`.treehouse/\` pool, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
-
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First, get to a clean base before branching:
+   - \`git stash --include-untracked\` or \`git reset --hard && git clean -fd\` to drop any leftover state from a previous task,
+   - check out and fast-forward the default branch (e.g. \`git checkout main && git fetch origin && git reset --hard origin/main\`; use \`master\` if that is the default),
+   then create your branch: \`git checkout -b fm/$ID\`.$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+2. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Report status by appending one line to your events file:
+   \`echo "{state}: {one short line}" >> $CS_EVENTS\`
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+4. If you hit the same obstacle twice, append \`blocked: {why}\` to the events file and stop; firstmate will help.
+5. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
+   append \`needs-decision: {summary of options}\` to the events file and stop. Firstmate will steer you with the decision.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the repo.
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 

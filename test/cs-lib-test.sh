@@ -82,6 +82,16 @@ has "pane runs driver"   "$PANE" "bash /home/node/.fm/fix-login-k3.run.sh"
 cs_pane_launch_cmd c /r/x.run.sh claude >/dev/null 2>&1; ok "pane rejects non-copilot" "$?" "1"
 cs_push_driver c i d s claude >/dev/null 2>&1; ok "driver rejects non-copilot" "$?" "1"
 
+# --- cs_pull_report: stub cs_ssh to return canned remote report content ---
+cs_ssh() { printf 'line one\nline two\n'; }   # stub: pretend remote report exists
+DEST="$TMP/pull/report.md"
+OUT="$(cs_pull_report somecs scout-z1 "$DEST")"
+ok "pull report dest" "$OUT" "$DEST"
+ok "pull report body" "$(cat "$DEST")" "$(printf 'line one\nline two')"
+cs_ssh() { printf ''; }                        # stub: remote report absent
+cs_pull_report somecs scout-z2 "$TMP/pull/none.md" >/dev/null 2>&1; ok "pull report absent rc" "$?" "1"
+unset -f cs_ssh
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]
