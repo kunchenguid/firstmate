@@ -286,3 +286,108 @@ cs_create() {
 cs_repo_dir() {
   cs_ssh "$1" -- 'd=$(ls -d /workspaces/*/ 2>/dev/null | head -1); printf "%s" "${d%/}"'
 }
+
+# ---------------------------------------------------------------------------
+# Spawn helpers: push the brief + a driver script into the codespace and build
+# the local tmux pane command that runs the agent over SSH. The pane runs
+# `gh codespace ssh` LOCALLY, so it must carry the same scoped credential as
+# _cs_gh (strip the integration GITHUB_TOKEN; source a token file into GH_TOKEN
+# if present) - without ever putting the token on the command line (it is
+# sourced in the pane).
+#
+# Supervision model (copilot-in-codespace): the codespace-native `copilot`
+# harness authenticates via env token (GH_TOKEN aliased to the codespace's own
+# GITHUB_TOKEN) ONLY in headless `-p` mode; interactive `-i` ignores env tokens
+# and demands a stored device-flow login. So the crewmate runs as a headless
+# driver loop: an initial `copilot -p` on the brief (streamed to the pane, so
+# peek works), then a loop that watches a remote inbox file for steers and
+# resumes the same session (`--resume`, context preserved) for each one (so
+# fm-send works). The driver appends TURN-ENDED to ~/.fm/<id>.events after every
+# copilot turn; the relay mirrors that to wake the watcher. This keeps native
+# codespace auth with no secret propagation.
+# ---------------------------------------------------------------------------
+
+# cs_push_brief <cs> <id> <local-brief> - copy the brief into the codespace and
+# print its ABSOLUTE remote path (resolved remotely, so the launch command needs
+# no $HOME/tilde expansion). The crewmate reads this file as its initial prompt.
+cs_push_brief() {
+  local cs=$1 id=$2 brief=$3
+  [ -f "$brief" ] || { echo "cs_push_brief: no brief at $brief" >&2; return 1; }
+  cs_ssh "$cs" -- "mkdir -p \$HOME/.fm && cat > \$HOME/.fm/$id.brief.md && printf '%s\\n' \$HOME/.fm/$id.brief.md" < "$brief"
+}
+
+# cs_session_id - print a fresh RFC-4122 UUID for a copilot session. copilot
+# validates the --session-id format, so a real v4 UUID is required.
+cs_session_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr 'A-Z' 'a-z'
+  else
+    python3 -c 'import uuid;print(uuid.uuid4())'
+  fi
+}
+
+# cs_push_driver <cs> <id> <remote-dir> <session-id> [harness] - generate the
+# headless driver loop, push it to ~/.fm/<id>.run.sh in the codespace, and print
+# its absolute remote path. The driver (only `copilot` is supported):
+#   - aliases GH_TOKEN to the codespace's native GITHUB_TOKEN (headless auth),
+#   - runs the brief once with a fixed session id,
+#   - then watches ~/.fm/<id>.inbox and resumes that session for each steer,
+#   - appends TURN-ENDED to ~/.fm/<id>.events after every turn (relay wakes us).
+# The script is generated LOCALLY with values interpolated and pushed over stdin,
+# so the pane command needs no fragile remote quoting.
+cs_push_driver() {
+  local cs=$1 id=$2 rdir=$3 sid=$4 harness=${5:-$(cs_harness)}
+  case "$harness" in
+    copilot) ;;
+    *) echo "cs_push_driver: unsupported codespace harness '$harness' (only copilot)" >&2; return 1 ;;
+  esac
+  local script
+  script=$(cat <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+export GH_TOKEN="\${GITHUB_TOKEN:-}"
+EV="\$HOME/.fm/$id.events"
+INBOX="\$HOME/.fm/$id.inbox"
+BRIEF="\$HOME/.fm/$id.brief.md"
+SID="$sid"
+mkdir -p "\$HOME/.fm"
+cd "$rdir" 2>/dev/null || { printf 'blocked: repo dir %s missing\\n' "$rdir" >> "\$EV"; exit 1; }
+: > "\$INBOX"
+run() { copilot --allow-all "\$@" 2>&1; printf 'TURN-ENDED\\n' >> "\$EV"; }
+run --session-id "\$SID" -p "\$(cat "\$BRIEF")"
+while true; do
+  if [ -s "\$INBOX" ]; then
+    steer="\$(cat "\$INBOX")"; : > "\$INBOX"
+    run --resume="\$SID" -p "\$steer"
+  fi
+  sleep 4
+done
+EOF
+)
+  printf '%s\n' "$script" | cs_ssh "$cs" -- "mkdir -p \$HOME/.fm && cat > \$HOME/.fm/$id.run.sh && chmod +x \$HOME/.fm/$id.run.sh && printf '%s\\n' \$HOME/.fm/$id.run.sh"
+}
+
+# cs_pane_launch_cmd <cs> <id> [harness] - print the exact local command line for
+# `tmux send-keys -l` that launches the crewmate driver inside the codespace over
+# one SSH connection. The driver (pushed by cs_push_driver) streams to the pane
+# (peekable) and watches the inbox for steers (send-able). Only the codespace-
+# native `copilot` harness is supported.
+cs_pane_launch_cmd() {
+  local cs=$1 id=$2 harness=${3:-$(cs_harness)}
+  case "$harness" in
+    copilot) ;;
+    *)
+      echo "cs_pane_launch_cmd: unsupported codespace harness '$harness' (only copilot)" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "[ -f '$FM_CS_TOKEN_FILE' ] && . '$FM_CS_TOKEN_FILE'; exec env -u GITHUB_TOKEN gh codespace ssh -c '$cs' -- bash -lc \"bash \\\$HOME/.fm/$id.run.sh\""
+}
+
+# cs_send_steer <cs> <id> <text> - append a one-line steer to the crewmate's
+# remote inbox; the driver loop picks it up and resumes the copilot session.
+# This is the codespace equivalent of `tmux send-keys` for a local crewmate.
+cs_send_steer() {
+  local cs=$1 id=$2 text=$3
+  printf '%s\n' "$text" | cs_ssh "$cs" -- "mkdir -p \$HOME/.fm && cat >> \$HOME/.fm/$id.inbox"
+}
