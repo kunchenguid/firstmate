@@ -97,6 +97,13 @@ test_propagate_lib() {
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
 
+  mkdir -p "$dest/crew-harness"
+  if propagate_inheritable_config "$src" "$dest"; then
+    fail "failed absence mirror returned success"
+  fi
+  [ -d "$dest/crew-harness" ] || fail "failed absence mirror removed the wrong path"
+  rm -rf "$dest/crew-harness"
+
   # 5. secondmate-harness is never inherited
   printf 'grok\n' > "$src/secondmate-harness"
   printf 'codex\n' > "$src/crew-harness"
@@ -423,6 +430,21 @@ test_bootstrap_sweep_no_inheritance_is_noop() {
   pass "B9 bootstrap sweep with no inheritable config is a config no-op and still fast-forwards"
 }
 
+test_bootstrap_sweep_surfaces_config_propagation_failure() {
+  local w c1 out fail_line
+  w=$(new_world boot-prop-fail)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$c1"
+  mkdir -p "$w/sm/config/crew-harness"
+
+  out=$(run_bootstrap "$w")
+
+  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: config inheritance failed' || true)
+  [ -n "$fail_line" ] || fail "bootstrap did not surface config propagation failure (got: $out)"
+  [ -d "$w/sm/config/crew-harness" ] || fail "failed propagation removed the wrong path"
+  pass "B10 bootstrap sweep surfaces config propagation failures"
+}
+
 test_harness_resolution
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -433,5 +455,6 @@ test_spawn_unverified_secondmate_harness_refused
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_no_inheritance_is_noop
+test_bootstrap_sweep_surfaces_config_propagation_failure
 
 echo "# all fm-secondmate-harness tests passed"

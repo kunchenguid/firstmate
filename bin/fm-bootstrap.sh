@@ -132,11 +132,28 @@ secondmate_sync() {
   # above (FF_SEEN_HOMES is exactly that set). config/ is gitignored, so this is a
   # separate copy from the tracked-files fast-forward; primary-authoritative, so
   # it runs whether or not the home's tracked files advanced, keeping the fleet
-  # converged on the primary. Silent (fm-config-inherit-lib.sh); a primary with no
-  # inheritable config set is a complete no-op.
-  local home
-  for home in $FF_SEEN_HOMES; do
-    propagate_inheritable_config "$CONFIG" "$home/config" || true
+  # converged on the primary. The propagation helper stays silent on success; a
+  # primary with no inheritable config set and no downstream copy is a no-op.
+  local meta id home home_real propagated_homes
+  propagated_homes=""
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta" .meta)
+    home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    validate_secondmate_home "$id" "$home" || continue
+    home_real="$VALIDATED_HOME"
+    case " $FF_SEEN_HOMES " in
+      *" $home_real "*) ;;
+      *) continue ;;
+    esac
+    case " $propagated_homes " in
+      *" $home_real "*) continue ;;
+    esac
+    propagated_homes="$propagated_homes $home_real"
+    if ! propagate_inheritable_config "$CONFIG" "$home_real/config"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
+    fi
   done
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0

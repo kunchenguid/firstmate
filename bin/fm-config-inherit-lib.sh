@@ -52,7 +52,7 @@ propagate_inheritable_config() {
       fi
     elif [ -e "$dest" ]; then
       # Primary has no value for this item: mirror the absence downstream.
-      rm -f "$dest" 2>/dev/null || true
+      rm -f "$dest" 2>/dev/null || return 1
     fi
   done
   return 0
