@@ -17,7 +17,7 @@ TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live
+  local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -27,10 +27,15 @@ test_singleton_start() {
   pid1=$!
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
   pid2=$!
-  sleep 0.5
-  live=0
-  is_live_non_zombie "$pid1" && live=$((live + 1))
-  is_live_non_zombie "$pid2" && live=$((live + 1))
+  i=0
+  while [ "$i" -lt 50 ]; do
+    live=0
+    is_live_non_zombie "$pid1" && live=$((live + 1))
+    is_live_non_zombie "$pid2" && live=$((live + 1))
+    [ "$live" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
   [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
   grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true
@@ -40,7 +45,7 @@ test_singleton_start() {
 }
 
 test_stale_watch_lock_reclaimed() {
-  local dir state fakebin out dead_pid pid live lock_pid
+  local dir state fakebin out dead_pid pid live lock_pid i
   dir=$(make_case stale-lock)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -53,11 +58,18 @@ test_stale_watch_lock_reclaimed() {
   printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  sleep 0.5
+  i=0
   live=0
-  is_live_non_zombie "$pid" && live=1
+  lock_pid=
+  while [ "$i" -lt 50 ]; do
+    live=0
+    is_live_non_zombie "$pid" && live=1
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$live" -eq 1 ] && [ "$lock_pid" != "$dead_pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
   [ "$live" -eq 1 ] || fail "watcher did not reclaim stale lock and stay alive"
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$lock_pid" != "$dead_pid" ] || fail "stale watch lock pid was not replaced"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true

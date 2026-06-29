@@ -258,18 +258,20 @@ HAVE_RUN=0
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
-  run_branch=$(strip_quotes "$(nm_field branch)")
-  if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
-    HAVE_RUN=1
-  else
-    # The active-or-most-recent run is for another branch; find this branch's
-    # own most recent run in the list, then inspect it directly.
-    list_out=$(nm_run axi)
-    rid=$(nm_run_id_for_branch "$CREW_BRANCH" "$list_out")
-    if [ -n "$rid" ]; then
-      RUN_OUT=$(nm_run axi status --run "$rid")
-      run_branch=$(strip_quotes "$(nm_field branch)")
-      [ "$run_branch" = "$CREW_BRANCH" ] && HAVE_RUN=1
+  if [ -n "$RUN_OUT" ]; then
+    run_branch=$(strip_quotes "$(nm_field branch)")
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      HAVE_RUN=1
+    else
+      # The active-or-most-recent run is for another branch; find this branch's
+      # own most recent run in the list, then inspect it directly.
+      list_out=$(nm_run axi)
+      rid=$(nm_run_id_for_branch "$CREW_BRANCH" "$list_out")
+      if [ -n "$rid" ]; then
+        RUN_OUT=$(nm_run axi status --run "$rid")
+        run_branch=$(strip_quotes "$(nm_field branch)")
+        [ "$run_branch" = "$CREW_BRANCH" ] && HAVE_RUN=1
+      fi
     fi
   fi
 fi
