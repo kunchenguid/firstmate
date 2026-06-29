@@ -81,6 +81,14 @@ EOF
   GROK_WORKSPACE_ROOT="$evil" bash "$hook"
   assert_absent "$evil_target" "old-style grok pointer touched an arbitrary target"
 
+  {
+    printf '%s\n' 'ignored'
+    printf 'token=%s\n' "$token"
+  } > "$wt/.fm-grok-turnend"
+  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_absent "$target" "grok pointer accepted token outside the first line"
+
+  printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
   GROK_WORKSPACE_ROOT="$wt" bash "$hook"
   assert_present "$target" "registered grok pointer did not touch the task turn-end file"
   pass "grok global hook requires a firstmate registry token"
