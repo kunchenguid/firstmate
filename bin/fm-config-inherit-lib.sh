@@ -27,6 +27,30 @@
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-harness}"
 
+copy_inheritable_file() {
+  local src=$1 dest=$2 dest_parent tmp
+  if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then
+    return 1
+  fi
+  dest_parent=${dest%/*}
+  [ -n "$dest_parent" ] && [ "$dest_parent" != "$dest" ] || return 1
+  mkdir -p "$dest_parent" 2>/dev/null || return 1
+  tmp=$(mktemp "$dest_parent/.fm-inherit.XXXXXX" 2>/dev/null) || return 1
+  if ! cp "$src" "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if [ -L "$dest" ] && ! rm -f "$dest" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if mv -f "$tmp" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
 # propagate_inheritable_config <src-config-dir> <dest-config-dir>
 # Copy each declared inheritable item from the primary's config dir (src) into a
 # secondmate home's config dir (dest). SILENT on success - callers parse stdout,
@@ -43,14 +67,16 @@ propagate_inheritable_config() {
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   for item in $FM_INHERITABLE_CONFIG; do
+    case "$item" in
+      ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
+    esac
     src="$src_config/$item"
     dest="$dest_config/$item"
     if [ -f "$src" ]; then
-      if [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        mkdir -p "$dest_config" 2>/dev/null || return 1
-        cp "$src" "$dest" 2>/dev/null || return 1
+      if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+        copy_inheritable_file "$src" "$dest" || return 1
       fi
-    elif [ -e "$dest" ]; then
+    elif [ -e "$dest" ] || [ -L "$dest" ]; then
       # Primary has no value for this item: mirror the absence downstream.
       rm -f "$dest" 2>/dev/null || return 1
     fi

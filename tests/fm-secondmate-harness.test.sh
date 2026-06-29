@@ -69,7 +69,7 @@ ROWS
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
 test_propagate_lib() {
-  local d src dest m1 m2
+  local d src dest m1 m2 outside
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   dest="$d/dest"
@@ -92,10 +92,25 @@ test_propagate_lib() {
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
 
+  outside="$d/outside-target"
+  rm -f "$dest/crew-harness" "$outside"
+  printf 'outside\n' > "$outside"
+  ln -s "$outside" "$dest/crew-harness"
+  printf 'pi\n' > "$src/crew-harness"
+  propagate_inheritable_config "$src" "$dest"
+  [ ! -L "$dest/crew-harness" ] || fail "destination symlink was not replaced"
+  [ "$(cat "$dest/crew-harness")" = pi ] || fail "destination symlink replacement has wrong content"
+  [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
+
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   rm -f "$src/crew-harness"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
+
+  rm -f "$dest/crew-harness"
+  ln -s "$d/missing-target" "$dest/crew-harness"
+  propagate_inheritable_config "$src" "$dest"
+  [ -L "$dest/crew-harness" ] && fail "broken destination symlink not removed on absence mirror"
 
   mkdir -p "$dest/crew-harness"
   if propagate_inheritable_config "$src" "$dest"; then
