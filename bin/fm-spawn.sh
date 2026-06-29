@@ -363,6 +363,7 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   }
   [ -n "$WT" ] || { echo "error: treehouse get --lease returned an empty path" >&2; exit 1; }
+  trap '[ -n "$WT" ] && ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null || true' EXIT
 
   # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
   # a real git worktree root, distinct from the project's primary checkout
@@ -484,6 +485,7 @@ mkdir -p "$STATE"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+trap - EXIT
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
