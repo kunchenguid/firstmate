@@ -56,6 +56,33 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
+# Extract the first GitHub PR / GitLab MR URL from a status line, or print nothing.
+# A done-state status that carries such a URL (e.g. "done: PR
+# https://github.com/o/r/pull/7 checks green") lets the out-of-band notifier offer
+# an "Open PR" button. The match is one whitespace-free token ending in
+# /pull/<n> or /merge_requests/<n>, so trailing punctuation in the status line is
+# excluded. Pure; the caller decides when an Open-PR button is warranted.
+fm_status_pr_url() {  # <status-line>
+  printf '%s' "$1" | grep -oiE 'https?://[^[:space:]]+/(pull|merge_requests)/[0-9]+' | head -1
+}
+
+# Read the delivery mode= a task recorded in its meta, or print nothing when the
+# meta is absent or carries no mode. Pure file read; the state dir and task id
+# locate state/<task>.meta.
+fm_task_mode() {  # <state-dir> <task>
+  local meta="$1/$2.meta"
+  [ -e "$meta" ] || return 0
+  sed -n 's/^mode=//p' "$meta" 2>/dev/null | tail -1
+}
+
+# 0 (true) when a task's project is local-only, 1 otherwise. A local-only task has
+# no PR, so the notifier skips the "Open PR" button for it; an unknown/absent mode
+# is treated as NOT local-only (a PR URL would not appear for a local-only task
+# anyway).
+fm_task_is_local_only() {  # <state-dir> <task>
+  [ "$(fm_task_mode "$1" "$2")" = local-only ]
+}
+
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
 # captain-relevant last line; 1 otherwise. Pass the space-separated file list that
 # follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,

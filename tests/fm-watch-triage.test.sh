@@ -97,6 +97,38 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+test_status_pr_url_extractor() {
+  # fm_status_pr_url pulls the GitHub PR / GitLab MR URL out of a done-state status
+  # line (the "Open PR" button target), stopping at the trailing number so status
+  # punctuation is excluded, and prints nothing when there is no PR/MR URL.
+  [ "$(fm_status_pr_url 'done: PR https://github.com/o/r/pull/7 checks green')" = 'https://github.com/o/r/pull/7' ] \
+    || fail "GitHub /pull/ URL not extracted"
+  [ "$(fm_status_pr_url 'done: ready https://gitlab.com/o/r/-/merge_requests/45, ok')" = 'https://gitlab.com/o/r/-/merge_requests/45' ] \
+    || fail "GitLab /merge_requests/ URL not extracted (or trailing comma included)"
+  [ "$(fm_status_pr_url 'done: opened https://github.com/o/r/pull/5.')" = 'https://github.com/o/r/pull/5' ] \
+    || fail "trailing period leaked into the extracted URL"
+  [ -z "$(fm_status_pr_url 'needs-decision: pick A or B')" ] || fail "a non-PR line yielded a URL"
+  [ -z "$(fm_status_pr_url 'done: PR https://example.test/pr/7 checks green')" ] \
+    || fail "a non-pull/-MR path (/pr/) was wrongly treated as a PR URL"
+  pass "fm_status_pr_url extracts GitHub PR / GitLab MR URLs and ignores the rest"
+}
+
+test_task_is_local_only_from_meta() {
+  # fm_task_is_local_only reads mode= from state/<task>.meta. Only mode=local-only
+  # is local-only; any other mode, or an absent meta, is treated as not local-only
+  # (a local-only task has no PR, so it never gets the Open PR button).
+  local dir state
+  dir=$(make_case task-mode); state="$dir/state"
+  printf 'window=s:fm-a\nmode=local-only\nyolo=off\n' > "$state/a.meta"
+  printf 'window=s:fm-b\nmode=no-mistakes\n'          > "$state/b.meta"
+  printf 'window=s:fm-c\nmode=direct-PR\n'            > "$state/c.meta"
+  fm_task_is_local_only "$state" a || fail "mode=local-only not detected as local-only"
+  fm_task_is_local_only "$state" b && fail "mode=no-mistakes wrongly detected as local-only"
+  fm_task_is_local_only "$state" c && fail "mode=direct-PR wrongly detected as local-only"
+  fm_task_is_local_only "$state" missing && fail "absent meta wrongly detected as local-only"
+  pass "fm_task_is_local_only reads mode= and treats only local-only (not unknown) as local-only"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -716,7 +748,50 @@ test_signal_notifier_skipped_while_afk() {
   pass "while afk the watcher does not toast (the daemon's notify_escalation owns it)"
 }
 
+test_signal_notifier_open_pr_for_done_with_url() {
+  # A done: status carrying a PR URL on a non-local-only task passes --open <url>
+  # so the toast gets an "Open PR" button. The PR URL must NOT leak into the
+  # lock-screen summary text.
+  local dir state fakebin out notifylog fake pid args url
+  dir=$(make_case notify-open-pr); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+  printf 'window=s:fm-task\nmode=no-mistakes\n' > "$state/task.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the done: + PR signal"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--open" "a done: status with a PR URL did not pass --open"
+  assert_contains "$args" "$url" "the PR URL was not passed to --open"
+  assert_contains "$args" "ready for review" "summary did not reflect the review class"
+  # The summary line itself is still id-free; the URL rides only the --open flag.
+  pass "watcher passes --open <url> for a done: status carrying a PR URL"
+}
+
+test_signal_notifier_no_open_pr_for_local_only() {
+  # A local-only task has no PR, so even a done: status must NOT get an Open PR
+  # button: --open is omitted when the task's mode is local-only.
+  local dir state fakebin out notifylog fake pid args
+  dir=$(make_case notify-open-local-only); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  printf 'window=s:fm-task\nmode=local-only\n' > "$state/task.meta"
+  # Even if a URL-shaped token appears, a local-only task is gated out.
+  printf 'done: ready in branch fm/task https://github.com/o/r/pull/9\n' > "$state/task.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the local-only done: signal"
+  args=$(tr '\0' '\n' < "$notifylog")
+  [ -s "$notifylog" ] || fail "the local-only done: still should toast (just without --open)"
+  assert_not_contains "$args" "--open" "a local-only task must not get an Open PR button"
+  pass "watcher omits --open for a local-only task (no PR to open)"
+}
+
 test_signal_reason_is_actionable_classifier
+test_status_pr_url_extractor
+test_task_is_local_only_from_meta
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -742,3 +817,5 @@ test_signal_notifier_silent_for_working_note
 test_signal_notifier_gated_by_fm_notify_off
 test_signal_notifier_error_does_not_change_wake
 test_signal_notifier_skipped_while_afk
+test_signal_notifier_open_pr_for_done_with_url
+test_signal_notifier_no_open_pr_for_local_only

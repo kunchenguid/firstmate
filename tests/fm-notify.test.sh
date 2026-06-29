@@ -293,6 +293,93 @@ test_windows_focus_adds_click_to_focus_action_not_appactivate() {
   pass "windows --focus adds the click-to-focus protocol action, never an auto AppActivate"
 }
 
+test_windows_open_adds_open_pr_action_button() {
+  # --open <url> adds a SECOND toast action, "Open PR", that opens the URL in the
+  # default browser (activationType="protocol"). The "Go to firstmate" focus action
+  # and the Dismiss action are still present, so the toast carries both buttons.
+  local dir log fakebin ps url
+  dir="$TMP_ROOT/win-open"; mkdir -p "$dir"
+  log="$dir/calls.log"; : > "$log"
+  fakebin=$(make_notify_fakebin "$dir" "$log")
+  url="https://github.com/karotkriss/firstmate/pull/4"
+  PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=MINGW64_NT-10.0 \
+    bash "$NOTIFY" "Firstmate" "1 item ready for review" --focus --open "$url" \
+    || fail "windows --open exited non-zero"
+  ps=$(decode_encoded_command "$log")
+  assert_contains "$ps" 'content="Open PR"' "--open did not add the Open PR action"
+  assert_contains "$ps" "arguments=\"$url\"" "Open PR action did not carry the PR URL"
+  assert_contains "$ps" 'activationType="protocol"' "Open PR action is not a protocol activation"
+  assert_contains "$ps" "Go to firstmate" "--open dropped the focus action button"
+  assert_contains "$ps" "Dismiss" "--open dropped the Dismiss action"
+  pass "windows --open adds the Open PR browser action alongside focus + dismiss"
+}
+
+test_windows_no_open_omits_open_pr_action() {
+  # Without --open the toast is unchanged: no Open PR button (backward compatible).
+  local dir log fakebin ps
+  dir="$TMP_ROOT/win-noopen"; mkdir -p "$dir"
+  log="$dir/calls.log"; : > "$log"
+  fakebin=$(make_notify_fakebin "$dir" "$log")
+  PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=MINGW64_NT-10.0 \
+    bash "$NOTIFY" "Firstmate" "a decision is needed" --focus || fail "windows bare exited non-zero"
+  ps=$(decode_encoded_command "$log")
+  assert_not_contains "$ps" "Open PR" "a bare call must not carry an Open PR button"
+  pass "windows omits the Open PR action when --open is not given (unchanged behavior)"
+}
+
+test_windows_open_url_is_xml_attribute_escaped() {
+  # The Open PR URL is interpolated into an XML attribute, so a value with XML
+  # metacharacters must be entity-escaped, never able to break the toast markup.
+  local dir log fakebin ps
+  dir="$TMP_ROOT/win-open-escape"; mkdir -p "$dir"
+  log="$dir/calls.log"; : > "$log"
+  fakebin=$(make_notify_fakebin "$dir" "$log")
+  PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=MINGW64_NT-10.0 \
+    bash "$NOTIFY" "Firstmate" "ready" --open 'https://x/pull/1?a=1&b="2"' || fail "windows --open escape exited non-zero"
+  ps=$(decode_encoded_command "$log")
+  assert_contains "$ps" '&amp;' "ampersand in the URL was not XML-escaped"
+  assert_contains "$ps" '&quot;' "double-quote in the URL was not XML-escaped"
+  assert_not_contains "$ps" 'arguments="https://x/pull/1?a=1&b="2""' "raw unescaped URL broke the attribute"
+  pass "windows --open XML-escapes the URL so it can never break the toast attribute"
+}
+
+test_macos_open_uses_terminal_notifier_open_flag() {
+  # macOS terminal-notifier has one click action: with --open the click OPENS the
+  # PR (-open <url>) and the focus -execute is omitted (best-effort macOS parity).
+  local dir log fakebin args
+  dir="$TMP_ROOT/macos-open"; mkdir -p "$dir"
+  log="$dir/calls.log"; : > "$log"
+  fakebin=$(make_macos_fakebin "$dir" "$log")
+  PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=Darwin \
+    bash "$NOTIFY" "Firstmate" "ready for review" --focus --open "https://github.com/o/r/pull/9" \
+    || fail "macos --open exited non-zero"
+  args=$(tr '\0' '\n' < "$log")
+  assert_contains "$args" "-open" "terminal-notifier missing the -open click action"
+  assert_contains "$args" "https://github.com/o/r/pull/9" "-open did not carry the PR URL"
+  assert_contains "$args" "-sound" "terminal-notifier dropped the sound under --open"
+  assert_not_contains "$args" "-execute" "--open must use -open, not the focus -execute (one click action)"
+  pass "macos --open opens the PR via terminal-notifier -open (best-effort parity)"
+}
+
+test_linux_open_adds_openpr_action_when_supported() {
+  # On a notify-send that supports actions, --open adds a SECOND action, "Open PR",
+  # alongside the focus action, so the captain can open the PR from the toast.
+  local dir fakebin log pf args
+  dir="$TMP_ROOT/linux-open"; mkdir -p "$dir"
+  log="$dir/calls.log"; : > "$log"
+  fakebin=$(make_linux_fakebin "$dir")
+  pf="$dir/proc"; printf 'Linux generic\n' > "$pf"
+  NS_LOG="$log" NS_SUPPORTS_ACTION=1 \
+    PATH="$fakebin:$PATH" FM_NOTIFY=on FM_NOTIFY_BG=0 FM_NOTIFY_UNAME=Linux FM_NOTIFY_PROC_VERSION="$pf" \
+    bash "$NOTIFY" "Firstmate" "ready for review" --focus --open "https://github.com/o/r/pull/12" \
+    || fail "linux --open dispatch exited non-zero"
+  args=$(tr '\0' '\n' < "$log")
+  assert_contains "$args" "--action=focus=Go to firstmate" "--open dropped the focus action"
+  assert_contains "$args" "--action=openpr=Open PR" "--open did not add the Open PR action"
+  assert_contains "$args" "--wait" "the multi-action notify-send must --wait for a click"
+  pass "linux --open adds the Open PR action alongside focus when the daemon supports actions"
+}
+
 test_title_message_carried_as_base64_not_injected() {
   # A title/message with PowerShell-dangerous characters must be carried as
   # base64 data, never interpolated as code. The decoded script must contain the
@@ -477,6 +564,11 @@ test_macos_terminal_notifier_no_focus_omits_execute
 test_windows_bare_call_defaults_to_focus_sound_persist
 test_windows_no_focus_flag_omits_click_action_but_keeps_sound
 test_windows_focus_adds_click_to_focus_action_not_appactivate
+test_windows_open_adds_open_pr_action_button
+test_windows_no_open_omits_open_pr_action
+test_windows_open_url_is_xml_attribute_escaped
+test_macos_open_uses_terminal_notifier_open_flag
+test_linux_open_adds_openpr_action_when_supported
 test_title_message_carried_as_base64_not_injected
 test_record_pane_writes_pane_file
 test_install_skips_protocol_off_wsl

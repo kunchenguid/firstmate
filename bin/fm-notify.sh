@@ -6,13 +6,19 @@
 # FIRST backend of the pluggable notifier from issue #106; the pluggable seam for
 # a later remote-push backend (a phone push via ntfy or Pushover) is marked below.
 #
-# Usage: fm-notify.sh "<title>" "<message>" [--focus|--no-focus]
+# Usage: fm-notify.sh "<title>" "<message>" [--focus|--no-focus] [--open <url>]
 #        fm-notify.sh install            # arm click-to-focus (WSL only)
 #   --focus     (DEFAULT) make the toast carry a "Go to firstmate" action that
 #               focuses the host terminal and the firstmate pane WHEN THE CAPTAIN
 #               CLICKS it. Click-to-focus, never auto-focus - see below.
 #   --no-focus  opt out of the click-to-focus action (used by tests; the default
 #               is always focus-on so a bare call still gets the full toast).
+#   --open <url>  add a SECOND "Open PR" action that opens <url> in the default
+#               browser when clicked. Used for done-state escalations that carry a
+#               PR/MR URL, so the captain can jump straight to the PR. Windows gets
+#               a real second toast button (activationType="protocol"); macOS and
+#               Linux are best-effort (terminal-notifier -open / notify-send
+#               --action). Omitted -> no extra button (unchanged behavior).
 #
 # Contract: dependency-free beyond the platform's own tools, fast, and
 # non-blocking. The notifier never hangs the caller and never fails it: if no
@@ -118,6 +124,15 @@ _fm_notify_pane_file() {
 # an escalation summary - can never break out of the script or need quoting.
 _b64_utf16() { printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w0 2>/dev/null; }
 
+# _xml_escape: escape the five XML metacharacters so a value is safe inside an XML
+# attribute. The "Open PR" action's URL is interpolated into the toast XML as an
+# attribute (unlike the title/message, which are set via DOM text nodes), so it is
+# escaped here to keep a stray quote or angle bracket from breaking the toast
+# markup. Escape & first so the entity ampersands it introduces are not re-escaped.
+_xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 # _build_windows_ps: assemble the PowerShell that shows a persistent, SOUNDING
 # WinRT toast. The toast is scenario="reminder" (ToastGeneric) so it pops as a
 # banner and stays until acted on, instead of dropping silently into the
@@ -132,7 +147,7 @@ _b64_utf16() { printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base6
 # custom "Firstmate" AppId is left out on purpose since an unregistered AppId can
 # suppress the toast entirely.
 _build_windows_ps() {
-  local title=$1 msg=$2 focus=$3 tb mb toast_open focus_action sound audio
+  local title=$1 msg=$2 focus=$3 open_url=$4 tb mb toast_open focus_action openpr_action sound audio url_esc
   tb=$(_b64_utf16 "$title")
   mb=$(_b64_utf16 "$msg")
   if [ "$focus" = 1 ]; then
@@ -141,6 +156,15 @@ _build_windows_ps() {
   else
     toast_open='<toast scenario="reminder">'
     focus_action=''
+  fi
+  # Optional second button: "Open PR" opens the PR/MR URL in the default browser.
+  # activationType="protocol" with an https argument hands the URL to the OS, which
+  # routes it to the default browser. The URL is XML-attribute-escaped (above).
+  if [ -n "$open_url" ]; then
+    url_esc=$(_xml_escape "$open_url")
+    openpr_action="    <action content=\"Open PR\" activationType=\"protocol\" arguments=\"$url_esc\"/>"
+  else
+    openpr_action=''
   fi
   # Explicit, non-silent audio so the toast always sounds. The src is an
   # operator-trusted internal knob (never user/escalation text), defaulting to the
@@ -168,6 +192,7 @@ $toast_open
 $audio
   <actions>
 $focus_action
+$openpr_action
     <action content="Dismiss" arguments="dismiss" activationType="system"/>
   </actions>
 </toast>
@@ -199,11 +224,11 @@ _run_bg() {
 }
 
 fm_notify_windows() {
-  local title=$1 msg=$2 focus=$3 ps enc
+  local title=$1 msg=$2 focus=$3 open_url=$4 ps enc
   command -v powershell.exe >/dev/null 2>&1 || return 0
   command -v iconv >/dev/null 2>&1 || return 0
   command -v base64 >/dev/null 2>&1 || return 0
-  ps=$(_build_windows_ps "$title" "$msg" "$focus")
+  ps=$(_build_windows_ps "$title" "$msg" "$focus" "$open_url")
   enc=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w0 2>/dev/null) || return 0
   [ -n "$enc" ] || return 0
   _run_bg powershell.exe -NoProfile -NonInteractive -EncodedCommand "$enc"
@@ -218,17 +243,23 @@ _osa_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 _sh_squote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 # fm_notify_macos: mirror the Windows toast as closely as macOS robustly allows.
-# terminal-notifier (when present) gives a persistent alert + sound + click-to-
-# focus via -execute, which runs bin/fm-focus.sh (with FM_HOME) to raise the
-# terminal and select the firstmate pane. Without it, fall back to `osascript
-# display notification` WITH a sound - no persistence/click, but still better than
-# a silent banner. Title/message are passed as discrete arguments (terminal-
-# notifier) or escaped osascript string literals, never shell-interpolated.
+# terminal-notifier (when present) gives a persistent alert + sound + a single
+# click action. With an --open URL the click action OPENS THE PR (-open <url>),
+# the most useful action for a done-state notification; otherwise it click-to-
+# focuses via -execute, which runs bin/fm-focus.sh (with FM_HOME) to raise the
+# terminal and select the firstmate pane. terminal-notifier has one click action,
+# so -open takes priority over -execute when a URL is present (best-effort macOS
+# parity). Without terminal-notifier, fall back to `osascript display
+# notification` WITH a sound - no persistence/click, but still better than a silent
+# banner. Title/message are passed as discrete arguments (terminal-notifier) or
+# escaped osascript string literals, never shell-interpolated.
 fm_notify_macos() {
-  local title=$1 msg=$2 focus=$3 focus_sh=$4 home=$5 t m sound exe
+  local title=$1 msg=$2 focus=$3 focus_sh=$4 home=$5 open_url=$6 t m sound exe
   sound="${FM_NOTIFY_MACOS_SOUND:-Ping}"
   if command -v terminal-notifier >/dev/null 2>&1; then
-    if [ "$focus" = 1 ] && [ -x "$focus_sh" ]; then
+    if [ -n "$open_url" ]; then
+      _run_bg terminal-notifier -title "$title" -message "$msg" -sound "$sound" -open "$open_url"
+    elif [ "$focus" = 1 ] && [ -x "$focus_sh" ]; then
       # -execute is shell-evaluated: carry only firstmate's own quoted paths.
       exe="FM_HOME=$(_sh_squote "$home") $(_sh_squote "$focus_sh")"
       _run_bg terminal-notifier -title "$title" -message "$msg" -sound "$sound" -execute "$exe"
@@ -268,30 +299,45 @@ _fm_linux_play_sound() {
   return 0
 }
 
-# _fm_linux_notify_action: post a critical (persistent) notification carrying a
-# "Go to firstmate" action and, when the captain clicks it, run bin/fm-focus.sh.
-# notify-send --wait blocks until the click or the daemon's timeout, so the caller
-# always backgrounds this (it runs inside _run_bg). Best-effort and never-fatal.
+# _fm_linux_notify_action: post a critical (persistent) notification carrying up to
+# two actions - a "Go to firstmate" click that runs bin/fm-focus.sh, and, with an
+# --open URL, an "Open PR" click that runs xdg-open on the URL. notify-send --wait
+# blocks until a click (or the daemon's timeout) and prints the chosen action key,
+# so the caller always backgrounds this (it runs inside _run_bg). want_focus gates
+# the focus action; a non-empty open_url adds the Open-PR action. Arrays are avoided
+# for bash 3.2 safety, so the notify-send call is enumerated over the cases.
+# Best-effort and never-fatal.
 _fm_linux_notify_action() {
-  local title=$1 msg=$2 focus_sh=$3 home=$4 act
-  act=$(notify-send --urgency=critical --wait --action='focus=Go to firstmate' -- "$title" "$msg" 2>/dev/null)
-  [ "$act" = focus ] && FM_HOME="$home" "$focus_sh" >/dev/null 2>&1
+  local title=$1 msg=$2 focus_sh=$3 home=$4 open_url=$5 want_focus=$6 act
+  if [ "$want_focus" = 1 ] && [ -n "$open_url" ]; then
+    act=$(notify-send --urgency=critical --wait \
+      --action='focus=Go to firstmate' --action='openpr=Open PR' -- "$title" "$msg" 2>/dev/null)
+  elif [ "$want_focus" = 1 ]; then
+    act=$(notify-send --urgency=critical --wait --action='focus=Go to firstmate' -- "$title" "$msg" 2>/dev/null)
+  else
+    act=$(notify-send --urgency=critical --wait --action='openpr=Open PR' -- "$title" "$msg" 2>/dev/null)
+  fi
+  case "$act" in
+    focus)  FM_HOME="$home" "$focus_sh" >/dev/null 2>&1 ;;
+    openpr) command -v xdg-open >/dev/null 2>&1 && xdg-open "$open_url" >/dev/null 2>&1 ;;
+  esac
   return 0
 }
 
 # fm_notify_linux: mirror the Windows toast as closely as the Linux desktop
 # robustly allows. --urgency=critical makes the notification persist; a best-
 # effort sound plays alongside; and where the notification daemon supports
-# actions, a "Go to firstmate" click runs bin/fm-focus.sh. Click-to-focus is
-# desktop-environment-dependent, so it degrades to persistent+sound when the
-# daemon has no action support. notify-send takes title/message as discrete
-# arguments, never shell-interpolated.
+# actions, a "Go to firstmate" click runs bin/fm-focus.sh and (with an --open URL)
+# an "Open PR" click runs xdg-open. Actions are desktop-environment-dependent, so
+# it degrades to persistent+sound when the daemon has no action support. notify-send
+# takes title/message as discrete arguments, never shell-interpolated.
 fm_notify_linux() {
-  local title=$1 msg=$2 focus=$3 focus_sh=$4 home=$5
+  local title=$1 msg=$2 focus=$3 focus_sh=$4 home=$5 open_url=$6 want_focus=0
   command -v notify-send >/dev/null 2>&1 || return 0
   _fm_linux_play_sound
-  if [ "$focus" = 1 ] && [ -x "$focus_sh" ] && _fm_notify_send_supports_action; then
-    _run_bg _fm_linux_notify_action "$title" "$msg" "$focus_sh" "$home"
+  [ "$focus" = 1 ] && [ -x "$focus_sh" ] && want_focus=1
+  if { [ "$want_focus" = 1 ] || [ -n "$open_url" ]; } && _fm_notify_send_supports_action; then
+    _run_bg _fm_linux_notify_action "$title" "$msg" "$focus_sh" "$home" "$open_url" "$want_focus"
   else
     _run_bg notify-send --urgency=critical -- "$title" "$msg"
   fi
@@ -313,13 +359,13 @@ fm_notify_linux() {
 # can run bin/fm-focus.sh with the right FM_HOME (Windows resolves both itself
 # through the installed protocol launcher).
 fm_notify_dispatch() {
-  local title=$1 msg=$2 focus=$3 focus_sh home
+  local title=$1 msg=$2 focus=$3 open_url=${4:-} focus_sh home
   focus_sh="$(_fm_notify_self_dir)/fm-focus.sh"
   home=$(_fm_notify_home)
   case "$(fm_detect_platform)" in
-    wsl|windows) fm_notify_windows "$title" "$msg" "$focus" ;;
-    macos)       fm_notify_macos "$title" "$msg" "$focus" "$focus_sh" "$home" ;;
-    linux)       fm_notify_linux "$title" "$msg" "$focus" "$focus_sh" "$home" ;;
+    wsl|windows) fm_notify_windows "$title" "$msg" "$focus" "$open_url" ;;
+    macos)       fm_notify_macos "$title" "$msg" "$focus" "$focus_sh" "$home" "$open_url" ;;
+    linux)       fm_notify_linux "$title" "$msg" "$focus" "$focus_sh" "$home" "$open_url" ;;
     *)           return 0 ;;  # unknown platform: quiet no-op
   esac
   # Future: fm_notify_push_ntfy "$title" "$msg"   (remote push, issue #106)
@@ -432,11 +478,14 @@ fm_notify_main() {
 
   # Focus is ON BY DEFAULT: every toast pops, sounds, persists, and is click-to-
   # focus. --no-focus opts out (tests only); --focus is accepted for explicitness.
-  local title="" msg="" focus=1 nargs=0
+  # --open <url> (or --open=<url>) adds the optional "Open PR" action button.
+  local title="" msg="" focus=1 open_url="" nargs=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --focus) focus=1 ;;
       --no-focus) focus=0 ;;
+      --open) shift; open_url=${1:-} ;;
+      --open=*) open_url=${1#--open=} ;;
       --) shift; break ;;
       *)
         case $nargs in
@@ -455,14 +504,14 @@ fm_notify_main() {
   done
 
   if [ -z "$title" ]; then
-    echo "usage: fm-notify.sh \"<title>\" \"<message>\" [--focus|--no-focus]  |  fm-notify.sh install" >&2
+    echo "usage: fm-notify.sh \"<title>\" \"<message>\" [--focus|--no-focus] [--open <url>]  |  fm-notify.sh install" >&2
     return 2
   fi
 
   # Toggle check AFTER arg parsing so a bad invocation still reports usage.
   fm_notify_enabled || return 0
 
-  fm_notify_dispatch "$title" "$msg" "$focus"
+  fm_notify_dispatch "$title" "$msg" "$focus" "$open_url"
   return 0
 }
 

@@ -286,7 +286,7 @@ _notify_seen_path() { printf '%s/.notify-seen-%s' "$STATE" "$(printf '%s' "$1" |
 notify_signal_statuses() {  # <file> ...
   fm_notify_enabled || return 0
   [ -x "$NOTIFY_CMD" ] || return 0
-  local f last task seen n=0 decision=0 review=0 summary
+  local f last task seen n=0 decision=0 review=0 summary open_url="" url
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
@@ -302,6 +302,16 @@ notify_signal_statuses() {  # <file> ...
     elif printf '%s' "$last" | grep -qiE 'done|merged|checks green|ready|PR '; then
       review=1
     fi
+    # A done-state status that carries a PR/MR URL earns an "Open PR" button, so
+    # the captain can jump straight to the PR from the toast. Skipped for
+    # local-only tasks (no PR). The first eligible URL wins (one button), so a
+    # multi-task wake still gets at most one Open-PR target.
+    if [ -z "$open_url" ] && printf '%s' "$last" | grep -qiE 'done'; then
+      url=$(fm_status_pr_url "$last")
+      if [ -n "$url" ] && ! fm_task_is_local_only "$STATE" "$task"; then
+        open_url=$url
+      fi
+    fi
   done
   [ "$n" -gt 0 ] || return 0
   if [ "$decision" = 1 ]; then
@@ -312,11 +322,20 @@ notify_signal_statuses() {  # <file> ...
     summary="$n update(s) need your attention"
   fi
   # The toast text is an id-free count-and-class summary (lock-screen safe), the
-  # same shape the daemon emits. Error-isolated either way.
+  # same shape the daemon emits. With a PR URL it also carries --open so the toast
+  # gets the "Open PR" button. Error-isolated either way.
   if [ "${FM_WATCH_NOTIFY_BG:-1}" = 0 ]; then
-    "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 || true
+    if [ -n "$open_url" ]; then
+      "$NOTIFY_CMD" "Firstmate" "$summary" --focus --open "$open_url" >/dev/null 2>&1 || true
+    else
+      "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 || true
+    fi
   else
-    ( "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 & ) 2>/dev/null || true
+    if [ -n "$open_url" ]; then
+      ( "$NOTIFY_CMD" "Firstmate" "$summary" --focus --open "$open_url" >/dev/null 2>&1 & ) 2>/dev/null || true
+    else
+      ( "$NOTIFY_CMD" "Firstmate" "$summary" --focus >/dev/null 2>&1 & ) 2>/dev/null || true
+    fi
   fi
   return 0
 }
