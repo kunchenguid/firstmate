@@ -54,7 +54,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, or pi), git with GitHub auth, and tmux for the crew windows.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the crew windows.
 The first mate detects and offers to install everything else.
 
 ```sh
@@ -126,7 +126,7 @@ Full architecture - the supervision engine, worktree isolation, secondmates, pro
 ## Built-in skills
 
 Firstmate ships these user-invocable built-in skills.
-Claude uses the slash form shown here; codex uses the same names with `$`, such as `$afk`.
+Claude and grok use the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |

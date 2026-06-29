@@ -72,7 +72,7 @@ separator, 0x1f), invisible and untypable. This is how firstmate tells a
 daemon escalation apart from a real message in the same pane. The marker
 travels with the message text; it does not rely on harness-level
 typed-vs-injected detection (which is not portable across claude, codex,
-opencode, and pi).
+opencode, pi, and grok).
 
 ## Busy-guard and composer guard
 
