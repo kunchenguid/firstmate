@@ -222,6 +222,36 @@ SH
   pass "fm-focus on Linux still selects the pane when the window raise finds nothing"
 }
 
+# --- positional home arg: the WSL launcher passes the home as $1 --------------
+
+test_positional_home_arg_wins_over_env() {
+  # The WSL launcher passes the firstmate home as fm-focus.sh's positional $1,
+  # because an `env FM_HOME=...` wrapper does not survive WScript.Shell.Run. The
+  # arg must take precedence over any ambient FM_HOME, so the pane recorded under
+  # $1/state is the one selected even when FM_HOME points at a different home.
+  local dir log fakebin home decoy pf calls
+  dir="$TMP_ROOT/posarg"; mkdir -p "$dir"
+  log="$dir/tmux.log"; : > "$log"
+  fakebin=$(make_tmux_fakebin "$dir" "$log")
+  home="$dir/home"; mkdir -p "$home/state"
+  printf '%%4\n' > "$home/state/.fm-tmux-pane"
+  decoy="$dir/decoy"; mkdir -p "$decoy/state"
+  printf '%%9\n' > "$decoy/state/.fm-tmux-pane"
+  pf="$dir/proc"; printf 'Linux generic\n' > "$pf"
+  # FM_HOME points at the decoy and the positional arg names the real home; with no
+  # FM_TMUX_PANE_FILE, the pane file is derived from the resolved home, so selecting
+  # %4 (not the decoy's %9) proves $1 won. Both panes are live so the decoy would be
+  # selected if the env home were used.
+  PATH="$fakebin:$PATH" FM_HOME="$decoy" FM_NOTIFY_UNAME=Linux FM_NOTIFY_PROC_VERSION="$pf" \
+    TMUX_STUB_PANES=$'%4\n%9' TMUX_STUB_WIN='work:7' TMUX_STUB_FALLBACK='' \
+    bash "$FOCUS" "$home" || fail "fm-focus exited non-zero with a positional home arg"
+  calls=$(tr '\0' '\n' < "$log")
+  assert_contains "$calls" "%4" "positional home arg did not win over FM_HOME env"
+  assert_not_contains "$calls" "%9" "fm-focus used the FM_HOME env home instead of the positional arg"
+  assert_contains "$calls" "work:7" "positional home did not resolve the pane's CURRENT session:window"
+  pass "fm-focus's positional \$1 home wins over the FM_HOME env (WScript.Shell.Run-safe)"
+}
+
 test_recorded_pane_resolves_nonfirstmate_session
 test_fallback_finds_claude_pane_by_home_cwd
 test_fallback_handles_home_with_spaces
@@ -229,3 +259,4 @@ test_macos_raises_terminal_then_selects_pane
 test_macos_explicit_term_override_is_activated
 test_linux_raises_window_then_selects_pane
 test_linux_degrades_to_select_when_no_window_found
+test_positional_home_arg_wins_over_env

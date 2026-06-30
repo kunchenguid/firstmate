@@ -428,7 +428,7 @@ fm_notify_install() {
   command -v cmd.exe   >/dev/null 2>&1 || { printf 'fm-notify: cmd.exe not found - cannot resolve %%LOCALAPPDATA%%\n' >&2; return 1; }
 
   # Resolve a stable Windows-accessible launcher dir under %LOCALAPPDATA%.
-  local appdata_win appdata_wsl vbs_dir vbs_wsl vbs_win wsl_cmd vbs_focus vbs_home vbs_distro
+  local appdata_win appdata_wsl vbs_dir vbs_wsl vbs_win wsl_cmd vbs_focus vbs_home
   appdata_win=$(cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r\n')
   [ -n "$appdata_win" ] || { printf 'fm-notify: could not resolve %%LOCALAPPDATA%%\n' >&2; return 1; }
   appdata_wsl=$(wslpath -u "$appdata_win" 2>/dev/null)
@@ -438,20 +438,22 @@ fm_notify_install() {
   vbs_wsl="$vbs_dir/fm-launch.vbs"
 
   # The hidden launcher: window style 0 so no console flashes. Pin the distro so a
-  # multi-distro host still reaches the right bash, and run fm-focus.sh in the
-  # firstmate distro under the SAME FM_HOME that armed the pane file - so a custom
-  # home clicks into the pane it recorded, matching the macOS/Linux backends which
-  # also pass FM_HOME through. The distro, FM_HOME, and focus_sh are each
-  # VBS-escaped (embedded " -> "") and wrapped in VBS double quotes, so a distro
-  # name or checkout path containing spaces reaches wsl.exe/bash as one argument.
+  # multi-distro host still reaches the right bash, and run fm-focus.sh under the
+  # SAME firstmate home that armed the pane file - so a custom home clicks into the
+  # pane it recorded, matching the macOS/Linux backends which also pass the home
+  # through. WScript.Shell.Run does NOT preserve an `env VAR=...` wrapper or quotes
+  # around the distro, so neither survives the VBS -> wsl.exe chain: the distro is
+  # passed UNQUOTED and the home is passed as bash's positional $1 (fm-focus.sh
+  # reads $1 as FM_HOME). focus_sh and home are still VBS-escaped (embedded " -> "")
+  # and wrapped in VBS double quotes, so a checkout path containing spaces still
+  # reaches bash as one argument.
   home=$(_fm_notify_home)
   vbs_focus=${focus_sh//\"/\"\"}
   vbs_home=${home//\"/\"\"}
   if [ -n "${WSL_DISTRO_NAME:-}" ]; then
-    vbs_distro=${WSL_DISTRO_NAME//\"/\"\"}
-    wsl_cmd="wsl.exe -d \"\"${vbs_distro}\"\" -e env FM_HOME=\"\"${vbs_home}\"\" bash \"\"${vbs_focus}\"\""
+    wsl_cmd="wsl.exe -d ${WSL_DISTRO_NAME} -e bash \"\"${vbs_focus}\"\" \"\"${vbs_home}\"\""
   else
-    wsl_cmd="wsl.exe -e env FM_HOME=\"\"${vbs_home}\"\" bash \"\"${vbs_focus}\"\""
+    wsl_cmd="wsl.exe -e bash \"\"${vbs_focus}\"\" \"\"${vbs_home}\"\""
   fi
   printf 'CreateObject("WScript.Shell").Run "%s", 0, False\r\n' "$wsl_cmd" > "$vbs_wsl" \
     || { printf 'fm-notify: could not write the launcher %s\n' "$vbs_wsl" >&2; return 1; }

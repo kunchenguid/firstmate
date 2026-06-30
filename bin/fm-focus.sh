@@ -35,7 +35,10 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # it work with no FM_HOME in the environment; the launcher may also export FM_HOME
 # for a home that is not the repo root. Never an absolute literal.
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$_self_dir/.." && pwd)}"
-FM_HOME="${FM_HOME:-$FM_ROOT}"
+# The WSL launcher passes the home as $1 (an argument survives WScript.Shell.Run;
+# an `env FM_HOME=...` wrapper does not). macOS/Linux backends still pass it via the
+# FM_HOME env. Precedence: launcher arg, then env, then self-derived repo root.
+FM_HOME="${1:-${FM_HOME:-$FM_ROOT}}"
 pane_file="${FM_TMUX_PANE_FILE:-$FM_HOME/state/.fm-tmux-pane}"
 
 # 1) Raise the host terminal window. Hidden/best-effort and NEVER fatal on every

@@ -548,18 +548,17 @@ SH
   assert_contains "$reg" 'HKCU\Software\Classes\firstmate\shell\open\command' "protocol command key not registered"
   assert_contains "$reg" 'wscript.exe //B //Nologo "C:\fake\fm-launch.vbs" "%1"' "open command not wired to the launcher"
   vbs=$(cat "$dir/appdata/firstmate/fm-launch.vbs")
-  assert_contains "$vbs" 'WScript.Shell' "launcher is not a WScript.Shell .Run"
-  # The distro is pinned AND VBS-quoted ("") so a name with spaces survives.
-  assert_contains "$vbs" 'wsl.exe -d ""TestDistro"" -e env' "launcher does not pin and quote the distro"
-  assert_contains "$vbs" ', 0, False' "launcher does not run hidden (window style 0)"
-  # The launcher passes the SAME FM_HOME that armed the pane file, so a custom
-  # home clicks into the pane it recorded (not the repo-root default).
-  assert_contains "$vbs" "FM_HOME=\"\"$home\"\"" "launcher does not preserve FM_HOME for the recorded pane"
   focus_sh="$ROOT/bin/fm-focus.sh"
-  # The fm-focus.sh path is wrapped in VBS-escaped quotes ("") so a checkout path
-  # with spaces still reaches bash as one argument.
-  assert_contains "$vbs" "bash \"\"$focus_sh\"\"" "launcher does not quote the fm-focus.sh path for spaces"
-  pass "fm_notify_install registers the firstmate: protocol + hidden launcher (FM_HOME-preserving, quoted) on WSL"
+  assert_contains "$vbs" 'WScript.Shell' "launcher is not a WScript.Shell .Run"
+  # WScript.Shell.Run does not preserve quotes around the distro or an `env VAR=`
+  # wrapper, so the distro is pinned UNQUOTED and the home rides as a positional arg.
+  assert_contains "$vbs" 'wsl.exe -d TestDistro -e bash' "launcher does not pin the distro unquoted"
+  assert_not_contains "$vbs" 'env FM_HOME=' "launcher still wraps the home in an env that WScript.Shell.Run drops"
+  assert_contains "$vbs" ', 0, False' "launcher does not run hidden (window style 0)"
+  # The home that armed the pane file is passed as fm-focus.sh's positional $1, and
+  # both the focus path and the home are VBS-quoted ("") so spaces survive as one arg.
+  assert_contains "$vbs" "bash \"\"$focus_sh\"\" \"\"$home\"\"" "launcher does not pass the recorded home as fm-focus.sh's positional arg"
+  pass "fm_notify_install registers the firstmate: protocol + hidden launcher (positional-home, distro-pinned) on WSL"
 }
 
 test_install_fails_when_any_registry_write_fails() {
