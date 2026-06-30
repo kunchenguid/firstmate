@@ -7,11 +7,16 @@
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
-# Enter is positively confirmed (the text is still sitting in the composer after
-# all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
-# The composer/submit logic is shared with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Enter is positively confirmed (the sent text is still sitting in the composer
+# after all retries), fm-send exits NON-ZERO so the caller knows the steer did not
+# land instead of silently leaving an unsubmitted instruction (incident
+# afk-invx-i5). Some WSL-hosted Windows-agent panes report the cursor row as
+# pending after a submit that actually landed; an ambiguous pending read whose
+# composer no longer holds the sent text is downgraded to a warning + success
+# after one longer settle, so a phantom pending never turns a real steer into an
+# error. The composer/submit logic is shared with the away-mode daemon via
+# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4)
+# and FM_SEND_AMBIGUOUS_SETTLE (default 1.5).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,8 +63,33 @@ else
   verdict=$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")
   case "$verdict" in
     pending)
-      echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
-      exit 1
+      # Some WSL-hosted Windows-agent panes can report the cursor row as
+      # pending after a successful submit. Fail only when the sent text itself is
+      # still observable in the normalized composer after one longer settle.
+      sleep "${FM_SEND_AMBIGUOUS_SETTLE:-1.5}"
+      if fm_pane_is_busy "$T"; then
+        echo "warning: submit to $T reported pending, but pane is busy; treating as delivered" >&2
+        exit 0
+      fi
+      state2=$(fm_tmux_composer_state "$T")
+      [ "$state2" != pending ] && exit 0
+      composer_text=$(fm_tmux_composer_text "$T" 2>/dev/null || true)
+      if [ -n "$composer_text" ]; then
+        case "$composer_text" in
+          *"$*"*)
+            echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+            exit 1
+            ;;
+        esac
+        case "$*" in
+          *"$composer_text"*)
+            echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+            exit 1
+            ;;
+        esac
+      fi
+      echo "warning: submit to $T reported pending, but sent text is no longer in composer; treating as delivered" >&2
+      exit 0
       ;;
     send-failed)
       echo "error: text not sent to $T (tmux send-keys failed)" >&2

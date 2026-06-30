@@ -7,7 +7,9 @@
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
 # Run as a background task. Re-arm it after handling each wake; duplicate
-# invocations no-op through the watcher singleton lock.
+# invocations no-op through the watcher singleton lock. `--keepalive` runs a
+# silent sidecar that re-arms this one-shot watcher when the liveness beacon
+# goes stale and no live watcher holds the singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +23,105 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+KEEPALIVE_LOCK="$STATE/.watch.keepalive.lock"
+KEEPALIVE_LOG="$STATE/.watch.keepalive.log"
+KEEPALIVE_ERR="$STATE/.watch.keepalive.err"
+KEEPALIVE_INTERVAL=${FM_WATCH_KEEPALIVE_INTERVAL:-30}
+KEEPALIVE_CRASH_THRESHOLD=${FM_WATCH_KEEPALIVE_CRASH_THRESHOLD:-5}
+KEEPALIVE_CRASH_BACKOFF=${FM_WATCH_KEEPALIVE_CRASH_BACKOFF:-300}
+
+watch_lock_live() {
+  local pid
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid"
+}
+
+# A task is in flight when any state/*.meta exists. The keepalive exists only to
+# keep a one-shot watcher alive while work exists; with the fleet empty there is
+# no consumer for the wakes a watcher would enqueue, so the keepalive must not
+# spawn or keep re-arming.
+work_in_flight() {
+  local meta
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] && return 0
+  done
+  return 1
+}
+
+keepalive_log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$KEEPALIVE_LOG" 2>/dev/null || true
+}
+
+ensure_keepalive() {
+  [ "${FM_WATCH_KEEPALIVE:-1}" = "0" ] && return 0
+  [ "${FM_WATCH_KEEPALIVE_CHILD:-0}" = "1" ] && return 0
+  work_in_flight || return 0
+  if fm_lock_try_acquire "$KEEPALIVE_LOCK"; then
+    fm_lock_release "$KEEPALIVE_LOCK"
+    FM_WATCH_KEEPALIVE_CHILD=1 "$0" --keepalive >/dev/null 2>>"$KEEPALIVE_ERR" &
+  fi
+}
+
+run_keepalive() {
+  local beat="$STATE/.last-watcher-beat" age pid="" tmp="" rc reason now backoff_until=0 crash_count=0
+
+  if ! fm_lock_try_acquire "$KEEPALIVE_LOCK"; then
+    exit 0
+  fi
+  trap 'kill "$pid" 2>/dev/null || true; [ -n "$pid" ] && wait "$pid" 2>/dev/null || true; [ -n "$tmp" ] && rm -f "$tmp" 2>/dev/null || true; fm_lock_release "$KEEPALIVE_LOCK"' EXIT
+  keepalive_log "keepalive starting (pid $$); stale_grace=${WATCHER_STALE_GRACE}s interval=${KEEPALIVE_INTERVAL}s"
+
+  while :; do
+    if ! work_in_flight; then
+      keepalive_log "fleet empty; keepalive stopping"
+      break
+    fi
+    age=$(fm_path_age "$beat")
+    if [ "$age" -ge "$WATCHER_STALE_GRACE" ] && ! watch_lock_live; then
+      now=$(date +%s)
+      if [ "$now" -lt "$backoff_until" ]; then
+        sleep "$KEEPALIVE_INTERVAL"
+        continue
+      fi
+      tmp=$(mktemp "${TMPDIR:-/tmp}/fm-watch-keepalive.XXXXXX") || {
+        sleep "$KEEPALIVE_INTERVAL"
+        continue
+      }
+      keepalive_log "re-arming watcher after stale beacon age ${age}s"
+      FM_WATCH_KEEPALIVE_CHILD=1 FM_WATCH_KEEPALIVE=0 "$0" >"$tmp" 2>>"$KEEPALIVE_ERR" &
+      pid=$!
+      wait "$pid"; rc=$?
+      pid=""
+      reason=$(cat "$tmp" 2>/dev/null || true)
+      rm -f "$tmp" 2>/dev/null || true
+      tmp=""
+
+      if [ "$rc" -ne 0 ] || [ -z "$reason" ]; then
+        now=$(date +%s)
+        crash_count=$((crash_count + 1))
+        keepalive_log "watcher re-arm exited rc=$rc reason='$reason' (consecutive failures: $crash_count)"
+        if [ "$crash_count" -gt "$KEEPALIVE_CRASH_THRESHOLD" ]; then
+          backoff_until=$((now + KEEPALIVE_CRASH_BACKOFF))
+          crash_count=0
+          keepalive_log "watcher re-arm crash loop; backing off ${KEEPALIVE_CRASH_BACKOFF}s"
+        fi
+      else
+        crash_count=0
+        keepalive_log "watcher one-shot exited with: $reason"
+      fi
+    fi
+    sleep "$KEEPALIVE_INTERVAL"
+  done
+}
+
+case "${1:-}" in
+  --keepalive)
+    run_keepalive
+    exit 0
+    ;;
+esac
+
+ensure_keepalive
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
