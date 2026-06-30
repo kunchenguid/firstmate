@@ -831,7 +831,7 @@ Dismiss tells the relay to drop the request so it stops re-offering it every pol
 Like `bin/fm-x-reply.sh`, the dismiss honors `FMX_DRY_RUN` (recording the would-be dismiss to `state/x-outbox/` instead of posting).
 The reply is **public on a shared bot**, so the skill enforces a strict version of section 9: no task ids, internal vocabulary, captain-private material, or secrets - outcomes only.
 Because public mention text can influence the composed reply, the skill never inlines it into a shell command; it passes the reply via `bin/fm-x-reply.sh <request_id> --text-file <path>` (or stdin), not as an interpolated argument.
-When the reply needs one outbound image, pass `--image <path>` to `bin/fm-x-reply.sh`; the helper reads the local file, detects the media type, base64-encodes the raw bytes, and sends the relay's optional `image` object without inlining image bytes into the shell command.
+When the reply needs one outbound image, pass `--image <path>` to `bin/fm-x-reply.sh`; the helper reads one local PNG, JPEG, GIF, WebP, BMP, or TIFF, detects the media type, base64-encodes the raw bytes, and sends the relay's optional `image` object without inlining image bytes into the shell command.
 
 **Completion follow-up.**
 When an actionable mention spawns a real task rather than completing in the answering turn, the immediate reply is an acknowledgement and the **outcome** is delivered later as a single follow-up reply.
