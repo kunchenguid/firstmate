@@ -36,6 +36,18 @@ watch_lock_live() {
   fm_pid_alive "$pid"
 }
 
+# A task is in flight when any state/*.meta exists. The keepalive exists only to
+# keep a one-shot watcher alive while work exists; with the fleet empty there is
+# no consumer for the wakes a watcher would enqueue, so the keepalive must not
+# spawn or keep re-arming.
+work_in_flight() {
+  local meta
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] && return 0
+  done
+  return 1
+}
+
 keepalive_log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$KEEPALIVE_LOG" 2>/dev/null || true
 }
@@ -43,6 +55,7 @@ keepalive_log() {
 ensure_keepalive() {
   [ "${FM_WATCH_KEEPALIVE:-1}" = "0" ] && return 0
   [ "${FM_WATCH_KEEPALIVE_CHILD:-0}" = "1" ] && return 0
+  work_in_flight || return 0
   if fm_lock_try_acquire "$KEEPALIVE_LOCK"; then
     fm_lock_release "$KEEPALIVE_LOCK"
     FM_WATCH_KEEPALIVE_CHILD=1 "$0" --keepalive >/dev/null 2>>"$KEEPALIVE_ERR" &
@@ -59,6 +72,10 @@ run_keepalive() {
   keepalive_log "keepalive starting (pid $$); stale_grace=${WATCHER_STALE_GRACE}s interval=${KEEPALIVE_INTERVAL}s"
 
   while :; do
+    if ! work_in_flight; then
+      keepalive_log "fleet empty; keepalive stopping"
+      break
+    fi
     age=$(fm_path_age "$beat")
     if [ "$age" -ge "$WATCHER_STALE_GRACE" ] && ! watch_lock_live; then
       now=$(date +%s)

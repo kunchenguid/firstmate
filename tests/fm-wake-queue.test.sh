@@ -416,6 +416,7 @@ test_keepalive_rearms_stale_missing_watcher() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/keepalive.out"
+  printf 'project=x\n' > "$state/task.meta"
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_KEEPALIVE=1 FM_WATCH_KEEPALIVE_INTERVAL=1 \
     FM_WATCHER_STALE_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
@@ -431,6 +432,26 @@ test_keepalive_rearms_stale_missing_watcher() {
   wait "$pid" 2>/dev/null || true
   is_live_non_zombie "$watcher_pid" && fail "keepalive did not clean up child watcher on exit"
   pass "watch keepalive re-arms a stale missing watcher"
+}
+
+test_keepalive_stops_when_fleet_empty() {
+  local dir state fakebin out pid live
+  dir=$(make_case keepalive-empty)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/keepalive.out"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_KEEPALIVE=1 FM_WATCH_KEEPALIVE_INTERVAL=1 \
+    FM_WATCHER_STALE_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" --keepalive > "$out" &
+  pid=$!
+  sleep 1.5
+  live=0
+  is_live_non_zombie "$pid" && live=1
+  [ "$live" -eq 0 ] || { kill "$pid" 2>/dev/null || true; fail "keepalive kept running with no tasks in flight"; }
+  [ -e "$state/.watch.lock/pid" ] && fail "keepalive armed a watcher with no tasks in flight"
+  wait "$pid" 2>/dev/null || true
+  pass "watch keepalive stops cleanly when the fleet is empty"
 }
 
 test_guard_warns_on_pending_queue() {
@@ -1322,6 +1343,7 @@ test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_keepalive_rearms_stale_missing_watcher
+test_keepalive_stops_when_fleet_empty
 test_guard_warns_on_pending_queue
 test_guard_rearms_after_draining_pending_queue
 # Sub-supervisor (fm-supervise-daemon.sh) classifier + batching + housekeeping.
