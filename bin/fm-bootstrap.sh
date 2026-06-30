@@ -15,8 +15,11 @@
 #          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
 #          instruction surface actually changed; firstmate nudges each to re-read.
 #          Already-current or no-instruction-change homes are silently left alone.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs for
-#          live secondmate homes; no-op/current and successful updates stay quiet.
+#          The secondmate sweep also propagates declared inheritable local config
+#          (config/crew-harness today) into each validated live secondmate home.
+#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
+#          config-inheritance failures for live secondmate homes; no-op/current
+#          and successful updates stay quiet.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
