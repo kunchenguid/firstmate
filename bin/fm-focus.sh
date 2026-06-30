@@ -29,11 +29,12 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_self_dir/fm-focus-lib.sh"
 
 # Resolve the firstmate home (and the pane-id file the notifier records under it)
-# from the environment, else from this script's own install location
-# (bin/fm-focus.sh -> repo root), matching bin/fm-notify.sh. A protocol/-execute
-# click invokes this in a fresh shell, so the self-derived default is what makes
-# it work with no FM_HOME in the environment; the launcher may also export FM_HOME
-# for a home that is not the repo root. Never an absolute literal.
+# from the launcher arg or environment, else from this script's own install
+# location (bin/fm-focus.sh -> repo root), matching bin/fm-notify.sh. A
+# protocol/-execute click invokes this in a fresh shell, so the self-derived
+# default is what makes it work with no FM_HOME in the environment; for a home
+# that is not the repo root the notifier supplies it (see below). Never an
+# absolute literal.
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$_self_dir/.." && pwd)}"
 # The WSL launcher passes the home as $1 (an argument survives WScript.Shell.Run;
 # an `env FM_HOME=...` wrapper does not). macOS/Linux backends still pass it via the
