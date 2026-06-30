@@ -29,9 +29,9 @@ fm_path_sig() {
   local path=$1 out
   if [ "$(uname)" = Darwin ]; then
     if [ -x /usr/bin/stat ]; then
-      out=$(/usr/bin/stat -f '%z:%Fm' "$path" 2>/dev/null | fm_stat_first_line) && fm_valid_path_sig "$out" && { printf '%s\n' "$out"; return 0; }
+      out=$(/usr/bin/stat -f '%z:%m' "$path" 2>/dev/null | fm_stat_first_line) && fm_valid_path_sig "$out" && { printf '%s\n' "$out"; return 0; }
     fi
-    out=$(stat -f '%z:%Fm' "$path" 2>/dev/null | fm_stat_first_line) && fm_valid_path_sig "$out" && { printf '%s\n' "$out"; return 0; }
+    out=$(stat -f '%z:%m' "$path" 2>/dev/null | fm_stat_first_line) && fm_valid_path_sig "$out" && { printf '%s\n' "$out"; return 0; }
   fi
   out=$(stat -c '%s:%Y' "$path" 2>/dev/null | fm_stat_first_line) && fm_valid_path_sig "$out" && { printf '%s\n' "$out"; return 0; }
   return 1

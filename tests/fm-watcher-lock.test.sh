@@ -658,6 +658,28 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_path_sig_darwin_bsd_stat() {
+  local sig valid_int valid_float
+  # Regression: %Fm (float-precision mtime) produced '0:1750000000.123456000'
+  # which fm_valid_path_sig rejects.  After the fix to %m (integer epoch-seconds)
+  # the output is '0:1750000000' which must pass.
+  valid_int=$(bash -c '. "$1"; fm_valid_path_sig "0:1750000000" && echo ok || echo fail' _ "$ROOT/bin/fm-stat-lib.sh")
+  [ "$valid_int" = ok ] || fail "fm_valid_path_sig rejected integer sig '0:1750000000'"
+  valid_float=$(bash -c '. "$1"; fm_valid_path_sig "0:1750000000.123456000" && echo ok || echo fail' _ "$ROOT/bin/fm-stat-lib.sh")
+  [ "$valid_float" = fail ] || fail "fm_valid_path_sig accepted float sig '0:1750000000.123456000'"
+  if [ "$(uname)" = Darwin ]; then
+    sig=$(bash -c '. "$1"; fm_path_sig /dev/null' _ "$ROOT/bin/fm-stat-lib.sh") \
+      || fail "fm_path_sig returned non-zero on Darwin"
+    case "$sig" in
+      *[!0-9:]*|''|:*|*:) fail "fm_path_sig returned non-integer sig on Darwin: '$sig'" ;;
+      *:*) ;;
+      *) fail "fm_path_sig returned sig with no colon on Darwin: '$sig'" ;;
+    esac
+  fi
+  pass "fm_valid_path_sig accepts integer and rejects float; fm_path_sig works on Darwin"
+}
+
+test_path_sig_darwin_bsd_stat
 test_singleton_start
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
