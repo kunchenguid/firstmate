@@ -53,6 +53,24 @@ copy_inheritable_file() {
   return 1
 }
 
+destination_allows_inherited_item() {
+  local dest_config=$1 item=$2 dest_parent dest_name dest_parent_abs top dest_path rel_path
+  dest_parent=${dest_config%/*}
+  dest_name=${dest_config##*/}
+  [ -n "$dest_parent" ] && [ "$dest_parent" != "$dest_config" ] || return 1
+  dest_parent_abs=$(cd "$dest_parent" 2>/dev/null && pwd -P) || return 1
+  if ! git -C "$dest_parent_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+  top=$(git -C "$dest_parent_abs" rev-parse --show-toplevel 2>/dev/null) || return 1
+  dest_path="$dest_parent_abs/$dest_name/$item"
+  case "$dest_path" in
+    "$top"/*) rel_path=${dest_path#"$top"/} ;;
+    *) return 1 ;;
+  esac
+  git -C "$top" check-ignore -q -- "$rel_path" 2>/dev/null
+}
+
 # propagate_inheritable_config <src-config-dir> <dest-config-dir>
 # Copy each declared inheritable item from the primary's config dir (src) into a
 # secondmate home's config dir (dest). SILENT on success - callers parse stdout,
@@ -75,10 +93,12 @@ propagate_inheritable_config() {
     src="$src_config/$item"
     dest="$dest_config/$item"
     if [ -f "$src" ]; then
+      destination_allows_inherited_item "$dest_config" "$item" || continue
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
         copy_inheritable_file "$src" "$dest" || return 1
       fi
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
+      destination_allows_inherited_item "$dest_config" "$item" || continue
       # Primary has no value for this item: mirror the absence downstream.
       rm -f "$dest" 2>/dev/null || return 1
     fi

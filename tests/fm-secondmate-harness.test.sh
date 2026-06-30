@@ -331,13 +331,16 @@ test_spawn_unverified_secondmate_harness_refused() {
 # real gitignore (config/crew-harness ignored, so a propagated value never dirties
 # the secondmate worktree on a later sweep). Echoes the world dir.
 new_world() {
-  local name=$1 w
+  local name=$1 dispatch_ignore=${2:-yes} w
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
   git init -q -b main "$w/main"
-  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-dispatch.json\nconfig/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n' \
-    > "$w/main/.gitignore"
+  {
+    printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
+    [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
+    printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+  } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
   mkdir -p "$w/main/bin"
@@ -466,6 +469,35 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
   pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
 }
 
+test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
+  local w out status
+  w=$(new_world boot-stale-dispatch no)
+  add_sm_worktree "$w" sm "$(git -C "$w/main" rev-parse HEAD)"
+  printf 'local divergence\n' >> "$w/sm/README.md"
+  git -C "$w/sm" add README.md
+  git -C "$w/sm" commit -qm local
+  printf 'config/crew-dispatch.json\n' >> "$w/main/.gitignore"
+  git -C "$w/main" add .gitignore
+  git -C "$w/main" commit -qm c2
+
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'manual\n' > "$w/home/config/backlog-backend"
+  out=$(run_bootstrap "$w")
+
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: diverged from" \
+    "stale dispatch: expected fast-forward skip"
+  [ ! -e "$w/sm/config/crew-dispatch.json" ] \
+    || fail "stale dispatch: crew-dispatch.json was copied before the home ignored it"
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "stale dispatch: existing ignored config stopped propagating"
+  [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
+    || fail "stale dispatch: backlog backend stopped propagating"
+  status=$(git -C "$w/sm" status --porcelain -- config/crew-dispatch.json)
+  [ -z "$status" ] || fail "stale dispatch: crew-dispatch.json dirtied the home: $status"
+  pass "B9 bootstrap sweep defers new inherited config until the home ignores it"
+}
+
 # Backward-compat: with no inheritable config set, the sweep is a no-op for the
 # home's config/ - exactly as before this feature - and ordinary sweep behavior
 # (fast-forward) is unaffected.
@@ -488,7 +520,7 @@ test_bootstrap_sweep_no_inheritance_is_noop() {
   [ -e "$w/sm/config" ] && fail "no-inheritance sweep created a home config/ dir"
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] \
     || fail "no-inheritance sweep did not still fast-forward the tracked files"
-  pass "B9 bootstrap sweep with no inheritable config is a config no-op and still fast-forwards"
+  pass "B10 bootstrap sweep with no inheritable config is a config no-op and still fast-forwards"
 }
 
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
@@ -503,7 +535,7 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
   fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: config inheritance failed' || true)
   [ -n "$fail_line" ] || fail "bootstrap did not surface config propagation failure (got: $out)"
   [ -d "$w/sm/config/crew-harness" ] || fail "failed propagation removed the wrong path"
-  pass "B10 bootstrap sweep surfaces config propagation failures"
+  pass "B11 bootstrap sweep surfaces config propagation failures"
 }
 
 test_harness_resolution
@@ -515,6 +547,7 @@ test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
+test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
 
