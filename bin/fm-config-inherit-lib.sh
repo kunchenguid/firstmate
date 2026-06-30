@@ -86,8 +86,9 @@ destination_allows_inherited_item() {
 # backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
-# Status is pushed, unchanged, skipped, or error. Returns non-zero only when the
-# destination cannot be created or written.
+# Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
+# do not affect the exit code. Returns non-zero only when a real propagation
+# error, such as copy or remove failure, occurs.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0

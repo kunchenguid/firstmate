@@ -16,9 +16,9 @@
 #      and config/backlog-backend - down into each secondmate home's config/, so
 #      the secondmate's OWN crewmates, dispatch profiles, and backlog backend
 #      inherit the primary's settings. It is primary-authoritative (re-pushed at
-#      secondmate spawn and on the bootstrap secondmate sweep) and
-#      config/secondmate-harness is
-#      deliberately NOT inherited (secondmates do not spawn secondmates).
+#      secondmate spawn, on the bootstrap secondmate sweep, and by config push).
+#      config/secondmate-harness is deliberately NOT inherited (secondmates do
+#      not spawn secondmates).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -353,8 +353,8 @@ test_spawn_unverified_secondmate_harness_refused() {
 }
 
 # ===========================================================================
-# B integration: the bootstrap secondmate sweep propagates inheritable config and
-# keeps it converged on the primary (independent of the tracked-files ff status).
+# B integration: spawn, bootstrap, and config push propagate inheritable config
+# and keep it converged on the primary (independent of tracked-file ff status).
 # ===========================================================================
 
 # A PRIMARY firstmate repo on main with one commit + a home dir, mirroring the

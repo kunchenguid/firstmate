@@ -3,9 +3,11 @@
 # Usage: fm-config-push.sh [--help]
 #
 # Config-only convergence for mid-session changes such as config/crew-dispatch.json
-# edits. This reuses the same live secondmate discovery and
+# edits. This discovers live secondmate homes from state/*.meta, backfills
+# home= from data/secondmates.md for older meta records, and reuses the same
 # propagate_inheritable_config machinery as bootstrap, but deliberately does not
 # fast-forward tracked files and does not nudge running secondmates.
+# Warnings-only skips exit 0; real propagation errors exit non-zero.
 set -u
 
 usage() {
@@ -20,6 +22,11 @@ This is config-only:
   - does not nudge secondmates
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
+  - exits non-zero only for real propagation errors
+
+Live homes come from state/*.meta records with kind=secondmate.
+data/secondmates.md is only a fallback for missing home= fields in older or
+incomplete meta records.
 
 Environment overrides follow the rest of firstmate:
   FM_HOME            active firstmate home
