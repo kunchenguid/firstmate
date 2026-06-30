@@ -11,6 +11,9 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 mkdir -p "$STATE"
 
+# shellcheck source=bin/fm-stat-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-stat-lib.sh"
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -31,14 +34,6 @@ fm_pid_identity() {
   out=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
-}
-
-fm_path_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
 }
 
 fm_path_age() {

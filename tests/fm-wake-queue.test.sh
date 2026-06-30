@@ -10,6 +10,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-stat-lib.sh
+. "$ROOT/bin/fm-stat-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -90,7 +92,7 @@ test_stale_enqueue_before_suppressor() {
   # give the window one and prime the .seen-* marker to its current signature so
   # the per-poll signal scan does not pre-empt the stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
+  sig=$(fm_path_sig "$state/stale.status") || fail "could not stat stale status"
   printf '%s' "$sig" > "$state/.seen-stale_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
@@ -123,7 +125,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
+  sig=$(fm_path_sig "$state/stopped.status") || fail "could not stat stopped status"
   printf '%s' "$sig" > "$state/.seen-stopped_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")

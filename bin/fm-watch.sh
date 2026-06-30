@@ -68,21 +68,6 @@ printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
-# Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
-# Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
-# `stat -f` is *filesystem* stat and writes a partial filesystem dump ("File: ...",
-# "Blocks: ...") to stdout before failing, so the fallback's correct output gets
-# appended to that garbage. Arithmetic under `set -u` then aborts on the stray
-# token (e.g. the word "File" read as an unset variable), which silently kills the
-# watcher mid-cycle. Detect the platform once and pick the right form.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
-else
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
-fi
-
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
@@ -188,7 +173,7 @@ wake() {
 # busy fleet. Persist the schedule as file mtimes instead.
 age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
-  m=$(stat_mtime "$f") || { echo 999999; return; }
+  m=$(fm_path_mtime "$f") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
 }
 
@@ -206,7 +191,7 @@ scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
-    sig=$(stat_sig "$f") || continue
+    sig=$(fm_path_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"

@@ -142,6 +142,45 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
 }
 
+test_guard_darwin_ignores_path_gnu_stat() {
+  local dir state fakebin err
+  dir=$(make_case guard-darwin-gnu-stat)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  err="$dir/guard.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+echo Darwin
+SH
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-f" ]; then
+  cat <<'OUT'
+  File: "fake"
+    ID: 0        Namelen: 255     Type: overlayfs
+OUT
+  exit 0
+fi
+if [ "${1:-}" = "-c" ]; then
+  case "${2:-}" in
+    %Y) date +%s ;;
+    '%s:%Y') printf '1:%s\n' "$(date +%s)" ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/uname" "$fakebin/stat"
+
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed with GNU stat earlier on PATH"
+  [ ! -s "$err" ] || fail "guard warned with fresh beacon under Darwin/GNU stat PATH: $(cat "$err")"
+  pass "guard uses validated mtime when Darwin branch sees GNU stat earlier on PATH"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -623,6 +662,7 @@ test_singleton_start
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_darwin_ignores_path_gnu_stat
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency

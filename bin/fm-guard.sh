@@ -47,13 +47,6 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Portable mtime; see fm-watch.sh for why the `stat -f || stat -c` fallback breaks on Linux.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
-
 # Only act with tasks in flight; count them so the banner can say how much is
 # riding on an absent watcher.
 in_flight=0
@@ -71,8 +64,7 @@ BEAT="$STATE/.last-watcher-beat"
 watcher_fresh=false
 beacon_desc=never
 if [ -e "$BEAT" ]; then
-  m=$(stat_mtime "$BEAT")
-  if [ -n "$m" ]; then
+  if m=$(fm_path_mtime "$BEAT"); then
     age=$(( $(date +%s) - m ))
     beacon_desc="${age}s ago"
     [ "$age" -lt "$GRACE" ] && watcher_fresh=true
