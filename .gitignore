@@ -7,4 +7,5 @@ data/
 .env
 config/crew-harness
 config/secondmate-harness
+config/backlog-backend
 config/x-mode.env

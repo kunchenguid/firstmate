@@ -3,7 +3,8 @@
 # extensible set of LOCAL (gitignored) config items down into each secondmate
 # home's config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-harness=codex makes a secondmate's crewmates spawn on
-# codex too).
+# codex too, and primary config/backlog-backend=manual makes that home hand-edit
+# backlog files too).
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -17,15 +18,15 @@
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
-# convergence point inherits it - no other change needed. Only crew-harness is
-# wired today. config/secondmate-harness is deliberately NOT in the list: it is
-# the primary's own setting for launching secondmates, and a secondmate never
-# spawns secondmates, so it must not flow downstream.
+# convergence point inherits it - no other change needed. config/secondmate-harness
+# is deliberately NOT in the list: it is the primary's own setting for launching
+# secondmates, and a secondmate never spawns secondmates, so it must not flow
+# downstream.
 
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-harness}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-harness backlog-backend}"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp

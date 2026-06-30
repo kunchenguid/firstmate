@@ -71,7 +71,7 @@ Idle secondmate panes are healthy; teardown is explicit and refuses while the se
 Secondmate homes stay on the same firstmate version as the primary checkout.
 On main firstmate bootstrap, `fm-bootstrap.sh` fast-forwards each live secondmate home recorded in `state/*.meta` to the primary default-branch commit with no origin fetch.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` directories untouched.
-Bootstrap separately propagates the primary's declared inheritable local config, currently `config/crew-harness`, into each validated live secondmate home so that secondmate's own crewmates use the primary setting.
+Bootstrap separately propagates the primary's declared inheritable local config, currently `config/crew-harness` and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates and backlog backend use the primary settings.
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
@@ -80,7 +80,8 @@ Secondmate spawn also propagates the same inheritable config before launch.
 
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and falls back to `config/crew-harness`, then to the primary's own harness, when unset or `default`.
-`config/crew-harness` remains the crewmate harness and is the only harness config inherited into secondmate homes.
+`config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
+`config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces hand-editing across the fleet.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).
 

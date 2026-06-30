@@ -12,8 +12,8 @@
 #   non-flag string containing whitespace is treated as a RAW launch command - the
 #   escape hatch for verifying new adapters.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
-#   (config/crew-harness today) into the secondmate home's config/, so the
-#   secondmate's OWN crewmates inherit the primary's settings (fm-config-inherit-lib.sh).
+#   into the secondmate home's config/, so the secondmate's OWN crewmates and
+#   backlog backend inherit the primary's settings (fm-config-inherit-lib.sh).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -363,10 +363,10 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  # Inheritable-config propagation: push the primary's declared LOCAL config
-  # (config/crew-harness today) into this secondmate home's config/, so the
-  # secondmate's OWN crewmates inherit the primary's settings. config/ is
-  # gitignored, so this is a separate copy from the local-HEAD fast-forward above;
+  # Inheritable-config propagation: push the primary's declared LOCAL config into
+  # this secondmate home's config/, so the secondmate's OWN crewmates and backlog
+  # backend inherit the primary's settings. config/ is gitignored, so this is a
+  # separate copy from the local-HEAD fast-forward above;
   # primary-authoritative and re-pushed on every convergence. config/secondmate-harness
   # is the primary's own knob and is deliberately NOT in the inheritable set
   # (fm-config-inherit-lib.sh). A primary with no inheritable config set is a no-op.

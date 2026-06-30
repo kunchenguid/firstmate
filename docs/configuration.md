@@ -6,11 +6,15 @@ The files and environment variables you set to operate firstmate.
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
 
-## Backlog backend (.tasks.toml / tasks-axi)
+## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the optional `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
-When compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation; without it, backlog bookkeeping remains manual.
+The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+When compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation.
 Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
+If the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap suggests `npm install -g tasks-axi` through the normal consent flow and falls back to manual editing until it is installed.
+Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the install suggestion.
+Absent or `tasks-axi` selects the default tasks-axi backend.
+The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -53,7 +57,7 @@ When it is absent or contains `default`, crewmates mirror the firstmate's own ha
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents.
 When it is absent or contains `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, preserving the previous behavior.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-The primary propagates `config/crew-harness` into secondmate homes at secondmate spawn and during the bootstrap secondmate sweep, so a secondmate's own crewmates use the primary's concrete crew-harness value.
+The primary propagates `config/crew-harness` and `config/backlog-backend` into secondmate homes at secondmate spawn and during the bootstrap secondmate sweep, so a secondmate's own crewmates and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 
@@ -61,7 +65,10 @@ For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under 
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-If compatible `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent or incompatible, firstmate keeps hand-editing `data/backlog.md` exactly as before.
+Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
+If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations.
+When it is absent or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and firstmate keeps hand-editing `data/backlog.md` until installation is approved and completed.
+When `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 Bootstrap also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms; local-only and no-origin skips stay silent.

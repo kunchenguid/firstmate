@@ -16,7 +16,7 @@
 #          instruction surface actually changed; firstmate nudges each to re-read.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inheritable local config
-#          (config/crew-harness today) into each validated live secondmate home.
+#          into each validated live secondmate home.
 #          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
 #          config-inheritance failures for live secondmate homes; no-op/current
 #          and successful updates stay quiet.
@@ -27,9 +27,11 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          tasks-axi is an OPTIONAL backlog-management capability reported only
-#          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
-#          line and never prompts an install.
+#          tasks-axi is the default backlog-management backend. It is reported
+#          as TASKS_AXI: available when compatible (0.1.1+). Without
+#          config/backlog-backend=manual, a missing or incompatible tasks-axi is
+#          reported through the MISSING line and backlog operations fall back to
+#          manual editing until the captain approves installation.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -131,7 +133,7 @@ secondmate_sync() {
   done < "$tmp"
   rm -f "$tmp"
   # Inheritable-config propagation: push the primary's declared LOCAL config
-  # (config/crew-harness today) into every VALIDATED live secondmate home swept
+  # into every VALIDATED live secondmate home swept
   # above (FF_SEEN_HOMES is exactly that set). config/ is gitignored, so this is a
   # separate copy from the tracked-files fast-forward; primary-authoritative, so
   # it runs whether or not the home's tracked files advanced, keeping the fleet
@@ -168,6 +170,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    tasks-axi) echo "npm install -g tasks-axi" ;;
     *) return 1 ;;
   esac
 }
@@ -334,7 +337,13 @@ fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
-fm_tasks_axi_compatible && echo "TASKS_AXI: available"
+if ! fm_backlog_backend_manual "$CONFIG"; then
+  if fm_tasks_axi_compatible; then
+    echo "TASKS_AXI: available"
+  else
+    echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+  fi
+fi
 secondmate_sync
 x_mode_setup
 fleet_sync

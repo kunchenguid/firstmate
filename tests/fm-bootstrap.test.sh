@@ -2,11 +2,12 @@
 # Behavior tests for fm-bootstrap.sh tool detection.
 #
 # Bootstrap prints one line per problem or capability fact and is silent when all
-# is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)' and
-# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
-# are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease, which (if any) tasks-axi version is on PATH, and which
-# no-mistakes version is on PATH.
+# is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
+# 'MISSING: tasks-axi (install: ...)', and 'TASKS_AXI: available' lines, so those
+# contracts are pinned verbatim. The cases are table-driven over the inputs that
+# vary: whether `treehouse get --help` advertises --lease, which (if any)
+# tasks-axi version is on PATH, whether the local backend config opts out, and
+# which no-mistakes version is on PATH.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,18 +68,22 @@ SH
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<mode>^<expect>^<notcontains>
+#   <label>^<lease 1/0>^<tasks-axi version or ->^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks mode expect notcontains case_dir fakebin out n
+  local label lease tasks backend mode expect notcontains case_dir fakebin out n
   n=0
-  while IFS='^' read -r label lease tasks mode expect notcontains; do
+  while IFS='^' read -r label lease tasks backend mode expect notcontains; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/case-$n"
     mkdir -p "$case_dir/home"
+    if [ "$backend" != "-" ]; then
+      mkdir -p "$case_dir/home/config"
+      printf '%s\n' "$backend" > "$case_dir/home/config/backlog-backend"
+    fi
     fakebin=$(make_fake_toolchain "$case_dir")
     [ "$tasks" = "-" ] || add_tasks_axi "$fakebin" "$tasks"
     # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
@@ -99,12 +104,15 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^-^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available^1^0.1.1^exact^TASKS_AXI: available^
-incompatible tasks-axi is ignored^1^0.1.0^empty^^
+treehouse --lease support is accepted silently^1^-^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is reported available by default^1^0.1.1^-^exact^TASKS_AXI: available^
+missing tasks-axi is suggested by default^1^-^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi is suggested by default^1^0.1.0^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+manual backlog backend suppresses missing tasks-axi^1^-^manual^empty^^
+manual backlog backend suppresses tasks-axi availability^1^0.1.1^manual^empty^^
 ROWS
-  pass "bootstrap reports treehouse lease + tasks-axi compatibility contracts"
+  pass "bootstrap reports treehouse lease + tasks-axi default/backend contracts"
 }
 
 test_no_mistakes_min_version() {
@@ -116,7 +124,10 @@ test_no_mistakes_min_version() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/no-mistakes-$n"
     mkdir -p "$case_dir/home"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
+    add_tasks_axi "$fakebin" "0.1.1"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
