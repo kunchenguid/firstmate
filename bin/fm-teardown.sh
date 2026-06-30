@@ -617,10 +617,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     elif [ -n "$unpushed" ]; then
       # Commits not reachable from any remote. Before refusing, recognize LANDED work:
-      # a merged PR for the current HEAD or content already in the up-to-date default
-      # branch. On a gh lookup error work_is_landed falls back to the content check,
-      # and if that is also inconclusive it returns false - so we never silently allow
-      # teardown of possibly-unlanded work; only genuinely unlanded work is refused.
+      # a merged PR whose head contains the current local work, or content already in
+      # the up-to-date default branch. On a gh lookup error work_is_landed falls back
+      # to the content check, and if that is also inconclusive it returns false - so
+      # we never silently allow teardown of possibly-unlanded work; only genuinely
+      # unlanded work is refused.
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       if ! work_is_landed "$branch"; then
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
