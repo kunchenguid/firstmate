@@ -141,9 +141,9 @@ secondmate_sync() {
   # it runs whether or not the home's tracked files advanced, keeping the fleet
   # converged on the primary. The propagation helper stays silent on success; a
   # primary with no inheritable config set and no downstream copy is a no-op.
-  local meta id home window home_real propagated_homes
+  local id home home_real propagated_homes
   propagated_homes=""
-  while IFS='|' read -r id home window meta; do
+  while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in

@@ -97,7 +97,7 @@ echo "config-push: $CONFIG -> live secondmate homes"
 
 seen_homes=""
 errors=0
-while IFS='|' read -r id home window meta; do
+while IFS='|' read -r id home _window meta; do
   [ -n "$id" ] || continue
   if [ -z "$home" ]; then
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
