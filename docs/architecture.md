@@ -52,6 +52,14 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 
+## Dispatch profiles
+
+Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
+The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching profile, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
+The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent or match the natural-language rules.
+Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
+That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
@@ -71,7 +79,7 @@ Idle secondmate panes are healthy; teardown is explicit and refuses while the se
 Secondmate homes stay on the same firstmate version as the primary checkout.
 On main firstmate bootstrap, `fm-bootstrap.sh` fast-forwards each live secondmate home recorded in `state/*.meta` to the primary default-branch commit with no origin fetch.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` directories untouched.
-Bootstrap separately propagates the primary's declared inheritable local config, currently `config/crew-harness` and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates and backlog backend use the primary settings.
+Bootstrap separately propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates, dispatch profiles, and backlog backend use the primary settings.
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
@@ -81,6 +89,7 @@ Secondmate spawn also propagates the same inheritable config before launch.
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and falls back to `config/crew-harness`, then to the primary's own harness, when unset or `default`.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
+`config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces hand-editing across the fleet.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).

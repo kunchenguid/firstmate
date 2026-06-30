@@ -18,8 +18,9 @@
 #   non-flag string containing whitespace is treated as a RAW launch command - the
 #   escape hatch for verifying new adapters.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
-#   into the secondmate home's config/, so the secondmate's OWN crewmates and
-#   backlog backend inherit the primary's settings (fm-config-inherit-lib.sh).
+#   into the secondmate home's config/, so the secondmate's OWN crewmates,
+#   dispatch profiles, and backlog backend inherit the primary's settings
+#   (fm-config-inherit-lib.sh).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
