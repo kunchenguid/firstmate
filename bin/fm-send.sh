@@ -7,11 +7,16 @@
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
-# Enter is positively confirmed (the text is still sitting in the composer after
-# all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
-# The composer/submit logic is shared with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Enter is positively confirmed (the sent text is still sitting in the composer
+# after all retries), fm-send exits NON-ZERO so the caller knows the steer did not
+# land instead of silently leaving an unsubmitted instruction (incident
+# afk-invx-i5). Some WSL-hosted Windows-agent panes report the cursor row as
+# pending after a submit that actually landed; an ambiguous pending read whose
+# composer no longer holds the sent text is downgraded to a warning + success
+# after one longer settle, so a phantom pending never turns a real steer into an
+# error. The composer/submit logic is shared with the away-mode daemon via
+# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4)
+# and FM_SEND_AMBIGUOUS_SETTLE (default 1.5).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
