@@ -69,12 +69,20 @@ else
       state2=$(fm_tmux_composer_state "$T")
       [ "$state2" != pending ] && exit 0
       composer_text=$(fm_tmux_composer_text "$T" 2>/dev/null || true)
-      case "$composer_text" in
-        *"$*"*)
-          echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
-          exit 1
-          ;;
-      esac
+      if [ -n "$composer_text" ]; then
+        case "$composer_text" in
+          *"$*"*)
+            echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+            exit 1
+            ;;
+        esac
+        case "$*" in
+          *"$composer_text"*)
+            echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
+            exit 1
+            ;;
+        esac
+      fi
       echo "warning: submit to $T reported pending, but sent text is no longer in composer; treating as delivered" >&2
       exit 0
       ;;
