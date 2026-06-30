@@ -213,6 +213,20 @@ test_linux_action_when_supported() {
 test_macos_osascript_fallback_has_sound() {
   # With terminal-notifier ABSENT, fall back to osascript display notification -
   # now WITH a sound (still better than a silent banner).
+  #
+  # This is the one notifier test whose path depends on a host tool being ABSENT
+  # rather than stubbed present: fm_notify_macos probes terminal-notifier first,
+  # so the osascript fallback is only reached on a macOS host with no
+  # terminal-notifier. Gate it to exactly that, via fm_detect_platform, and skip
+  # cleanly elsewhere. A non-macOS host (the Linux CI runner) would never take the
+  # macOS branch, and a host that ships terminal-notifier (some runners carry it
+  # as a Ruby gem binstub, and a macOS box may have it installed) would take the
+  # terminal-notifier branch instead, leaving osascript uncalled. The skip still
+  # emits one passing line so the harness count and format stay consistent.
+  if [ "$(fm_detect_platform)" != macos ] || command -v terminal-notifier >/dev/null 2>&1; then
+    pass "macos falls back to osascript display notification WITH a sound (skipped: needs a macOS host with no terminal-notifier)"
+    return 0
+  fi
   local dir log fakebin args
   dir="$TMP_ROOT/macos-fallback"; mkdir -p "$dir"
   log="$dir/calls.log"; : > "$log"
