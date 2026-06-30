@@ -831,12 +831,14 @@ Dismiss tells the relay to drop the request so it stops re-offering it every pol
 Like `bin/fm-x-reply.sh`, the dismiss honors `FMX_DRY_RUN` (recording the would-be dismiss to `state/x-outbox/` instead of posting).
 The reply is **public on a shared bot**, so the skill enforces a strict version of section 9: no task ids, internal vocabulary, captain-private material, or secrets - outcomes only.
 Because public mention text can influence the composed reply, the skill never inlines it into a shell command; it passes the reply via `bin/fm-x-reply.sh <request_id> --text-file <path>` (or stdin), not as an interpolated argument.
+When the reply needs one outbound image, pass `--image <path>` to `bin/fm-x-reply.sh`; the helper reads the local file, detects the media type, base64-encodes the raw bytes, and sends the relay's optional `image` object without inlining image bytes into the shell command.
 
 **Completion follow-up.**
 When an actionable mention spawns a real task rather than completing in the answering turn, the immediate reply is an acknowledgement and the **outcome** is delivered later as a single follow-up reply.
 The skill links the spawned task to its originating mention right after dispatch with `bin/fm-x-link.sh <task-id> <request_id>`, which records `x_request=` and `x_request_ts=` (an epoch) in `state/<id>.meta`.
 When that task reaches a terminal state - PR merged, scout report written, local-only merge, or `failed` - firstmate posts one follow-up on the same completion wake it already handles (the merge `check:`/`done` signal of sections 7 and 8): it confirms the link with `bin/fm-x-followup.sh --check <id>` (which prints the `request_id` when a follow-up is due, and is silent when the task is not X-linked or the window has passed), composes a short public-safe outcome, and posts the single follow-up with `bin/fm-x-followup.sh <id> --text-file <path>` (or stdin).
 That helper posts through `bin/fm-x-reply.sh --followup` to the relay's `connector/followup` endpoint - which retains the request-to-tweet binding for a **24h window** after the initial answer and accepts exactly one thread-bound follow-up - and clears the link on success.
+When the completion follow-up needs one outbound image, pass `--image <path>` to `bin/fm-x-followup.sh`; it forwards the image to `bin/fm-x-reply.sh --followup` so the same relay image contract is used for the follow-up endpoint.
 A `failed` task still warrants an honest follow-up (the work did not pan out), not silence.
 Past the 24h window the relay would drop a late follow-up, so firstmate skips silently and clears the link.
 The follow-up is **one** reply and is held to the same public-safety bar as every other reply here: outcomes only, never task ids, internals, captain-private material, or secrets.
@@ -853,10 +855,12 @@ The skill answers concisely by default - one tweet, two at most - and never hand
 `bin/fm-x-reply.sh` handles length: a reply that fits one tweet is posted as-is; a genuinely long reply is auto-split, premium-independently, into a numbered `(k/n)` thread on word boundaries, each tweet within `FMX_X_REPLY_MAX_CHARS` (default 280) and capped at `FMX_X_THREAD_MAX` tweets (default 25).
 Those reply limits are optional environment or `.env` values, with explicit environment values winning over `.env`.
 A single tweet sends `{request_id, text}`; a thread additionally sends `texts` - the ordered chunks - which the relay posts as chained replies (`text` stays the first chunk so a relay that only reads `text` still posts the opener).
-This is text-only - never an image of prose.
+Do not use an image for prose; image attachments are only for actual visual artifacts such as generated illustrations, screenshots, or diagrams.
+When `--image <path>` accompanies a reply that auto-splits into a thread, the client includes `image` alongside `text` and `texts`, and the relay attaches that image to the first/opener tweet only while later chunks remain text-only.
 
 **Preview / dry-run.**
-Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the full would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread; a `--followup` preview additionally carries an `endpoint` marker so it is self-describing, while the live body stays unchanged), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread; a `--followup` preview additionally carries an `endpoint` marker so it is self-describing, while the live body stays unchanged), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+When `--image <path>` is present, the live POST body carries the real `image.data_base64`, but the dry-run outbox stores only a compact marker `{media_type, bytes, source_path}` so previews do not write multi-MB blobs.
 The same dry-run switch makes `bin/fm-x-dismiss.sh` record `{request_id, endpoint:"dismiss"}` to `state/x-outbox/<request_id>.json` instead of calling the relay, then echo the `request_id` and exit 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
 These dry-run paths run before token and network checks, so previewing a composed answer or dismiss needs `jq` but does not need `FMX_PAIRING_TOKEN`, `curl`, or a live relay.

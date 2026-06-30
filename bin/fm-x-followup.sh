@@ -14,8 +14,8 @@
 #     exit 1, silent               -> not linked, or window elapsed (link pruned)
 #
 # Post (after composing the reply to a file or stdin):
-#   fm-x-followup.sh <task-id> --text-file <path>
-#   fm-x-followup.sh <task-id> -
+#   fm-x-followup.sh <task-id> [--image <path>] --text-file <path>
+#   fm-x-followup.sh <task-id> [--image <path>] -
 #     Linked and within window: posts ONE follow-up via fm-x-reply.sh
 #       --followup, clears the link on success, echoes <request_id>, exit 0.
 #     Window elapsed: clears the link, posts nothing, exit 0 (silent skip).
@@ -25,6 +25,8 @@
 # Dry-run (FMX_DRY_RUN) flows through fm-x-reply.sh: the follow-up is recorded to
 # state/x-outbox/<request_id>.json instead of posted, and the link is cleared
 # exactly as a live post would, so the full loop runs end to end without a tweet.
+# With --image <path>, the follow-up carries one local image attachment; if the
+# reply text splits into a thread, the relay attaches the image to the opener.
 #
 # The 24h window is FMX_FOLLOWUP_MAX_AGE_SECS (default 86400). FMX_NOW_OVERRIDE
 # pins "now" for deterministic tests. Meta read/write lives in fm-x-lib.sh.
@@ -38,7 +40,25 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
 usage() {
-  echo "usage: fm-x-followup.sh --check <task-id> | <task-id> --text-file <path> | <task-id> -" >&2
+  echo "usage: fm-x-followup.sh --check <task-id> | <task-id> [--image <path>] --text-file <path> | <task-id> [--image <path>] -" >&2
+}
+
+help() {
+  cat <<'EOF'
+usage: fm-x-followup.sh --check <task-id>
+       fm-x-followup.sh <task-id> [--image <path>] --text-file <path>
+       fm-x-followup.sh <task-id> [--image <path>] -
+
+Post the single completion follow-up for an X-linked task and clear the link.
+
+Options:
+  --check          Print the request_id when a follow-up is due.
+  --image <path>   Attach one local image file; threaded replies attach it to the opener tweet.
+  --text-file <path>
+                   Read follow-up text from a file.
+  -                Read follow-up text from stdin.
+  --help           Show this help.
+EOF
 }
 
 MAX_AGE=${FMX_FOLLOWUP_MAX_AGE_SECS:-86400}
@@ -50,6 +70,10 @@ esac
 # source (--text-file <path> | -) deferred until after the link/window check so a
 # missing link never consumes stdin or posts.
 MODE=post
+case "${1:-}" in
+  --help|-h) help; exit 0 ;;
+esac
+
 if [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
@@ -58,7 +82,23 @@ else
   ID=${1:-}
   if [ -z "$ID" ]; then usage; exit 2; fi
   shift
-  TS_ARGS=("$@")
+  TS_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --image)
+        TS_ARGS+=("$1")
+        shift
+        if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+          echo "fm-x-followup: missing --image path" >&2
+          usage
+          exit 2
+        fi
+        TS_ARGS+=("$1")
+        ;;
+      *) TS_ARGS+=("$1") ;;
+    esac
+    shift
+  done
   if [ "${#TS_ARGS[@]}" -lt 1 ]; then usage; exit 2; fi
 fi
 
