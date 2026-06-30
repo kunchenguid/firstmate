@@ -70,11 +70,11 @@ cleanup_tmp_files() {
 }
 trap cleanup_tmp_files EXIT
 
-reply_tmp_file() {
-  local file
+reply_make_tmp_file() {
+  local var_name=$1 file
   file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reply.XXXXXX") || return 1
   TMP_FILES+=("$file")
-  printf '%s\n' "$file"
+  printf -v "$var_name" '%s' "$file"
 }
 
 usage() {
@@ -181,7 +181,7 @@ IMAGE_PAYLOAD_FILE=
 IMAGE_PREVIEW=
 PAYLOAD_FILE=
 if [ -n "$IMAGE_PATH" ]; then
-  IMAGE_PAYLOAD_FILE=$(reply_tmp_file) || {
+  reply_make_tmp_file IMAGE_PAYLOAD_FILE || {
     echo "fm-x-reply: cannot create image payload temp file" >&2; exit 1; }
   IMAGE_PREVIEW=$(fmx_image_payload_file "$IMAGE_PATH" fm-x-reply "$IMAGE_PAYLOAD_FILE") || exit 1
   printf '%s' "$IMAGE_PREVIEW" | jq -e . >/dev/null 2>&1 || {
@@ -203,7 +203,7 @@ case "$N" in ''|*[!0-9]*) echo "fm-x-reply: failed to split reply into a thread"
 # JSON-escaped. A single tweet sends {request_id, text}; a thread also sends
 # {texts: [...]} for the relay to post as chained replies. When image is present
 # on a thread, the relay attaches it to the first chunk only.
-PAYLOAD_FILE=$(reply_tmp_file) || {
+reply_make_tmp_file PAYLOAD_FILE || {
   echo "fm-x-reply: cannot create request payload temp file" >&2; exit 1; }
 if [ -n "$IMAGE_PAYLOAD_FILE" ]; then
   fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" "$IMAGE_PAYLOAD_FILE" > "$PAYLOAD_FILE" || {

@@ -842,6 +842,22 @@ test_reply_image_thread_dry_run_records_compact_marker() {
   pass "fm-x-reply dry-run records compact image metadata for threaded replies"
 }
 
+test_reply_image_dry_run_cleans_payload_temp_files() {
+  local home tmpdir img out rc leftovers
+  home="$TMP_ROOT/reply-image-temp-clean"; mkdir -p "$home"
+  tmpdir="$home/tmp"; mkdir -p "$tmpdir"
+  img="$home/preview.png"
+  make_sample_image "$img"
+  out=$(PATH="$BASE_PATH" TMPDIR="$tmpdir" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-temp-clean" --image "$img" "Here is the image." \
+    2>"$home/err"); rc=$?
+  expect_code 0 "$rc" "reply image temp cleanup exit"
+  [ "$out" = "req-img-temp-clean" ] || fail "image dry-run temp cleanup must echo the request_id (got: $out)"
+  leftovers=$(find "$tmpdir" -type f -name 'fm-x-reply.*' -print)
+  [ -z "$leftovers" ] || fail "reply temp files must be cleaned (left: $leftovers)"
+  pass "fm-x-reply cleans image and payload temp files"
+}
+
 test_reply_image_path_errors_are_clear() {
   local home out rc err img
   home="$TMP_ROOT/reply-image-errors"; mkdir -p "$home"
@@ -1381,6 +1397,7 @@ test_reply_thread_live_posts_texts
 test_reply_image_live_posts_image_object
 test_reply_image_live_streams_payload_file
 test_reply_image_thread_dry_run_records_compact_marker
+test_reply_image_dry_run_cleans_payload_temp_files
 test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
 test_reply_followup_image_live_posts_image_object
