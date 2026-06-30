@@ -172,7 +172,7 @@ So an absent or `default` `config/secondmate-harness` behaves exactly as before 
 The split is durable: every secondmate respawn (recovery, `/updatefirstmate`, restart) re-resolves from `config/secondmate-harness`, so it survives restarts without being recorded per-task.
 
 `config/crew-harness` and `config/backlog-backend` are inherited; `config/secondmate-harness` is not.
-The primary pushes its declared inheritable config down into each secondmate home's `config/` - at secondmate spawn and on the bootstrap secondmate sweep (section 3) - so a secondmate's OWN crewmates use the primary's settings (primary `config/crew-harness=codex` makes a secondmate's crewmates spawn on codex too).
+The primary pushes its declared inheritable config down into each secondmate home's `config/` - at secondmate spawn and on the bootstrap secondmate sweep (section 3) - so a secondmate's OWN crewmates and backlog backend use the primary's settings (primary `config/crew-harness=codex` makes a secondmate's crewmates spawn on codex too).
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
 Inheritance also copies `config/backlog-backend`, so a primary opt-out with `manual` makes secondmates hand-edit too.
