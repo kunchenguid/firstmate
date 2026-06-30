@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--model <name>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
+#   --model <name> selects the crewmate model for this spawn (e.g. haiku|sonnet|opus,
+#   or any string the harness accepts). Currently wired for the claude harness only,
+#   where it threads `--model "<name>"` into the launch ahead of the prompt; other
+#   harnesses ignore it for now (others TODO). With no --model the launch is identical
+#   to before. Recorded as model=<name> in the task meta (model=default when unset).
 #   With no harness arg, the harness comes from fm-harness.sh: a crewmate/scout
 #   spawn resolves the CREW harness (config/crew-harness, falling back to firstmate's
 #   own); a --secondmate spawn resolves the SECONDMATE harness (config/secondmate-harness
@@ -36,7 +41,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> model=<name|default> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -57,14 +62,24 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+MODEL=
 POS=()
+want_model=
 for a in "$@"; do
+  if [ -n "$want_model" ]; then
+    MODEL=$a
+    want_model=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --model) want_model=1 ;;
+    --model=*) MODEL=${a#--model=} ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_model" ] || { echo "error: --model requires a value (e.g. --model sonnet)" >&2; exit 1; }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -76,6 +91,9 @@ idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   rc=0
+  # A shared --model applies to every pair (passed through to each single-task re-exec).
+  model_args=()
+  [ -z "$MODEL" ] || model_args=(--model "$MODEL")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -86,9 +104,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${model_args[@]+"${model_args[@]}"} --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${model_args[@]+"${model_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
@@ -136,7 +154,11 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # __MODELFLAG__ is replaced below with `--model "<name>" ` when --model was passed,
+    # or with nothing otherwise (so the launch is byte-for-byte today's without --model).
+    # Model selection is wired only for claude here; the other adapters carry no
+    # __MODELFLAG__ placeholder, so they simply never receive a per-task model (others TODO).
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -579,6 +601,7 @@ fi
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  echo "model=${MODEL:-default}"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -588,6 +611,15 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+# Per-task model flag (claude only; see launch_template). Empty when --model was not
+# passed, so a no-model launch is identical to today's. A trailing space keeps the
+# prompt arg separated from the flag.
+if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+  MODELFLAG="--model $(shell_quote "$MODEL") "
+else
+  MODELFLAG=
+fi
+LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
@@ -604,4 +636,4 @@ tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO model=${MODEL:-default} window=$T worktree=$WT"
