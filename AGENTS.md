@@ -32,7 +32,7 @@ Hard rules, in priority order:
    The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
 3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
-   The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for a normal ship task whose commits are not so reachable, it is also landed when its PR is merged and GitHub reports the current worktree HEAD as that PR's head (which covers the common squash-merge-then-delete-branch flow, where the branch's commits live nowhere on a remote yet the recorded work merged) or when its content is already present in the up-to-date default branch; for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
+   The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for a normal ship task whose commits are not so reachable, it is also landed when its PR is merged and GitHub reports a PR head that contains the current local work (including a local `HEAD` that is an ancestor of the PR head, or unpushed local patches that were replayed into that PR head) or when its content is already present in the up-to-date default branch; for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
    Uncommitted changes are never landed.
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
@@ -87,7 +87,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -401,7 +401,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
 
-**yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
+**yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, run `bin/fm-pr-check.sh <id> <PR url>` before any PR merge if it has not already been run, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
 
@@ -431,7 +431,7 @@ The fields below name the run-step states and outcomes it reads from `no-mistake
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and a verified `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
@@ -444,9 +444,10 @@ bin/fm-teardown.sh <id>
 ```
 
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
-"Landed" is broader than remote-reachable: for a normal ship task whose commits are not reachable from any remote-tracking branch, the script also accepts the work when its PR is merged and GitHub reports the current worktree HEAD as that PR's head, or when its content is already present in the up-to-date default branch.
+"Landed" is broader than remote-reachable: for a normal ship task whose commits are not reachable from any remote-tracking branch, the script also accepts the work when its PR is merged and GitHub reports a PR head that contains the current local work, or when its content is already present in the up-to-date default branch.
+Containment means local `HEAD` is the PR head, local `HEAD` is an ancestor of the PR head, or the unpushed local patches have matching patch IDs in that PR head after no-mistakes replayed the branch.
 This recognizes the common squash-merge-then-delete-branch flow, where the branch's own commits live nowhere on a remote yet the change is fully in `main`; a merged-and-deleted branch now tears down cleanly instead of false-refusing.
-Genuinely unlanded work (no matching merged PR head and content not in the default branch) and dirty worktrees still refuse, and a gh lookup error falls back to the content check rather than silently allowing.
+Genuinely unlanded work (no merged PR head containing the local work and content not in the default branch) and dirty worktrees still refuse, and a gh lookup error falls back to the content check rather than silently allowing.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so safe clone states catch up to the merge, clean detached ancestor drift self-heals, and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
 Unsafe drift is reported as `STUCK:` and left untouched.

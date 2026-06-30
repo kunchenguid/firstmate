@@ -4,8 +4,8 @@
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports the current HEAD as that PR's head, or its content is already
-# in the up-to-date default branch.
+# and GitHub reports a PR head that contains the current local work, or its content
+# is already in the up-to-date default branch.
 #
 # Covers two fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -13,8 +13,8 @@
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
-#     recognizes the matching merged PR head (or the content already in main) as
-#     landed.
+#     recognizes a merged PR head containing the local work (or the content already
+#     in main) as landed.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -23,13 +23,16 @@
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
-#   (g) no-mistakes + squash-merged PR, branch-deleted         -> ALLOW  (squash fix)
+#   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
-#   (m) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
+#   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
+#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
+#   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -211,6 +214,30 @@ append_pr_meta_for_current_head() {
     "pr_head=$head" >> "$case_dir/state/task-x1.meta"
 }
 
+append_pr_meta_url() {
+  local case_dir=$1
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+}
+
+commit_tree_from_wt_head() {
+  local case_dir=$1 parent=$2 msg=$3 tree
+  tree=$(git -C "$case_dir/wt" rev-parse "$parent^{tree}") || return 1
+  printf '%s\n' "$msg" | git -C "$case_dir/wt" commit-tree "$tree" -p "$parent"
+}
+
+land_equivalent_patch_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  tmp="$case_dir/_equiv"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
+  git -C "$case_dir/project" fetch -q origin "$branch"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
 # Override gh-axi so every call fails, simulating an API/network error.
 add_gh_axi_error() {
   local case_dir=$1
@@ -390,6 +417,49 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case squash-ancestor)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-ancestor: teardown should succeed when local HEAD is in the merged PR head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-ancestor: teardown printed a REFUSED line"
+  pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
+}
+
+test_squash_merged_pr_allows_replayed_unpushed_patch() {
+  local case_dir rc parent_head pr_head
+  case_dir=$(make_case squash-replayed-patch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
+  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -444,6 +514,27 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   expect_code 1 "$rc" "pr-check-stale: teardown should refuse after a later local commit"
   grep -q REFUSED "$case_dir/stderr" || fail "pr-check-stale: no REFUSED line in stderr"
   pass "fm-pr-check does not refresh PR head after HEAD moves"
+}
+
+test_pr_check_records_remote_head_when_local_lags() {
+  local case_dir local_head pr_head
+  case_dir=$(make_case pr-check-local-lags)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+
+  grep -qxF "pr_head=$pr_head" "$case_dir/state/task-x1.meta" \
+    || fail "pr-check-local-lags: did not record GitHub PR head"
+  ! grep -qxF "pr_head=$local_head" "$case_dir/state/task-x1.meta" \
+    || fail "pr-check-local-lags: recorded local HEAD instead of remote PR head"
+  pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
 test_content_in_default_fallback_allows() {
@@ -555,8 +646,11 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
+test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
+test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
