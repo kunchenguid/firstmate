@@ -28,7 +28,6 @@ KEEPALIVE_LOG="$STATE/.watch.keepalive.log"
 KEEPALIVE_ERR="$STATE/.watch.keepalive.err"
 KEEPALIVE_INTERVAL=${FM_WATCH_KEEPALIVE_INTERVAL:-30}
 KEEPALIVE_CRASH_THRESHOLD=${FM_WATCH_KEEPALIVE_CRASH_THRESHOLD:-5}
-KEEPALIVE_CRASH_WINDOW=${FM_WATCH_KEEPALIVE_CRASH_WINDOW:-60}
 KEEPALIVE_CRASH_BACKOFF=${FM_WATCH_KEEPALIVE_CRASH_BACKOFF:-300}
 
 watch_lock_live() {
@@ -51,8 +50,7 @@ ensure_keepalive() {
 }
 
 run_keepalive() {
-  local beat="$STATE/.last-watcher-beat" age pid="" tmp="" rc reason now t backoff_until=0
-  local -a crash_times=()
+  local beat="$STATE/.last-watcher-beat" age pid="" tmp="" rc reason now backoff_until=0 crash_count=0
 
   if ! fm_lock_try_acquire "$KEEPALIVE_LOCK"; then
     exit 0
@@ -83,20 +81,15 @@ run_keepalive() {
 
       if [ "$rc" -ne 0 ] || [ -z "$reason" ]; then
         now=$(date +%s)
-        local -a keep=()
-        for t in "${crash_times[@]:-}"; do
-          [ -n "$t" ] && [ $((now - t)) -lt "$KEEPALIVE_CRASH_WINDOW" ] && keep+=("$t")
-        done
-        keep+=("$now")
-        crash_times=("${keep[@]}")
-        keepalive_log "watcher re-arm exited rc=$rc reason='$reason'"
-        if [ "${#crash_times[@]}" -gt "$KEEPALIVE_CRASH_THRESHOLD" ]; then
+        crash_count=$((crash_count + 1))
+        keepalive_log "watcher re-arm exited rc=$rc reason='$reason' (consecutive failures: $crash_count)"
+        if [ "$crash_count" -gt "$KEEPALIVE_CRASH_THRESHOLD" ]; then
           backoff_until=$((now + KEEPALIVE_CRASH_BACKOFF))
-          crash_times=()
+          crash_count=0
           keepalive_log "watcher re-arm crash loop; backing off ${KEEPALIVE_CRASH_BACKOFF}s"
         fi
       else
-        crash_times=()
+        crash_count=0
         keepalive_log "watcher one-shot exited with: $reason"
       fi
     fi
