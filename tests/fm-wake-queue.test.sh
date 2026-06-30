@@ -426,6 +426,7 @@ test_keepalive_rearms_stale_missing_watcher() {
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ -n "$watcher_pid" ] || fail "keepalive did not start a one-shot watcher"
   is_live_non_zombie "$watcher_pid" || fail "keepalive watcher pid is not live"
+  # shellcheck disable=SC1090
   beat_age=$(FM_STATE_OVERRIDE="$state" . "$LIB"; fm_path_age "$state/.last-watcher-beat")
   [ "$beat_age" -lt 3 ] || fail "keepalive watcher did not refresh heartbeat (age=$beat_age)"
   kill "$pid" 2>/dev/null || true
