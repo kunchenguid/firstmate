@@ -157,4 +157,10 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# out-of-band notifier (bin/fm-notify.sh); fired by the watcher on a captain-relevant signal in normal mode and by the daemon on a confirmed escalation while afk
+FM_NOTIFY=on                       # native OS notification toggle; off/0/false/no/disabled silences every notification (also gated daemon-side so a custom FM_NOTIFY_CMD cannot bypass it)
+# click-to-focus (WSL/Windows): `fm-notify.sh install` registers the firstmate: protocol + hidden launcher; firstmate's pane id is recorded here for fm-focus.sh
+FM_TMUX_PANE_FILE=$FM_HOME/state/.fm-tmux-pane  # override the recorded-pane-id path read by bin/fm-focus.sh (default derives from the firstmate home)
+FM_FOCUS_MACOS_TERM=    # macOS: terminal app fm-focus.sh activates on a click; empty auto-detects iTerm2/Terminal (best-effort)
+FM_FOCUS_LINUX_WINDOW=  # Linux: window title fm-focus.sh raises via wmctrl/xdotool on a click; empty falls back to a known terminal class (best-effort)
 ```

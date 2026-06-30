@@ -116,6 +116,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# The notifier's pure helpers, for ONE definition of the FM_NOTIFY toggle. The
+# escalation notifier hook (notify_escalation) gates on fm_notify_enabled BEFORE
+# running any command, so FM_NOTIFY=off silences even an FM_NOTIFY_CMD override
+# whose own script would not consult the toggle. Source-safe (BASH_SOURCE guard).
+# shellcheck source=bin/fm-notify.sh
+. "$FM_DAEMON_DIR/fm-notify.sh"
+
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 INJECT_SKIP_DEFAULT="heartbeat"
@@ -415,6 +422,74 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+# Fire a best-effort native OS notification (and focus the host terminal) the
+# moment an away-mode escalation digest is actually delivered to the captain, so
+# they get pinged out of band while away from the pane. This is the issue #106
+# notifier hook. It runs ONLY on a confirmed inject of a classified escalation -
+# never on routine self-handled wakes - so it cannot ping for benign churn. The
+# toast text is a clean count-and-class summary with no task ids or internal
+# vocabulary, since it can surface on a lock screen. Fully best-effort: the
+# notifier honors FM_NOTIFY=off itself and a missing/failing notifier never
+# affects escalation delivery. FM_NOTIFY_CMD overrides the notifier path (tests).
+# The FM_NOTIFY=off gate is enforced HERE, before any command runs, so a custom
+# FM_NOTIFY_CMD that does not consult the toggle is silenced too (the built-in
+# notifier also self-gates, but the override must not be a bypass).
+# Find an "Open PR" URL for the escalation digest: the first GitHub PR / GitLab MR
+# URL on a done-state buffered line whose task is NOT local-only. Buffered signal
+# lines are "<task>.status: <status> | <task2>.status: <status2>" (the catch-all
+# scan appends "<task>.status: <status> (catch-all scan)"); split on " | " so each
+# "<task>.status: <rest>" segment is examined independently, and return the first
+# URL whose task's recorded mode is not local-only. Empty when none. Best-effort:
+# non-signal buffered lines (e.g. stale-terminal) carry no parseable task and are
+# skipped, so they simply get no button.
+notify_open_url_for_buffer() {  # <state> <buffer-file>
+  local state=$1 buf=$2 seg task rest url
+  [ -r "$buf" ] || return 0
+  while IFS= read -r seg; do
+    case "$seg" in *.status:\ *) ;; *) continue ;; esac
+    task=${seg%%.status: *}; task=${task##* }
+    rest=${seg#*.status: }
+    case "$rest" in *[Dd]one*) ;; *) continue ;; esac
+    url=$(fm_status_pr_url "$rest")
+    [ -n "$url" ] || continue
+    fm_task_is_local_only "$state" "$task" && continue
+    printf '%s' "$url"
+    return 0
+  done < <(awk '{gsub(/ \| /,"\n"); print}' "$buf")
+  return 0
+}
+
+notify_escalation() {  # <state> <count>
+  local state=$1 n=$2 buf notify summary open_url decision=0
+  fm_notify_enabled || return 0
+  notify="${FM_NOTIFY_CMD:-$FM_DAEMON_DIR/fm-notify.sh}"
+  [ -x "$notify" ] || return 0
+  buf="$state/.subsuper-escalations"
+  if grep -qiE 'needs-decision|blocked|failed' "$buf" 2>/dev/null; then
+    summary="$n item(s) need your decision"
+    decision=1
+  elif grep -qiE 'done|merged|checks green|ready|PR ' "$buf" 2>/dev/null; then
+    summary="$n item(s) ready for review"
+  else
+    summary="$n update(s) need your attention"
+  fi
+  # A done-state escalation carrying a PR/MR URL (non-local-only task) also gets
+  # the "Open PR" button via --open. Best-effort, like the rest of the hook. The
+  # button is reserved for review/done-state digests: a digest classified as a
+  # decision wake never carries --open, even if a done: line is also buffered, so
+  # the action stays consistent with the notification class.
+  if [ "$decision" = 1 ]; then
+    open_url=""
+  else
+    open_url=$(notify_open_url_for_buffer "$state" "$buf")
+  fi
+  if [ -n "$open_url" ]; then
+    "$notify" "Firstmate" "$summary" --focus --open "$open_url" >/dev/null 2>&1 || true
+  else
+    "$notify" "Firstmate" "$summary" --focus >/dev/null 2>&1 || true
+  fi
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
@@ -428,7 +503,12 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    # Captain-relevant digest delivered: fire the out-of-band notifier (best-
+    # effort) BEFORE clearing the buffer so the summary can read its contents.
+    notify_escalation "$state" "$n"
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
+  fi
   return 1
 }
 

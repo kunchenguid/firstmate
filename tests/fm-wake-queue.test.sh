@@ -14,6 +14,11 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
+# Keep this suite from firing real OS notifications: it drives the real
+# bin/fm-watch.sh over captain-relevant statuses, whose signal path execs
+# bin/fm-notify.sh (notify_signal_statuses). Matches the sibling e2e suites.
+export FM_NOTIFY=off
+
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
