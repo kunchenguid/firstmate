@@ -141,13 +141,9 @@ secondmate_sync() {
   # it runs whether or not the home's tracked files advanced, keeping the fleet
   # converged on the primary. The propagation helper stays silent on success; a
   # primary with no inheritable config set and no downstream copy is a no-op.
-  local meta id home home_real propagated_homes
+  local meta id home window home_real propagated_homes
   propagated_homes=""
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
-    id=$(basename "$meta" .meta)
-    home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  while IFS='|' read -r id home window meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
@@ -161,7 +157,7 @@ secondmate_sync() {
     if ! propagate_inheritable_config "$CONFIG" "$home_real/config"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
     fi
-  done
+  done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }

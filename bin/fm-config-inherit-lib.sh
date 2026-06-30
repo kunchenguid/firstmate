@@ -11,11 +11,12 @@
 #
 # Why this is separate from the tracked-files fast-forward (fm-ff-lib.sh): config/
 # is gitignored, so a tracked-files fast-forward never carries these items. This
-# is an explicit copy run at the two convergence points the primary owns - a
-# secondmate spawn (bin/fm-spawn.sh) and the bootstrap secondmate sweep
-# (bin/fm-bootstrap.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins and
-# is re-pushed on every convergence, so the fleet stays converged on the primary;
-# an item the primary does not set is mirrored as absence downstream.
+# is an explicit copy run at the convergence points the primary owns - a
+# secondmate spawn (bin/fm-spawn.sh), the bootstrap secondmate sweep
+# (bin/fm-bootstrap.sh), and the focused mid-session config push
+# (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
+# and is re-pushed on every convergence, so the fleet stays converged on the
+# primary; an item the primary does not set is mirrored as absence downstream.
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -73,19 +74,45 @@ destination_allows_inherited_item() {
 
 # propagate_inheritable_config <src-config-dir> <dest-config-dir>
 # Copy each declared inheritable item from the primary's config dir (src) into a
-# secondmate home's config dir (dest). SILENT on success - callers parse stdout,
-# so this writes nothing there. A source item that is present is copied only when
-# its content differs (idempotent: a re-run never churns mtimes). A source item
-# that is absent is mirrored as a missing destination item, so clearing the
-# primary's value clears it downstream too (primary-authoritative). The
-# destination dir is created lazily, only when there is actually something to
-# write, so a primary with no inheritable config set is a complete no-op (it
-# leaves the secondmate home exactly as it was - the backward-compatible path).
-# Returns non-zero only when the destination cannot be created or written.
+# secondmate home's config dir (dest). SILENT on stdout - callers parse stdout,
+# so this writes nothing there. It emits concise stderr diagnostics only for
+# notable events: a guard skip or a copy/remove error. A source item that is
+# present is copied only when its content differs (idempotent: a re-run never
+# churns mtimes). A source item that is absent is mirrored as a missing
+# destination item, so clearing the primary's value clears it downstream too
+# (primary-authoritative). The destination dir is created lazily, only when there
+# is actually something to write, so a primary with no inheritable config set is a
+# complete no-op (it leaves the secondmate home exactly as it was - the
+# backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
+# file, one tab-separated line per item is appended there:
+#   <item> <status> <reason>
+# Status is pushed, unchanged, skipped, or error. Returns non-zero only when the
+# destination cannot be created or written.
+record_inheritable_config_result() {
+  local item=$1 status=$2 reason=${3:-}
+  [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
+  printf '%s\t%s\t%s\n' "$item" "$status" "$reason" >> "$FM_CONFIG_INHERIT_REPORT" 2>/dev/null || true
+}
+
+inheritable_config_skip_reason() {
+  printf '%s' "destination does not allow inherited item (not gitignored or guard failed)"
+}
+
+warn_inheritable_config_skip() {
+  local item=$1 dest_config=$2 reason=$3
+  echo "fm-config-inherit: warning: skipped $item for $dest_config: $reason" >&2
+}
+
+warn_inheritable_config_error() {
+  local item=$1 dest=$2 reason=$3
+  echo "fm-config-inherit: error: $reason $item at $dest" >&2
+}
+
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest
+  local src_config=$1 dest_config=$2 item src dest reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
+  rc=0
   for item in $FM_INHERITABLE_CONFIG; do
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
@@ -93,15 +120,43 @@ propagate_inheritable_config() {
     src="$src_config/$item"
     dest="$dest_config/$item"
     if [ -f "$src" ]; then
-      destination_allows_inherited_item "$dest_config" "$item" || continue
+      if ! destination_allows_inherited_item "$dest_config" "$item"; then
+        reason=$(inheritable_config_skip_reason)
+        warn_inheritable_config_skip "$item" "$dest_config" "$reason"
+        record_inheritable_config_result "$item" skipped "$reason"
+        continue
+      fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        copy_inheritable_file "$src" "$dest" || return 1
+        if copy_inheritable_file "$src" "$dest"; then
+          record_inheritable_config_result "$item" pushed ""
+        else
+          reason="failed to copy"
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+        fi
+      else
+        record_inheritable_config_result "$item" unchanged ""
       fi
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
-      destination_allows_inherited_item "$dest_config" "$item" || continue
+      if ! destination_allows_inherited_item "$dest_config" "$item"; then
+        reason=$(inheritable_config_skip_reason)
+        warn_inheritable_config_skip "$item" "$dest_config" "$reason"
+        record_inheritable_config_result "$item" skipped "$reason"
+        continue
+      fi
       # Primary has no value for this item: mirror the absence downstream.
-      rm -f "$dest" 2>/dev/null || return 1
+      if rm -f "$dest" 2>/dev/null; then
+        record_inheritable_config_result "$item" pushed "mirrored primary absence"
+      else
+        reason="failed to remove"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+      fi
+    else
+      record_inheritable_config_result "$item" unchanged ""
     fi
   done
-  return 0
+  return "$rc"
 }

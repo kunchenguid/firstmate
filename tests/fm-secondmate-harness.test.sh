@@ -71,7 +71,7 @@ ROWS
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
 test_propagate_lib() {
-  local d src dest m1 m2 outside
+  local d src dest m1 m2 outside stdout stderr guard_repo err_text
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   dest="$d/dest"
@@ -81,7 +81,11 @@ test_propagate_lib() {
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
-  propagate_inheritable_config "$src" "$dest" || fail "propagate returned non-zero"
+  stdout="$d/clean-copy.out"
+  stderr="$d/clean-copy.err"
+  propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
+  [ ! -s "$stdout" ] || fail "clean copy wrote to stdout"
+  [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
@@ -89,7 +93,11 @@ test_propagate_lib() {
   # 2. idempotent: an unchanged re-run does not churn the mtime
   m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
   sleep 1
-  propagate_inheritable_config "$src" "$dest"
+  stdout="$d/unchanged.out"
+  stderr="$d/unchanged.err"
+  propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr"
+  [ ! -s "$stdout" ] || fail "unchanged propagation wrote to stdout"
+  [ ! -s "$stderr" ] || fail "unchanged propagation wrote to stderr"
   m2=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
   [ "$m1" = "$m2" ] || fail "idempotent re-run churned mtime ($m1 -> $m2)"
 
@@ -125,9 +133,12 @@ test_propagate_lib() {
   [ -L "$dest/crew-harness" ] && fail "broken destination symlink not removed on absence mirror"
 
   mkdir -p "$dest/crew-harness"
-  if propagate_inheritable_config "$src" "$dest"; then
+  stderr="$d/remove-error.err"
+  if propagate_inheritable_config "$src" "$dest" 2>"$stderr"; then
     fail "failed absence mirror returned success"
   fi
+  assert_contains "$(cat "$stderr")" "fm-config-inherit: error: failed to remove crew-harness" \
+    "remove error did not emit a stderr diagnostic"
   [ -d "$dest/crew-harness" ] || fail "failed absence mirror removed the wrong path"
   rm -rf "$dest/crew-harness"
 
@@ -150,7 +161,26 @@ test_propagate_lib() {
   propagate_inheritable_config "$d/src3" "$d/dest3/config"
   [ -e "$d/dest3/config" ] && fail "empty-source propagation created a destination dir"
 
-  pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op"
+  # 7. a git worktree that does not ignore an inherited item gets a visible
+  # stderr warning and a skip, not a silent miss.
+  guard_repo="$d/guard-repo"
+  git init -q -b main "$guard_repo"
+  printf 'config/crew-harness\nconfig/backlog-backend\n' > "$guard_repo/.gitignore"
+  printf 'guard\n' > "$guard_repo/README.md"
+  git -C "$guard_repo" add -A
+  git -C "$guard_repo" commit -qm guard
+  printf '{"default":{"harness":"grok"}}\n' > "$src/crew-dispatch.json"
+  stdout="$d/guard-skip.out"
+  stderr="$d/guard-skip.err"
+  FM_INHERITABLE_CONFIG=crew-dispatch.json propagate_inheritable_config "$src" "$guard_repo/config" >"$stdout" 2>"$stderr" \
+    || fail "guard skip should not make propagation fail"
+  [ ! -s "$stdout" ] || fail "guard skip wrote to stdout"
+  err_text=$(cat "$stderr")
+  assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
+    "guard skip did not emit a stderr warning"
+  [ ! -e "$guard_repo/config/crew-dispatch.json" ] || fail "guard skip still copied the unignored item"
+
+  pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }
 
 # ===========================================================================
@@ -400,6 +430,12 @@ run_bootstrap() {
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
+run_config_push() {
+  local w=$1
+  PATH="$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-config-push.sh"
+}
+
 # The sweep pushes the primary's inheritable config into a live home, re-converges
 # it when the primary changes it, and mirrors absence when the primary clears it -
 # all while never inheriting secondmate-harness.
@@ -538,6 +574,124 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
   pass "B11 bootstrap sweep surfaces config propagation failures"
 }
 
+test_config_push_propagates_reports_without_ff_or_nudge() {
+  local w c1 sm_real old_head out err status out2 tmp
+  w=$(new_world config-push-basic)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$c1"
+  sm_real=$(cd "$w/sm" && pwd -P)
+  printf -- '- sm - config push target (home: %s; scope: config; projects: alpha; added 2026-06-30)\n' "$sm_real" > "$w/home/data/secondmates.md"
+  tmp="$w/home/state/sm.meta.tmp"
+  grep -v '^home=' "$w/home/state/sm.meta" > "$tmp"
+  mv "$tmp" "$w/home/state/sm.meta"
+
+  printf 'v2\n' > "$w/main/AGENTS.md"
+  git -C "$w/main" add AGENTS.md
+  git -C "$w/main" commit -qm c2
+  old_head=$(git -C "$w/sm" rev-parse HEAD)
+
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'manual\n' > "$w/home/config/backlog-backend"
+  err="$w/config-push-basic.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+
+  expect_code 0 "$status" "config push should succeed"
+  assert_contains "$out" "config-push: $w/home/config -> live secondmate homes" \
+    "config push lacked the header"
+  assert_contains "$out" "secondmate sm ($sm_real):" \
+    "config push did not discover the live secondmate through registry fallback"
+  assert_contains "$out" "crew-dispatch.json: pushed" \
+    "config push did not report crew-dispatch as pushed"
+  assert_contains "$out" "crew-harness: pushed" \
+    "config push did not report crew-harness as pushed"
+  assert_contains "$out" "backlog-backend: pushed" \
+    "config push did not report backlog-backend as pushed"
+  assert_not_contains "$out" "NUDGE_SECONDMATES" \
+    "config push must not nudge secondmates"
+  [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
+    || fail "config push fast-forwarded tracked files"
+  [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
+
+  out2=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "idempotent config push should succeed"
+  assert_contains "$out2" "crew-dispatch.json: unchanged" \
+    "idempotent config push did not report crew-dispatch as unchanged"
+  assert_contains "$out2" "crew-harness: unchanged" \
+    "idempotent config push did not report crew-harness as unchanged"
+  assert_contains "$out2" "backlog-backend: unchanged" \
+    "idempotent config push did not report backlog-backend as unchanged"
+  pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
+}
+
+test_config_push_reports_skips_dirty_and_invalid_home() {
+  local w head out err status stale_real dirty_real bad_home err_text tmp
+  w=$(new_world config-push-warnings)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" dirty "$head"
+  add_sm_worktree "$w" stale "$head"
+  dirty_real=$(cd "$w/dirty" && pwd -P)
+  stale_real=$(cd "$w/stale" && pwd -P)
+
+  printf 'local edit\n' >> "$w/dirty/README.md"
+  tmp="$w/stale/.gitignore.tmp"
+  grep -v '^config/crew-dispatch.json$' "$w/stale/.gitignore" > "$tmp"
+  mv "$tmp" "$w/stale/.gitignore"
+
+  bad_home="$w/not-secondmate"
+  mkdir -p "$bad_home"
+  {
+    printf 'window=firstmate:fm-bad\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$bad_home"
+  } > "$w/home/state/bad.meta"
+
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'manual\n' > "$w/home/config/backlog-backend"
+  err="$w/config-push-warnings.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+
+  expect_code 0 "$status" "warnings-only config push should exit zero"
+  assert_contains "$out" "secondmate dirty ($dirty_real):" \
+    "config push did not report dirty home"
+  assert_contains "$out" "home: dirty working tree - config-only push continuing" \
+    "config push did not surface dirty state"
+  assert_contains "$out" "secondmate stale ($stale_real):" \
+    "config push did not report stale home"
+  assert_contains "$out" "crew-dispatch.json: skipped - destination does not allow inherited item" \
+    "config push did not report non-allowing item skip"
+  assert_contains "$out" "secondmate bad ($bad_home): skipped - unsafe home: not a seeded secondmate home" \
+    "config push did not report invalid secondmate home"
+  err_text=$(cat "$err")
+  assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
+    "config push did not inherit the lib's skip stderr warning"
+  pass "B13 config-push reports dirty, non-allowing, and invalid homes without failing warnings-only runs"
+}
+
+test_config_push_exits_nonzero_on_copy_error() {
+  local w head out err status sm_real err_text
+  w=$(new_world config-push-error)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  sm_real=$(cd "$w/sm" && pwd -P)
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  mkdir -p "$w/sm/config/crew-harness"
+
+  err="$w/config-push-error.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+
+  expect_code 1 "$status" "copy-error config push should exit non-zero"
+  assert_contains "$out" "secondmate sm ($sm_real):" \
+    "config push error output missed the home"
+  assert_contains "$out" "crew-harness: error - failed to copy" \
+    "config push did not report the per-item copy error"
+  err_text=$(cat "$err")
+  assert_contains "$err_text" "fm-config-inherit: error: failed to copy crew-harness" \
+    "copy error did not emit a stderr diagnostic"
+  pass "B14 config-push exits nonzero on real propagation errors"
+}
+
 test_harness_resolution
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -550,5 +704,8 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
+test_config_push_propagates_reports_without_ff_or_nudge
+test_config_push_reports_skips_dirty_and_invalid_home
+test_config_push_exits_nonzero_on_copy_error
 
 echo "# all fm-secondmate-harness tests passed"
