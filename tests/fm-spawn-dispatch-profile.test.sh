@@ -66,6 +66,20 @@ make_spawn_case() {
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
 
+enable_dispatch_profile() {
+  local home=$1
+  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
+    > "$home/config/crew-dispatch.json"
+}
+
+make_seeded_secondmate_home() {
+  local home=$1 id=$2
+  mkdir -p "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+}
+
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
@@ -79,7 +93,7 @@ run_spawn() {
 }
 
 read_case_record() {
-  IFS='|' read -r _case_dir HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
 }
@@ -107,6 +121,91 @@ test_no_profile_keeps_claude_launch_unchanged() {
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+}
+
+test_active_dispatch_profile_requires_explicit_harness_for_ship() {
+  local rec id out status
+  id=profile-required-ship-z11
+  rec=$(make_spawn_case profile-required-ship claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ship spawn without explicit harness should fail when dispatch profiles are active"
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+    "spawn did not explain the dispatch-profile backstop"
+  assert_absent "$HOME_DIR/state/$id.meta" "ship refusal should happen before meta is written"
+  pass "active crew-dispatch profile requires an explicit harness for ship spawns"
+}
+
+test_active_dispatch_profile_requires_explicit_harness_for_scout() {
+  local rec id out status
+  id=profile-required-scout-z12
+  rec=$(make_spawn_case profile-required-scout claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 1 "$status" "scout spawn without explicit harness should fail when dispatch profiles are active"
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+    "scout refusal did not explain the dispatch-profile backstop"
+  assert_absent "$HOME_DIR/state/$id.meta" "scout refusal should happen before meta is written"
+  pass "active crew-dispatch profile requires an explicit harness for scout spawns"
+}
+
+test_active_dispatch_profile_allows_explicit_harness() {
+  local rec id out status launch
+  id=profile-explicit-z13
+  rec=$(make_spawn_case profile-explicit claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "explicit harness should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit harness launch did not thread model and effort"
+  pass "active crew-dispatch profile allows an explicit resolved harness"
+}
+
+test_active_dispatch_profile_allows_positional_harness() {
+  local rec id out status
+  id=profile-positional-z14
+  rec=$(make_spawn_case profile-positional claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "positional harness should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report positional codex harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  pass "active crew-dispatch profile allows the legacy positional harness form"
+}
+
+test_active_dispatch_profile_allows_raw_launch_command() {
+  local rec id out status launch
+  id=profile-raw-z15
+  rec=$(make_spawn_case profile-raw claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --flag")
+  status=$?
+  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -234,6 +333,7 @@ test_batch_forwards_shared_profile_flags() {
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
@@ -246,7 +346,30 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_active_dispatch_profile_does_not_block_secondmate_launch() {
+  local rec id sm out status
+  id=profile-secondmate-z16
+  rec=$(make_spawn_case profile-secondmate codex "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
+  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  pass "active crew-dispatch profile does not block secondmate launches"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
+test_active_dispatch_profile_requires_explicit_harness_for_ship
+test_active_dispatch_profile_requires_explicit_harness_for_scout
+test_active_dispatch_profile_allows_explicit_harness
+test_active_dispatch_profile_allows_positional_harness
+test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
@@ -255,5 +378,6 @@ test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
+test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

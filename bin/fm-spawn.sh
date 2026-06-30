@@ -9,14 +9,16 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
-#   With no harness arg, the harness comes from fm-harness.sh: a crewmate/scout
-#   spawn resolves the CREW harness (config/crew-harness, falling back to firstmate's
-#   own); a --secondmate spawn resolves the SECONDMATE harness (config/secondmate-harness
-#   -> config/crew-harness -> own), so the secondmate-vs-crewmate split is DURABLE
-#   across every respawn (recovery, /updatefirstmate, restart). A bare adapter name
-#   (claude|codex|opencode|pi|grok) overrides it for this spawn (either kind). A
-#   non-flag string containing whitespace is treated as a RAW launch command - the
-#   escape hatch for verifying new adapters.
+#   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
+#   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
+#   spawns require an explicit harness so firstmate cannot silently skip dispatch
+#   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
+#   harness (config/secondmate-harness -> config/crew-harness -> own), so the
+#   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   overrides it for this spawn (either kind). A non-flag string containing
+#   whitespace is treated as a RAW launch command - the escape hatch for verifying
+#   new adapters.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings
@@ -31,9 +33,11 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort applies to every pair. The loop lives here, in bash,
-#   so callers never hand-write a multi-task shell loop (the tool shell is zsh, which does
-#   not word-split unquoted $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+#   source of truth; shared --scout/--harness/--model/--effort applies to every pair.
+#   If config/crew-dispatch.json exists, shared --harness is required for crewmate
+#   and scout batches. The loop lives here, in bash, so callers never hand-write a
+#   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
+#   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -116,6 +120,10 @@ esac
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -221,15 +229,20 @@ case "$ARG3" in
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
-    # every other kind uses the crew harness. Resolving here on every spawn is what
-    # makes the split DURABLE - a respawn (recovery, /updatefirstmate, restart)
-    # re-resolves, so config/secondmate-harness keeps governing secondmate launches
-    # across restarts. The launch_template lookup below is the unverified-adapter
-    # guard for both kinds: a harness with no template aborts the spawn.
+    # every other kind uses the crew harness only when no dispatch profile file is
+    # active. Resolving here on every spawn is what makes the split DURABLE - a
+    # respawn (recovery, /updatefirstmate, restart) re-resolves, so
+    # config/secondmate-harness keeps governing secondmate launches across restarts.
+    # The launch_template lookup below is the unverified-adapter guard for both
+    # kinds: a harness with no template aborts the spawn.
     if [ "$KIND" = secondmate ]; then
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
     else
+      if [ -f "$CONFIG/crew-dispatch.json" ]; then
+        echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+        exit 1
+      fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi

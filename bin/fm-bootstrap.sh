@@ -6,6 +6,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -353,7 +354,22 @@ crew_dispatch_validate() {
         end
     end
   ' "$file" 2>/dev/null || true)
-  [ -z "$err" ] || echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
+  if [ -n "$err" ]; then
+    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
+    return 0
+  fi
+  jq -r '
+    def profile($p):
+      ($p.harness | tostring)
+      + (if ($p.model? != null) then "/" + ($p.model | tostring)
+         elif ($p.effort? != null) then "/default"
+         else "" end)
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+    (["CREW_DISPATCH: active config/crew-dispatch.json"]
+      + [(.rules // [])[]? | "  rule: " + (.when | tostring) + " -> " + profile(.use)]
+      + (if (.default? | type) == "object" then ["  default: " + profile(.default)] else [] end))
+    | .[]
+  ' "$file"
 }
 
 if [ "${1:-}" = "install" ]; then
