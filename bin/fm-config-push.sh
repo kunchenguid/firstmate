@@ -78,6 +78,7 @@ print_item_report() {
 
 records=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-records.XXXXXX" 2>/dev/null) || exit 1
 reports=""
+# shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local report_file
   rm -f "$records"
