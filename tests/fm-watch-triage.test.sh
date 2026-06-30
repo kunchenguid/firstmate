@@ -405,6 +405,75 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- pane layout (FM_TMUX_LAYOUT=pane): the recorded target is a bare pane id ---
+# A pane-layout task records pane=%NN as its supervision target, so the watcher's
+# stale loop sees a raw pane id with no task id in it. The id must be recovered by
+# matching the target against the meta (fm_task_for_tmux_target), and the wake
+# reason must surface a target firstmate's tools can resolve (the bare fm-<id>),
+# never the unresolvable pane id.
+
+test_pane_layout_stale_surfaced_with_resolvable_target() {
+  local dir state fakebin out drain_out capture_file pane key pane_hash sig pid
+  dir=$(make_case pane-stale-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  pane="%42"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=firstmate:main\npane=%s\ntmux_layout=pane\nkind=ship\n' "$pane" > "$state/panecrew.meta"
+  printf 'working: implementing\n' > "$state/panecrew.status"
+  sig=$(seen_sig "$state/panecrew.status"); printf '%s' "$sig" > "$state/.seen-panecrew_status"
+  key=$(printf '%s' "$pane" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No running pipeline for this id; NOT provably working -> surface at once.
+  export FM_FAKE_CREW_STATE_panecrew='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a stopped pane-layout crew"
+  grep -Fx "stale: fm-panecrew" "$out" >/dev/null || fail "pane-layout stale wake did not surface a resolvable fm-<id> target: $(cat "$out")"
+  grep -F "$pane" "$out" >/dev/null && fail "pane-layout stale wake leaked the unresolvable pane id"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after pane-layout stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "fm-panecrew" >/dev/null || fail "pane-layout stale wake was not queued with a resolvable target"
+  unset FM_FAKE_CREW_STATE_panecrew
+  pass "pane-layout stale surfaces the bare fm-<id>, never the unresolvable pane id"
+}
+
+test_pane_layout_stale_absorbs_provably_working_via_resolved_id() {
+  local dir state fakebin out capture_file pane key pane_hash sig pid
+  dir=$(make_case pane-stale-absorb); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  pane="%42"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=firstmate:main\npane=%s\ntmux_layout=pane\nkind=ship\n' "$pane" > "$state/panecrew.meta"
+  printf 'working: still compiling\n' > "$state/panecrew.status"
+  sig=$(seen_sig "$state/panecrew.status"); printf '%s' "$sig" > "$state/.seen-panecrew_status"
+  key=$(printf '%s' "$pane" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Provable-working verdict is keyed to the TASK id, not the pane id: only a
+  # correctly resolved id reads it, so a mis-resolved %NN would fall to the unknown
+  # default and surface. Absorbing here proves the id was resolved from the meta.
+  export FM_FAKE_CREW_STATE_panecrew='state: working · source: run-step · ci running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a provably-working pane-layout crew (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "provably-working pane-layout stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "provably-working pane-layout stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "pane-layout stale suppressor not advanced on absorb"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_panecrew
+  pass "pane-layout non-terminal stale resolves the task id from meta and absorbs a provably-working crew"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -592,6 +661,8 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced
+test_pane_layout_stale_surfaced_with_resolvable_target
+test_pane_layout_stale_absorbs_provably_working_via_resolved_id
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed

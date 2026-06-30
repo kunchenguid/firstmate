@@ -48,6 +48,27 @@ fm_meta_tmux_target() {  # <meta>
   printf '%s\n' "$target"
 }
 
+# fm_task_for_tmux_target: inverse of fm_meta_tmux_target. Given a live tmux target
+# (a "session:fm-<id>" window name in the default window layout, or a bare pane id
+# like "%42" in pane layout) return the owning task id by matching the target
+# against each state/<id>.meta's recorded target (pane= when present, else
+# window=). This is the layout-agnostic reverse map a plain "<session>:fm-<id>"
+# string parse cannot do for a pane id, which carries no task id. Falls back to
+# that string parse when no meta matches (e.g. an explicit out-of-home target).
+# Prints the task id; never fails.
+fm_task_for_tmux_target() {  # <target> <state-dir>
+  local target=$1 state=$2 meta mt id
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    mt=$(fm_meta_tmux_target "$meta" 2>/dev/null || true)
+    [ -n "$mt" ] && [ "$mt" = "$target" ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    printf '%s' "$id"
+    return 0
+  done
+  id=${target##*:}; id=${id#fm-}; printf '%s' "$id"
+}
+
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).

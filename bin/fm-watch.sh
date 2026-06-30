@@ -381,6 +381,16 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
+    # Resolve the recorded target back to a stable task id (layout-agnostic) for
+    # crew-state/status lookups, and to a target firstmate's diagnosis tools can
+    # resolve for the wake reason: a window-layout "session:fm-<id>" is itself
+    # resolvable, but a pane-layout bare pane id (e.g. %42) is not, so surface the
+    # bare "fm-<id>" instead (fm-peek/fm-send map it through meta to the pane).
+    task=$(fm_task_for_tmux_target "$w" "$STATE")
+    case "$w" in
+      *:*) stale_target=$w ;;
+      *)   stale_target="fm-$task" ;;
+    esac
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
@@ -401,18 +411,18 @@ EOF
         if afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            fm_wake_append stale "$w" "stale: $stale_target" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "stale: $stale_target"
           fi
-        elif stale_is_terminal "$w" "$STATE"; then
+        elif stale_is_terminal "$task" "$STATE"; then
           # Terminal status under a stale pane: actionable -> enqueue + exit.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            fm_wake_append stale "$w" "stale: $stale_target" || exit 1
             printf '%s' "$h" > "$sf"
             rm -f "$ssf"
-            mark_surfaced "$STATE/$(window_to_task "$w").status"
-            wake "stale: $w"
+            mark_surfaced "$STATE/$task.status"
+            wake "stale: $stale_target"
           fi
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
@@ -427,15 +437,15 @@ EOF
           #     status, waiting on a decision, or wedged) instead of leaving the
           #     finish to wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w")"; then
+            if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed non-terminal stale (provably working): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              fm_wake_append stale "$w" "stale: $stale_target" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              wake "stale: $w"
+              wake "stale: $stale_target"
             fi
           else
             since=$(cat "$ssf" 2>/dev/null || true)
@@ -447,9 +457,9 @@ EOF
               *)
                 age=$(( $(date +%s) - since ))
                 if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-                  fm_wake_append stale "$w" "stale: $w (idle ${age}s, possible wedge)" || exit 1
+                  fm_wake_append stale "$w" "stale: $stale_target (idle ${age}s, possible wedge)" || exit 1
                   rm -f "$ssf"
-                  wake "stale: $w (idle ${age}s, possible wedge)"
+                  wake "stale: $stale_target (idle ${age}s, possible wedge)"
                 fi
                 ;;
             esac
