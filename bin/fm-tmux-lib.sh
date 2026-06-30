@@ -34,6 +34,20 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
+# fm_meta_tmux_target: return the live tmux target recorded in a task meta file.
+# New pane-layout tasks record both window= (the containing window, for
+# compatibility) and pane= (the supervised pane). Older tasks only have window=.
+fm_meta_tmux_target() {  # <meta>
+  local meta=$1 target
+  [ -f "$meta" ] || return 1
+  target=$(grep '^pane=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -z "$target" ]; then
+    target=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  [ -n "$target" ] || return 1
+  printf '%s\n' "$target"
+}
+
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).

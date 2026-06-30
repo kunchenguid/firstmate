@@ -91,7 +91,7 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (VERIFIED 2026-06-11, codex-cli 0.139.0; layout checked 2026-06-30, codex-cli 0.142.4)
 
 | Fact | Value |
 |---|---|
@@ -99,6 +99,10 @@ That styled capture is internal to the boolean detector only.
 | Exit command | `/quit` (slash popup needs about 1 second between text and Enter; `fm-send` handles it) |
 | Interrupt | single Escape |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
+
+Codex does not expose Claude Code's built-in `--tmux --worktree` layout affordance (checked against `codex --help` on 0.142.4).
+Firstmate owns the tmux supervision layer for Codex: the default remains one `fm-<id>` window per task, and setting `FM_TMUX_LAYOUT=pane` before launching firstmate splits the current tmux window instead.
+Pane-layout tasks record both `window=<containing-window>` for compatibility and `pane=<pane-id>` as the active target; `fm-send`, `fm-peek`, watcher/current-state reads, and teardown prefer `pane=` when present and fall back to legacy `window=` metadata.
 
 A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard as the `/` slash popup: submitting too fast lets the popup swallow the Enter, so the invocation never lands.
 `fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with `fm_tmux_submit_core`'s retried Enter as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target's `state/<id>.meta`.

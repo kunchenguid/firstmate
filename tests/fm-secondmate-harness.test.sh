@@ -376,6 +376,9 @@ new_world() {
   mkdir -p "$w/main/bin"
   printf 'echo a\n' > "$w/main/bin/tool.sh"
   git -C "$w/main" add -A
+  # Some developer machines globally ignore AGENTS.md; force-add it because the
+  # secondmate validator requires every seeded firstmate home to contain it.
+  git -C "$w/main" add -f AGENTS.md
   git -C "$w/main" commit -qm c1
   printf '%s\n' "$w"
 }

@@ -36,6 +36,8 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -147,7 +149,7 @@ window_kind() {
   local w=$1 meta mw kind
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    mw=$(fm_meta_tmux_target "$meta" || true)
     [ "$mw" = "$w" ] || continue
     kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
@@ -161,7 +163,7 @@ recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    w=$(fm_meta_tmux_target "$meta" || true)
     [ -n "$w" ] || continue
     case "$seen" in
       *"|$w|"*) continue ;;

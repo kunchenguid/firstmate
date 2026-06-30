@@ -49,6 +49,9 @@ new_world() {
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
+  # AGENTS.md is part of the instruction surface under test; force-add it so
+  # developer-global ignore rules cannot hide it from synthetic firstmate repos.
+  git -C "$w/seed" add -f AGENTS.md
   git -C "$w/seed" commit -qm c1
   git -C "$w/seed" push -q origin main
 
@@ -83,6 +86,7 @@ bump_origin() {
     printf 's2\n' > "$w/seed/.agents/skills/note.md"
   fi
   git -C "$w/seed" add -A
+  git -C "$w/seed" add -f AGENTS.md
   git -C "$w/seed" commit -qm "bump-$mode"
   git -C "$w/seed" push -q origin main
 }

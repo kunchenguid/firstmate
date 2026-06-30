@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the tmux window, clear volatile state, refresh/prune
+# secondmate home, kill the tmux window/pane, clear volatile state, refresh/prune
 # the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work that has not LANDED, because treehouse return
@@ -58,6 +58,7 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
+PANE=$(grep '^pane=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -89,6 +90,15 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+kill_recorded_tmux_target() {
+  local window=$1 pane=${2:-}
+  if [ -n "$pane" ]; then
+    tmux kill-pane -t "$pane" 2>/dev/null || true
+  elif [ -n "$window" ]; then
+    tmux kill-window -t "$window" 2>/dev/null || true
+  fi
 }
 
 remove_grok_turnend_auth() {
@@ -510,20 +520,19 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_t child_pane child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     child_t=$(meta_value "$child_meta" window)
+    child_pane=$(meta_value "$child_meta" pane)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    if [ -n "$child_t" ]; then
-      tmux kill-window -t "$child_t" 2>/dev/null || true
-    fi
+    kill_recorded_tmux_target "$child_t" "$child_pane"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -655,7 +664,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-tmux kill-window -t "$T" 2>/dev/null || true
+kill_recorded_tmux_target "$T" "$PANE"
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
@@ -669,5 +678,9 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ -n "$PANE" ]; then
+  echo "teardown $ID complete (window $T, pane $PANE, worktree $WT)"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder

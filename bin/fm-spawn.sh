@@ -28,6 +28,11 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   FM_TMUX_LAYOUT=window (default) gives every task its own tmux window, as before.
+#   FM_TMUX_LAYOUT=pane, when firstmate itself is running inside tmux, splits the
+#   current window and records pane=<pane-id> while preserving window=<session:window>
+#   for existing metadata readers. This fills the Codex parity gap with Claude
+#   Code's built-in --tmux affordance without changing the default window model.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -47,7 +52,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> [pane=<pane-id>] worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -492,21 +497,42 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
+TMUX_LAYOUT=${FM_TMUX_LAYOUT:-window}
+case "$TMUX_LAYOUT" in
+  window|pane) ;;
+  *) echo "error: FM_TMUX_LAYOUT must be 'window' or 'pane' (got '$TMUX_LAYOUT')" >&2; exit 1 ;;
+esac
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
 else
+  if [ "$TMUX_LAYOUT" = pane ]; then
+    echo "error: FM_TMUX_LAYOUT=pane requires firstmate to be running inside tmux" >&2
+    exit 1
+  fi
   tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
   SES=firstmate
 fi
 
 W="fm-$ID"
-T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
-  echo "error: window $T already exists" >&2
-  exit 1
+PANE_TARGET=
+if [ "$TMUX_LAYOUT" = pane ]; then
+  CURRENT_WINDOW=$(tmux display-message -p '#W')
+  META_WINDOW="$SES:$CURRENT_WINDOW"
+  PANE_TARGET=$(tmux split-window -d -P -F '#{pane_id}' -c "$PROJ_ABS") \
+    || { echo "error: failed to split tmux pane in $META_WINDOW" >&2; exit 1; }
+  [ -n "$PANE_TARGET" ] || { echo "error: tmux split-window did not return a pane target" >&2; exit 1; }
+  tmux select-pane -t "$PANE_TARGET" -T "$W" 2>/dev/null || true
+  T="$PANE_TARGET"
+else
+  META_WINDOW="$SES:$W"
+  T="$META_WINDOW"
+  if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
+    echo "error: window $T already exists" >&2
+    exit 1
+  fi
+  tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
@@ -678,7 +704,9 @@ EOF
 fi
 
 {
-  echo "window=$T"
+  echo "window=$META_WINDOW"
+  [ -z "$PANE_TARGET" ] || echo "pane=$PANE_TARGET"
+  echo "tmux_layout=$TMUX_LAYOUT"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
@@ -717,4 +745,8 @@ tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
+if [ -n "$PANE_TARGET" ]; then
+  echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW pane=$PANE_TARGET worktree=$WT"
+else
+  echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+fi

@@ -2,7 +2,8 @@
 # Send one line of literal text to a crewmate window, then Enter.
 # Usage: fm-send.sh <window> <text...>
 #   <window> may be a bare firstmate window name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or explicit session:window.
+#   this home's state/<id>.meta (pane= when present, else window=), or an explicit
+#   tmux target such as session:window.
 # Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
@@ -50,8 +51,8 @@ resolve() {
         echo "error: no metadata for $1 in $STATE; pass session:window to target a window outside this firstmate home" >&2
         exit 1
       fi
-      window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
+      window=$(fm_meta_tmux_target "$meta" || true)
+      [ -n "$window" ] || { echo "error: no tmux target recorded in $meta" >&2; exit 1; }
       echo "$window"
       ;;
     *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \

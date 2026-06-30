@@ -80,6 +80,7 @@ Then just talk:
 ```
 
 Run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
+Set `FM_TMUX_LAYOUT=pane` before launching firstmate if you want new crewmates split into the current tmux window instead of separate task windows; this is useful for Codex, which does not provide Claude Code's built-in `--tmux` layout mode.
 Outside tmux, crewmates land in a detached `firstmate` session you can attach to.
 
 ## How It Works

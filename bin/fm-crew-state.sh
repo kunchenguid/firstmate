@@ -71,7 +71,7 @@ meta_value() {  # <key>
 }
 
 WT=$(meta_value worktree)
-WIN=$(meta_value window)
+WIN=$(fm_meta_tmux_target "$META" || true)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
 
