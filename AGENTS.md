@@ -96,6 +96,7 @@ state/               volatile runtime signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .notify-seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); fm-guard.sh reads it
+  .fm-tmux-pane      firstmate's own recorded tmux pane id; written by fm-notify.sh install, read by fm-focus.sh so a notification click lands on the exact pane (section 8)
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -590,6 +591,7 @@ Focusing a Windows Terminal tab by session is out of scope (unsupported by Windo
 
 When a done-state escalation carries a PR/MR URL, the notification also gets a second "Open PR" button via `--open <url>`, so the captain can jump straight to the PR.
 Both supervision hooks add it automatically: when a captain-relevant `done:` status carries a PR URL (a GitHub `/pull/<n>` or GitLab `/merge_requests/<n>`) and the task's project is not `local-only` (read from the task's `mode=` in `state/<id>.meta`), the watcher and the daemon pass `--open <url>`; `local-only` tasks have no PR and get no button, and the URL rides only the flag so the id-free summary text is unchanged.
+The button is reserved for review/done-state notifications: a wake classified as a decision (any buffered `needs-decision`/`blocked`/`failed` item wins) carries no `--open` even when a `done:` PR line sits alongside it, so the action stays consistent with the notification class.
 On WSL/Windows it is a real second toast button (`<action content="Open PR" activationType="protocol" arguments="<url>"/>`, the URL XML-attribute-escaped so it cannot break the toast markup) that opens the default browser; on macOS it is best-effort via `terminal-notifier -open <url>` (the single click action, so it replaces the focus `-execute` when a URL is present); on Linux it is best-effort via a second `notify-send --action` that runs `xdg-open <url>` where the daemon supports actions.
 
 The script keeps a marked seam for later out-of-band backends (a phone push via ntfy or Pushover for the captain's iPhone), so adding one does not touch the native path.
