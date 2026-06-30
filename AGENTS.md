@@ -173,7 +173,7 @@ Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
 It is firstmate-maintained but human-editable.
 When the captain expresses a standing preference such as "use grok for news-dependent work", firstmate codifies it into this file; the captain may also hand-edit it.
 The file is JSON so firstmate can read the natural-language rules and bootstrap can validate it with `jq`.
-See `config/crew-dispatch.json.example` for a documented starting point.
+See `docs/examples/crew-dispatch.json` for a documented starting point to copy into local `config/crew-dispatch.json`.
 
 Schema:
 
