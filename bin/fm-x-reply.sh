@@ -62,6 +62,21 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
+TMP_FILES=()
+cleanup_tmp_files() {
+  if [ "${#TMP_FILES[@]}" -gt 0 ]; then
+    rm -f "${TMP_FILES[@]}"
+  fi
+}
+trap cleanup_tmp_files EXIT
+
+reply_tmp_file() {
+  local file
+  file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reply.XXXXXX") || return 1
+  TMP_FILES+=("$file")
+  printf '%s\n' "$file"
+}
+
 usage() {
   echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] <text> | [--followup] [--image <path>] --text-file <path> | [--followup] [--image <path>] -" >&2
 }
@@ -162,13 +177,14 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
-IMAGE_PAYLOAD=
+IMAGE_PAYLOAD_FILE=
 IMAGE_PREVIEW=
+PAYLOAD_FILE=
 if [ -n "$IMAGE_PATH" ]; then
-  IMAGE_INFO=$(fmx_image_file_json "$IMAGE_PATH" fm-x-reply) || exit 1
-  IMAGE_PAYLOAD=$(printf '%s' "$IMAGE_INFO" | jq -c '.payload') || {
-    echo "fm-x-reply: failed to build image payload" >&2; exit 1; }
-  IMAGE_PREVIEW=$(printf '%s' "$IMAGE_INFO" | jq -c '.preview') || {
+  IMAGE_PAYLOAD_FILE=$(reply_tmp_file) || {
+    echo "fm-x-reply: cannot create image payload temp file" >&2; exit 1; }
+  IMAGE_PREVIEW=$(fmx_image_payload_file "$IMAGE_PATH" fm-x-reply "$IMAGE_PAYLOAD_FILE") || exit 1
+  printf '%s' "$IMAGE_PREVIEW" | jq -e . >/dev/null 2>&1 || {
     echo "fm-x-reply: failed to build image preview" >&2; exit 1; }
 fi
 
@@ -187,8 +203,15 @@ case "$N" in ''|*[!0-9]*) echo "fm-x-reply: failed to split reply into a thread"
 # JSON-escaped. A single tweet sends {request_id, text}; a thread also sends
 # {texts: [...]} for the relay to post as chained replies. When image is present
 # on a thread, the relay attaches it to the first chunk only.
-PAYLOAD=$(fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" "$IMAGE_PAYLOAD") || {
-  echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
+PAYLOAD_FILE=$(reply_tmp_file) || {
+  echo "fm-x-reply: cannot create request payload temp file" >&2; exit 1; }
+if [ -n "$IMAGE_PAYLOAD_FILE" ]; then
+  fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" "$IMAGE_PAYLOAD_FILE" > "$PAYLOAD_FILE" || {
+    echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
+else
+  fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" > "$PAYLOAD_FILE" || {
+    echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
+fi
 
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then
@@ -201,7 +224,7 @@ if [ -n "$FMX_DRY" ]; then
   # The recorded body is the would-be POST body, except image bytes are replaced
   # by a compact marker. A follow-up preview additionally carries an
   # "endpoint":"followup" marker so an outbox record is self-describing.
-  OUTREC=$(fmx_reply_outbox_json "$PAYLOAD" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
+  OUTREC=$(fmx_reply_outbox_json "$REQ" "$CHUNKS" "$N" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
     echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
   printf '%s\n' "$OUTREC" > "$outbox_file" 2>/dev/null || {
     echo "fm-x-reply: cannot write dry-run outbox: $outbox_file" >&2
@@ -223,7 +246,7 @@ if [ -z "$FMX_TOKEN" ]; then
   echo "fm-x-reply: X mode not configured (no FMX_PAIRING_TOKEN)" >&2
   exit 1
 fi
-code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD")
+code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE")
 post_rc=$?
 case "$post_rc" in
   0) : ;;

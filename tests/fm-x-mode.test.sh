@@ -37,6 +37,14 @@ while [ $# -gt 0 ]; do
     -o) ofile=$2; shift 2 ;;
     -X) method=$2; shift 2 ;;
     --data) data=$2; shift 2 ;;
+    --data-binary)
+      case "$2" in
+        @-) data=$(cat) ;;
+        @*) data=$(cat -- "${2#@}") ;;
+        *) data=$2 ;;
+      esac
+      shift 2
+      ;;
     -H)
       case "$2" in
         @*) while IFS= read -r header; do case "$header" in Authorization:*) auth=$header ;; esac; done < "${2#@}" ;;
@@ -322,6 +330,42 @@ test_reply_non_2xx_fails() {
   [ "$rc" -ne 0 ] || fail "reply must exit non-zero on a non-2xx response"
   assert_grep "HTTP 500" "$err" "reply must report the failing status"
   pass "fm-x-reply exits non-zero on a non-2xx relay response"
+}
+
+test_reply_auth_header_tempfile_cleans_up_on_interrupted_post() {
+  local home fakebin log out rc auth_file
+  home="$TMP_ROOT/reply-auth-interrupt"; mkdir -p "$home"
+  fakebin=$(fm_fakebin "$home")
+  log="$home/auth-file.txt"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+auth_file=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H)
+      case "$2" in @*) auth_file=${2#@} ;; esac
+      shift 2
+      ;;
+    -o|-w|-X|-m|--data|--data-binary) shift 2 ;;
+    -s) shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$auth_file" > "$FAKE_AUTH_FILE_LOG"
+kill -TERM "$PPID"
+exit 143
+SH
+  chmod +x "$fakebin/curl"
+  printf 'FMX_PAIRING_TOKEN=tok-clean\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_AUTH_FILE_LOG="$log" \
+    "$ROOT/bin/fm-x-reply.sh" "req-clean" "Hello." 2>"$home/err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted relay post must fail"
+  [ -z "$out" ] || fail "interrupted relay post must not echo the request_id (got: $out)"
+  auth_file=$(cat "$log")
+  [ -n "$auth_file" ] || fail "fake curl must record the auth header temp file"
+  [ ! -e "$auth_file" ] || fail "auth header temp file must be removed after an interrupted post"
+  pass "fm-x-reply cleans up auth header temp files on interrupted posts"
 }
 
 test_reply_usage_error() {
@@ -739,6 +783,33 @@ test_reply_image_live_posts_image_object() {
   [ "$(printf '%s' "$data" | jq -r '.text')" = "Here is the illustration." ] \
     || fail "image reply must preserve text"
   pass "fm-x-reply --image posts an image object on answer"
+}
+
+test_reply_image_live_streams_payload_file() {
+  local home fakebin log out rc data img i
+  home="$TMP_ROOT/reply-image-stream"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/large.png"
+  make_sample_image "$img"
+  i=0
+  while [ "$i" -lt 4096 ]; do
+    printf '0123456789abcdef0123456789abcdef' >> "$img"
+    i=$((i + 1))
+  done
+  printf 'FMX_PAIRING_TOKEN=tok-img-stream\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-stream" --image "$img" "Here is the illustration."); rc=$?
+  expect_code 0 "$rc" "streamed image reply exit"
+  [ "$out" = "req-img-stream" ] || fail "streamed image reply must echo only the request_id (got: $out)"
+  assert_grep "--data-binary @" "$log" "image reply must stream the POST body from a file"
+  grep '^argv=' "$log" | tail -1 | grep -F 'data_base64' >/dev/null 2>&1 \
+    && fail "image reply must not place image JSON in curl argv"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  printf '%s' "$data" | jq -e '.image.media_type == "image/png" and (.image.data_base64 | length > 100000)' >/dev/null \
+    || fail "streamed image reply must still send the base64 image body"
+  pass "fm-x-reply streams large image payloads outside curl argv"
 }
 
 test_reply_image_thread_dry_run_records_compact_marker() {
@@ -1293,6 +1364,7 @@ test_poll_rejects_unsafe_request_id
 test_reply_success_posts_request_bound_only
 test_reply_text_file_and_stdin
 test_reply_non_2xx_fails
+test_reply_auth_header_tempfile_cleans_up_on_interrupted_post
 test_reply_usage_error
 test_reply_help_mentions_image
 test_reply_whitespace_text_rejected
@@ -1307,6 +1379,7 @@ test_reply_thread_dry_run
 test_reply_max_chars_floor_clamps_to_minimum
 test_reply_thread_live_posts_texts
 test_reply_image_live_posts_image_object
+test_reply_image_live_streams_payload_file
 test_reply_image_thread_dry_run_records_compact_marker
 test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
