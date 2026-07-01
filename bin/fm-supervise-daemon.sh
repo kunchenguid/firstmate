@@ -517,18 +517,20 @@ housekeeping() {  # <state>
     key="${marker##*.subsuper-stale-}"
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    # Reconstruct the window name from the key (best-effort: session is unknown,
-    # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
+    # Resolve a live tmux target for this task (pane-aware via meta, then a
+    # legacy window-name probe). A pane-layout task has no window NAMED fm-<id>,
+    # so meta resolution is what keeps its wedge escalating instead of silently
+    # dropping.
+    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker, nothing to escalate.
+      # Task gone (torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
     if pane_is_busy "$win"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
-      escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-      stale_marker_remove "$win" "$state"
+      escalate_add "$state" "stale persisted ${age}s (possible wedge): fm-$key"
+      rm -f "$marker"   # format-independent: we hold the exact marker path
     fi
   done
 
@@ -549,9 +551,25 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
+# Resolve a live tmux target for a stale marker key. The key is _stale_key(task).
+# Pane-aware: first match the key against each state/<id>.meta and, when the
+# recorded tmux target (pane= when present, else window=) is still live, return it
+# so a pane-layout task (a pane titled fm-<id> inside firstmate's window, never a
+# window NAMED fm-<id>) resolves to its pane id. Fall back to the legacy scan of
+# live fm-* window NAMES for targets without meta.
+window_for_task() {  # <task-key> [state]
+  local key=$1 state=${2:-} w t meta id mt
+  if [ -n "$state" ]; then
+    for meta in "$state"/*.meta; do
+      [ -e "$meta" ] || continue
+      id=${meta##*/}; id=${id%.meta}
+      [ "$(_stale_key "$id")" = "$key" ] || continue
+      mt=$(fm_meta_tmux_target "$meta" 2>/dev/null || true)
+      [ -n "$mt" ] || continue
+      tmux display-message -p -t "$mt" '#{pane_id}' >/dev/null 2>&1 || continue
+      printf '%s' "$mt"; return 0
+    done
+  fi
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }

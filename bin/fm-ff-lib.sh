@@ -21,6 +21,12 @@
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
+# fm_meta_tmux_target (the pane-aware tmux target recorded in a task meta) lives
+# in fm-tmux-lib.sh; source it so the secondmate nudge target follows pane=
+# layout the same way the supervision tools do.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-tmux-lib.sh"
+
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
@@ -241,9 +247,17 @@ secondmate_registry_field() {
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
 # The meta file is the liveness signal; data/secondmates.md is only the fallback
 # for durable fields such as home= when an older/incomplete meta lacks them.
-# Output is pipe-delimited: id|home|window|meta-file.
+# Output is pipe-delimited: id|home|nudge-target|meta-file.
+#
+# The nudge-target is the tmux target firstmate fm-sends the re-read nudge to. It
+# is resolved through fm_meta_tmux_target (pane= when present, else window=) so
+# pane-layout secondmates are steered on their own pane, not the shared containing
+# window. A window-layout target ("session:fm-<id>") is already resolvable and is
+# emitted as-is (legacy behavior); a pane-layout bare pane id is not resolvable by
+# fm-send/fm-peek, so the bare "fm-<id>" form is emitted instead (fm-send maps it
+# back through this home's meta to the pane).
 live_secondmate_meta_records() {
-  local state=$1 registry=${2:-} meta id home window
+  local state=$1 registry=${2:-} meta id home target
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
@@ -253,8 +267,12 @@ live_secondmate_meta_records() {
     if [ -z "$home" ] && [ -n "$registry" ]; then
       home=$(secondmate_registry_field "$registry" "$id" home || true)
     fi
-    window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    printf '%s|%s|%s|%s\n' "$id" "$home" "$window" "$meta"
+    target=$(fm_meta_tmux_target "$meta" 2>/dev/null || true)
+    case "$target" in
+      ''|*:*) ;;             # empty (no live target) or window layout: use as-is
+      *) target="fm-$id" ;;  # pane layout bare pane id -> resolvable fm-<id>
+    esac
+    printf '%s|%s|%s|%s\n' "$id" "$home" "$target" "$meta"
   done
 }
 

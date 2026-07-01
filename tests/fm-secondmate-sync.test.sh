@@ -263,6 +263,37 @@ test_sweep_nudge_requires_instruction_change() {
   pass "T7 sweep nudges on a real instruction change only, but still fast-forwards"
 }
 
+# --- T7b: the nudge target follows pane= layout, window= stays legacy ---------
+test_nudge_target_is_pane_aware() {
+  local w state rec_pane rec_win
+  w=$(new_world nudge-pane-aware)
+  state="$w/home/state"
+  # Pane-layout secondmate: window= is the shared containing window, pane= is the
+  # supervised pane. The nudge must resolve to the pane, and a bare pane id is not
+  # fm-send-resolvable, so the record must carry the "fm-<id>" form instead.
+  {
+    printf 'window=firstmate:main\n'
+    printf 'pane=%%42\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm-pane\n' "$w"
+  } > "$state/sm-pane.meta"
+  # Window-layout secondmate: already-resolvable target emitted as-is (legacy).
+  {
+    printf 'window=firstmate:fm-sm-win\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm-win\n' "$w"
+  } > "$state/sm-win.meta"
+
+  rec_pane=$(live_secondmate_meta_records "$state" | grep '^sm-pane|')
+  rec_win=$(live_secondmate_meta_records "$state" | grep '^sm-win|')
+
+  [ "$(printf '%s' "$rec_pane" | cut -d'|' -f3)" = "fm-sm-pane" ] \
+    || fail "pane-layout nudge target must be the resolvable fm-<id>, got: '$rec_pane'"
+  [ "$(printf '%s' "$rec_win" | cut -d'|' -f3)" = "firstmate:fm-sm-win" ] \
+    || fail "window-layout nudge target must stay the legacy window name, got: '$rec_win'"
+  pass "T7b nudge target resolves through pane= when present, keeps legacy window= otherwise"
+}
+
 # --- T8: bootstrap sweeps live homes, nudges only the real instruction change -
 make_fake_toolchain() {
   local dir=$1 fakebin
@@ -430,6 +461,7 @@ test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
+test_nudge_target_is_pane_aware
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch

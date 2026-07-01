@@ -114,6 +114,34 @@ test_housekeeping_persistent_stale_escalates() {
   pass "persistent stale escalates after threshold and clears its marker"
 }
 
+test_housekeeping_pane_layout_stale_escalates() {
+  local dir state fakebin pane key
+  dir=$(make_supercase stale-pane-layout)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"
+  # Pane-layout task: no window NAMED fm-<id> exists (the pane lives inside the
+  # containing window "firstmate:main"); the live supervision target is pane=%42,
+  # recorded only in the meta. The legacy window-name scan alone would find
+  # nothing and drop the wedge without escalating.
+  cat > "$state/pane-w7.meta" <<EOF
+window=firstmate:main
+pane=%42
+kind=ship
+EOF
+  printf 'working\n' > "$state/pane-w7.status"
+  printf 'idle prompt \$\n' > "$pane"
+  key=$(printf '%s' "pane-w7" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="firstmate:main" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "pane-layout wedge was not escalated (dropped instead of escalating)"
+  grep -F "fm-pane-w7" "$state/.subsuper-escalations" >/dev/null \
+    || fail "pane-layout wedge escalation did not name a resolvable target"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "pane-layout stale marker not cleared after escalation"
+  pass "pane-layout wedge escalates via the meta pane target, not just window-name scan"
+}
+
 test_housekeeping_resumed_stale_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-resumed)
@@ -690,6 +718,7 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_pane_layout_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
