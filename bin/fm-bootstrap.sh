@@ -11,6 +11,8 @@
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
+#                 "SKILL_LINK: <detail>" (only when the global fm-crewmate skill
+#                   symlink could not be created; success is silent),
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
 #          worktree was fast-forwarded to firstmate's own current default-branch
@@ -207,6 +209,33 @@ write_if_changed() {
   local dest=$1 content=$2
   [ -f "$dest" ] && [ "$(cat "$dest" 2>/dev/null)" = "$content" ] && return 0
   printf '%s\n' "$content" > "$dest"
+}
+
+# Ensure the firstmate-owned fm-crewmate skill is globally auto-loaded so every
+# crew in EVERY repo (not just firstmate) discovers it: symlink the harness global
+# skills dir entry at the firstmate-owned canonical skill under FM_ROOT. The skill
+# travels with firstmate through git + /updatefirstmate, so this points at the
+# primary checkout's copy, never at a crewmate's disposable worktree.
+# Idempotent and best-effort: a failure here must never abort bootstrap, and an
+# existing real (non-symlink) dir/file at the target is never clobbered.
+# Scoped to claude's global skills dir (~/.claude/skills). Other harnesses that
+# support user-global skills would need their own link added here the same way.
+ensure_global_crew_skill() {
+  local src="$FM_ROOT/.agents/skills/fm-crewmate"
+  local dir="$HOME/.claude/skills"
+  local link="$dir/fm-crewmate"
+  [ -d "$src" ] || return 0
+  mkdir -p "$dir" 2>/dev/null || { echo "SKILL_LINK: could not create $dir - skipped"; return 0; }
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link" 2>/dev/null)" = "$src" ] && return 0
+    ln -sfn "$src" "$link" 2>/dev/null || echo "SKILL_LINK: could not repoint $link -> $src - skipped"
+    return 0
+  fi
+  if [ -e "$link" ]; then
+    echo "SKILL_LINK: $link exists and is not a symlink - left untouched (remove it manually to enable the global fm-crewmate skill)"
+    return 0
+  fi
+  ln -s "$src" "$link" 2>/dev/null || echo "SKILL_LINK: could not create $link -> $src - skipped"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
@@ -409,6 +438,7 @@ if ! fm_backlog_backend_manual "$CONFIG"; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
 fi
+ensure_global_crew_skill
 secondmate_sync
 x_mode_setup
 fleet_sync
