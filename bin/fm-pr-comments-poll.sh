@@ -50,6 +50,7 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p "$SEEN_DIR" "$ERR_DIR" "$LOCK_DIR" "$ENABLED_DIR" "$DISABLED_DIR"
+find "$STORE" -maxdepth 1 -type f \( -name '*.events.*' -o -name '*.events.*.err' \) -exec rm -f {} + 2>/dev/null || true
 
 need_tool() {
   command -v "$1" >/dev/null 2>&1
@@ -279,7 +280,7 @@ merge_seen() {
 }
 
 process_task() {
-  local id=$1 meta pr window parsed owner repo num lock seen events rc=0 event key author body state msg
+  local id=$1 meta pr window parsed owner repo num lock seen events poll_rc rc=0 event key author body state msg
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || return 0
   pr=$(meta_value pr "$meta")
@@ -294,10 +295,10 @@ process_task() {
     return 0
   fi
   seen="$SEEN_DIR/$id.seen"
-  events="$STORE/$id.events.$$"
-  if ! json_lines_for_pr "$owner" "$repo" "$num" > "$events" 2>"$events.err"; then
+  events=$(json_lines_for_pr "$owner" "$repo" "$num" 2>/dev/null)
+  poll_rc=$?
+  if [ "$poll_rc" -ne 0 ]; then
     emit_error_once "$id-gh" "pr-comment-watch-error $id: GitHub comment poll failed"
-    rm -f "$events" "$events.err"
     cleanup_current_lock
     return 0
   fi
@@ -333,8 +334,9 @@ process_task() {
       emit_error_once "$id-send" "pr-comment-watch-error $id: failed to inject PR feedback"
       break
     fi
-  done < "$events"
-  rm -f "$events" "$events.err"
+  done <<EOF_EVENTS
+$events
+EOF_EVENTS
   cleanup_current_lock
   return "$rc"
 }

@@ -48,9 +48,14 @@ is_pr_linked() {
 }
 
 write_check() {
+  local root_q home_q state_q poll_q
+  root_q=$(printf '%q' "$FM_ROOT")
+  home_q=$(printf '%q' "$FM_HOME")
+  state_q=$(printf '%q' "$STATE")
+  poll_q=$(printf '%q' "$FM_ROOT/bin/fm-pr-comments-poll.sh")
   cat > "$CHECK" <<EOF
 #!/usr/bin/env bash
-FM_ROOT_OVERRIDE="\${FM_ROOT_OVERRIDE:-$FM_ROOT}" FM_HOME="\${FM_HOME:-$FM_HOME}" FM_STATE_OVERRIDE="\${FM_STATE_OVERRIDE:-$STATE}" "$FM_ROOT/bin/fm-pr-comments-poll.sh" --enabled
+FM_ROOT_OVERRIDE=\${FM_ROOT_OVERRIDE:-$root_q} FM_HOME=\${FM_HOME:-$home_q} FM_STATE_OVERRIDE=\${FM_STATE_OVERRIDE:-$state_q} exec $poll_q --enabled
 EOF
   chmod +x "$CHECK"
 }

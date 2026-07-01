@@ -270,6 +270,55 @@ test_disable_cleans_check_shim() {
   pass "PR comment watching disables cleanly"
 }
 
+test_poll_does_not_persist_comment_bodies_in_state() {
+  local home fakebin send_log leftovers rc
+  home="$TMP_ROOT/no-body-state"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  send_log="$home/send.log"
+  mkdir -p "$home/state/.pr-comments/enabled" "$home/state/.pr-comments"
+  : > "$home/state/.pr-comments/enabled/maps"
+  printf 'private stale body\n' > "$home/state/.pr-comments/maps.events.123"
+  printf 'private stale stderr\n' > "$home/state/.pr-comments/maps.events.123.err"
+  printf '%s\n' '{"type":"issue_comment","id":"600","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-600","path":"","line":"","state":"","body":"private feedback must not persist"}' > "$home/issue.jsonl"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "no-body-state poll exit"
+  assert_grep "private feedback must not persist" "$send_log" "poll must still deliver comment bodies"
+  leftovers=$(find "$home/state/.pr-comments" -maxdepth 1 -type f -name '*.events.*' -print 2>/dev/null)
+  [ -z "$leftovers" ] || fail "poll must not leave comment body temp files in state (got: $leftovers)"
+  pass "PR comment polling keeps bodies out of state"
+}
+
+test_check_shim_quotes_generated_paths() {
+  local home fakebin send_log out rc
+  home="$TMP_ROOT/shim path \"quote\" dollar\$sign"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  send_log="$home/send.log"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments.sh" enable maps >/dev/null 2>/dev/null
+  assert_present "$home/state/pr-comments.check.sh" "task enable must create check shim for unusual homes"
+  printf '%s\n' '{"type":"issue_comment","id":"700","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-700","path":"","line":"","state":"","body":"quoted shim path delivery"}' > "$home/issue.jsonl"
+
+  out=$(unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE; PATH="$fakebin:$BASE_PATH" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$home/state/pr-comments.check.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "quoted path check shim exit"
+  [ -z "$out" ] || fail "quoted path check shim should be silent on success (got: $out)"
+  assert_grep "quoted shim path delivery" "$send_log" "generated check shim must preserve unusual FM_HOME paths"
+  pass "PR comment check shim quotes generated paths"
+}
+
 test_enable_primes_and_dedupes_new_issue_comment
 test_review_comment_context_and_bot_ignore
 test_multiline_feedback_is_single_line_and_clears_send_error
@@ -277,3 +326,5 @@ test_stale_task_lock_is_recovered
 test_prime_surfaces_github_poll_errors
 test_disable_task_excludes_under_all_scope
 test_disable_cleans_check_shim
+test_poll_does_not_persist_comment_bodies_in_state
+test_check_shim_quotes_generated_paths
