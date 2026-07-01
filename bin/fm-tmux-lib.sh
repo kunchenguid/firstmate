@@ -61,7 +61,9 @@ fm_task_for_tmux_target() {  # <target> <state-dir>
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     mt=$(fm_meta_tmux_target "$meta" 2>/dev/null || true)
-    [ -n "$mt" ] && [ "$mt" = "$target" ] || continue
+    if [ -z "$mt" ] || [ "$mt" != "$target" ]; then
+      continue
+    fi
     id=${meta##*/}; id=${id%.meta}
     printf '%s' "$id"
     return 0
