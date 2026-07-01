@@ -259,6 +259,7 @@ launch_template() {
   esac
 }
 
+WRAP_LAUNCH_IN_BASH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -288,10 +289,12 @@ case "$ARG3" in
       harness_src='config/crew-harness'
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    WRAP_LAUNCH_IN_BASH=1
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    WRAP_LAUNCH_IN_BASH=1
     ;;
 esac
 
@@ -818,15 +821,18 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Run the launch command through an explicit `bash -c` rather than trusting the
-# pane's own interactive shell to parse it: the operator's default shell is
-# whatever their tmux pane starts (fish, zsh, bash...), and every template above
-# relies on bash's "$(cat __BRIEF__)" command substitution, which non-bash shells
-# such as fish can reject outright. shell_quote()'ing the fully assembled command
-# into a single `bash -c '...'` argument makes the pane shell's own syntax a
-# non-issue - it only has to parse three plain words (bash, -c, a quoted string) -
-# while bash itself interprets everything inside, exactly as before.
-LAUNCH="bash -c $(shell_quote "$LAUNCH")"
+if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
+  # Run templated launches through an explicit `bash -c` rather than trusting the
+  # pane's own interactive shell to parse them: the operator's default shell is
+  # whatever their tmux pane starts (fish, zsh, bash...), and every template above
+  # relies on bash's "$(cat __BRIEF__)" command substitution, which non-bash
+  # shells such as fish can reject outright. shell_quote()'ing the fully
+  # assembled command into a single `bash -c '...'` argument makes the pane
+  # shell's own syntax a non-issue - it only has to parse three plain words
+  # (bash, -c, a quoted string) - while bash itself interprets everything inside,
+  # exactly as before.
+  LAUNCH="bash -c $(shell_quote "$LAUNCH")"
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

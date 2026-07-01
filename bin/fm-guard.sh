@@ -48,10 +48,10 @@ if [ -n "$tangle_branch" ]; then
 fi
 
 # Portable mtime; see fm-watch.sh for why the `stat -f || stat -c` fallback breaks on Linux.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
+if stat -c %Y "$SCRIPT_DIR" >/dev/null 2>&1; then
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
+else
+  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
 fi
 
 # Only act with tasks in flight; count them so the banner can say how much is

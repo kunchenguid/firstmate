@@ -72,6 +72,16 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+shell_quote_for_expected() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+bash_wrapped_expected() {
+  printf 'bash -c %s' "$(shell_quote_for_expected "$1")"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -118,9 +128,9 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected=$(bash_wrapped_expected "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\"")
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  pass "no --model/--effort records defaults and wraps the claude template in bash"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -169,8 +179,10 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" "codex --model" "explicit harness launch did not thread model flag"
+  assert_contains "$launch" "gpt-5" "explicit harness launch did not thread model value"
+  assert_contains "$launch" "model_reasoning_effort=\"high\"" "explicit harness launch did not thread effort"
+  assert_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" "explicit harness launch did not use codex autonomy flag"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -219,8 +231,10 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
-    "claude launch did not thread model and effort flags"
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model" "claude launch did not thread model flag"
+  assert_contains "$launch" "sonnet" "claude launch did not thread model value"
+  assert_contains "$launch" "--effort" "claude launch did not thread effort flag"
+  assert_contains "$launch" "high" "claude launch did not thread effort value"
   pass "claude receives --model and --effort profile flags"
 }
 
@@ -235,8 +249,10 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
+  assert_contains "$launch" "codex --model" "codex launch did not thread model flag"
+  assert_contains "$launch" "gpt-5" "codex launch did not thread model value"
+  assert_contains "$launch" "model_reasoning_effort=\"high\"" "codex launch did not thread reasoning effort config"
+  assert_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" "codex launch did not use autonomy flag"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -251,8 +267,9 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "codex --model" "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "gpt-5" "codex launch did not preserve the model value when max effort was omitted"
+  assert_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" "codex launch did not preserve autonomy flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -268,8 +285,10 @@ test_grok_threads_model_and_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
-    "grok launch did not thread model and reasoning-effort flags"
+  assert_contains "$launch" "grok --always-approve --model" "grok launch did not thread model flag"
+  assert_contains "$launch" "grok-4" "grok launch did not thread model value"
+  assert_contains "$launch" "--reasoning-effort" "grok launch did not thread reasoning-effort flag"
+  assert_contains "$launch" "high" "grok launch did not thread reasoning-effort value"
   assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
   pass "grok receives --model and --reasoning-effort profile flags"
 }
@@ -285,8 +304,9 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
-    "grok launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model" "grok launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "grok-4" "grok launch did not preserve the model value when max effort was omitted"
+  assert_contains "$launch" '"$(cat ' "grok launch did not preserve the brief substitution when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -303,8 +323,9 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not thread model"
+  assert_contains "$launch" "opencode --model" "opencode launch did not thread model flag"
+  assert_contains "$launch" "anthropic/claude-sonnet-4-5" "opencode launch did not thread model value"
+  assert_contains "$launch" "--prompt" "opencode launch did not preserve prompt flag"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
@@ -322,7 +343,9 @@ test_pi_omits_invalid_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
+  assert_contains "$launch" "pi --model" "pi launch did not thread model flag"
+  assert_contains "$launch" "sonnet" "pi launch did not thread model value"
+  assert_contains "$launch" " -e " "pi launch did not preserve extension flag"
   assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
   pass "pi threads model and omits unsupported max effort"
 }

@@ -84,13 +84,13 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 # "Blocks: ...") to stdout before failing, so the fallback's correct output gets
 # appended to that garbage. Arithmetic under `set -u` then aborts on the stray
 # token (e.g. the word "File" read as an unset variable), which silently kills the
-# watcher mid-cycle. Detect the platform once and pick the right form.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
-else
+# watcher mid-cycle. Detect the stat implementation once and pick the right form.
+if stat -c %Y "$SCRIPT_DIR" >/dev/null 2>&1; then
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
+else
+  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
 fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
