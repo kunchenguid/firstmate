@@ -36,6 +36,15 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
+# (capture, list-live via recorded_windows/window_kind, busy-state via the
+# BUSY_REGEX below) synthesizes the signal/stale/check/heartbeat wake
+# vocabulary for any backend with no native event push - today, that means
+# every task, since tmux (P1's only backend) has none. A future native-event
+# backend (e.g. herdr) would override this seam with a real push subscription
+# instead of polling; see bin/fm-backend.sh and data/fm-backend-design-d7.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -155,6 +164,23 @@ window_kind() {
     return 0
   done
   echo unknown
+}
+
+# window_backend: the backend recorded in the meta whose window= matches <w>,
+# defaulting to tmux (absent backend= means tmux; the P1 compatibility
+# contract) when no matching meta carries the field, or none matches at all.
+window_backend() {
+  local w=$1 meta mw backend
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    [ "$mw" = "$w" ] || continue
+    backend=$(grep '^backend=' "$meta" | cut -d= -f2- || true)
+    [ -n "$backend" ] || backend=tmux
+    echo "$backend"
+    return 0
+  done
+  echo tmux
 }
 
 recorded_windows() {
@@ -379,7 +405,7 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

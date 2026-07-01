@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# fm-backend.sh - runtime-backend selection, meta helpers, selector resolution,
+# and dispatch for firstmate's session-provider abstraction.
+#
+# Design: data/fm-backend-design-d7/report.md ("Backend Interface") and
+# data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
+# abstraction"). This is P1: it extracts the tmux command sequences that
+# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already
+# ran inline into bin/backends/tmux.sh, with those SAME command sequences, so
+# the default (tmux) path is byte-identical. No other backend exists yet.
+#
+# Compatibility contract: a task's meta may omit `backend=`; every reader here
+# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
+# `backend=tmux` for a default-backend task, so existing and newly spawned
+# default-path metas stay byte-identical. Only a task spawned on a future
+# non-tmux backend would ever carry an explicit `backend=` line.
+#
+# Event-source framing (herdr-addendum "Events as the core abstraction"): a
+# backend's supervision surface is conceptually an EVENT SOURCE - it produces
+# task events (status-changed, went-stale, exited) that map onto firstmate's
+# existing signal/stale/check/heartbeat wake vocabulary. The tmux adapter has
+# no native event push, so fm-watch.sh's poll loop over the pull primitives
+# below (capture, list-live, busy-state via regex) IS the default event-source
+# implementation that synthesizes those events; P1 only names that seam, it
+# does not change the loop's behavior. The pull primitives also stay available
+# on their own for on-demand reads (fm-peek.sh, fm-crew-state.sh).
+
+FM_BACKEND_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+
+# Verified backend adapters. Extend only after a backend gets its own
+# bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
+# section 4's harness-verification discipline.
+FM_BACKEND_KNOWN="tmux"
+
+# fm_backend_is_known: 0 iff <name> has a verified adapter.
+fm_backend_is_known() {  # <name>
+  local name=$1 known
+  for known in $FM_BACKEND_KNOWN; do
+    [ "$name" = "$known" ] && return 0
+  done
+  return 1
+}
+
+# fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
+# explicit per-task override. Precedence: FM_BACKEND env, then config/backend
+# (a single word on its first non-empty line, mirroring config/crew-harness),
+# then default tmux. A per-task `--backend` flag is parsed by the caller
+# (fm-spawn.sh) and takes precedence over this resolution entirely; it is not
+# read here.
+fm_backend_name() {
+  local line v
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s' "$FM_BACKEND"
+    return 0
+  fi
+  if [ -f "$FM_BACKEND_CONFIG_DIR/backend" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      v=$(printf '%s' "$line" | tr -d '[:space:]')
+      if [ -n "$v" ]; then
+        printf '%s' "$v"
+        return 0
+      fi
+    done < "$FM_BACKEND_CONFIG_DIR/backend"
+  fi
+  printf 'tmux'
+}
+
+# fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
+fm_backend_validate() {  # <name>
+  local name=$1
+  if ! fm_backend_is_known "$name"; then
+    echo "error: unknown backend '$name' (known: $FM_BACKEND_KNOWN)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# fm_meta_get: the LAST value of `key=` in <meta-file>, or empty (never
+# errors) if the file or key is absent. Mirrors the ad hoc `grep '^key=' |
+# tail -1 | cut -d= -f2-` snippet every fm-*.sh script used to repeat inline.
+fm_meta_get() {  # <meta-file> <key>
+  local meta=$1 key=$2
+  [ -f "$meta" ] || return 0
+  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
+# `tmux` when the field is absent - the P1 compatibility contract.
+fm_backend_of_meta() {  # <meta-file>
+  local v
+  v=$(fm_meta_get "$1" backend)
+  printf '%s' "${v:-tmux}"
+}
+
+# fm_backend_source: source the named backend's adapter file, once per shell.
+fm_backend_source() {  # <name>
+  local name=$1
+  fm_backend_validate "$name" || return 1
+  case "$name" in
+    tmux)
+      if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/tmux.sh
+        . "$FM_BACKEND_LIB_DIR/backends/tmux.sh"
+        _FM_BACKEND_TMUX_SOURCED=1
+      fi
+      ;;
+  esac
+}
+
+# fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
+# selector to a live session-provider target. Three forms, in order:
+#   "session:window"  used as-is (the escape hatch for a window outside this
+#                      firstmate home) - backend-independent, a literal string.
+#   "fm-<id>"          routed through <state-dir>/<id>.meta's `window=` field -
+#                      backend-independent, a stored value, NOT re-verified
+#                      against a live backend inventory (matches today's
+#                      behavior: tmux window names can be trusted from meta
+#                      without a live re-check).
+#   anything else      an ad hoc bare window name with no meta, resolved by
+#                      searching the DEFAULT backend's live inventory (tmux in
+#                      P1) - the one form that is genuinely backend-specific,
+#                      because it has to enumerate live sessions.
+fm_backend_resolve_selector() {  # <raw-target> <state-dir>
+  local raw=$1 state=$2 meta window
+  case "$raw" in
+    *:*)
+      printf '%s' "$raw"
+      return 0
+      ;;
+    fm-*)
+      meta="$state/${raw#fm-}.meta"
+      if [ ! -f "$meta" ]; then
+        echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
+        return 1
+      fi
+      window=$(fm_meta_get "$meta" window)
+      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
+      printf '%s' "$window"
+      return 0
+      ;;
+    *)
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_resolve_bare_selector "$raw"
+      ;;
+  esac
+}
+
+# --- generic per-op dispatch -------------------------------------------------
+#
+# Thin case-dispatch wrappers so a caller names an operation and a backend
+# rather than hand-writing `case "$backend" in tmux) fm_backend_tmux_x ;; esac`
+# at every call site. P1 has exactly one backend, so every case has one arm;
+# a future backend adds its own arm here, never changes a call site.
+
+# fm_backend_capture: bounded plain-text session capture.
+fm_backend_capture() {  # <backend> <target> <lines>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_capture "$@" ;;
+    *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_send_key: one named special key (Enter, Escape, C-c, ...).
+fm_backend_send_key() {  # <backend> <target> <key>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_send_key "$@" ;;
+    *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_send_text_submit: type text once, then submit and verify,
+# retrying only the submission (never retyping). Echoes the verdict
+# (empty|pending|unknown|send-failed for the tmux adapter).
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_send_text_submit "$@" ;;
+    *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_kill: remove the task's session endpoint (best-effort; a
+# nonexistent/already-gone target is not an error - callers already swallow
+# failures here exactly as the inline `tmux kill-window ... || true` did).
+fm_backend_kill() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_kill "$@" ;;
+    *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}

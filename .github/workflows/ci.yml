@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh tests/*.sh
+      - run: shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
 
   tests:
     name: Behavior tests

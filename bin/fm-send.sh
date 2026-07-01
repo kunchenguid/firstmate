@@ -34,33 +34,15 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
-resolve() {
-  case "$1" in
-    *:*) echo "$1" ;;
-    fm-*)
-      meta="$STATE/${1#fm-}.meta"
-      if [ ! -f "$meta" ]; then
-        echo "error: no metadata for $1 in $STATE; pass session:window to target a window outside this firstmate home" >&2
-        exit 1
-      fi
-      window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
-      echo "$window"
-      ;;
-    *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \
-         || { echo "error: no window named $1" >&2; exit 1; } ;;
-  esac
-}
-
 RAW_TARGET=$1
-T=$(resolve "$1")
+T=$(fm_backend_resolve_selector "$1" "$STATE")
 shift
 
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
@@ -82,18 +64,23 @@ esac
 # scope the codex `$<skill>` popup-settle below. A bare fm-<id> target carries
 # meta; an explicit session:window escape-hatch target has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
+# The target's BACKEND is resolved the same way (defaulting to tmux, the P1
+# compatibility contract) so the send-key/send-text dispatch below routes
+# through the same backend the selector itself was resolved against.
 TARGET_HARNESS=""
+TARGET_BACKEND=tmux
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
-      TARGET_HARNESS=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+      TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     fi
     ;;
 esac
 
 if [ "${1:-}" = "--key" ]; then
-  tmux send-keys -t "$T" "$2"
+  fm_backend_send_key "$TARGET_BACKEND" "$T" "$2"
 else
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -114,7 +101,7 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_tmux_submit_core "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
+  verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
   case "$verdict" in
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
