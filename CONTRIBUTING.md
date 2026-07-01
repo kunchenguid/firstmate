@@ -45,7 +45,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
-- In Markdown, put each full sentence on its own line.
+- When writing or substantially editing a long Markdown file, put each full sentence on its own line.
 
 ## Development
 
