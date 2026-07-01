@@ -22,6 +22,7 @@ IGNORE_AUTH_USER=${FM_PR_COMMENTS_IGNORE_AUTH_USER:-1}
 MAX_BODY_CHARS=${FM_PR_COMMENTS_MAX_BODY_CHARS:-12000}
 MAX_MESSAGE_CHARS=${FM_PR_COMMENTS_MAX_MESSAGE_CHARS:-14000}
 LOCK_STALE_SECS=${FM_PR_COMMENTS_LOCK_STALE_SECS:-900}
+MAX_TASKS_PER_POLL=${FM_PR_COMMENTS_MAX_TASKS_PER_POLL:-4}
 CURRENT_LOCK=
 MODE=enabled
 PRIME=0
@@ -207,6 +208,36 @@ selected_tasks() {
   esac
 }
 
+selected_tasks_for_cycle() {
+  local max tasks n start cursor_file emitted idx id next
+  case "$MAX_TASKS_PER_POLL" in ''|*[!0-9]*) max=4 ;; *) max=$MAX_TASKS_PER_POLL ;; esac
+  if [ "$PRIME" = 1 ] || [ "$MODE" = task ] || [ "$MODE" = all ] || [ "$max" -eq 0 ]; then
+    selected_tasks
+    return 0
+  fi
+  tasks=$(selected_tasks)
+  n=$(printf '%s\n' "$tasks" | awk 'NF { c++ } END { print c + 0 }')
+  [ "$n" -gt 0 ] || return 0
+  cursor_file="$STORE/cursor.$MODE"
+  if [ "$n" -le "$max" ]; then
+    printf '0\n' > "$cursor_file" 2>/dev/null || true
+    printf '%s\n' "$tasks" | awk 'NF'
+    return 0
+  fi
+  start=$(cat "$cursor_file" 2>/dev/null || printf 0)
+  case "$start" in ''|*[!0-9]*) start=0 ;; esac
+  start=$((start % n))
+  emitted=0
+  while [ "$emitted" -lt "$max" ]; do
+    idx=$(((start + emitted) % n))
+    id=$(printf '%s\n' "$tasks" | awk -v want="$((idx + 1))" 'NF { c++; if (c == want) { print; exit } }')
+    [ -n "$id" ] && printf '%s\n' "$id"
+    emitted=$((emitted + 1))
+  done
+  next=$(((start + max) % n))
+  printf '%s\n' "$next" > "$cursor_file" 2>/dev/null || true
+}
+
 json_lines_for_pr() {
   local owner=$1 repo=$2 num=$3 endpoint rc=0
   endpoint="/repos/$owner/$repo/issues/$num/comments"
@@ -286,21 +317,26 @@ process_task() {
   pr=$(meta_value pr "$meta")
   window=$(meta_value window "$meta")
   [ -n "$pr" ] && [ -n "$window" ] || return 0
-  parsed=$(parse_pr_url "$pr") || { emit_error_once "$id-parse" "pr-comment-watch-error $id: unsupported PR URL"; return 0; }
+  parsed=$(parse_pr_url "$pr") || { emit_error_once "$id-parse" "pr-comment-watch-error $id: unsupported PR URL"; [ "$PRIME" = 1 ] && return 1 || return 0; }
   owner=$(printf '%s' "$parsed" | cut -f1)
   repo=$(printf '%s' "$parsed" | cut -f2)
   num=$(printf '%s' "$parsed" | cut -f3)
   lock="$LOCK_DIR/$id.lock"
   if ! acquire_task_lock "$lock"; then
+    if [ "$PRIME" = 1 ]; then
+      emit_error_once "$id-lock" "pr-comment-watch-error $id: task poll lock unavailable"
+      return 1
+    fi
     return 0
   fi
+  clear_error "$id-lock"
   seen="$SEEN_DIR/$id.seen"
   events=$(json_lines_for_pr "$owner" "$repo" "$num" 2>/dev/null)
   poll_rc=$?
   if [ "$poll_rc" -ne 0 ]; then
     emit_error_once "$id-gh" "pr-comment-watch-error $id: GitHub comment poll failed"
     cleanup_current_lock
-    return 0
+    [ "$PRIME" = 1 ] && return 1 || return 0
   fi
   clear_error "$id-gh"
   clear_error "$id-parse"
@@ -343,17 +379,22 @@ EOF_EVENTS
 
 if ! need_tool jq; then
   emit_error_once tools "pr-comment-watch-error missing jq"
-  exit 0
+  [ "$PRIME" = 1 ] && exit 1 || exit 0
 fi
 if ! command -v "$GH_CMD" >/dev/null 2>&1; then
   emit_error_once tools "pr-comment-watch-error missing GitHub CLI"
-  exit 0
+  [ "$PRIME" = 1 ] && exit 1 || exit 0
 fi
 if [ -z "$SELF_LOGIN" ] && [ "$IGNORE_AUTH_USER" != 0 ]; then
   SELF_LOGIN=$("$GH_CMD" api user --jq .login 2>/dev/null || true)
 fi
 
-selected_tasks | while IFS= read -r id; do
+poll_rc=0
+tasks=$(selected_tasks_for_cycle)
+while IFS= read -r id; do
   [ -n "$id" ] || continue
-  process_task "$id"
-done
+  process_task "$id" || poll_rc=1
+done <<EOF_SELECTED_TASKS
+$tasks
+EOF_SELECTED_TASKS
+exit "$poll_rc"

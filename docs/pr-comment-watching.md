@@ -12,7 +12,7 @@ bin/fm-pr-comments.sh disable <task-id>
 bin/fm-pr-comments.sh disable all
 ```
 
-Enabling writes `state/pr-comments.check.sh`, which is picked up by the normal firstmate watcher check loop. It also primes currently visible comments as already seen, so only new feedback is delivered after activation. Disabling one task while `all` is enabled records that task as an exclusion; `status` lists excluded tasks.
+Enabling primes currently visible comments as already seen before writing `state/pr-comments.check.sh`, which is picked up by the normal firstmate watcher check loop, so only new feedback is delivered after activation. If priming fails, activation is left unchanged and the error is printed. Disabling one task while `all` is enabled records that task as an exclusion; `status` lists excluded tasks.
 
 ## What is watched
 
@@ -22,7 +22,7 @@ Enabling writes `state/pr-comments.check.sh`, which is picked up by the normal f
 - PR review comments, including file/line context when GitHub provides it;
 - PR review bodies and review state.
 
-Seen event ids are stored under `state/.pr-comments/seen/`. New events are marked seen only after a successful `bin/fm-send.sh fm-<task-id> ...` injection, so retries do not lose undelivered feedback. Bot comments and comments from the authenticated GitHub user are ignored and still marked seen to avoid feedback loops.
+Seen event ids are stored under `state/.pr-comments/seen/`. New events are marked seen only after a successful `bin/fm-send.sh fm-<task-id> ...` injection, so retries do not lose undelivered feedback. Bot comments and comments from the authenticated GitHub user are ignored and still marked seen to avoid feedback loops. Enabled watcher checks process a bounded round-robin batch of tasks per cycle (`FM_PR_COMMENTS_MAX_TASKS_PER_POLL`, default 4) so larger fleets keep making progress without overrunning the check timeout.
 
 The scripts do not merge, push, edit project files, or store comment bodies in state. They keep only ids and small error markers.
 

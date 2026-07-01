@@ -23,6 +23,9 @@ if [ "$1" = api ] && [ "${2:-}" = user ]; then
 fi
 if [ "$1" = api ]; then
   [ "${FAKE_GH_FAIL:-0}" = 0 ] || exit 1
+  if [ -n "${FAKE_GH_ASSERT_NO_CHECK:-}" ] && [ -e "$FAKE_GH_ASSERT_NO_CHECK" ]; then
+    exit 1
+  fi
   endpoint=
   for arg in "$@"; do
     case "$arg" in /repos/*) endpoint=$arg ;; esac
@@ -200,20 +203,23 @@ test_stale_task_lock_is_recovered() {
 }
 
 test_prime_surfaces_github_poll_errors() {
-  local home fakebin out rc
+  local home fakebin out rc err
   home="$TMP_ROOT/prime-errors"; mkdir -p "$home"
   fakebin=$(make_fakebin "$home")
   write_event_files "$home"
   make_home_with_pr_task "$home"
 
+  err="$home/enable.err"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
     FAKE_SEND_LOG="$home/send.log" FAKE_GH_FAIL=1 FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
     FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
-    "$ROOT/bin/fm-pr-comments.sh" enable all 2>/dev/null); rc=$?
-  expect_code 0 "$rc" "enable all with prime error exit"
+    "$ROOT/bin/fm-pr-comments.sh" enable all 2>"$err"); rc=$?
+  expect_code 1 "$rc" "enable all with prime error exit"
   assert_contains "$out" "pr-comment-watch-error maps: GitHub comment poll failed" "enable priming must surface GitHub poll failures"
-  assert_contains "$out" "enabled: PR comment watching for all PR-linked tasks" "enable should still report configured watching"
-  pass "PR comment enabling surfaces priming poll errors"
+  assert_grep "priming failed" "$err" "enable must explain that watching stayed unchanged"
+  assert_absent "$home/state/pr-comments.check.sh" "failed priming must not activate the check shim"
+  assert_absent "$home/state/.pr-comments/enabled/all" "failed priming must not enable all scope"
+  pass "PR comment enabling surfaces priming poll errors without activating"
 }
 
 test_disable_task_excludes_under_all_scope() {
@@ -319,6 +325,74 @@ test_check_shim_quotes_generated_paths() {
   pass "PR comment check shim quotes generated paths"
 }
 
+test_enable_primes_before_creating_check_shim() {
+  local home fakebin send_log out rc
+  home="$TMP_ROOT/prime-before-check"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  send_log="$home/send.log"
+  printf '%s\n' '{"type":"issue_comment","id":"800","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-800","path":"","line":"","state":"","body":"existing feedback before activation"}' > "$home/issue.jsonl"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_GH_ASSERT_NO_CHECK="$home/state/pr-comments.check.sh" \
+    FAKE_ISSUE_COMMENTS="$home/issue.jsonl" FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" \
+    FAKE_REVIEWS="$home/reviews.jsonl" "$ROOT/bin/fm-pr-comments.sh" enable all 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "enable all primes before check creation exit"
+  assert_not_contains "$out" "pr-comment-watch-error" "priming must run before the active check shim exists"
+  assert_present "$home/state/pr-comments.check.sh" "successful enable must create the check shim after priming"
+  assert_grep "issue_comment:800" "$home/state/.pr-comments/seen/maps.seen" "existing feedback must be primed before activation"
+  assert_absent "$send_log" "priming before activation must not inject existing feedback"
+  pass "PR comment enabling primes before activating the check shim"
+}
+
+test_enabled_poll_round_robins_bounded_task_batches() {
+  local home fakebin send_log rc
+  home="$TMP_ROOT/bounded"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  fm_write_meta "$home/state/rails.meta" \
+    "window=fm-rails" \
+    "project=rails" \
+    "kind=ship" \
+    "pr=https://github.com/acme/rails/pull/8"
+  fm_write_meta "$home/state/roads.meta" \
+    "window=fm-roads" \
+    "project=roads" \
+    "kind=ship" \
+    "pr=https://github.com/acme/roads/pull/9"
+  send_log="$home/send.log"
+  mkdir -p "$home/state/.pr-comments/enabled"
+  : > "$home/state/.pr-comments/enabled/all"
+  printf '%s\n' '{"type":"issue_comment","id":"900","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-900","path":"","line":"","state":"","body":"bounded batch delivery"}' > "$home/issue.jsonl"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FM_PR_COMMENTS_MAX_TASKS_PER_POLL=1 FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "first bounded poll exit"
+  assert_grep "TARGET=fm-maps" "$send_log" "first bounded poll must process the first task"
+  assert_no_grep "TARGET=fm-rails" "$send_log" "first bounded poll must stop after the batch limit"
+  assert_no_grep "TARGET=fm-roads" "$send_log" "first bounded poll must stop after the batch limit"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FM_PR_COMMENTS_MAX_TASKS_PER_POLL=1 FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "second bounded poll exit"
+  assert_grep "TARGET=fm-rails" "$send_log" "second bounded poll must advance to the next task"
+  assert_no_grep "TARGET=fm-roads" "$send_log" "second bounded poll must still honor the batch limit"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FM_PR_COMMENTS_MAX_TASKS_PER_POLL=1 FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "third bounded poll exit"
+  assert_grep "TARGET=fm-roads" "$send_log" "third bounded poll must reach later tasks"
+  pass "PR comment polling round-robins bounded enabled batches"
+}
+
 test_enable_primes_and_dedupes_new_issue_comment
 test_review_comment_context_and_bot_ignore
 test_multiline_feedback_is_single_line_and_clears_send_error
@@ -328,3 +402,5 @@ test_disable_task_excludes_under_all_scope
 test_disable_cleans_check_shim
 test_poll_does_not_persist_comment_bodies_in_state
 test_check_shim_quotes_generated_paths
+test_enable_primes_before_creating_check_shim
+test_enabled_poll_round_robins_bounded_task_batches

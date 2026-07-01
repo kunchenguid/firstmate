@@ -60,6 +60,17 @@ EOF
   chmod +x "$CHECK"
 }
 
+run_prime() {
+  local output rc=0
+  output=$("$FM_ROOT/bin/fm-pr-comments-poll.sh" "$@" --prime 2>&1) || rc=$?
+  [ -z "$output" ] || printf '%s\n' "$output"
+  if [ "$rc" -ne 0 ]; then
+    echo "fm-pr-comments: priming failed; leaving PR comment watching unchanged" >&2
+    return "$rc"
+  fi
+  return 0
+}
+
 remove_check_if_empty() {
   if [ ! -e "$ENABLED_DIR/all" ] && ! find "$ENABLED_DIR" -type f ! -name all -print -quit 2>/dev/null | grep . >/dev/null; then
     rm -f "$CHECK"
@@ -84,11 +95,11 @@ case "$cmd" in
   enable)
     case "$scope" in
       all)
+        run_prime --all || exit 1
         touch "$ENABLED_DIR/all"
         rm -rf "$DISABLED_DIR"
         mkdir -p "$DISABLED_DIR"
         write_check
-        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --all --prime || true
         echo "enabled: PR comment watching for all PR-linked tasks"
         ;;
       '') usage >&2; exit 2 ;;
@@ -97,10 +108,10 @@ case "$cmd" in
           echo "fm-pr-comments: task '$scope' is not PR-linked (need state/$scope.meta with pr= and window=)" >&2
           exit 1
         fi
+        run_prime --task "$scope" || exit 1
         touch "$ENABLED_DIR/$scope"
         rm -f "$DISABLED_DIR/$scope"
         write_check
-        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --task "$scope" --prime || true
         echo "enabled: PR comment watching for $scope"
         ;;
     esac
