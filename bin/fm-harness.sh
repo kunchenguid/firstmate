@@ -27,32 +27,59 @@ detect_own() {
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ found
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename "$comm")" in
-      *claude*) echo claude; return ;;
-      *codex*) echo codex; return ;;
-      *opencode*) echo opencode; return ;;
-      *grok*) echo grok; return ;;
-      pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        case "$args" in
-          *claude*) echo claude; return ;;
-          *codex*) echo codex; return ;;
-          *opencode*) echo opencode; return ;;
-          *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
-        esac ;;
-    esac
+    found=$(harness_for_pid "$pid") && { echo "$found"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
       break
     fi
   done
+  # Layer 3: tmux may keep the stable pane shell as #{pane_pid} while the
+  # harness runs below it. Find a verified harness among that pane's descendants.
+  if pane_pid=$(current_tmux_pane_pid); then
+    found=$(find_harness_descendant "$pane_pid") && { echo "$found"; return; }
+  fi
   echo unknown
+}
+
+current_tmux_pane_pid() {
+  if [ -n "${TMUX_PANE:-}" ]; then
+    tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null && return 0
+  fi
+  tmux display-message -p '#{pane_pid}' 2>/dev/null
+}
+
+harness_for_pid() {
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  case "$(basename "$comm")" in
+    *claude*) echo claude; return 0 ;;
+    *codex*) echo codex; return 0 ;;
+    *opencode*) echo opencode; return 0 ;;
+    *grok*) echo grok; return 0 ;;
+    pi) echo pi; return 0 ;;
+    node*|python*)
+      # Bare interpreter: match the harness name in its script path.
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      case "$args" in
+        *claude*) echo claude; return 0 ;;
+        *codex*) echo codex; return 0 ;;
+        *opencode*) echo opencode; return 0 ;;
+        *grok*) echo grok; return 0 ;;
+        *" pi "*|*/pi) echo pi; return 0 ;;
+      esac ;;
+  esac
+  return 1
+}
+
+find_harness_descendant() {
+  local root=$1 child found
+  for child in $(ps -A -o pid=,ppid= | awk -v p="$root" '$2 == p { print $1 }'); do
+    found=$(harness_for_pid "$child") && { echo "$found"; return 0; }
+    found=$(find_harness_descendant "$child") && { echo "$found"; return 0; }
+  done
+  return 1
 }
 
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter

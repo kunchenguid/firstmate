@@ -18,19 +18,46 @@ mkdir -p "$STATE"
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
 
 harness_pid() {
-  local pid=$$ comm args
+  local pid=$$ found
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
-      echo "$pid"; return 0
-    fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
+    found=$(pid_is_harness "$pid") && { echo "$pid"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  # In tmux-launched sessions, #{pane_pid} can be the stable shell with the
+  # harness running as a descendant. Record that harness PID, not this tool shell.
+  if pane_pid=$(current_tmux_pane_pid); then
+    found=$(find_harness_descendant "$pane_pid") && { echo "$found"; return 0; }
+  fi
+  return 1
+}
+
+current_tmux_pane_pid() {
+  if [ -n "${TMUX_PANE:-}" ]; then
+    tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null && return 0
+  fi
+  tmux display-message -p '#{pane_pid}' 2>/dev/null
+}
+
+pid_is_harness() {
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    return 0
+  fi
+  # Bare interpreter (e.g. node): match the harness name in its script path.
+  case "$comm" in
+    *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && return 0 ;;
+  esac
+  return 1
+}
+
+find_harness_descendant() {
+  local root=$1 child found
+  for child in $(ps -A -o pid=,ppid= | awk -v p="$root" '$2 == p { print $1 }'); do
+    pid_is_harness "$child" && { echo "$child"; return 0; }
+    found=$(find_harness_descendant "$child") && { echo "$found"; return 0; }
   done
   return 1
 }
