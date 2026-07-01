@@ -128,13 +128,14 @@ selected_tasks() {
 }
 
 json_lines_for_pr() {
-  local owner=$1 repo=$2 num=$3 endpoint
+  local owner=$1 repo=$2 num=$3 endpoint rc=0
   endpoint="/repos/$owner/$repo/issues/$num/comments"
-  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"issue_comment", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:"", line:"", state:"", body:(.body // "")} | @json'
+  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"issue_comment", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:"", line:"", state:"", body:(.body // "")} | @json' || rc=$?
   endpoint="/repos/$owner/$repo/pulls/$num/comments"
-  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"review_comment", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:(.path // ""), line:((.line // .original_line // .position // "")|tostring), state:"", body:(.body // "")} | @json'
+  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"review_comment", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:(.path // ""), line:((.line // .original_line // .position // "")|tostring), state:"", body:(.body // "")} | @json' || rc=$?
   endpoint="/repos/$owner/$repo/pulls/$num/reviews"
-  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"review", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:"", line:"", state:(.state // ""), body:(.body // "")} | @json'
+  "$GH_CMD" api --paginate "$endpoint" --jq '.[] | {type:"review", id:(.id|tostring), author:(.user.login // ""), url:(.html_url // ""), path:"", line:"", state:(.state // ""), body:(.body // "")} | @json' || rc=$?
+  return $rc
 }
 
 is_ignored_author() {
@@ -171,9 +172,9 @@ format_message() {
     *) label="PR comment" ;;
   esac
   loc=
-  [ -n "$path" ] && loc="\nLocation: $path"
+  [ -n "$path" ] && loc=$'\n'"Location: $path"
   [ -n "$line" ] && [ "$line" != null ] && loc="$loc:$line"
-  [ -n "$state" ] && [ "$state" != null ] && loc="$loc\nReview state: $state"
+  [ -n "$state" ] && [ "$state" != null ] && loc="$loc"$'\n'"Review state: $state"
   [ -n "$body" ] || body="(no body)"
   cat <<EOF
 PR feedback for this task ($id): $label
@@ -245,7 +246,6 @@ process_task() {
       merge_seen "$seen" "$key"
     else
       emit_error_once "$id-send" "pr-comment-watch-error $id: failed to inject PR feedback"
-      rc=0
       break
     fi
   done < "$events"
