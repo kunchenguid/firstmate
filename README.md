@@ -144,7 +144,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, optional X mode, the files you set, and harness support.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
-- [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
+- [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual, including general behavior rules for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 
 ## Contributing

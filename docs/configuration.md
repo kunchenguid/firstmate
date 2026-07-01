@@ -5,6 +5,8 @@ The files and environment variables you set to operate firstmate.
 ## Orchestrator behavior (AGENTS.md)
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
+Its `General agent behavior` section is the shared tracked home for system-level writing, generated-file safety, decision-making, and validation expectations.
+Those rules do not relax the delegation model, captain approval, or the no-mistakes gate.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
