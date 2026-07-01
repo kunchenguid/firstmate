@@ -52,7 +52,26 @@ This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
-Never add an agent name as co-author.
+
+### General agent behavior
+
+These rules apply anywhere this file controls agent behavior.
+They do not relax the delegation model, captain approval, or the no-mistakes gate.
+
+- Never use the em dash character.
+  Use plain dash `-` instead.
+- Never add an agent name as a commit co-author.
+- Never manually modify `CHANGELOG.md` files or any file marked as generated or auto-generated.
+- When writing or substantially editing a long Markdown file, put each full sentence on its own physical line.
+  Preserve normal Markdown structure, but avoid placing multiple sentences on one physical line.
+- When making technical decisions, treat development cost as a weak signal.
+  Prefer quality, simplicity, robustness, scalability, and long-term maintainability.
+- When fixing a bug, first reproduce it in an end-to-end setting as close as practical to the user's real experience.
+  Make the fix prove it solves the real problem.
+- When end-to-end testing a product, inspect the UI critically and hold it to pixel-level polish.
+  If something clearly looks wrong, try to get it fixed along the way even when it is not the original task.
+- Apply the same standard to engineering health.
+  Treat lint failures, test failures, and flaky tests as real defects; if you see one, work to get it fixed even when it was not introduced by the current change.
 
 ## 2. Layout and state
 
