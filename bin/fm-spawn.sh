@@ -825,6 +825,8 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+# `export VAR=value` is accepted by fish, bash, and zsh; the bash-only syntax is
+# inside the templated launch strings, so only those need the wrapper below.
 tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmp" Enter
 sleep 0.3
 if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
