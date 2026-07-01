@@ -83,11 +83,6 @@ bash_wrapped_expected() {
   printf 'bash -c %s' "$(shell_quote_for_expected "export GOTMPDIR=$(shell_quote_for_expected "$gotmp"); $command")"
 }
 
-env_prefixed_expected() {
-  local gotmp=$1 command=$2
-  printf 'env GOTMPDIR=%s %s' "$(shell_quote_for_expected "$gotmp")" "$command"
-}
-
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -216,13 +211,13 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "CUSTOM=1 custom-agent --flag && echo done")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  expected=$(env_prefixed_expected "/tmp/fm-$id/gotmp" "custom-agent --flag")
+  expected="CUSTOM=1 custom-agent --flag && echo done"
   [ "$launch" = "$expected" ] || fail "raw launch command changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }

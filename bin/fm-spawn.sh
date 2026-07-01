@@ -825,6 +825,8 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmp" Enter
+sleep 0.3
 if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
   LAUNCH="export GOTMPDIR=$sq_gotmp; $LAUNCH"
   # Run templated launches through an explicit `bash -c` rather than trusting the
@@ -837,8 +839,6 @@ if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
   # (bash, -c, a quoted string) - while bash itself interprets everything inside,
   # exactly as before.
   LAUNCH="bash -c $(shell_quote "$LAUNCH")"
-else
-  LAUNCH="env GOTMPDIR=$sq_gotmp $LAUNCH"
 fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
