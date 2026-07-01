@@ -2,7 +2,7 @@
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
+# gotmp/, exports GOTMPDIR for the launch, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
@@ -87,7 +87,7 @@ META
 
 test_spawn_contract_and_mkdir_pattern() {
   # Structural: fm-spawn must create the gotmp dir, record tasktmp in meta, and export
-  # GOTMPDIR into the pane. Assert the contract lines are present in the source.
+  # GOTMPDIR for the launch. Assert the contract lines are present in the source.
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
   grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
@@ -95,7 +95,7 @@ test_spawn_contract_and_mkdir_pattern() {
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
   grep -F 'export GOTMPDIR=' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: GOTMPDIR export into pane"
+    || fail "fm-spawn missing: GOTMPDIR export for launch"
   # Behavioral: the mkdir + meta-write pattern spawn uses must produce a gotmp dir and
   # a meta line whose value the teardown grep (tasktmp=, cut -d= -f2-) reads back whole.
   local id=spawn-sim-z1

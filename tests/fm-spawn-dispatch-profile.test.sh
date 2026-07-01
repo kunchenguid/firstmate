@@ -79,7 +79,13 @@ shell_quote_for_expected() {
 }
 
 bash_wrapped_expected() {
-  printf 'bash -c %s' "$(shell_quote_for_expected "$1")"
+  local gotmp=$1 command=$2
+  printf 'bash -c %s' "$(shell_quote_for_expected "export GOTMPDIR=$(shell_quote_for_expected "$gotmp"); $command")"
+}
+
+env_prefixed_expected() {
+  local gotmp=$1 command=$2
+  printf 'env GOTMPDIR=%s %s' "$(shell_quote_for_expected "$gotmp")" "$command"
 }
 
 make_seeded_secondmate_home() {
@@ -128,7 +134,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected=$(bash_wrapped_expected "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\"")
+  expected=$(bash_wrapped_expected "/tmp/fm-$id/gotmp" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\"")
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and wraps the claude template in bash"
 }
@@ -203,7 +209,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch expected
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -216,7 +222,8 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  expected=$(env_prefixed_expected "/tmp/fm-$id/gotmp" "custom-agent --flag")
+  [ "$launch" = "$expected" ] || fail "raw launch command changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

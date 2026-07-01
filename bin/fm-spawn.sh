@@ -813,6 +813,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_gotmp=$(shell_quote "$TASK_TMP/gotmp")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -825,6 +826,7 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
+  LAUNCH="export GOTMPDIR=$sq_gotmp; $LAUNCH"
   # Run templated launches through an explicit `bash -c` rather than trusting the
   # pane's own interactive shell to parse them: the operator's default shell is
   # whatever their tmux pane starts (fish, zsh, bash...), and every template above
@@ -835,12 +837,9 @@ if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
   # (bash, -c, a quoted string) - while bash itself interprets everything inside,
   # exactly as before.
   LAUNCH="bash -c $(shell_quote "$LAUNCH")"
+else
+  LAUNCH="env GOTMPDIR=$sq_gotmp $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
