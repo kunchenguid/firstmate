@@ -41,8 +41,10 @@ SH
 #!/usr/bin/env bash
 {
   printf 'TARGET=%s\n' "$1"
+  case "$2" in *$'\n'*) printf 'HAS_NEWLINE=1\n' ;; *) printf 'HAS_NEWLINE=0\n' ;; esac
   printf 'MESSAGE<<EOF\n%s\nEOF\n' "$2"
 } >> "$FAKE_SEND_LOG"
+[ "${FAKE_SEND_FAIL:-0}" = 0 ] || exit 1
 SH
   chmod +x "$fakebin/fake-send"
   printf '%s\n' "$fakebin"
@@ -134,6 +136,68 @@ test_review_comment_context_and_bot_ignore() {
   pass "PR review comments include code context and bot noise is ignored"
 }
 
+test_multiline_feedback_is_single_line_and_clears_send_error() {
+  local home fakebin send_log out rc err_marker
+  home="$TMP_ROOT/single-line"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  send_log="$home/send.log"
+  mkdir -p "$home/state/.pr-comments/enabled"
+  : > "$home/state/.pr-comments/enabled/maps"
+  printf '%s\n' '{"type":"review_comment","id":"300","author":"reviewer","url":"https://github.com/acme/maps/pull/7#discussion_r300","path":"src/map.ts","line":"50","state":"","body":"first line\nsecond line\nthird line"}' > "$home/review-comments.jsonl"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_FAIL=1 FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled); rc=$?
+  expect_code 0 "$rc" "failed send poll exit"
+  assert_contains "$out" "pr-comment-watch-error maps: failed to inject PR feedback" "send failures must surface once"
+  assert_no_grep "review_comment:300" "$home/state/.pr-comments/seen/maps.seen" "failed sends must not mark the comment seen"
+  err_marker="$home/state/.pr-comments/errors/maps-send"
+  assert_present "$err_marker" "send failure marker must be recorded"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled); rc=$?
+  expect_code 0 "$rc" "successful retry poll exit"
+  [ -z "$out" ] || fail "successful retry should be silent (got: $out)"
+  assert_grep "HAS_NEWLINE=0" "$send_log" "PR feedback must be delivered as one line"
+  assert_grep "Author: reviewer" "$send_log" "single-line feedback must preserve author"
+  assert_grep "URL: https://github.com/acme/maps/pull/7#discussion_r300" "$send_log" "single-line feedback must preserve URL"
+  assert_grep "Location: src/map.ts:50" "$send_log" "single-line feedback must preserve file and line"
+  assert_grep "first line ⏎ second line ⏎ third line" "$send_log" "single-line feedback must preserve body context with separators"
+  assert_grep "review_comment:300" "$home/state/.pr-comments/seen/maps.seen" "successful retry must mark the comment seen"
+  assert_absent "$err_marker" "successful sends must clear the prior send error marker"
+  pass "PR feedback injection is single-line and clears send errors"
+}
+
+test_stale_task_lock_is_recovered() {
+  local home fakebin send_log lock old_epoch rc
+  home="$TMP_ROOT/stale-lock"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  send_log="$home/send.log"
+  lock="$home/state/.pr-comments/locks/maps.lock"
+  mkdir -p "$home/state/.pr-comments/enabled" "$lock"
+  : > "$home/state/.pr-comments/enabled/maps"
+  old_epoch=$(($(date +%s) - 100))
+  printf '999999 %s %s\n' "$old_epoch" "$(hostname 2>/dev/null || printf unknown)" > "$lock/owner"
+  printf '%s\n' '{"type":"issue_comment","id":"400","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-400","path":"","line":"","state":"","body":"stale lock should not block this"}' > "$home/issue.jsonl"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FM_PR_COMMENTS_LOCK_STALE_SECS=1 FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "stale lock poll exit"
+  assert_grep "stale lock should not block this" "$send_log" "stale locks must be reaped so feedback is delivered"
+  assert_grep "issue_comment:400" "$home/state/.pr-comments/seen/maps.seen" "stale-lock delivery must mark the comment seen"
+  assert_absent "$lock" "task lock must be cleaned up after polling"
+  pass "PR comment polling recovers stale task locks"
+}
+
 test_disable_cleans_check_shim() {
   local home fakebin out rc
   home="$TMP_ROOT/disable"; mkdir -p "$home"
@@ -154,4 +218,6 @@ test_disable_cleans_check_shim() {
 
 test_enable_primes_and_dedupes_new_issue_comment
 test_review_comment_context_and_bot_ignore
+test_multiline_feedback_is_single_line_and_clears_send_error
+test_stale_task_lock_is_recovered
 test_disable_cleans_check_shim
