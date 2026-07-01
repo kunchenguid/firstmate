@@ -9,6 +9,7 @@
 #   (a) merge records pr= and pr_head= before merging, and merges
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after the URL
+#   (d) merge is refused before gh-axi when task meta is missing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -145,6 +146,30 @@ test_extra_merge_args_forwarded() {
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
 
+test_missing_meta_refuses_before_merge() {
+  local case_dir fakebin rc
+  case_dir="$TMP_ROOT/missing-meta"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" missing-x1 https://github.com/example/repo/pull/21 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
+  assert_grep 'no meta for task missing-x1' "$case_dir/stderr" \
+    "missing-meta: refusal did not explain missing meta"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
+  assert_absent "$case_dir/state/missing-x1.check.sh" \
+    "missing-meta: fm-pr-check should not arm a poll for an unknown task"
+  pass "fm-pr-merge refuses before merging when task meta is missing"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
+test_missing_meta_refuses_before_merge
