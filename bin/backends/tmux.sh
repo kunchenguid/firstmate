@@ -56,11 +56,18 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
+#
+# Session targets use tmux's exact-match form ("=firstmate" here, "=name:" in
+# create-task): the '=' pins exact-name matching (never prefix/fnmatch) and, for
+# a window target, the trailing ':' pins session interpretation. A bare numeric
+# session name (a captain session literally named "7") is otherwise parsed by
+# `-t` as a window INDEX of the current session, landing the window in an
+# unrelated session or failing on an occupied index (verified tmux 3.4).
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t '=firstmate' 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }
@@ -68,14 +75,16 @@ fm_backend_tmux_container_ensure() {
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
-# (session:window, matching how fm-spawn.sh composed its own $T).
+# (session:window, matching how fm-spawn.sh composed its own $T). Sessions are
+# targeted with the exact-match form "=<session>:" (see container-ensure) so a
+# numeric session name is never misread as a window index.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
   local ses=$1 wname=$2 proj_abs=$3
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  if tmux list-windows -t "=$ses:" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  tmux new-window -d -t "=$ses:" -n "$wname" -c "$proj_abs"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or
