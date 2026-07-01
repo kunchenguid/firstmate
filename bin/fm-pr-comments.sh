@@ -13,8 +13,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 STORE="$STATE/.pr-comments"
 ENABLED_DIR="$STORE/enabled"
+DISABLED_DIR="$STORE/disabled"
 CHECK="$STATE/pr-comments.check.sh"
-mkdir -p "$STATE" "$ENABLED_DIR"
+mkdir -p "$STATE" "$ENABLED_DIR" "$DISABLED_DIR"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -79,8 +80,10 @@ case "$cmd" in
     case "$scope" in
       all)
         touch "$ENABLED_DIR/all"
+        rm -rf "$DISABLED_DIR"
+        mkdir -p "$DISABLED_DIR"
         write_check
-        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --all --prime >/dev/null || true
+        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --all --prime || true
         echo "enabled: PR comment watching for all PR-linked tasks"
         ;;
       '') usage >&2; exit 2 ;;
@@ -90,8 +93,9 @@ case "$cmd" in
           exit 1
         fi
         touch "$ENABLED_DIR/$scope"
+        rm -f "$DISABLED_DIR/$scope"
         write_check
-        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --task "$scope" --prime >/dev/null || true
+        "$FM_ROOT/bin/fm-pr-comments-poll.sh" --task "$scope" --prime || true
         echo "enabled: PR comment watching for $scope"
         ;;
     esac
@@ -99,15 +103,19 @@ case "$cmd" in
   disable)
     case "$scope" in
       all)
-        rm -rf "$ENABLED_DIR"
-        mkdir -p "$ENABLED_DIR"
+        rm -rf "$ENABLED_DIR" "$DISABLED_DIR"
+        mkdir -p "$ENABLED_DIR" "$DISABLED_DIR"
         rm -f "$CHECK"
         echo "disabled: PR comment watching"
         ;;
       '') usage >&2; exit 2 ;;
       *)
-        rm -f "$ENABLED_DIR/$scope"
-        remove_check_if_empty
+        if [ -e "$ENABLED_DIR/all" ]; then
+          touch "$DISABLED_DIR/$scope"
+        else
+          rm -f "$ENABLED_DIR/$scope"
+          remove_check_if_empty
+        fi
         echo "disabled: PR comment watching for $scope"
         ;;
     esac
@@ -120,6 +128,14 @@ case "$cmd" in
     fi
     if [ -e "$ENABLED_DIR/all" ]; then
       echo "scope: all PR-linked tasks"
+      if find "$DISABLED_DIR" -type f -print -quit 2>/dev/null | grep . >/dev/null; then
+        printf 'excluded:'
+        for f in "$DISABLED_DIR"/*; do
+          [ -e "$f" ] || continue
+          printf ' %s' "$(basename "$f")"
+        done
+        printf '\n'
+      fi
     else
       printf 'scope:'
       found=0

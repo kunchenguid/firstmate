@@ -12,7 +12,7 @@ bin/fm-pr-comments.sh disable <task-id>
 bin/fm-pr-comments.sh disable all
 ```
 
-Enabling writes `state/pr-comments.check.sh`, which is picked up by the normal firstmate watcher check loop. It also primes currently visible comments as already seen, so only new feedback is delivered after activation.
+Enabling writes `state/pr-comments.check.sh`, which is picked up by the normal firstmate watcher check loop. It also primes currently visible comments as already seen, so only new feedback is delivered after activation. Disabling one task while `all` is enabled records that task as an exclusion; `status` lists excluded tasks.
 
 ## What is watched
 

@@ -22,6 +22,7 @@ if [ "$1" = api ] && [ "${2:-}" = user ]; then
   exit 0
 fi
 if [ "$1" = api ]; then
+  [ "${FAKE_GH_FAIL:-0}" = 0 ] || exit 1
   endpoint=
   for arg in "$@"; do
     case "$arg" in /repos/*) endpoint=$arg ;; esac
@@ -174,7 +175,7 @@ test_multiline_feedback_is_single_line_and_clears_send_error() {
 }
 
 test_stale_task_lock_is_recovered() {
-  local home fakebin send_log lock old_epoch rc
+  local home fakebin send_log lock rc
   home="$TMP_ROOT/stale-lock"; mkdir -p "$home"
   fakebin=$(make_fakebin "$home")
   write_event_files "$home"
@@ -183,8 +184,8 @@ test_stale_task_lock_is_recovered() {
   lock="$home/state/.pr-comments/locks/maps.lock"
   mkdir -p "$home/state/.pr-comments/enabled" "$lock"
   : > "$home/state/.pr-comments/enabled/maps"
-  old_epoch=$(($(date +%s) - 100))
-  printf '999999 %s %s\n' "$old_epoch" "$(hostname 2>/dev/null || printf unknown)" > "$lock/owner"
+  printf 'malformed-owner\n' > "$lock/owner"
+  touch -t 202001010000 "$lock"
   printf '%s\n' '{"type":"issue_comment","id":"400","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-400","path":"","line":"","state":"","body":"stale lock should not block this"}' > "$home/issue.jsonl"
 
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
@@ -196,6 +197,59 @@ test_stale_task_lock_is_recovered() {
   assert_grep "issue_comment:400" "$home/state/.pr-comments/seen/maps.seen" "stale-lock delivery must mark the comment seen"
   assert_absent "$lock" "task lock must be cleaned up after polling"
   pass "PR comment polling recovers stale task locks"
+}
+
+test_prime_surfaces_github_poll_errors() {
+  local home fakebin out rc
+  home="$TMP_ROOT/prime-errors"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$home/send.log" FAKE_GH_FAIL=1 FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments.sh" enable all 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "enable all with prime error exit"
+  assert_contains "$out" "pr-comment-watch-error maps: GitHub comment poll failed" "enable priming must surface GitHub poll failures"
+  assert_contains "$out" "enabled: PR comment watching for all PR-linked tasks" "enable should still report configured watching"
+  pass "PR comment enabling surfaces priming poll errors"
+}
+
+test_disable_task_excludes_under_all_scope() {
+  local home fakebin send_log out rc
+  home="$TMP_ROOT/disable-under-all"; mkdir -p "$home"
+  fakebin=$(make_fakebin "$home")
+  write_event_files "$home"
+  make_home_with_pr_task "$home"
+  fm_write_meta "$home/state/roads.meta" \
+    "window=fm-roads" \
+    "project=roads" \
+    "kind=ship" \
+    "pr=https://github.com/acme/roads/pull/9"
+  send_log="$home/send.log"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments.sh" enable all >/dev/null 2>/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-pr-comments.sh" disable maps 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "disable task under all exit"
+  assert_contains "$out" "disabled: PR comment watching for maps" "disable task under all must report the task"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-pr-comments.sh" status 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "status after exclusion exit"
+  assert_contains "$out" "scope: all PR-linked tasks" "status must retain all scope"
+  assert_contains "$out" "excluded: maps" "status must list per-task exclusions"
+
+  printf '%s\n' '{"type":"issue_comment","id":"500","author":"reviewer","url":"https://github.com/acme/maps/pull/7#issuecomment-500","path":"","line":"","state":"","body":"all scope should skip maps only"}' > "$home/issue.jsonl"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PR_COMMENTS_SEND="$fakebin/fake-send" \
+    FAKE_SEND_LOG="$send_log" FAKE_ISSUE_COMMENTS="$home/issue.jsonl" \
+    FAKE_REVIEW_COMMENTS="$home/review-comments.jsonl" FAKE_REVIEWS="$home/reviews.jsonl" \
+    "$ROOT/bin/fm-pr-comments-poll.sh" --enabled >/dev/null; rc=$?
+  expect_code 0 "$rc" "poll enabled with excluded task exit"
+  assert_no_grep "TARGET=fm-maps" "$send_log" "disabled task under all must not receive injected feedback"
+  assert_grep "TARGET=fm-roads" "$send_log" "other all-scope tasks must still receive injected feedback"
+  pass "PR comment watching supports per-task exclusions under all scope"
 }
 
 test_disable_cleans_check_shim() {
@@ -220,4 +274,6 @@ test_enable_primes_and_dedupes_new_issue_comment
 test_review_comment_context_and_bot_ignore
 test_multiline_feedback_is_single_line_and_clears_send_error
 test_stale_task_lock_is_recovered
+test_prime_surfaces_github_poll_errors
+test_disable_task_excludes_under_all_scope
 test_disable_cleans_check_shim

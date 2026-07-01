@@ -14,6 +14,7 @@ SEEN_DIR="$STORE/seen"
 ERR_DIR="$STORE/errors"
 LOCK_DIR="$STORE/locks"
 ENABLED_DIR="$STORE/enabled"
+DISABLED_DIR="$STORE/disabled"
 GH_CMD=${FM_PR_COMMENTS_GH:-gh}
 SEND_CMD=${FM_PR_COMMENTS_SEND:-$FM_ROOT/bin/fm-send.sh}
 SELF_LOGIN=${FM_PR_COMMENTS_SELF_LOGIN-}
@@ -48,7 +49,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-mkdir -p "$SEEN_DIR" "$ERR_DIR" "$LOCK_DIR" "$ENABLED_DIR"
+mkdir -p "$SEEN_DIR" "$ERR_DIR" "$LOCK_DIR" "$ENABLED_DIR" "$DISABLED_DIR"
 
 need_tool() {
   command -v "$1" >/dev/null 2>&1
@@ -80,7 +81,10 @@ trap 'cleanup_current_lock; exit 130' INT
 trap 'cleanup_current_lock; exit 143' TERM
 
 file_mtime_epoch() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+  case "$(uname -s 2>/dev/null || printf unknown)" in
+    Darwin|FreeBSD|OpenBSD|NetBSD) stat -f %m "$1" 2>/dev/null || true ;;
+    *) stat -c %Y "$1" 2>/dev/null || true ;;
+  esac
 }
 
 recover_stale_lock() {
@@ -175,7 +179,11 @@ all_pr_tasks() {
 enabled_tasks() {
   local f id seen=
   if [ -e "$ENABLED_DIR/all" ]; then
-    all_pr_tasks
+    all_pr_tasks | while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      [ ! -e "$DISABLED_DIR/$id" ] || continue
+      printf '%s\n' "$id"
+    done
     return 0
   fi
   for f in "$ENABLED_DIR"/*; do
