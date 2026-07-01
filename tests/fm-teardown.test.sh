@@ -33,6 +33,7 @@
 #   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
+#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -438,6 +439,38 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
 }
 
+test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case no-pr-branch-discovery)
+  write_meta "$case_dir" no-mistakes ship
+  # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
+  # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
+  # a repo with no PR CI so the "checks green" trigger that fires it never
+  # happened): a branch with a commit, a no-mistakes auto-fix commit pushed on
+  # top that never made it back into the local worktree, a squash merge onto
+  # main under a brand-new SHA, and the head branch deleted (simulated here by
+  # never pushing fm/task-x1 at all, so no refs/remotes/origin/fm/task-x1
+  # exists to make HEAD "reachable").
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "no-pr-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
+  pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
   local case_dir rc parent_head pr_head
   case_dir=$(make_case squash-replayed-patch)
@@ -648,6 +681,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head

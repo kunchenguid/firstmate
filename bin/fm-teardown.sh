@@ -12,6 +12,12 @@
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# The PR itself is resolved from the task's recorded pr= when present, or - when
+# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
+# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
+# up a merged PR whose head branch matches the worktree's branch, fetching its head
+# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
+# by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
