@@ -69,6 +69,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -516,6 +518,14 @@ fi
 W="fm-$ID"
 PANE_TARGET=
 if [ "$TMUX_LAYOUT" = pane ]; then
+  if [ -f "$STATE/$ID.meta" ]; then
+    existing_target=$(fm_meta_tmux_target "$STATE/$ID.meta" 2>/dev/null || true)
+    if [ -n "$existing_target" ] \
+       && tmux display-message -p -t "$existing_target" '#{pane_id}' >/dev/null 2>&1; then
+      echo "error: task $ID already has a live supervised target ($existing_target); refusing to split a new pane and overwrite its metadata" >&2
+      exit 1
+    fi
+  fi
   CURRENT_WINDOW=$(tmux display-message -p '#W')
   META_WINDOW="$SES:$CURRENT_WINDOW"
   PANE_TARGET=$(tmux split-window -d -P -F '#{pane_id}' -c "$PROJ_ABS") \

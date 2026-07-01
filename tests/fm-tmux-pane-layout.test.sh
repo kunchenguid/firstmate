@@ -131,6 +131,35 @@ EOF
   pass "fm-send/fm-peek use pane= when present and keep legacy window= fallback"
 }
 
+test_spawn_pane_layout_refuses_live_duplicate() {
+  local rec id out status meta
+  id=pane-dup-z3
+  rec=$(make_case spawn-pane-dup)
+  read_case "$rec"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief\n' > "$HOME_DIR/data/$id/brief.md"
+  meta="$HOME_DIR/state/$id.meta"
+  cat > "$meta" <<EOF
+window=firstmate:main
+pane=%99
+worktree=$WT_DIR
+harness=codex
+kind=ship
+EOF
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_TMUX_LAYOUT=pane TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$WT_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" codex 2>&1)
+  status=$?
+  expect_code 1 "$status" "pane-layout spawn must refuse a live duplicate target"
+  assert_contains "$out" "already has a live supervised target" "spawn did not report the live-duplicate guard"
+  assert_grep "pane=%99" "$meta" "guard must not overwrite the existing meta"
+  pass "FM_TMUX_LAYOUT=pane refuses to overwrite a live supervised target"
+}
+
 test_teardown_kills_pane_not_window_when_recorded() {
   local case_dir fakebin log state
   case_dir="$TMP_ROOT/teardown-pane"
@@ -159,6 +188,7 @@ EOF
 }
 
 test_spawn_pane_layout_records_compatible_targets
+test_spawn_pane_layout_refuses_live_duplicate
 test_send_and_peek_prefer_pane_with_window_fallback
 test_teardown_kills_pane_not_window_when_recorded
 
