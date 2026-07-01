@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Merge a task's PR, always recording pr=/pr_head= into state/<id>.meta first via
-# bin/fm-pr-check.sh, so bin/fm-teardown.sh's landed-check always has a PR
-# reference to verify a squash merge against.
+# Merge a task's PR, always recording pr= and any available pr_head= into
+# state/<id>.meta first via bin/fm-pr-check.sh, so bin/fm-teardown.sh's
+# landed-check has a PR reference to verify a squash merge against.
 #
 # Why this exists: the normal trigger for running fm-pr-check.sh is the crew's
 # `done: PR <url> checks green` line, which no-mistakes only emits once its CI
