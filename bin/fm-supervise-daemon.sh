@@ -159,10 +159,10 @@ AFK_FLAG_NAME=".afk"
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
-if [ "$(uname)" = Darwin ]; then
-  _stat_file_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
+if stat -c %Y "$FM_DAEMON_DIR" >/dev/null 2>&1; then
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
+else
+  _stat_file_mtime() { stat -f %m "$1" 2>/dev/null; }
 fi
 _now() { date +%s; }
 _file_age() {  # seconds since mtime; very large if missing
