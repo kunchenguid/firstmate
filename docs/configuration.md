@@ -153,6 +153,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_TMUX_LAYOUT=window   # 'window' (default) spawns one fm-<id> tmux window per task; 'pane' splits firstmate's current window and records pane= (requires running inside tmux)
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
