@@ -36,6 +36,9 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   Verified harness templates are wrapped in `bash -c` before they are sent to
+#   tmux, so fish/zsh/bare-bash pane shells all launch the same command; raw
+#   launch commands are passed through unchanged.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings

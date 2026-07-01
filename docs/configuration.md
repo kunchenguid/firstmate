@@ -65,6 +65,8 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Those verified templates are executed through `bash -c` inside the tmux pane, so the captain's interactive pane shell can be fish, zsh, or bash without parsing the template's bash substitutions itself.
+Raw launch commands used while verifying a new adapter are passed through unchanged.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
