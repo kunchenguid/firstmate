@@ -116,6 +116,7 @@ Secondmate launch can use a separate local `config/secondmate-harness`.
 Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, bootstrap, or an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
 A presence-gated sub-supervisor (`/afk`) can self-handle routine events and batch only what matters while you step away.
+Whether you are at the pane or away, firstmate also pings you out of band with a native OS notification the moment a real decision needs you.
 An opt-in X mode can also use the watcher check path to answer your public `@myfirstmate` mentions and act on normal reversible mention requests from the current fleet state, with `FMX_DRY_RUN` available to test the poll -> compose -> would-post loop without publishing.
 The relay routes only the owner's own mentions to that owner's firstmate home; parent-thread context may still include other public accounts.
 The token is standing authorization for those autonomous replies and eligible lifecycle actions; destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.

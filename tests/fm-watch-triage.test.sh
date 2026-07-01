@@ -34,8 +34,12 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # Extra "VAR=val" args are applied via `env` so they are real assignments: a
+  # post-expansion "$@" token is parsed as a command name, not an assignment, so
+  # the inline-prefix form would run "FM_NOTIFY=on" as a command. env handles both
+  # the no-extra case (env just execs the watcher) and any passed assignments.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -91,6 +95,38 @@ test_signal_reason_is_actionable_classifier() {
   # Coalesced batch: one benign + one captain-relevant -> actionable.
   signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
+}
+
+test_status_pr_url_extractor() {
+  # fm_status_pr_url pulls the GitHub PR / GitLab MR URL out of a done-state status
+  # line (the "Open PR" button target), stopping at the trailing number so status
+  # punctuation is excluded, and prints nothing when there is no PR/MR URL.
+  [ "$(fm_status_pr_url 'done: PR https://github.com/o/r/pull/7 checks green')" = 'https://github.com/o/r/pull/7' ] \
+    || fail "GitHub /pull/ URL not extracted"
+  [ "$(fm_status_pr_url 'done: ready https://gitlab.com/o/r/-/merge_requests/45, ok')" = 'https://gitlab.com/o/r/-/merge_requests/45' ] \
+    || fail "GitLab /merge_requests/ URL not extracted (or trailing comma included)"
+  [ "$(fm_status_pr_url 'done: opened https://github.com/o/r/pull/5.')" = 'https://github.com/o/r/pull/5' ] \
+    || fail "trailing period leaked into the extracted URL"
+  [ -z "$(fm_status_pr_url 'needs-decision: pick A or B')" ] || fail "a non-PR line yielded a URL"
+  [ -z "$(fm_status_pr_url 'done: PR https://example.test/pr/7 checks green')" ] \
+    || fail "a non-pull/-MR path (/pr/) was wrongly treated as a PR URL"
+  pass "fm_status_pr_url extracts GitHub PR / GitLab MR URLs and ignores the rest"
+}
+
+test_task_is_local_only_from_meta() {
+  # fm_task_is_local_only reads mode= from state/<task>.meta. Only mode=local-only
+  # is local-only; any other mode, or an absent meta, is treated as not local-only
+  # (a local-only task has no PR, so it never gets the Open PR button).
+  local dir state
+  dir=$(make_case task-mode); state="$dir/state"
+  printf 'window=s:fm-a\nmode=local-only\nyolo=off\n' > "$state/a.meta"
+  printf 'window=s:fm-b\nmode=no-mistakes\n'          > "$state/b.meta"
+  printf 'window=s:fm-c\nmode=direct-PR\n'            > "$state/c.meta"
+  fm_task_is_local_only "$state" a || fail "mode=local-only not detected as local-only"
+  fm_task_is_local_only "$state" b && fail "mode=no-mistakes wrongly detected as local-only"
+  fm_task_is_local_only "$state" c && fail "mode=direct-PR wrongly detected as local-only"
+  fm_task_is_local_only "$state" missing && fail "absent meta wrongly detected as local-only"
+  pass "fm_task_is_local_only reads mode= and treats only local-only (not unknown) as local-only"
 }
 
 test_stale_is_terminal_classifier() {
@@ -578,7 +614,211 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+# --- normal-mode outbound notifier hook (fires the toast off the signal path) -
+
+# A fake fm-notify.sh that NUL-logs every arg it receives, with an optional exit
+# code so a test can simulate a FAILING notifier (the error-isolation contract).
+make_notify_fake() {  # <path> <log> [rc]
+  local path=$1 log=$2 rc=${3:-0}
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$log"
+exit $rc
+SH
+  chmod +x "$path"
+}
+
+test_signal_notifier_fires_for_captain_relevant() {
+  local dir state fakebin out notifylog fake pid args
+  dir=$(make_case notify-fires); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  printf 'working: setup\nneeds-decision: pick A or B\n' > "$state/task.status"
+  # FM_WATCH_NOTIFY_BG=0 runs the toast synchronously so it is logged before exit.
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a captain-relevant signal"
+  grep -F "signal: $state/task.status" "$out" >/dev/null || fail "watcher did not surface the signal"
+  [ -s "$notifylog" ] || fail "captain-relevant signal did not fire the notifier"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "Firstmate" "notifier title missing"
+  assert_contains "$args" "--focus" "notifier was not asked to focus"
+  assert_contains "$args" "need your decision" "summary did not mirror the daemon's decision class"
+  assert_not_contains "$args" "pick A or B" "raw status text leaked into the lock-screen summary"
+  assert_not_contains "$args" "task.status" "internal status filename leaked into the summary"
+  pass "normal-mode signal with a captain-relevant verb fires the notifier (id-free, decision class)"
+}
+
+test_signal_notifier_review_class_and_dedup() {
+  local dir state fakebin out notifylog fake pid args n status_file
+  dir=$(make_case notify-dedup); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  status_file="$state/task.status"
+  printf 'done: PR https://example.test/pr/7 checks green\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the done: signal"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "ready for review" "summary did not mirror the daemon's review class"
+  # Second wake on the SAME status content (bumped mtime -> fresh signal) must NOT
+  # toast again: the .notify-seen-<task> content marker dedupes it.
+  touch "$status_file"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit on the second (re-touched) signal"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not still wake on the second signal"
+  n=$(tr '\0' '\n' < "$notifylog" | grep -c '^Firstmate$')
+  [ "$n" -eq 1 ] || fail "the same status was toasted $n times; expected exactly 1 (dedup failed)"
+  [ -s "$state/.notify-seen-task" ] || fail "the per-task notify dedup marker was not recorded"
+  pass "review-class summary fires once and the same status is never toasted twice (dedup)"
+}
+
+test_signal_notifier_silent_for_working_note() {
+  local dir state fakebin out notifylog fake pid status_file
+  dir=$(make_case notify-working-silent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  status_file="$state/task.status"
+  printf 'working: compiling\n' > "$status_file"
+  # A no-verb working: note whose crew is NOT provably working is SURFACED, but it
+  # carries no captain-relevant verb, so it must never toast.
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the working: note"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not surface the working: signal"
+  [ ! -s "$notifylog" ] || fail "a working: note (no captain-relevant verb) fired the notifier"
+  unset FM_FAKE_CREW_STATE
+  pass "a surfaced working: note never toasts (only captain-relevant verbs do)"
+}
+
+test_signal_notifier_gated_by_fm_notify_off() {
+  local dir state fakebin out notifylog fake pid status_file
+  dir=$(make_case notify-off-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  status_file="$state/task.status"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=off FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the captain-relevant signal under FM_NOTIFY=off"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "FM_NOTIFY=off changed the wake/exit behavior"
+  [ ! -s "$notifylog" ] || fail "FM_NOTIFY=off did not silence the watcher notifier"
+  pass "FM_NOTIFY=off silences the watcher notifier but never changes the wake"
+}
+
+test_signal_notifier_error_does_not_change_wake() {
+  # HARD requirement: a FAILING notifier must NEVER change the watcher's wake/exit.
+  local dir state fakebin out drain_out notifylog fake pid
+  dir=$(make_case notify-error-isolated); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog" 1   # exit 1 = error
+  printf 'needs-decision: pick A or B\n' > "$state/task.status"
+  # Synchronous (BG=0) so the failing exec runs inline on the wake path; if the
+  # error were not isolated, it would change the watcher's behavior here.
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a failing notifier blocked or hung the watcher"
+  grep -F "signal: $state/task.status" "$out" >/dev/null || fail "a failing notifier suppressed the signal wake"
+  [ -s "$notifylog" ] || fail "the notifier was expected to have been invoked (and failed)"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain failed after a failing notifier"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.status" >/dev/null \
+    || fail "the wake was not queued when the notifier errored"
+  pass "a failing notifier never changes the watcher wake/exit (still surfaces + queues)"
+}
+
+test_signal_notifier_skipped_while_afk() {
+  # In away mode the daemon owns notifications (notify_escalation), so the watcher
+  # hook must NOT also toast - it would double-ping the captain.
+  local dir state fakebin out notifylog fake pid status_file
+  dir=$(make_case notify-afk-skip); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  status_file="$state/task.status"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+  date '+%s' > "$state/.afk"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "afk-mode watcher did not exit one-shot for the signal"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal"
+  [ ! -s "$notifylog" ] || fail "the watcher toasted while afk (the daemon owns notifications then)"
+  pass "while afk the watcher does not toast (the daemon's notify_escalation owns it)"
+}
+
+test_signal_notifier_open_pr_for_done_with_url() {
+  # A done: status carrying a PR URL on a non-local-only task passes --open <url>
+  # so the toast gets an "Open PR" button. The PR URL must NOT leak into the
+  # lock-screen summary text.
+  local dir state fakebin out notifylog fake pid args url
+  dir=$(make_case notify-open-pr); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+  printf 'window=s:fm-task\nmode=no-mistakes\n' > "$state/task.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/task.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the done: + PR signal"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--open" "a done: status with a PR URL did not pass --open"
+  assert_contains "$args" "$url" "the PR URL was not passed to --open"
+  assert_contains "$args" "ready for review" "summary did not reflect the review class"
+  # The summary line itself is still id-free; the URL rides only the --open flag.
+  pass "watcher passes --open <url> for a done: status carrying a PR URL"
+}
+
+test_signal_notifier_no_open_pr_for_local_only() {
+  # A local-only task has no PR, so even a done: status must NOT get an Open PR
+  # button: --open is omitted when the task's mode is local-only.
+  local dir state fakebin out notifylog fake pid args
+  dir=$(make_case notify-open-local-only); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  printf 'window=s:fm-task\nmode=local-only\n' > "$state/task.meta"
+  # Even if a URL-shaped token appears, a local-only task is gated out.
+  printf 'done: ready in branch fm/task https://github.com/o/r/pull/9\n' > "$state/task.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the local-only done: signal"
+  args=$(tr '\0' '\n' < "$notifylog")
+  [ -s "$notifylog" ] || fail "the local-only done: still should toast (just without --open)"
+  assert_not_contains "$args" "--open" "a local-only task must not get an Open PR button"
+  pass "watcher omits --open for a local-only task (no PR to open)"
+}
+
+test_signal_notifier_no_open_pr_for_decision_class() {
+  # A mixed wake - one task needs-decision, another done: with a PR URL - is
+  # classified as a decision wake (needs-decision wins). The Open PR button is
+  # reserved for review/done-state toasts, so --open must be omitted: an urgent
+  # decision toast must not also carry a button pointing at a different item.
+  local dir state fakebin out notifylog fake pid args url
+  dir=$(make_case notify-decision-no-open); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; notifylog="$dir/notify.log"; : > "$notifylog"
+  fake="$dir/fake-notify.sh"; make_notify_fake "$fake" "$notifylog"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+  # Two tasks wake together; the done: task is non-local-only so it would normally
+  # earn --open. The decision classification must still suppress the button.
+  printf 'window=s:fm-don\nmode=no-mistakes\n' > "$state/don.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$state/don.status"
+  printf 'needs-decision: pick A or B\n' > "$state/dec.status"
+  watch_bg "$state" "$fakebin" "$out" FM_NOTIFY=on FM_NOTIFY_CMD="$fake" FM_WATCH_NOTIFY_BG=0
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the mixed decision+done wake"
+  [ -s "$notifylog" ] || fail "a mixed decision+done wake should still toast"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "decision-class toast should still request focus"
+  assert_contains "$args" "need your decision" "mixed wake should classify as a decision wake"
+  assert_not_contains "$args" "--open" "a decision-class wake must not carry --open"
+  assert_not_contains "$args" "$url" "the PR URL must not ride a decision-class toast"
+  pass "watcher suppresses --open when the wake is classified as a decision"
+}
+
 test_signal_reason_is_actionable_classifier
+test_status_pr_url_extractor
+test_task_is_local_only_from_meta
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -598,3 +838,12 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
+test_signal_notifier_fires_for_captain_relevant
+test_signal_notifier_review_class_and_dedup
+test_signal_notifier_silent_for_working_note
+test_signal_notifier_gated_by_fm_notify_off
+test_signal_notifier_error_does_not_change_wake
+test_signal_notifier_skipped_while_afk
+test_signal_notifier_open_pr_for_done_with_url
+test_signal_notifier_no_open_pr_for_local_only
+test_signal_notifier_no_open_pr_for_decision_class

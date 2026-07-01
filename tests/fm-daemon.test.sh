@@ -20,6 +20,12 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# Keep the suite from firing real OS notifications via the escalation hook
+# (escalate_flush -> notify_escalation -> bin/fm-notify.sh): a confirmed flush on
+# a developer's WSL/macOS box would otherwise pop a toast per flush. The hook's
+# own behavior is covered deterministically by test_escalate_flush_fires_notify.
+export FM_NOTIFY=off
+
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
 
@@ -154,6 +160,173 @@ test_escalate_batches_into_one_digest() {
   n=$(grep -c '\[ENTER\]' "$sent")
   [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
   pass "multiple escalations flush as a single batched digest"
+}
+
+test_escalate_flush_fires_notify() {
+  # The issue #106 hook: a CONFIRMED escalation flush fires the native notifier
+  # (best-effort) with a clean, id-free summary, and only after a successful
+  # inject. A failed inject (afk off) must NOT notify. FM_NOTIFY_CMD points the
+  # daemon at a fake notifier that logs its args, so this is deterministic and
+  # never pops a real toast.
+  local dir state fakebin sent capture notifylog fakenotify
+  dir=$(make_supercase notify-hook)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+
+  # Successful flush -> notifier fired.
+  escalate_add "$state" "fin-t5.status: needs-decision: pick A or B"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed"
+  [ -s "$notifylog" ] || fail "confirmed flush did not fire the notifier"
+  local args
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "Firstmate" "notifier title missing"
+  assert_contains "$args" "--focus" "notifier was not asked to focus the host"
+  assert_contains "$args" "need your decision" "summary did not reflect the needs-decision class"
+  assert_not_contains "$args" "fin-t5" "task id leaked into the notification summary"
+  assert_not_contains "$args" ".status" "internal status filename leaked into the summary"
+
+  # Failed flush (afk inactive -> inject deferred) must NOT notify.
+  : > "$notifylog"
+  afk_exit "$state"
+  escalate_add "$state" "done: PR https://x/y/pull/1"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" \
+    && fail "escalate_flush should fail while afk inactive"
+  [ -s "$notifylog" ] && fail "notifier fired on a failed (un-delivered) flush"
+  pass "escalate_flush fires the native notifier only on a confirmed delivery"
+}
+
+test_escalate_flush_passes_open_pr_url() {
+  # A confirmed flush whose buffered done: line carries a PR URL (non-local-only
+  # task) passes --open <url> so the toast gets the "Open PR" button. A local-only
+  # task's done: line is gated out (no PR). The buffered signal form is
+  # "<task>.status: <status>", so the daemon recovers the task and reads its mode.
+  local dir state fakebin sent capture notifylog fakenotify args url
+  dir=$(make_supercase notify-open-pr)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+
+  # non-local-only done: + PR URL -> --open is passed.
+  printf 'window=s:fm-fin-t7\nmode=no-mistakes\n' > "$state/fin-t7.meta"
+  escalate_add "$state" "fin-t7.status: done: PR $url checks green"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--open" "a done: + PR escalation did not pass --open"
+  assert_contains "$args" "$url" "the PR URL was not passed to --open"
+  assert_not_contains "$args" "fin-t7" "task id leaked into the notifier args (summary stays id-free)"
+
+  # local-only done: -> no --open (no PR).
+  : > "$notifylog"
+  printf 'window=s:fm-loc-t8\nmode=local-only\n' > "$state/loc-t8.meta"
+  escalate_add "$state" "loc-t8.status: done: ready in branch fm/loc-t8 https://github.com/o/r/pull/9"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "second escalate_flush failed"
+  # Positive check first: a local-only done: must STILL fire the notifier (with
+  # --focus); otherwise the --open absence below would also pass on an empty log.
+  [ -s "$notifylog" ] || fail "local-only done: should still fire the notifier"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "local-only done: should still request focus"
+  assert_not_contains "$args" "--open" "a local-only done: must not pass --open (no PR)"
+  pass "escalate_flush passes --open for a done: PR escalation, gated out for local-only"
+}
+
+test_escalate_flush_decision_class_suppresses_open() {
+  # A digest classified as a DECISION wake (needs-decision/blocked/failed) must not
+  # carry --open even when a done: PR line is also buffered: the Open PR button is
+  # reserved for review/done-state toasts, so the action stays consistent with the
+  # notification class instead of pointing the captain at a different item.
+  local dir state fakebin sent capture notifylog fakenotify args url
+  dir=$(make_supercase notify-decision-no-open)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+  url="https://github.com/karotkriss/firstmate/pull/4"
+
+  # A mixed buffer: one needs-decision item AND a non-local-only done: + PR URL.
+  printf 'window=s:fm-dec-t9\nmode=no-mistakes\n' > "$state/dec-t9.meta"
+  printf 'window=s:fm-don-t9\nmode=no-mistakes\n' > "$state/don-t9.meta"
+  escalate_add "$state" "dec-t9.status: needs-decision: pick A or B"
+  escalate_add "$state" "don-t9.status: done: PR $url checks green"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY='' \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed"
+  [ -s "$notifylog" ] || fail "a decision+done digest should still fire the notifier"
+  args=$(tr '\0' '\n' < "$notifylog")
+  assert_contains "$args" "--focus" "decision digest should still request focus"
+  assert_contains "$args" "need your decision" "mixed digest should classify as a decision wake"
+  assert_not_contains "$args" "--open" "a decision-class digest must not carry --open"
+  assert_not_contains "$args" "$url" "the PR URL must not ride a decision-class toast"
+  pass "escalate_flush suppresses --open when the digest is a decision wake"
+}
+
+test_notify_off_gates_even_custom_cmd() {
+  # Security gate (CodeRabbit): FM_NOTIFY=off must silence the notifier even when
+  # FM_NOTIFY_CMD points at a custom command that would not consult the toggle
+  # itself. The off-check short-circuits BEFORE any command runs, so the override
+  # is never a bypass. A confirmed inject still happens; only the toast is gated.
+  local dir state fakebin sent capture notifylog fakenotify
+  dir=$(make_supercase notify-off-gate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  notifylog="$dir/notify.log"; : > "$notifylog"
+  fakenotify="$dir/fake-notify.sh"
+  cat > "$fakenotify" <<SH
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "$notifylog"
+exit 0
+SH
+  chmod +x "$fakenotify"
+
+  escalate_add "$state" "fin-t6.status: needs-decision: pick A or B"
+  afk_enter "$state"
+  # FM_NOTIFY=off with a custom FM_NOTIFY_CMD: inject confirmed, notifier NOT run.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_NOTIFY=off \
+    FM_NOTIFY_CMD="$fakenotify" escalate_flush "$state" || fail "escalate_flush failed under FM_NOTIFY=off"
+  [ -s "$sent" ] || fail "the escalation digest was not injected (the off-gate must not block delivery)"
+  [ -s "$notifylog" ] && fail "FM_NOTIFY=off still ran the custom FM_NOTIFY_CMD notifier"
+  pass "FM_NOTIFY=off gates the notifier even with a custom FM_NOTIFY_CMD, without blocking delivery"
 }
 
 test_escalate_batch_age_uses_first_append() {
@@ -692,6 +865,10 @@ test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
+test_escalate_flush_fires_notify
+test_escalate_flush_passes_open_pr_url
+test_escalate_flush_decision_class_suppresses_open
+test_notify_off_gates_even_custom_cmd
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
