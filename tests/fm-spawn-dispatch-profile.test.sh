@@ -308,7 +308,7 @@ test_grok_omits_invalid_max_reasoning_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "grok --always-approve --model" "grok launch did not preserve the model flag when max effort was omitted"
   assert_contains "$launch" "grok-4" "grok launch did not preserve the model value when max effort was omitted"
-  assert_contains "$launch" '"$(cat ' "grok launch did not preserve the brief substitution when max effort was omitted"
+  assert_contains "$launch" "\"\$(cat " "grok launch did not preserve the brief substitution when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
