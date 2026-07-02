@@ -29,7 +29,7 @@ fm_git_identity fmtest fmtest@example.invalid
 # A fakebin whose `no-mistakes init` records that it ran (so we can prove the
 # helper invoked the refresh) and honors FM_FAKE_NM_INIT_RC for the failure case.
 make_fakebin() {  # <dir> -> echoes fakebin path
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -78,7 +78,7 @@ SH
 }
 
 make_stalling_gate_root() {  # <dir> -> echoes fake firstmate root
-  local dir=$1 root="$1/fm-root"
+  local root="$1/fm-root"
   mkdir -p "$root/bin"
   cat > "$root/bin/fm-project-mode.sh" <<'SH'
 #!/usr/bin/env bash
@@ -95,6 +95,7 @@ SH
 }
 
 run_with_timeout() {  # <seconds> <command> [args...]
+  # shellcheck disable=SC2016  # Single quotes are deliberate: Perl expands its own variables.
   perl -e '
 my $t = shift;
 my $pid = fork;
