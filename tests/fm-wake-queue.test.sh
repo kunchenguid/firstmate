@@ -16,6 +16,14 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+seen_sig() {
+  if stat -c %Y "$ROOT" >/dev/null 2>&1; then
+    stat -c '%s:%Y' "$1" 2>/dev/null
+  else
+    stat -f '%z:%Fm' "$1" 2>/dev/null
+  fi
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 all pids i pid count unique malformed
@@ -90,7 +98,7 @@ test_stale_enqueue_before_suppressor() {
   # give the window one and prime the .seen-* marker to its current signature so
   # the per-poll signal scan does not pre-empt the stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
+  sig=$(seen_sig "$state/stale.status")
   printf '%s' "$sig" > "$state/.seen-stale_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
@@ -123,7 +131,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
+  sig=$(seen_sig "$state/stopped.status")
   printf '%s' "$sig" > "$state/.seen-stopped_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")

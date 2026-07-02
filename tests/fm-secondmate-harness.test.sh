@@ -406,6 +406,10 @@ test_spawn_unverified_secondmate_harness_refused() {
 
 meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
+bash_c_arg_fragment() {
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
 # A tmux stub that behaves like make_noop_tmux but also captures the literal
 # `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
@@ -503,7 +507,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
+  assert_contains "$launch" "$(bash_c_arg_fragment "claude --dangerously-skip-permissions --model 'opus'")" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -525,7 +529,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "$(bash_c_arg_fragment "claude --dangerously-skip-permissions --model 'opus' --effort 'high'")" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
@@ -547,8 +551,8 @@ test_spawn_explicit_model_overrides_secondmate_harness_token() {
     || fail "explicit-model: meta model not sonnet (got '$(meta_field "$meta" model)'), explicit flag did not win over file token"
   [ "$(meta_field "$meta" effort)" = high ] || fail "explicit-model: file's effort token should still apply"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "--model 'sonnet'" "explicit-model: launch did not use the explicit --model"
-  assert_not_contains "$launch" "--model 'opus'" "explicit-model: launch leaked the file's model token"
+  assert_contains "$launch" "$(bash_c_arg_fragment "--model 'sonnet'")" "explicit-model: launch did not use the explicit --model"
+  assert_not_contains "$launch" "$(bash_c_arg_fragment "--model 'opus'")" "explicit-model: launch leaked the file's model token"
   pass "C5 spawn: an explicit --model overrides config/secondmate-harness's model token; the file's effort token still applies"
 }
 
@@ -569,8 +573,8 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token() {
   [ "$(meta_field "$meta" effort)" = low ] \
     || fail "explicit-effort: meta effort not low (got '$(meta_field "$meta" effort)'), explicit flag did not win over file token"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "--effort 'low'" "explicit-effort: launch did not use the explicit --effort"
-  assert_not_contains "$launch" "--effort 'high'" "explicit-effort: launch leaked the file's effort token"
+  assert_contains "$launch" "$(bash_c_arg_fragment "--effort 'low'")" "explicit-effort: launch did not use the explicit --effort"
+  assert_not_contains "$launch" "$(bash_c_arg_fragment "--effort 'high'")" "explicit-effort: launch leaked the file's effort token"
   pass "C6 spawn: an explicit --effort overrides config/secondmate-harness's effort token; the file's model token still applies"
 }
 
@@ -614,11 +618,11 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   [ "$(meta_field "$meta" model)" = gpt-5.5 ] || fail "explicit-harness-explicit-axes: meta model did not use explicit value"
   [ "$(meta_field "$meta" effort)" = xhigh ] || fail "explicit-harness-explicit-axes: meta effort did not use explicit value"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "--model 'gpt-5.5'" \
+  assert_contains "$launch" "$(bash_c_arg_fragment "--model 'gpt-5.5'")" \
     "explicit-harness-explicit-axes: launch did not use the explicit --model"
-  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
+  assert_contains "$launch" "$(bash_c_arg_fragment "-c 'model_reasoning_effort=\"xhigh\"'")" \
     "explicit-harness-explicit-axes: launch did not use the explicit --effort"
-  assert_not_contains "$launch" "--model 'opus'" \
+  assert_not_contains "$launch" "$(bash_c_arg_fragment "--model 'opus'")" \
     "explicit-harness-explicit-axes: launch leaked the file's model token"
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
