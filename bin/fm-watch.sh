@@ -4,14 +4,15 @@
 # and keeps blocking; it queues and exits only for actionable wakes. The no-verb
 # turn-end / non-terminal-stale path is absorb-only-when-provably-working: a wake
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a busy pane), and surfaced otherwise, so a
-# crew that finishes (or stops and waits) without a captain-relevant status is
-# never silently swallowed. While state/.afk exists, the daemon owns triage and
+# actively-running no-mistakes step, or a backend busy signal), and surfaced
+# otherwise, so a crew that finishes (or stops and waits) without a
+# captain-relevant status is never silently swallowed. While state/.afk exists,
+# the daemon owns triage and
 # this watcher queues and exits on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
-#   stale: <window>        terminal stale pane, a non-terminal stale whose crew is
+#   stale: <window>        terminal stale endpoint, a non-terminal stale whose crew is
 #                          not provably working (surfaced at once), or a provably-
 #                          working stale past the wedge threshold, unless afk active
 #   check: <script>: <out> per-task check output, always actionable
@@ -37,12 +38,12 @@ mkdir -p "$STATE"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
-# (capture, list-live via recorded_windows/window_kind, busy-state via the
-# BUSY_REGEX below) synthesizes the signal/stale/check/heartbeat wake
-# vocabulary for any backend with no native event push - today, that means
-# every task, since tmux (P1's only backend) has none. A future native-event
-# backend (e.g. herdr) would override this seam with a real push subscription
-# instead of polling; see bin/fm-backend.sh and data/fm-backend-design-d7.
+# (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
+# synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
+# no native event push. tmux always reports unknown busy-state, preserving the
+# original regex path. herdr contributes native semantic busy-state through the
+# same poll loop until a future push subscription replaces this default source;
+# see bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 

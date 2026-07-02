@@ -103,9 +103,10 @@ FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# Shared tmux pane primitives (busy/composer detection + verify-retry submit).
-# Sourced at top level so BOTH the executed daemon and the unit tests (which
-# source this file for its pure functions) get the corrected composer detection.
+# Shared tmux pane primitives for supervisor injection (busy/composer detection
+# + verify-retry submit). Sourced at top level so BOTH the executed daemon and
+# the unit tests (which source this file for its pure functions) get the
+# corrected composer detection. Stale task rechecks use fm-backend.sh below.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 
@@ -133,9 +134,9 @@ MAX_DEFER_SECS_DEFAULT=300
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
-# (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
-# overrides the busy set here, as before.
+# Composer-empty detection and the tmux busy-footer fallback live in
+# bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
+# FM_BUSY_REGEX still overrides the fallback busy set here, as before.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5

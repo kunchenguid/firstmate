@@ -19,8 +19,8 @@
 # remainder is the whole pane id - fm_backend_herdr_parse_target splits on the
 # first colon only). This is the value stored in a herdr task's meta window=
 # field and is what fm_backend_resolve_selector already returns unchanged for
-# both the fm-<id> and explicit session:window/target forms (that function has
-# no herdr-specific logic; it just returns meta's window= verbatim).
+# both the fm-<id> and explicit backend-target forms (that function has no
+# herdr-specific logic; it just returns meta's window= verbatim).
 #
 # Recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the

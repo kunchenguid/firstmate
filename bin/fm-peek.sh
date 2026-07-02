@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Print the tail of a crewmate pane (bounded, for cheap diagnosis).
-# Usage: fm-peek.sh <window> [lines=40]
-#   <window> may be a bare firstmate window name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or explicit session:window.
+# Print the tail of a crewmate endpoint (bounded, for cheap diagnosis).
+# Usage: fm-peek.sh <target> [lines=40]
+#   <target> may be a bare firstmate task name (fm-xyz), resolved through
+#   this home's state/<id>.meta, or an explicit backend target.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

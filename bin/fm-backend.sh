@@ -15,8 +15,8 @@
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a future
-# non-tmux backend would ever carry an explicit `backend=` line.
+# default-path metas stay byte-identical. Only a task spawned on a non-tmux
+# backend, currently experimental herdr, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -153,17 +153,18 @@ fm_backend_source() {  # <name>
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
 # selector to a live session-provider target. Three forms, in order:
-#   "session:window"  used as-is (the escape hatch for a window outside this
-#                      firstmate home) - backend-independent, a literal string.
+#   target with ":"   used as-is (the escape hatch for a window/pane outside
+#                      this firstmate home) - backend-independent, a literal string.
 #   "fm-<id>"          routed through <state-dir>/<id>.meta's `window=` field -
 #                      backend-independent, a stored value, NOT re-verified
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
 #                      without a live re-check).
 #   anything else      an ad hoc bare window name with no meta, resolved by
-#                      searching the DEFAULT backend's live inventory (tmux in
-#                      P1) - the one form that is genuinely backend-specific,
-#                      because it has to enumerate live sessions.
+#                      searching the legacy tmux live inventory. This remains
+#                      the compatibility fallback; herdr tasks should be
+#                      targeted by fm-<id> metadata or an explicit recorded
+#                      target.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 meta window
   case "$raw" in
@@ -193,8 +194,8 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 #
 # Thin case-dispatch wrappers so a caller names an operation and a backend
 # rather than hand-writing `case "$backend" in tmux) fm_backend_tmux_x ;; esac`
-# at every call site. P1 has exactly one backend, so every case has one arm;
-# a future backend adds its own arm here, never changes a call site.
+# at every call site. Each verified backend adds its own arm here, without
+# changing call sites.
 
 # fm_backend_capture: bounded plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines>
