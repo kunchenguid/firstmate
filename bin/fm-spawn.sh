@@ -914,8 +914,7 @@ META_WINDOW=$T
 # silently skip the pipeline run (bin/fm-nm-gate.sh). The gate is shared by the
 # main clone and every worktree of it, so refreshing the main clone (PROJ_ABS)
 # heals the one bare repo the worktree pushes to. Best-effort and
-# timeout-bounded (FM_NM_GATE_TIMEOUT seconds, default 10, same portable
-# background-and-poll pattern as bootstrap's fleet-sync bound): a failure or a
+# timeout-bounded (FM_NM_GATE_TIMEOUT seconds, default 10): a failure or a
 # hung `no-mistakes init` warns to stderr instead of stalling the spawn, and
 # its status line stays off this script's parseable stdout.
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -927,9 +926,11 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null &
   NM_GATE_PID=$!
   NM_GATE_START=$SECONDS
-  while jobs -r -p | grep -qx "$NM_GATE_PID"; do
+  while kill -0 "$NM_GATE_PID" 2>/dev/null; do
     if [ $((SECONDS - NM_GATE_START)) -ge "$NM_GATE_TIMEOUT" ]; then
       kill -TERM "-$NM_GATE_PID" 2>/dev/null || kill "$NM_GATE_PID" 2>/dev/null || true
+      sleep 0.2
+      kill -KILL "-$NM_GATE_PID" 2>/dev/null || kill -KILL "$NM_GATE_PID" 2>/dev/null || true
       echo "warning: no-mistakes gate refresh timed out after ${NM_GATE_TIMEOUT}s; gate may be stale" >&2
       break
     fi

@@ -55,6 +55,62 @@ make_repo() {  # <dir> [origin-bare]
   fi
 }
 
+make_spawn_fakebin() {  # <dir> -> echoes fakebin path
+  local dir=$1 fb
+  fb=$(fm_fakebin "$dir")
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+make_stalling_gate_root() {  # <dir> -> echoes fake firstmate root
+  local dir=$1 root="$1/fm-root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-project-mode.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "no-mistakes off"
+SH
+  cat > "$root/bin/fm-nm-gate.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+kill -STOP $$
+while :; do sleep 10; done
+SH
+  chmod +x "$root/bin/fm-project-mode.sh" "$root/bin/fm-nm-gate.sh"
+  printf '%s\n' "$root"
+}
+
+run_with_timeout() {  # <seconds> <command> [args...]
+  perl -e '
+my $t = shift;
+my $pid = fork;
+die "fork failed" unless defined $pid;
+if (!$pid) { setpgrp(0, 0); exec @ARGV; die "exec failed: $!" }
+local $SIG{ALRM} = sub {
+  kill "TERM", -$pid;
+  select undef, undef, undef, 0.2;
+  kill "KILL", -$pid;
+  exit 124;
+};
+alarm $t;
+waitpid $pid, 0;
+exit($? >> 8);
+' "$@"
+}
+
 # (a) no arg -> usage error, exit 2
 out=$("$NM_GATE" 2>&1); rc=$?
 expect_code 2 "$rc" "no-arg should exit 2"
@@ -101,4 +157,38 @@ out=$(PATH="$FB:$PATH" FM_FAKE_NM_INIT_RC=1 "$NM_GATE" "$WITHORIGIN" 2>&1); rc=$
 expect_code 0 "$rc" "init failure must stay non-fatal (exit 0)"
 assert_contains "$out" "warning" "init failure should warn"
 
-pass "fm-nm-gate.sh: usage, skip, refresh, and non-fatal failure paths hold"
+# (h) fm-spawn's gate refresh timeout kills a stalled helper and still spawns
+SPAWN_CASE="$TMP_ROOT/spawn-timeout"
+SPAWN_HOME="$SPAWN_CASE/home"
+SPAWN_PROJ="$SPAWN_CASE/project"
+SPAWN_WT="$SPAWN_CASE/wt"
+SPAWN_ID="nm-gate-timeout-z1"
+mkdir -p "$SPAWN_HOME/data/$SPAWN_ID" "$SPAWN_HOME/state" "$SPAWN_HOME/config" "$SPAWN_HOME/projects"
+printf 'brief\n' > "$SPAWN_HOME/data/$SPAWN_ID/brief.md"
+fm_git_worktree "$SPAWN_PROJ" "$SPAWN_WT" "wt-$SPAWN_ID"
+SPAWN_FAKEBIN=$(make_spawn_fakebin "$SPAWN_CASE/fake")
+STALLING_ROOT=$(make_stalling_gate_root "$SPAWN_CASE")
+out=$(
+  export PATH="$SPAWN_FAKEBIN:$PATH"
+  export FM_ROOT_OVERRIDE="$STALLING_ROOT"
+  export FM_HOME="$SPAWN_HOME"
+  export FM_STATE_OVERRIDE="$SPAWN_HOME/state"
+  export FM_DATA_OVERRIDE="$SPAWN_HOME/data"
+  export FM_PROJECTS_OVERRIDE="$SPAWN_HOME/projects"
+  export FM_CONFIG_OVERRIDE="$SPAWN_HOME/config"
+  export FM_SPAWN_NO_GUARD=1
+  export TMUX="fake,1,0"
+  export FM_FAKE_PANE_PATH="$SPAWN_WT"
+  export FM_NM_GATE_TIMEOUT=1
+  run_with_timeout 5 "$ROOT/bin/fm-spawn.sh" "$SPAWN_ID" "$SPAWN_PROJ" codex 2>&1
+); rc=$?
+expect_code 0 "$rc" "spawn gate timeout should not hang"$'\n'"$out"
+assert_contains "$out" "warning: no-mistakes gate refresh timed out after 1s; gate may be stale" \
+  "spawn should warn on gate timeout"
+assert_contains "$out" "spawned $SPAWN_ID harness=codex kind=ship mode=no-mistakes" \
+  "spawn should continue after gate timeout"
+assert_present "$SPAWN_HOME/state/$SPAWN_ID.meta" "spawn should write meta after gate timeout"
+assert_no_grep "jobs -r -p" "$ROOT/bin/fm-spawn.sh" "gate timeout must not depend on running job state"
+rm -rf "/tmp/fm-$SPAWN_ID"
+
+pass "fm-nm-gate.sh: usage, skip, refresh, non-fatal failure, and spawn timeout paths hold"
