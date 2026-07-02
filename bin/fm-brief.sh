@@ -171,54 +171,26 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Only the mode-specific Setup/Rule-1 text is prepared here. The Definition of
+# done is appended to the brief after the common body (see below) with a plain
+# `cat >> "$BRIEF" <<EOF`, NOT captured via `DOD=$(cat <<EOF ... EOF)`: bash 3.2
+# mis-parses a single quote inside a heredoc body nested in $(...) command
+# substitution (the no-mistakes DOD contains apostrophes), which aborts the
+# whole script. Writing the heredoc directly into the brief avoids that pattern
+# entirely while keeping any future apostrophe safe.
 case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
-EOF
-)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
-EOF
-)
     ;;
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow no-mistakes' own guidance for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
-
-After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
-EOF
-)
     ;;
 esac
 
@@ -257,6 +229,49 @@ If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durab
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
 EOF
+
+# Append the mode-specific Definition of done directly into the brief. This
+# heredoc is NOT wrapped in $(...) command substitution, so an apostrophe in the
+# body (e.g. the no-mistakes text) is safe on bash 3.2 as well as modern bash.
+case "$MODE" in
+  direct-PR)
+    cat >> "$BRIEF" <<EOF
+# Definition of done
+This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+EOF
+    ;;
+  local-only)
+    cat >> "$BRIEF" <<EOF
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+EOF
+    ;;
+  *)  # no-mistakes (default)
+    cat >> "$BRIEF" <<EOF
+# Definition of done
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+
+You drive no-mistakes by responding to its gates, not by implementing fixes.
+Follow no-mistakes' own guidance for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+Two firstmate-specific rules layer on top of that guidance:
+- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+
+After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+    ;;
+esac
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
