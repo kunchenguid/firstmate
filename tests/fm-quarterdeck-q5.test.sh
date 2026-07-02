@@ -40,6 +40,7 @@ fm_verdict_append "$S" q5task reject "(attempt 1 of 3) seeded"
 out=$("$ROOT/bin/fm-verify.sh" q5task 2>&1); code=$?
 V=$(fm_verdict_file "$S" q5task)
 expect_code 3 "$code" "third reject must exit 3 (escalate)"
+assert_grep "reject: (attempt 3 of 3)" "$V" "third reject line recorded before the escalate"
 assert_grep "escalate: attempt cap reached" "$V" "escalate line recorded at the cap"
 [ "$(fm_verdict_last "$S" q5task)" = escalate ] || fail "last decision must be escalate"
 
