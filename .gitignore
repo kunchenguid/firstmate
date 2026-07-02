@@ -9,4 +9,5 @@ config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
 config/backlog-backend
+config/backend
 config/x-mode.env
