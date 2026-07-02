@@ -87,6 +87,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+PR comment watching also needs `jq` when enabled; the poller reports `pr-comment-watch-error missing jq` until it is available.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
 If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations.
 When it is absent or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and firstmate keeps hand-editing `data/backlog.md` until installation is approved and completed.
@@ -146,6 +147,18 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## PR comment watching
+
+PR comment watching is enabled per home with `bin/fm-pr-comments.sh enable all` or `bin/fm-pr-comments.sh enable <task-id>`.
+Activation primes currently visible comments first, then writes `state/pr-comments.check.sh` so the normal watcher check loop runs `bin/fm-pr-comments-poll.sh --enabled`.
+Disable it with `bin/fm-pr-comments.sh disable all` or exclude one task under all-scope with `bin/fm-pr-comments.sh disable <task-id>`.
+Manual one-shot polling is available through `bin/fm-pr-comments.sh poll all` or `bin/fm-pr-comments.sh poll <task-id>`.
+
+The poller discovers PRs from `state/*.meta` `pr=` entries, then reads issue comments, review comments, and review bodies through `gh api`.
+It stores only event ids under `state/.pr-comments/seen/` plus small error and lock markers; comment bodies are sent to the target task window and are not persisted in state.
+New events are marked seen only after a successful `fm-send.sh` injection, and bot/self comments are marked seen without injection to prevent feedback loops.
+See [pr-comment-watching.md](pr-comment-watching.md) for the operator guide.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -171,6 +184,14 @@ FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-ou
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-tweet split budget; values below 50 clamp to 50
 FMX_X_THREAD_MAX=25     # maximum tweets in one auto-split X reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=86400   # local window for posting one X completion follow-up
+FM_PR_COMMENTS_GH=gh    # GitHub CLI command used by PR comment polling
+FM_PR_COMMENTS_SEND=$FM_ROOT/bin/fm-send.sh   # sender used to inject PR feedback into task windows
+FM_PR_COMMENTS_SELF_LOGIN=   # optional authenticated login override for self-comment filtering
+FM_PR_COMMENTS_IGNORE_AUTH_USER=1   # set 0 to inject comments from the authenticated GitHub user
+FM_PR_COMMENTS_MAX_BODY_CHARS=12000   # max reviewer body chars copied into one injected feedback message
+FM_PR_COMMENTS_MAX_MESSAGE_CHARS=14000   # max single-line message chars sent through fm-send
+FM_PR_COMMENTS_LOCK_STALE_SECS=900   # seconds before an abandoned per-task PR comment poll lock can be reaped
+FM_PR_COMMENTS_MAX_TASKS_PER_POLL=4   # enabled PR comment watcher tasks processed per check cycle; 0 means all
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
