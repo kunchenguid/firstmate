@@ -324,13 +324,13 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","grok","cursor"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif ($h == "codex" or $h == "grok" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
-      elif $h == "opencode" then false
+      elif ($h == "opencode" or $h == "cursor") then false
       else true
       end;
     def bad_efforts:

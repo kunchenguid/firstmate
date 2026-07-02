@@ -198,7 +198,7 @@ If the captain expresses a standing dispatch preference such as "use grok for ne
 Crewmates default to the same harness you are running on.
 The captain may override the static default at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single adapter name; absent or `default` means mirror your own harness).
 Resolve `default` with `bin/fm-harness.sh`; resolve the active static crewmate harness with `bin/fm-harness.sh crew`.
-Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
+Verified adapter names are `claude`, `codex`, `opencode`, `pi`, `grok`, and `cursor`.
 
 ### Crew dispatch profiles
 
@@ -260,6 +260,7 @@ The verified profile axes are:
 - `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high|xhigh>`; `max` is not passed because Grok rejects it for `--reasoning-effort`.
 - `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh>`; `max` is not passed because the installed Pi CLI warns that it is invalid.
 - `opencode`: model via `--model <provider/model>`; no verified effort flag for firstmate's interactive `opencode --prompt` launch, so effort is not passed.
+- `cursor`: model via `--model <id>` (cursor-specific vocabulary such as `auto`, `composer-2.5-fast`, `claude-opus-4-8-high`); no separate effort flag is passed because effort is folded into the model id (suffix `-low/-medium/-high/-xhigh/-max`, or bracket override `'id[effort=high]'`), so a requested effort is recorded in meta for traceability but not emitted as a flag (verified cursor-agent 2026.07.01-41b2de7).
 
 If the selected profile asks for an effort value the selected harness does not accept, `fm-spawn` records the requested `effort=` in meta for traceability but omits the launch flag so the harness starts successfully.
 Bootstrap reports this as a `CREW_DISPATCH` diagnostic when it can see the invalid harness/effort pair in `config/crew-dispatch.json`.

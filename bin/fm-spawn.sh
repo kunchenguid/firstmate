@@ -194,7 +194,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -255,6 +255,18 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (cursor-agent TUI): a positional prompt starts the supervised
+    # interactive session. --yolo (alias of --force, "Run Everything") auto-
+    # approves every tool execution, which an unattended crewmate needs; it is the
+    # targeted equivalent of claude's --dangerously-skip-permissions. cursor's
+    # turn-end signal rides a Stop hook in the shared ~/.cursor/hooks.json,
+    # installed additively below (merged with cmux's entries, guarded by a per-task
+    # token pointer), so the template is identical for ship/scout/secondmate. There
+    # is NO separate effort flag: effort is folded into the model id (suffix
+    # -low/-medium/-high/-xhigh/-max or bracket override 'id[effort=high]'), so
+    # __EFFORTFLAG__ stays empty for cursor until a model-id-suffix mapping exists;
+    # the requested effort is recorded in meta for traceability.
+    cursor) printf '%s' 'cursor-agent --yolo __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -342,7 +354,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -383,11 +395,54 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    #
+    # cursor has no separate effort/reasoning flag in interactive mode. Effort is
+    # encoded in the model id itself (suffix -low/-medium/-high/-xhigh/-max, or the
+    # bracket override 'id[effort=high]'). firstmate's dispatch-profile effort axis
+    # would therefore map to an effort-suffixed model id, not a flag; until that
+    # model-id-suffix mapping exists, fm-spawn emits no effort flag for cursor and
+    # the requested effort is recorded in meta for traceability (verified
+    # cursor-agent 2026.07.01-41b2de7).
   esac
 }
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# fm_cursor_merge_hooks <hooks.json> <json-escaped command>
+# Merge firstmate's stop hook into the SHARED ~/.cursor/hooks.json additively and
+# idempotently. The file is shared with cmux and already holds cmux's own entries,
+# so this NEVER clobbers existing hooks: it backs up the file, ensures the top-level
+# {"hooks": ...,"version":1} shape exists, and adds exactly one stop entry whose
+# command is the firstmate guard script - but only if a stop entry with that exact
+# firstmate command is not already present (the idempotency key). Other stop entries
+# (cmux's or the captain's) are left intact. Re-running spawn for any task produces
+# the same single firstmate entry; the per-task gate lives in the command, not here.
+fm_cursor_merge_hooks() {
+  local hooks_file=$1 fm_command=$2
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "warning: jq not found; cannot install cursor turn-end hook into $hooks_file" >&2
+    return 0
+  fi
+  [ -f "$hooks_file" ] || printf '{"hooks":{},"version":1}\n' > "$hooks_file"
+  cp -p "$hooks_file" "$hooks_file.fm-bak" 2>/dev/null || true
+  local tmp
+  tmp=$(mktemp) || return 0
+  if jq --arg cmd "$fm_command" '
+      ( . + {"version":1} ) as $base
+      | ($base.hooks // {}) as $h
+      | ($h.stop // []) as $stops
+      | ($stops | map(select(.hooks // [] | any(.command == $cmd))) | length) as $have
+      | (if $have > 0 then $stops
+         else $stops + [{"hooks":[{"type":"command","command":$cmd}]}] end) as $newstops
+      | $base + {"hooks":($h + {"stop":$newstops})}
+    ' "$hooks_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$hooks_file"
+  else
+    rm -f "$tmp"
+    echo "warning: cursor hooks merge failed; left $hooks_file untouched" >&2
+  fi
 }
 
 resolved_existing_dir() {
@@ -781,6 +836,57 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    cursor*)
+      # cursor fires a stop hook at every turn boundary (verified,
+      # cursor-agent 2026.07.01: 2 turns -> 2 stop fires), the clean equivalent of
+      # claude's Stop / codex's notify= / grok's Stop. But unlike grok's private
+      # ~/.grok/hooks/ tree, cursor's ONLY hook file is ~/.cursor/hooks.json,
+      # which is SHARED with cmux and already holds cmux's own stop /
+      # afterAgentResponse / beforeSubmitPrompt / beforeShellExecution /
+      # afterShellExecution entries. So firstmate jq-MERGES its stop command in
+      # additively and idempotently (back up -> merge keyed by a firstmate marker
+      # so re-runs never duplicate -> never clobber cmux's entries), and gates it
+      # as a no-op for every non-firstmate cursor session with the SAME per-task
+      # token-pointer scheme grok uses: the command fires only when the current
+      # workspace holds a .fm-cursor-turnend token pointer that matches the
+      # firstmate-owned hook registry. Result: cmux's hooks are untouched, and
+      # firstmate's hook never fires for cmux-driven or the captain's own cursor
+      # sessions. cursor's hook cwd is the workspace, so the guard resolves the
+      # workspace from CURSOR_WORKSPACE_ROOT (if set) or pwd, then reads the
+      # pointer; it does not depend on cursor setting a workspace env var.
+      CURSOR_HOOKS_FILE="$HOME/.cursor/hooks.json"
+      CURSOR_AUTH_DIR="$HOME/.cursor/fm-turn-end.d"
+      mkdir -p "$CURSOR_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
+      sq_cursor_auth_dir=$(shell_quote "$CURSOR_AUTH_DIR")
+      cat > "$CURSOR_AUTH_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_cursor_auth_dir
+workspace=\${CURSOR_WORKSPACE_ROOT:-\$PWD}
+p="\$workspace/.fm-cursor-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$CURSOR_AUTH_DIR/fm-turn-end.sh"
+      hook_command=$(json_escape "bash $(shell_quote "$CURSOR_AUTH_DIR/fm-turn-end.sh")")
+      fm_cursor_merge_hooks "$CURSOR_HOOKS_FILE" "$hook_command"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
+      exclude_path '.fm-cursor-turnend'
       ;;
   esac
 fi

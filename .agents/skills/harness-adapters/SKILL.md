@@ -55,6 +55,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <id>` | none — encoded in model id | Verified on cursor-agent 2026.07.01-41b2de7. No separate effort flag; effort folds into the model id (suffix `-low/-medium/-high/-xhigh/-max`, or bracket `'id[effort=high]'`). `fm-spawn` records the requested effort in meta but emits no effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -69,6 +70,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending; `fm_tmux_submit_core`'s retried Enter (used by `fm-send`) lands it.
+- cursor: `/<skill>`, for example `/no-mistakes` (same form as claude/grok). cursor auto-discovers the workspace's `.agents/skills/` as `/`-commands (verified cursor-agent 2026.07.01). Note: the user-level `no-mistakes` skill was NOT present in `~/.cursor/skills/` at probe time, so confirm `/no-mistakes` resolves on cursor (cursor may need it symlinked into `~/.cursor/skills/`); natural language is the fallback.
 
 ## claude (VERIFIED)
 
@@ -177,3 +179,36 @@ The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals 
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+## cursor (VERIFIED 2026-07-02, cursor-agent 2026.07.01-41b2de7)
+
+`cursor-agent` (Cursor CLI). Launch with a positional prompt: `cursor-agent --yolo "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (right-aligned on the `→ Add a follow-up` composer input line, shown iff a turn is running; idle shows that line bare, no suffix). The spinner line is a braille glyph + `<verb>` + `N.NNk tokens` (e.g. `⠘⠤ Working`, `⠰⠳ Editing 55 tokens`); the glyph rotates so match the ASCII `ctrl+c to stop`, never the spinner. |
+| Exit command | `Ctrl+D` (cleanly exits `node`→shell; `/exit`/`/quit` exist but their slash-autocomplete is menu-finicky under `tmux send-keys`). On exit prints `To resume this session: agent --resume=<chatId>`. |
+| Interrupt | single `Ctrl+C` (cancels the current turn, session survives). `Esc` dismisses the `/`-command menu but does not interrupt. |
+| Autonomy | `--yolo` (alias of `--force`; status bar shows `Run Everything`). Auto-approves every command unless explicitly denied. |
+| Env marker | `CURSOR_AGENT=1`, set for child/tool processes (the cursor analog of claude's `CLAUDECODE`). Also sets `CURSOR_INVOKED_AS=cursor-agent`, `CURSOR_CONVERSATION_ID=<uuid>`. |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same as claude/grok. Workspace `.agents/skills/` is auto-discovered as `/`-commands. |
+| Resume | `cursor-agent --resume=<chatId>` (id printed on exit) or `--continue`. |
+
+Trust dialog: first launch in an untrusted workspace shows a bordered "Workspace Trust Required" dialog.
+Accept with `a` (or arrow+Enter on the highlighted row); reject with `q`.
+Trust persists per workspace path, so a re-launch in the same path does not re-prompt, but a fresh worktree path prompts anew.
+After every spawn, peek the pane within ~20 seconds and accept with `bin/fm-send.sh <window> --key a` if the dialog is showing.
+Headless `--print` mode skips the dialog entirely with `--trust` (see future fallback below).
+
+Turn-end hook: cursor fires a `stop` hook at every turn boundary (verified: 2 turns → 2 fires), the clean equivalent of claude's Stop / grok's Stop.
+But unlike grok's private `~/.grok/hooks/` tree, cursor's ONLY hook file is `~/.cursor/hooks.json`, which is SHARED with cmux and already holds cmux's own `stop`/`afterAgentResponse`/`beforeSubmitPrompt`/`beforeShellExecution`/`afterShellExecution` entries.
+So `fm-spawn` `jq`-MERGES firstmate's `stop` command in additively and idempotently (back up → merge keyed by the exact firstmate command so re-runs never duplicate → never clobber cmux's entries) and gates it as a no-op for every non-firstmate cursor session with the same per-task token-pointer scheme grok uses.
+The guard command fires only when the current workspace holds a `.fm-cursor-turnend` token pointer that matches the firstmate-owned registry under `~/.cursor/fm-turn-end.d/`; it resolves the workspace from `CURSOR_WORKSPACE_ROOT` (if set) or `pwd`, so it does not depend on cursor setting a workspace env var.
+`fm-spawn` writes that per-task pointer (`<worktree>/.fm-cursor-turnend`, gitignored via git `info/exclude`) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+`fm-teardown` removes the worktree pointer and the per-task registry entry, but deliberately LEAVES the shared `~/.cursor/hooks.json` entry in place: it is idempotent and gated, so once the pointer is gone it is a safe no-op for every other cursor session (cmux's or a future firstmate task).
+This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files (firstmate never clobbers cmux's entries, so it never removes a shared entry wholesale either).
+Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+Future fallback (not wired today): if the interactive TUI proves too finicky under real supervision (multi-key submit / follow-up prompts via `tmux send-keys` are unreliable and the composer can wedge), cursor-agent has a verified headless mode: `cursor-agent --print --yolo --trust [--output-format json] "<prompt>"` runs one agent turn to stdout and exits 0 cleanly, with `--output-format json` giving structured per-turn output instead of pane-scraping.
+firstmate's interactive TUI launch matches the other five adapters today; headless `--print` is documented here as the documented fallback path if TUI reliability becomes a blocker in real supervision.
+
