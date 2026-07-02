@@ -92,17 +92,110 @@ test_backend_name_precedence() {
   dir="$TMP_ROOT/name-precedence"; cfg="$dir/config"
   mkdir -p "$cfg"
 
-  [ "$(FM_BACKEND='' FM_CONFIG_OVERRIDE="$cfg" fm_backend_name)" = tmux ] \
-    || fail "fm_backend_name should default to tmux with no env/config"
+  # TMUX/HERDR_ENV explicitly unset in a subshell so this stays deterministic
+  # regardless of the runtime this test suite itself happens to execute inside
+  # (e.g. a real tmux pane, which is the normal case for a captain's session).
+  # fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at fm-backend.sh
+  # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
+  # on the function call itself does not re-bind it, so these calls set
+  # FM_BACKEND_CONFIG_DIR directly.
+  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+    || fail "fm_backend_name should default to tmux with no env/config/detection markers"
 
   printf 'tmux\n' > "$cfg/backend"
-  [ "$(FM_BACKEND='' FM_CONFIG_OVERRIDE="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should read config/backend"
 
-  [ "$(FM_BACKEND=tmux FM_CONFIG_OVERRIDE="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
   pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
+}
+
+# fm_backend_detect: environment-marker runtime auto-detection (mirrors
+# fm-harness.sh's detect_own layer). Every case explicitly controls both TMUX
+# and HERDR_ENV so results never depend on the ambient shell this suite runs
+# inside.
+test_backend_detect_precedence() {
+  local out
+
+  if out=$(unset TMUX HERDR_ENV; fm_backend_detect); then
+    fail "fm_backend_detect should return 1 (undetected) with no markers set, got '$out'"
+  fi
+
+  out=$(unset TMUX; HERDR_ENV=1 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed when HERDR_ENV=1"
+  [ "$out" = herdr ] || fail "fm_backend_detect should report herdr for HERDR_ENV=1 alone, got '$out'"
+
+  out=$(unset HERDR_ENV; TMUX='fake,1,0' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed when \$TMUX is set"
+  [ "$out" = tmux ] || fail "fm_backend_detect should report tmux for \$TMUX alone, got '$out'"
+
+  # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
+  # (tmux) must win, since that is the surface firstmate is actually running on.
+  out=$(TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with both markers present"
+  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
+
+  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, both (tmux nested in herdr) -> tmux wins"
+}
+
+# fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
+# are both absent, selects between the two markers exactly as fm_backend_detect
+# does, and is loud only when it selects herdr - never when it selects tmux
+# (today's default-path behavior must stay byte-for-byte silent).
+test_backend_name_autodetect_notice() {
+  local dir cfg out errfile
+
+  dir="$TMP_ROOT/name-autodetect"; cfg="$dir/config-empty"; mkdir -p "$cfg"
+  errfile="$dir/err.txt"
+
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
+  [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
+
+  : > "$errfile"
+  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
+  assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
+    "fm_backend_name did not print a loud notice when auto-detecting herdr"
+  assert_contains "$(cat "$errfile")" "config/backend" \
+    "fm_backend_name's auto-detect notice did not name the opt-out"
+
+  : > "$errfile"
+  out=$(unset HERDR_ENV; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "fm_backend_name should auto-detect tmux from \$TMUX, got '$out'"
+  [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (today's unchanged default-path behavior)"$'\n'"$(cat "$errfile")"
+
+  : > "$errfile"
+  out=$(TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "nested tmux-in-herdr should auto-detect tmux (innermost first), got '$out'"
+  [ -s "$errfile" ] && fail "nested tmux-in-herdr auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
+
+  pass "fm_backend_name: auto-detect selects herdr (loud notice) or tmux (silent, including nested tmux-in-herdr)"
+}
+
+# Explicit configuration (FM_BACKEND env or config/backend) always wins over
+# runtime auto-detection, even when a detection marker points the other way.
+test_backend_name_explicit_beats_detection() {
+  local dir cfg out
+
+  dir="$TMP_ROOT/name-explicit-beats-detect"
+  cfg="$dir/config-tmux"; mkdir -p "$cfg"; printf 'tmux\n' > "$cfg/backend"
+  mkdir -p "$dir/config-empty"
+
+  # fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at fm-backend.sh
+  # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
+  # on the function call itself does not re-bind it, so these calls set
+  # FM_BACKEND_CONFIG_DIR directly to control which config dir is checked.
+  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND=tmux should win over an ambient HERDR_ENV=1 auto-detect marker, got '$out'"
+
+  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient HERDR_ENV=1 auto-detect marker, got '$out'"
+
+  pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection"
 }
 
 test_backend_validate_refuses_unknown() {
@@ -499,7 +592,64 @@ test_spawn_default_backend_writes_no_meta_field() {
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
+test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
+  local proj wt data id state config out fb
+  proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
+  id="explicitbackendz4"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
+  mkdir -p "$state" "$config"
+
+  # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
+  # but an explicit --backend tmux flag must still win outright.
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
+    FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
+  expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
+  assert_no_grep 'backend=' "$state/$id.meta" \
+    "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: explicit --backend tmux wins over an ambient HERDR_ENV=1 auto-detect marker"
+}
+
+test_spawn_autodetect_nesting_resolves_tmux_silently() {
+  local proj wt data id state config out fb
+  proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
+  id="nestbackendz5"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
+  mkdir -p "$state" "$config"
+
+  # No --backend, no FM_BACKEND, no config/backend: nothing is explicitly
+  # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present
+  # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
+  # fm_backend_name, must resolve this to tmux and stay completely silent about
+  # it (today's default path, byte-identical).
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
+    FM_TMUX_LOG="$TMP_ROOT/nest.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1)
+  expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
+  assert_no_grep 'backend=' "$state/$id.meta" \
+    "auto-detected nested tmux-in-herdr must resolve to tmux (missing backend= means tmux)"
+  case "$out" in
+    *NOTICE*) fail "auto-detecting tmux (even nested inside herdr) must stay silent, no NOTICE expected"$'\n'"$out" ;;
+  esac
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
+}
+
 test_backend_name_precedence
+test_backend_detect_precedence
+test_backend_name_autodetect_notice
+test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
@@ -511,3 +661,5 @@ test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
+test_spawn_autodetect_nesting_resolves_tmux_silently

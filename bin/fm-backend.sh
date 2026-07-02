@@ -51,14 +51,40 @@ fm_backend_is_known() {  # <name>
   return 1
 }
 
+# fm_backend_detect: detect the runtime firstmate itself is CURRENTLY executing
+# inside, from verified environment markers (mirrors bin/fm-harness.sh's
+# env-marker detection layer for harnesses). Prints the detected backend name
+# and returns 0, or returns 1 when nothing is detected. Nesting resolves
+# INNERMOST-first: tmux sets $TMUX in every process running inside it, even a
+# tmux started inside a herdr pane, so $TMUX is checked first and wins over
+# HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
+# HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process it manages a pane for;
+# HERDR_ENV=1 alone (no $TMUX) selects herdr. Both markers empirically verified
+# on the reference dev machine.
+fm_backend_detect() {
+  if [ -n "${TMUX:-}" ]; then
+    printf 'tmux'
+    return 0
+  fi
+  if [ "${HERDR_ENV:-}" = "1" ]; then
+    printf 'herdr'
+    return 0
+  fi
+  return 1
+}
+
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
 # explicit per-task override. Precedence: FM_BACKEND env, then config/backend
 # (a single word on its first non-empty line, mirroring config/crew-harness),
-# then default tmux. A per-task `--backend` flag is parsed by the caller
-# (fm-spawn.sh) and takes precedence over this resolution entirely; it is not
-# read here.
+# then runtime auto-detection (fm_backend_detect), then default tmux. A
+# per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
+# precedence over this resolution entirely; it is not read here. Auto-detect
+# fires only when nothing was explicitly configured, so an explicit setting
+# always wins. Selecting herdr via auto-detect prints one loud stderr notice
+# (it is experimental); auto-detecting tmux stays silent - it is today's
+# default-path behavior and callers must see zero change.
 fm_backend_name() {
-  local line v
+  local line v detected
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
     return 0
@@ -71,6 +97,13 @@ fm_backend_name() {
         return 0
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
+  fi
+  if detected=$(fm_backend_detect); then
+    if [ "$detected" = herdr ]; then
+      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
+    printf '%s' "$detected"
+    return 0
   fi
   printf 'tmux'
 }
