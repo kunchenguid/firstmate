@@ -35,6 +35,10 @@ fm_preview_slug() {
   printf '%s' "$1" | tr '/[:space:]' '--' | tr -cd 'A-Za-z0-9._-' | sed 's/^-*//; s/-*$//; s/--*/-/g'
 }
 
+fm_preview_path_hash() {
+  printf '%s' "$1" | cksum | awk '{printf "%x\n", $1}'
+}
+
 fm_preview_project_path() {
   local arg=$1
   case "$arg" in
@@ -96,9 +100,10 @@ fm_preview_pid_sig() {
 }
 
 fm_preview_stop_role() {
-  local meta=$1 role=$2 pid pgid sig current
+  local meta=$1 role=$2 pid pgid isolated sig current
   pid=$(fm_preview_meta_get "$meta" "${role}_pid")
   pgid=$(fm_preview_meta_get "$meta" "${role}_pgid")
+  isolated=$(fm_preview_meta_get "$meta" "${role}_pgid_isolated")
   sig=$(fm_preview_meta_get "$meta" "${role}_sig")
   [ -n "$pid" ] || return 0
   kill -0 "$pid" 2>/dev/null || return 0
@@ -107,19 +112,27 @@ fm_preview_stop_role() {
     echo "skip: recorded $role pid $pid is no longer the owned preview process" >&2
     return 0
   fi
-  if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+  if [ "$isolated" = 1 ] && [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
     kill -TERM "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   else
     kill -TERM "$pid" 2>/dev/null || true
   fi
   sleep 1
   if kill -0 "$pid" 2>/dev/null; then
-    if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+    if [ "$isolated" = 1 ] && [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
       kill -KILL "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
     else
       kill -KILL "$pid" 2>/dev/null || true
     fi
   fi
+}
+
+fm_preview_cleanup_started() {
+  local meta=$1 role
+  shift
+  for role in "$@"; do
+    fm_preview_stop_role "$meta" "$role"
+  done
 }
 
 fm_preview_json_field() {
@@ -246,9 +259,11 @@ fm_preview_wait_url() {
 }
 
 fm_preview_start_process() {
-  local id=$1 role=$2 dir=$3 cmd=$4 port=$5 backend_port=$6 frontend_port=$7 log=$8 pid pgid sig
+  local id=$1 role=$2 dir=$3 cmd=$4 port=$5 backend_port=$6 frontend_port=$7 log=$8 pid pgid isolated sig
   mkdir -p "$(dirname "$log")"
+  isolated=0
   if command -v setsid >/dev/null 2>&1; then
+    isolated=1
     setsid sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh "$dir" \
       env FM_PREVIEW_ID="$id" PORT="$port" BACKEND_PORT="$backend_port" FRONTEND_PORT="$frontend_port" \
       VITE_BACKEND_URL="http://127.0.0.1:$backend_port" VITE_API_URL="http://127.0.0.1:$backend_port" API_URL="http://127.0.0.1:$backend_port" \
@@ -264,13 +279,14 @@ fm_preview_start_process() {
   kill -0 "$pid" 2>/dev/null || { echo "error: $role process exited early; see $log" >&2; return 1; }
   pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | awk '{print $1}' || true)
   sig=$(fm_preview_pid_sig "$pid")
-  printf '%s_pid=%s\n%s_pgid=%s\n%s_sig=%s\n%s_log=%s\n' "$role" "$pid" "$role" "${pgid:-}" "$role" "$sig" "$role" "$log"
+  printf '%s_pid=%s\n%s_pgid=%s\n%s_pgid_isolated=%s\n%s_sig=%s\n%s_log=%s\n' "$role" "$pid" "$role" "${pgid:-}" "$role" "$isolated" "$role" "$sig" "$role" "$log"
 }
 
 fm_preview_main() {
-  local project_arg pr open_path=/ expects=() want= project project_name project_slug preview_id state_dir meta wt
+  local project_arg pr open_path=/ expects=() want= project project_name project_slug project_hash preview_id state_dir meta wt
   local repo pr_json branch head stable backend_desired frontend_desired backend_port frontend_port
   local backend_dir frontend_dir backend_cmd frontend_cmd backend_script frontend_script frontend_url backend_url ready tmp_meta
+  local cleanup_roles=()
 
   [ "$#" -ge 2 ] || { fm_preview_usage; return 2; }
   project_arg=$1
@@ -307,7 +323,8 @@ fm_preview_main() {
   project=$(fm_preview_project_path "$project_arg")
   project_name=$(basename "$project")
   project_slug=$(fm_preview_slug "$project_name")
-  preview_id="${project_slug}-pr${pr}"
+  project_hash=$(fm_preview_path_hash "$project")
+  preview_id="${project_slug}-${project_hash}-pr${pr}"
   state_dir="$STATE/previews"
   meta="$state_dir/$preview_id.meta"
   wt="$STATE/preview-worktrees/$preview_id"
@@ -380,16 +397,28 @@ fm_preview_main() {
   } > "$tmp_meta"
   mv "$tmp_meta" "$meta"
   fm_preview_start_process "$preview_id" backend "$backend_dir" "$backend_cmd" "$backend_port" "$backend_port" "$frontend_port" "$state_dir/$preview_id.backend.log" >> "$meta"
-  fm_preview_start_process "$preview_id" frontend "$frontend_dir" "$frontend_cmd" "$frontend_port" "$backend_port" "$frontend_port" "$state_dir/$preview_id.frontend.log" >> "$meta"
+  cleanup_roles=(backend)
+  fm_preview_start_process "$preview_id" frontend "$frontend_dir" "$frontend_cmd" "$frontend_port" "$backend_port" "$frontend_port" "$state_dir/$preview_id.frontend.log" >> "$meta" || {
+    fm_preview_cleanup_started "$meta" "${cleanup_roles[@]}"
+    return 1
+  }
+  cleanup_roles=(frontend backend)
 
   frontend_url="http://127.0.0.1:$frontend_port$open_path"
   backend_url="http://127.0.0.1:$backend_port"
-  fm_preview_wait_url "$backend_url" backend "${FM_PREVIEW_TIMEOUT:-60}"
-  fm_preview_wait_url "$frontend_url" frontend "${FM_PREVIEW_TIMEOUT:-60}"
+  fm_preview_wait_url "$backend_url" backend "${FM_PREVIEW_TIMEOUT:-60}" || {
+    fm_preview_cleanup_started "$meta" "${cleanup_roles[@]}"
+    return 1
+  }
+  fm_preview_wait_url "$frontend_url" frontend "${FM_PREVIEW_TIMEOUT:-60}" || {
+    fm_preview_cleanup_started "$meta" "${cleanup_roles[@]}"
+    return 1
+  }
 
   for want in "${expects[@]}"; do
     if ! curl -fsS --max-time 5 "$frontend_url" | grep -F -- "$want" >/dev/null; then
       echo "error: expected text not found at $frontend_url: $want" >&2
+      fm_preview_cleanup_started "$meta" "${cleanup_roles[@]}"
       return 1
     fi
   done
