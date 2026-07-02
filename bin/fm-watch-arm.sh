@@ -39,6 +39,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# Bash cannot install a trap for a signal that was ignored when the shell
+# started. Some harnesses launch test commands with SIGHUP ignored, so reset HUP
+# once through perl before this script installs its cleanup trap.
+if [ "${FM_WATCH_ARM_HUP_RESET:-0}" != 1 ]; then
+  case "$(trap -p HUP 2>/dev/null || true)" in
+    *"'' SIGHUP"*|*"'' HUP"*)
+      if command -v perl >/dev/null 2>&1; then
+        export FM_WATCH_ARM_HUP_RESET=1
+        exec perl -e '$SIG{HUP} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' "$0" "$@"
+      fi
+      ;;
+  esac
+fi
+unset FM_WATCH_ARM_HUP_RESET
+
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
