@@ -112,7 +112,11 @@ test_bootstrap_line() {
   out=$(run_bootstrap "$repo" | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "bootstrap did not report the tangled branch"
   assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
-  pass "fm-bootstrap: TANGLE problem line fires only for a feature branch in the primary"
+  out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
+  assert_contains "$out" "fm/tangle-bb2" "detect-only bootstrap did not report the tangled branch"
+  assert_contains "$out" "read-only session must leave restore work" "detect-only bootstrap did not explain restore ownership"
+  assert_not_contains "$out" "checkout main" "detect-only bootstrap printed a state-changing restore command"
+  pass "fm-bootstrap: TANGLE problem line fires only for a feature branch and suppresses repair commands in detect-only mode"
 }
 
 # --- GUARD 1a: brief isolation assertion ------------------------------------
