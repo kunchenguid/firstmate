@@ -21,7 +21,10 @@ Goal: make `cursor` a first-class, verified firstmate harness so that both the o
 ## Decisions made during brainstorming
 
 - Scope: both the first mate and the crewmates run on Cursor.
-- Persistence: land the adapter as an upstream PR through firstmate's `no-mistakes` pipeline (survives `/updatefirstmate`, reviewable, benefits everyone).
+- Persistence: local-first.
+  Install and use the adapter locally for a few weeks to prove it out, then open the upstream PR through firstmate's `no-mistakes` pipeline once it is good enough.
+- Preference neutrality: the adapter must not impose one operator's harness preference on others.
+  Some operators rank Claude above Cursor, so detection and defaults must stay neutral (see Detection).
 - Models: tiered via `config/crew-dispatch.json`, heavy work on `claude-opus-4-8-thinking-max`, light work on a faster ZDR-safe tier; the orchestrator runs a lighter ZDR-safe model.
 - Turn-end supervision: a global guarded `stop`-hook, following the grok adapter pattern.
 
@@ -34,15 +37,18 @@ It already establishes the pattern this design reuses: an autonomy flag, a globa
 
 ### 1. Detection (`bin/fm-harness.sh`)
 
-Add a Cursor env-marker check to `detect_own()` placed before the `CLAUDECODE` check:
+Add a Cursor env-marker check to `detect_own()` placed after the existing claude, pi, and grok env markers (not before `CLAUDECODE`):
 
 ```sh
 [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
 ```
 
-Ordering matters as insurance: a Cursor session running a Claude model reports `AI_AGENT=claude-code_...`, and if it ever also exported `CLAUDECODE=1` the existing claude check would win and misdetect the harness.
-Empirically, `CURSOR_AGENT=1` is set for Cursor agent child and tool processes, and `CLAUDECODE` is unset, but the ordering removes the risk regardless.
+Placing it after `CLAUDECODE` keeps detection preference-neutral: the adapter must not impose a "Cursor wins over Claude" default on operators who prefer Claude.
+This is also correct, not just polite.
+Empirically `CURSOR_AGENT=1` is set for Cursor agent processes while `CLAUDECODE` is unset, so the two markers do not co-occur in a normal Cursor session and the ordering does not change the result.
+In the one case where both could be set, a Claude session launched from within a Cursor context, the operator is genuinely in Claude, so resolving to claude is the right answer.
 Add a `*cursor*` case to the process-ancestry backstop as a secondary signal.
+Note that per-operator harness preference is expressed through configuration (`config/crew-harness`, `config/crew-dispatch.json`, and how the operator launches the first mate), not through `detect_own()`, so the adapter changes impose no preference.
 
 Session lock detection is separate and does not use the env marker.
 `bin/fm-lock.sh` defines `HARNESS_RE` and walks process ancestry to find the session-holding harness PID.
@@ -108,7 +114,7 @@ Add a `cursor (VERIFIED <date>)` section recording the busy signature, exit comm
 Derived from a full audit of every place the grok adapter touches the code.
 Each item must gain a `cursor` arm:
 
-- `bin/fm-harness.sh`: `CURSOR_AGENT=1` env-marker check before `CLAUDECODE`; `*cursor*` ancestry backstop case.
+- `bin/fm-harness.sh`: `CURSOR_AGENT=1` env-marker check after the existing claude/pi/grok markers (preference-neutral); `*cursor*` ancestry backstop case.
 - `bin/fm-lock.sh`: add the canonical Cursor binary token to `HARNESS_RE` (ancestry-based; required for the first mate to hold the session lock).
 - `bin/fm-spawn.sh`: `launch_template()` cursor case; `model_flag_for_harness()` cursor case; `--secondmate` bare-name list; per-harness effort handling (no flag); the global stop-hook install plus per-task pointer and registry writes.
 - `bin/fm-teardown.sh`: dirty-check regex exclusion for `.fm-cursor-turnend`; the two pointer removals; `remove_cursor_turnend_auth()` plus `$STATE/$ID.cursor-turnend-token` removal at both sites.
@@ -142,9 +148,23 @@ Before finalizing, a supervised throwaway task using fm-spawn's raw-launch escap
 
 The verification is driven directly from a Cursor agent, which can observe Cursor behavior firsthand.
 
-## Landing as an upstream PR
+## Rollout: local-first, then upstream PR
+
+The change is proven locally before it is proposed upstream.
+
+Phase 1, local (now):
 
 - All work happens on the `feat/cursor-harness-adapter` branch in a dedicated worktree, leaving the fleet's primary checkout on `main`.
+- Implement the adapter and configuration, then run the operator's own fleet on Cursor from this branch for a few weeks.
+- Because this is local, the operator may keep the checkout on the feature branch or apply the changes to their own working copy; the point is real daily use before committing to an upstream contract.
+
+Phase 2, upstream (after it proves out):
+
+- Open the PR through firstmate's `no-mistakes` pipeline once the adapter is good enough, so it survives `/updatefirstmate` and benefits everyone.
+- The upstream version must keep the preference-neutral detection above, so it does not regress operators who prefer Claude.
+
+Implementation details for both phases:
+
 - Implement the adapter (sections 1 through 5) plus the configuration documentation.
 - Add tests mirroring existing patterns, using `tests/fm-grok-harness.test.sh` as the primary template since grok is the closest adapter:
   - detection: `CURSOR_AGENT` maps to `cursor`, and ordering relative to `CLAUDECODE`;
