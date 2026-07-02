@@ -83,7 +83,8 @@ Then just talk:
 With the default tmux backend, run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
 Outside tmux, default-backend crewmates land in a detached `firstmate` session you can attach to.
 When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
-With experimental herdr, attach to the selected `HERDR_SESSION` to watch the shared `firstmate` workspace and its task tabs.
+With experimental herdr, attach to the selected `HERDR_SESSION` and switch between firstmate-home workspaces.
+The primary home uses `firstmate`; each secondmate home uses `firstmate-<secondmate-id>`, with that home's task tabs inside its own space.
 
 ## How It Works
 
