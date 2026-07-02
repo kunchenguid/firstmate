@@ -76,5 +76,6 @@ herdr_safe_stop_and_delete() {  # <name>
   herdr_refuse_if_default "$name" || return 1
   herdr session stop "$name" --session "$name" --json >/dev/null 2>&1 || true
   sleep 0.5
+  herdr_refuse_if_default "$name" || return 1
   herdr session delete "$name" --session "$name" --json >/dev/null 2>&1 || true
 }
