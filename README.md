@@ -54,14 +54,14 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, grok, or cursor), git with GitHub auth, and tmux for the reference session backend.
 Experimental herdr spawns additionally require `herdr` and `jq`, checked at spawn time.
 The first mate detects and offers to install everything else.
 
 ```sh
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
-cd firstmate && claude   # launch your harness here; AGENTS.md takes over
+cd firstmate && claude   # or cursor-agent, codex, etc.; AGENTS.md takes over
 ```
 
 Then just talk:
