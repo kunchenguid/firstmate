@@ -65,6 +65,8 @@ cmux's container shape is one workspace per task with one surface, no per-home c
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+`treehouse get`'s subshell has also been observed to `chdir()` the pane into the worktree correctly while leaving its `$PWD` environment variable stale, which breaks the no-mistakes gate's `post-receive` hook when a crewmate's `git push` inherits the bad value. `fm-spawn.sh` re-exports `PWD` from `pwd -P` into the pane right after the isolation guard passes, for ship/scout launches only (secondmate panes get their cwd from tmux's own `-c` flag instead). Because the corruption has also recurred mid-session, ship briefs (`fm-brief.sh`) additionally instruct crewmates to redo that re-export immediately before any push to the gate remote.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
