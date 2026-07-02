@@ -15,6 +15,7 @@
 #   (e) git repo + origin + no-mistakes installed    -> refreshed (init invoked)
 #   (f) no-mistakes not on PATH                       -> skip, exit 0
 #   (g) `no-mistakes init` fails                      -> warning, exit 0 (non-fatal)
+#   (h) fm-spawn gate refresh stalls                  -> timeout warning, spawn continues
 set -u
 
 # shellcheck source=tests/lib.sh

@@ -49,6 +49,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   For a no-mistakes-mode ship spawn, the project's shared gate hook is refreshed
+#   through bin/fm-nm-gate.sh before launch; FM_NM_GATE_TIMEOUT bounds this
+#   best-effort step and a warning never blocks the spawn.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only

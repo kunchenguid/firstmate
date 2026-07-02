@@ -25,8 +25,9 @@
 # healthy and the crewmate's own /no-mistakes run would surface a real problem.
 #
 # Mode-agnostic by design: the caller decides when a project is no-mistakes mode
-# (fm-spawn calls this only for no-mistakes-mode ship tasks). Prints one concise
-# status line to stdout; warnings go to stderr.
+# (fm-spawn calls this only for no-mistakes-mode ship tasks). Positive refreshes
+# and ordinary skips print one concise status line to stdout; missing tooling and
+# refresh failures warn to stderr.
 # Usage: fm-nm-gate.sh <project-clone-dir>
 set -eu
 

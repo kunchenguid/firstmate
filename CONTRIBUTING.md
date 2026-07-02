@@ -85,7 +85,7 @@ tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, r
 tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression guard (issue #166) and clean no-mistakes/direct-PR/local-only brief generation tests
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
-tests/fm-nm-gate.test.sh                  # no-mistakes gate refresh helper: usage errors, non-git/no-origin/no-mistakes-absent skips, idempotent init refresh, and non-fatal init-failure handling
+tests/fm-nm-gate.test.sh                  # no-mistakes gate refresh helper: usage errors, non-git/no-origin/no-mistakes-absent skips, idempotent init refresh, non-fatal init-failure handling, and spawn timeout behavior
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, optional secondmate model/effort pins, primary-to-secondmate config inheritance, and config-push tests
