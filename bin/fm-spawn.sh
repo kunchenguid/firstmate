@@ -197,7 +197,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -258,6 +258,15 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (Cursor agent CLI): a positional prompt starts the supervised
+    # interactive session. --force auto-approves every tool execution (footer shows
+    # "Run Everything") - the unattended-crewmate equivalent of claude's
+    # --dangerously-skip-permissions. There is no effort flag: effort is encoded in
+    # the model id (e.g. claude-opus-4-8-thinking-max), so no __EFFORTFLAG__. The
+    # turn-end signal does NOT ride the launch command - it is a Stop-event hook
+    # installed below (global hook merged into ~/.cursor/hooks.json + per-task
+    # pointer), so the template is identical for ship/scout/secondmate.
+    cursor) printf '%s' 'cursor-agent __MODELFLAG__--force "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -345,7 +354,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
