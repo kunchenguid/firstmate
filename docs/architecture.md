@@ -158,6 +158,12 @@ Durable project-intrinsic agent knowledge lives in each project's committed `AGE
 Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (project memory ownership).
 
+## Operational memory routing
+
+`/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
+Captain preferences go to `data/captain.md`, fleet-local operational facts and gotchas go to `data/learnings.md`, project-intrinsic knowledge goes through normal crewmate delivery into that project's committed `AGENTS.md`, and task-scoped notes or undone next steps go to the backlog.
+Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; `/stow` deliberately never stores findings in skills.
+
 ## Local clones stay fresh
 
 Bootstrap and PR-based teardown refresh remote-backed project clones when the clone is safe to move.
@@ -175,8 +181,8 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-All state lives in each task's session-provider backend (tmux by hard default, herdr when selected or auto-detected), no-mistakes run records, status event logs, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
-Kill the first mate session anytime; the next one reconciles and carries on.
+Fleet state lives in each task's session-provider backend (tmux by hard default, herdr when selected or auto-detected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
+Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
 
 ## Development notes
 

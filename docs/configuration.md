@@ -39,6 +39,11 @@ It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.ym
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
 
+## Operational learnings (data/learnings.md)
+
+Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and read right after `data/captain.md` during bootstrap.
+The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: rewrite or prune stale entries instead of appending forever.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
