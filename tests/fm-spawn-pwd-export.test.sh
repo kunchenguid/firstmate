@@ -33,8 +33,8 @@ test_pwd_export_present_and_guarded() {
   grep -F 'export PWD="$(pwd -P)"' "$SPAWN" >/dev/null \
     || fail "fm-spawn PWD re-export must resolve via pwd -P, not bare pwd or \$PWD"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
-  grep -F 'fm_backend_tmux_send_text_line "$T" '\''export PWD="$(pwd -P)"'\''' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: PWD re-export sent into pane via fm_backend_tmux_send_text_line"
+  grep -F 'spawn_send_text_line "$T" '\''export PWD="$(pwd -P)"'\''' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: PWD re-export sent into pane via spawn_send_text_line"
   pass "fm-spawn re-exports PWD via pwd -P into the pane"
 }
 
@@ -44,7 +44,7 @@ test_pwd_export_ordered_after_gotmpdir_before_launch() {
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings
   pwd_line=$(grep -n 'export PWD="\$(pwd -P)"' "$SPAWN" | head -1 | cut -d: -f1)
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
-  launch_line=$(grep -n 'fm_backend_tmux_send_literal "\$T" "\$LAUNCH"' "$SPAWN" | head -1 | cut -d: -f1)
+  launch_line=$(grep -n 'spawn_send_literal "\$T" "\$LAUNCH"' "$SPAWN" | head -1 | cut -d: -f1)
   [ -n "$gotmpdir_line" ] || fail "could not locate GOTMPDIR export line"
   [ -n "$pwd_line" ] || fail "could not locate PWD re-export line"
   [ -n "$launch_line" ] || fail "could not locate LAUNCH send-keys line"
