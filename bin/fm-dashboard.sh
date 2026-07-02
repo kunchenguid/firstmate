@@ -135,6 +135,22 @@ meta_value() {  # <meta-file> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# Classify a done task's stage. The crew-state detail is authoritative (a
+# merged PR reads "run passed: PR merged/closed" while the status log's last
+# line still says "checks green"), so match it first and fall back to the
+# status line only when the detail says nothing.
+done_stage() {  # <cs-detail> <last-status-line> -> merged|checks-green|done
+  case "$1" in
+    *merged*) printf 'merged'; return ;;
+    *'checks green'*|*checks-passed*) printf 'checks-green'; return ;;
+  esac
+  case "$2" in
+    *merged*) printf 'merged' ;;
+    *'checks green'*|*checks-passed*) printf 'checks-green' ;;
+    *) printf 'done' ;;
+  esac
+}
+
 # Emit a "<abs><br><span class=rel>(rel)</span>" cell body for an epoch, or a dash.
 time_cell() {  # <epoch-or-empty>
   if [ -n "$1" ]; then
@@ -204,10 +220,10 @@ collect_tasks() {
         failed)
           cls=fail; label=failed ;;
         done)
-          case "$cs_detail $last_line" in
-            *'checks green'*|*checks-passed*) pct=90; cls='pr'; label='checks green' ;;
-            *merged*)                          pct=100; cls='done'; label='merged' ;;
-            *)                                 pct=100; cls='done'; label='done' ;;
+          case "$(done_stage "$cs_detail" "$last_line")" in
+            checks-green) pct=90; cls='pr'; label='checks green' ;;
+            merged)       pct=100; cls='done'; label='merged' ;;
+            *)            pct=100; cls='done'; label='done' ;;
           esac ;;
         parked|blocked)
           if [ -n "$pr" ]; then pct=80
@@ -233,7 +249,10 @@ collect_tasks() {
     fi
 
     if [ "$cs_state" = working ]; then RUNNING=$(( RUNNING + 1 )); fi
-    case "$cs_state" in parked|blocked|failed|unknown) ATTENTION=$(( ATTENTION + 1 )) ;; esac
+    case "$cs_state" in
+      parked|blocked|failed) ATTENTION=$(( ATTENTION + 1 )) ;;
+      unknown) [ "$kind" = secondmate ] || ATTENTION=$(( ATTENTION + 1 )) ;;
+    esac
 
     # Decisions needed (best-effort, see header): a parked/blocked task's ask
     # is its latest needs-decision:/blocked: status line (falling back to the
@@ -245,10 +264,8 @@ collect_tasks() {
         [ -n "$dec_ask" ] || dec_ask="$cs_state: ${cs_detail:-waiting on a decision}"
         ;;
       done)
-        if [ -n "$pr" ]; then
-          case "$cs_detail $last_line" in
-            *'checks green'*|*checks-passed*) dec_ask='merge? checks are green' ;;
-          esac
+        if [ -n "$pr" ] && [ "$(done_stage "$cs_detail" "$last_line")" = checks-green ]; then
+          dec_ask='merge? checks are green'
         fi
         ;;
     esac
@@ -483,6 +500,9 @@ port, script, out = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.split("?", 1)[0] != "/":
+            self.send_error(404)
+            return
         try:
             subprocess.run(
                 [script, "-o", out],
