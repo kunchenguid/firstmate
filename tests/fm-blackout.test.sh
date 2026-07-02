@@ -111,7 +111,7 @@ test_predicate_broken_clock() {
   case "$now" in ''|*[!0-9]*) fail "broken clock: now not sanitized to a numeric epoch, got '$now'" ;; esac
   h=$(FM_BLACKOUT_NOW_EPOCH=not-a-number fm_blackout_hour)
   case "$h" in ''|*[!0-9]*) fail "broken clock: hour not numeric, got '$h'" ;; esac
-  [ "$h" -ge 0 ] && [ "$h" -le 23 ] || fail "broken clock: hour out of range, got '$h'"
+  if [ "$h" -lt 0 ] || [ "$h" -gt 23 ]; then fail "broken clock: hour out of range, got '$h'"; fi
   pass "predicate: a broken injected clock is sanitized to the real clock (never wedges)"
 }
 
