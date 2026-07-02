@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Q1: verdict-file grammar. Only approve/reject/escalate/lens append; last
 # decision ignores lens lines; reject count counts only rejects.
-# Mutation (LEDGER_MUTATE=1): append with kind "approved" (invalid) and expect
+# Mutation (LEDGER_MUTATE=1): append with kind "working" (invalid) and expect
 # it to SUCCEED — a correct validator refuses, so the assertion fails, proving
 # the test is keyed to real validation.
 set -u
@@ -23,11 +23,16 @@ f=$(fm_verdict_file "$S" t1)
 assert_present "$f" "verdict file exists"
 assert_grep "reject: first miss" "$f" "reject line recorded verbatim"
 
-# invalid kind refused (mutation: an invalid kind is expected to succeed)
-BAD=working
-[ "${LEDGER_MUTATE:-}" = 1 ] && BAD=approved
-if fm_verdict_append "$S" t1 "$BAD" nope 2>/dev/null; then
-  fail "invalid kind '$BAD' must be refused"
+# invalid kind refused. Mutation (LEDGER_MUTATE=1): assert the invalid append
+# SUCCEEDS - a correct validator refuses it, so the assertion fails, proving
+# the test is keyed to real validation.
+if [ "${LEDGER_MUTATE:-}" = 1 ]; then
+  fm_verdict_append "$S" t1 working nope 2>/dev/null \
+    || fail "MUTATION: invalid kind expected to succeed"
+else
+  if fm_verdict_append "$S" t1 working nope 2>/dev/null; then
+    fail "invalid kind 'working' must be refused"
+  fi
 fi
 assert_no_grep "nope" "$f" "invalid kind must not reach the file"
 
