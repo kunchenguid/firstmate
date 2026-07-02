@@ -5,7 +5,8 @@ It is the herdr equivalent of the tmux facts recorded in the `harness-adapters` 
 
 Herdr is [an agent-native terminal multiplexer](https://herdr.dev) with a socket API, CLI wrappers, and native per-pane agent-state detection.
 Verified against the real installed binary: herdr 0.7.1, protocol 14, macOS aarch64.
-All verification testing used isolated `HERDR_SESSION` names, stopped and deleted afterward; the captain's own default herdr session was never touched.
+Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
+A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the --session flag, not HERDR_SESSION alone" below.
 
 ## Status: experimental
 
@@ -56,7 +57,7 @@ Herdr tasks additionally record:
 | Operation | Verified herdr call | What was verified |
 |---|---|---|
 | Version/protocol gate | `herdr status --json` -> `.client.protocol` | Session-independent; `.server.*` fields ARE session-dependent. |
-| Headless server start | `HERDR_SESSION=<name> herdr server` (backgrounded) | A bare socket call does NOT auto-start the server; the adapter always starts-then-polls before any workspace/tab/pane call. |
+| Headless server start | `HERDR_SESSION=<name> herdr server` (backgrounded) | A bare socket call does NOT auto-start the server; the adapter always starts-then-polls before any workspace/tab/pane call. This fact is for start only, not cleanup. |
 | Duplicate task check | `herdr tab list --workspace <id>`, match by `.label` | Herdr does NOT enforce tab-label uniqueness itself; two tabs can share a label. The adapter's own duplicate check is required. |
 | Send literal (unsubmitted) | `herdr pane send-text <pane> <text>` | Does NOT auto-submit, contrary to the original design addendum's guess. Verified directly: a unique marker sent this way sits unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |
 | Send + submit atomically | `herdr pane run <pane> <command>` | Runs and submits a command in one call; used for the two fixed spawn-time commands (`treehouse get`, the `GOTMPDIR` export) exactly where tmux used one `send-keys ... Enter` call. |
@@ -65,6 +66,22 @@ Herdr tasks additionally record:
 | Busy state | `herdr agent get <pane>` -> `.result.agent.agent_status` | Verified live against an interactive `claude` session: reports `working` while generating, `done` once idle. Mapped: `working` -> busy; `idle`/`done` -> idle; `blocked` -> idle (surfaced like a stale pane, not suppressed as busy - a blocked agent is stuck waiting on the human, not grinding); anything else -> unknown (the cue for the shared tail-regex fallback). |
 | Kill | `herdr pane close <pane>` | Closing a tab's only (root) pane also closes the tab - no separate tab-close call needed for this adapter's one-pane-per-tab shape. Best-effort: closing an already-closed pane exits non-zero, matching tmux's `kill-window \|\| true` contract. |
 | Recovery / list-live | `herdr tab list --workspace <id>`, filter labels starting with `fm-` | Label-based, never trusts a stored id blindly - see "ID stability" below. |
+| Test session cleanup | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json` | Used only after `tests/herdr-test-safety.sh` re-queries `herdr session list --json` and confirms `<name>` is listed and not default. Never use `herdr server stop` for test cleanup. |
+
+## Session targeting: the --session flag, not HERDR_SESSION alone
+
+`HERDR_SESSION=<name>` is still the adapter's normal way to select a named herdr session for start, workspace, tab, pane, capture, send, and busy-state operations.
+The stored herdr target also carries the session explicitly as `<session>:<pane-id>`, so normal firstmate operations re-derive the intended session from task metadata.
+
+Destructive session cleanup is different.
+On herdr 0.7.1, neither an exported `HERDR_SESSION` nor an inline `HERDR_SESSION=<name>` prefix reliably targets `herdr server stop` when another herdr server is already running on the machine.
+`herdr server stop` has no session positional argument and can stop the ambient running server instead of the isolated smoke-test session.
+That failure mode killed the live default herdr server during real smoke-test cleanup on 2026-07-02.
+
+Real-herdr tests must therefore source `tests/herdr-test-safety.sh` and call `herdr_safe_stop_and_delete <name>` for session teardown.
+The helper fails closed on an empty name, literal `default`, a missing session-list entry, a failed `herdr session list --json`, or a listed entry flagged `default:true`.
+Only after that read-only guard passes does it call `herdr session stop <name> --session <name> --json`, re-run the guard, and then call `herdr session delete <name> --session <name> --json`.
+The explicit-by-name `session stop`/`session delete` form and the trailing `--session` flag are both intentional.
 
 ## Verified bug: `pane read --lines N` returns empty for small N
 
@@ -113,7 +130,7 @@ The adapter still implements label-based recovery (`fm_backend_herdr_list_live`)
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
-Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke test (`tests/fm-backend-herdr-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION` (never the default session):
+Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-autodetect-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION`:
 
 1. `FM_HOME=<scratch> FM_BACKEND=herdr HERDR_SESSION=<isolated> bin/fm-spawn.sh herdr-e2e-t1 projects/scratch-e2e-project claude` - spawned successfully, printing `backend=herdr` in the summary and writing `herdr_session=`/`herdr_workspace_id=`/`herdr_tab_id=`/`herdr_pane_id=` to the task's meta.
 2. `bin/fm-peek.sh fm-herdr-e2e-t1` - showed the live claude trust dialog.
@@ -130,7 +147,7 @@ Two real, non-obvious bugs were caught and fixed by this pass alone, both alread
 - The `pane read --lines N` small-N bug (see above) - without the fix, this E2E run flaked intermittently on the very first `send_text_line` call.
 - `pane get`'s `.result.pane.cwd` field is frozen at pane-creation time and never updates; `fm_backend_herdr_current_path` originally read it and would have made `fm-spawn.sh`'s worktree-discovery poll misresolve the acquired treehouse worktree path (it would see the pane's ORIGINAL directory, not where `treehouse get`'s subshell actually landed) - fixed by reading `.result.pane.foreground_cwd` instead, which tracks the live running process.
 
-The isolated herdr session, the treehouse pool worktree, and the scratch `FM_HOME` were all stopped/deleted/removed after this run; the captain's default herdr session and the live tmux fleet were never touched at any point.
+The isolated herdr session, the treehouse pool worktree, and the scratch `FM_HOME` were all stopped/deleted/removed after this run with the explicit session-targeting guard described above.
 
 ## Known gaps left for a follow-up
 

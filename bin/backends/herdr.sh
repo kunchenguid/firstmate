@@ -62,10 +62,12 @@ fm_backend_herdr_version_check() {
   return 0
 }
 
-# fm_backend_herdr_session: resolve which named herdr session this spawn/op
-# uses. HERDR_SESSION mirrors tmux's $TMUX ambient-selection: an operator (or
-# firstmate's own isolated test harness) sets it explicitly; absent means
-# herdr's own "default" session.
+# fm_backend_herdr_session: resolve which named herdr session this normal
+# spawn/op uses. HERDR_SESSION mirrors tmux's $TMUX ambient-selection for
+# adapter workspace/tab/pane operations: an operator (or firstmate's own
+# isolated test harness) sets it explicitly; absent means herdr's own
+# "default" session. Do not use HERDR_SESSION alone for destructive test
+# cleanup; tests/herdr-test-safety.sh documents and guards that path.
 fm_backend_herdr_session() {
   printf '%s' "${HERDR_SESSION:-default}"
 }
