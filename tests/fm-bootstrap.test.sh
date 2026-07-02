@@ -226,8 +226,24 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_dispatch_accepts_cursor() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/dispatch-cursor"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"rules":[{"when":"heavy work","use":{"harness":"cursor","model":"claude-opus-4-8-thinking-max"}}],"default":{"harness":"cursor","model":"claude-opus-4-8-thinking-high-fast"}}' > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "CREW_DISPATCH: active" "cursor dispatch config should validate as active (cursor is verified)"
+  assert_contains "$out" "-> cursor/claude-opus-4-8-thinking-max" "cursor dispatch rule should be surfaced"
+  pass "bootstrap accepts cursor as a verified crew-dispatch harness"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_crew_dispatch_accepts_cursor
