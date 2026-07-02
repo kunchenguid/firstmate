@@ -25,6 +25,14 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge it the normal way (gh-axi pr merge / captain)" >&2; exit 1; }
 
+# Quarterdeck: merging is gated on an independent verifier approve — the last
+# decision line of state/<id>.verdict must be `approve:` (bin/fm-verify.sh
+# writes it). FM_VERIFY_OVERRIDE=1 is the captain's loud, logged bypass.
+# Spec: docs/specs/2026-07-01-agent-os-council.md.
+# shellcheck source=bin/fm-verdict-lib.sh
+. "$SCRIPT_DIR/fm-verdict-lib.sh"
+fm_verdict_require_approve "$STATE" "$ID" fm-merge-local
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)

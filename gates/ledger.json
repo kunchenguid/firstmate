@@ -16,7 +16,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -33,7 +33,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
     },
     {
       "id": "gate-q1-verdict-grammar",
@@ -104,7 +104,26 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T05:18:51.710Z"
+      "last_verified": "2026-07-02T05:33:18.008Z"
+    },
+    {
+      "id": "gate-q2-merge-refuses-unverified",
+      "title": "fm-merge-local refuses without a trailing approve verdict; approve merges; override is loud",
+      "observable": "fm-merge-local exits 1 with the QUARTERDECK banner when state/<id>.verdict is missing or ends in reject, fast-forwards on approve, and honors FM_VERIFY_OVERRIDE=1 with a warning banner",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-01-agent-os-council.md",
+      "blocked_by": [
+        "gate-q1-verdict-grammar"
+      ],
+      "test_ref": "bash tests/fm-quarterdeck-q2.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-07-02T05:32:49.903Z",
+      "mutation_verified": null,
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-07-01T00:00:00Z",
+      "last_verified": "2026-07-02T05:33:18.008Z"
     }
   ]
 }
