@@ -12,6 +12,7 @@
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
+#   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -314,6 +315,36 @@ EOF
   pass "status tail is bounded to the configured line count, with the full log path always printed"
 }
 
+test_orphan_status_logs_are_printed() {
+  local rec root home fakebin out matched_count orphan_count
+  rec=$(new_world orphan-status)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'kind=ship\n' > "$home/state/task-a.meta"
+  printf 'matched: surfaced once\n' > "$home/state/task-a.status"
+  printf 'orphan: step 1\norphan: step 2\norphan: step 3\norphan: step 4\norphan: step 5\norphan: step 6\n' \
+    > "$home/state/task-orphan.status"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
+  assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
+  assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
+  assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
+  assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
+
+  matched_count=$(printf '%s\n' "$out" | grep -F -c 'matched: surfaced once')
+  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'orphan: step 6')
+  [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
+  [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
+
+  pass "orphan status logs are printed once with bounded tails"
+}
+
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
 
 test_endpoint_liveness_tmux() {
@@ -445,6 +476,7 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_status_tail_bounding
+test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

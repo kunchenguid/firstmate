@@ -35,7 +35,7 @@
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/learnings.md: read-only, always safe, always runs.
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
-#                       state/*.status tail per task, state/.afk, and a cheap
+#                       state/*.status tail, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script deliberately never arms the watcher itself.
@@ -101,6 +101,12 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+print_status_tail() {
+  local status=$1
+  printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
+  tail -n "$STATUS_TAIL" "$status"
 }
 
 section "SESSION START - $FM_HOME"
@@ -198,13 +204,24 @@ for meta in "$STATE"/*.meta; do
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
-    tail -n "$STATUS_TAIL" "$status"
+    print_status_tail "$status"
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+
+subsection "Orphan status logs (state/*.status without matching .meta)"
+ORPHAN_STATUS_FOUND=0
+for status in "$STATE"/*.status; do
+  [ -f "$status" ] || continue
+  id=$(basename "$status" .status)
+  [ -f "$STATE/$id.meta" ] && continue
+  ORPHAN_STATUS_FOUND=1
+  printf '\n--- %s ---\n' "$id"
+  print_status_tail "$status"
+done
+[ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
 AFK_PRESENT=0
