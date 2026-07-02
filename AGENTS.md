@@ -79,6 +79,7 @@ config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents,
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend, herdr is a second, experimental backend (docs/herdr-backend.md); not inherited into secondmate homes
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/blackout.env  optional overnight quiet-hours blackout config; LOCAL, gitignored; absent = feature OFF (complete no-op). Enable and tune via FM_BLACKOUT_ENABLED/START_HOUR/END_HOUR/TZ; example at docs/examples/blackout.env (section 8)
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
@@ -100,6 +101,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  blackout-override  optional epoch set by bin/fm-blackout-extend.sh; while in the future it keeps supervision ACTIVE past the blackout start; a past epoch is ignored (auto-expiry) (section 8)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
@@ -300,6 +302,7 @@ Reconcile reality with your records before doing anything else:
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
+    If an ENABLED overnight blackout (section 8) is in effect at restart time, that checklist itself resolves to arranging resumption (the auto-resuming sleeper) rather than starting an active watcher - recovery does not special-case this further, since `bin/fm-watch-arm.sh` already behaves correctly whether the restart happens mid-day or mid-blackout.
 
 A firstmate restart must be a non-event.
 All truth lives in each task's backend live-task inventory (tmux by hard default, or herdr when selected or auto-detected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
@@ -605,6 +608,18 @@ From there the task is an ordinary ship task through its mode-specific validatio
 The watcher is the backbone.
 Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
 It costs zero tokens while running.
+**Overnight quiet-hours blackout (opt-in, off by default).**
+A captain may enable a blackout window - by default 18:00-05:00 America/New_York - during which firstmate burns ZERO autonomous tokens: no polling, no wakes, no away-mode injections.
+With no local config, this is a complete no-op and every consumer below behaves exactly as if the feature did not exist.
+Enable it per home with a local, gitignored `config/blackout.env` (copy `docs/examples/blackout.env`), which sets `FM_BLACKOUT_ENABLED=1` plus optional `FM_BLACKOUT_START_HOUR`, `FM_BLACKOUT_END_HOUR`, and `FM_BLACKOUT_TZ` overrides.
+The shared predicate lives in `bin/fm-blackout-lib.sh` (`fm_in_blackout`), sourced by `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-guard.sh`, and the away-mode daemon, so enablement is consistent everywhere at once; the window math uses the system tz database, so EST/EDT and other DST transitions are handled automatically.
+When enabled: a running watcher that crosses into the window exits cleanly instead of continuing to poll or fire; `bin/fm-watch-arm.sh` invoked during the window does not start an active watcher, instead becoming a zero-token sleeper that blocks (holding the same watcher singleton lock, so it stays consistent with the "keep exactly one live cycle" discipline below) until the window ends and then starts the real watcher automatically, with no captain message required; and `bin/fm-guard.sh` treats a missing active watcher as EXPECTED during the window rather than alarming (its queued-wakes and worktree-tangle guards are unaffected and keep firing in both windows).
+Recovery (section 5) must respect an enabled blackout the same way: if firstmate restarts during the window, arrange resumption (the sleeper) rather than starting an active watcher.
+Away-mode escalations (the `/afk` daemon) also defer injection during an enabled blackout, so away mode shares the same zero-overnight-burn guarantee; its own bounded-latency wedge alarm is suppressed for the duration so a deferred escalation is never mistaken for a stuck delivery.
+X-mode polling (section 14) rides inside the same watcher's per-task check sweep, so an ENABLED blackout suppresses it too as a natural consequence of the watcher fully stopping: no `state/x-watch.check.sh` sweep runs, so pending X mentions are neither polled nor answered until the window ends, at which point the same auto-resuming sleeper starts the real watcher and X polling resumes with it. With the feature disabled (the default), X-mode cadence is unaffected exactly as before this feature existed.
+The captain can pull supervision back into the evening on demand with `bin/fm-blackout-extend.sh <HH:MM|+Nh|+Nm>` (e.g. `21:00` or `+2h`), which persists a future epoch to the local, gitignored `state/blackout-override`; while that epoch is in the future the predicate reports ACTIVE even past the start hour, and a live sleeper notices and (re)starts the real watcher on its own - no captain follow-up needed.
+An expired (past) override is ignored automatically, so an extension never lingers into the next day; `bin/fm-blackout-extend.sh --clear` cancels one early and `--status` reports the current state.
+None of this ever gates a message from the captain - only autonomous polling, wakes, and away-mode injections.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
 The no-verb path - a `signal` whose status carries no captain-relevant verb (a `working:` note, a bare turn-ended) and a non-terminal `stale` (a crewmate gone quiet) - is absorbed ONLY while that crewmate shows positive evidence it is still working: its no-mistakes run for its branch is in an actively-running step, or its pane shows the harness busy signature.
@@ -712,6 +727,7 @@ Inline facts that must survive without a loaded skill:
 - Any other unmarked message means the captain is back: clear `state/.afk`, stop the daemon, flush catch-up from `state/.wake-queue`, `state/.subsuper-escalations`, and `state/.subsuper-inject-wedged`, then re-arm normal watcher supervision.
 - Afk never changes approval authority; PR merges, ask-user findings, destructive actions, irreversible actions, and security-sensitive choices still require the same approval they required before.
 - Bias ambiguous cases toward exit because a present captain beats token savings and a false exit is self-correcting.
+- If an ENABLED overnight blackout (section 8) is active, the daemon defers every injection until the window ends instead of escalating; the buffer is preserved, so nothing is lost, and its own wedge alarm stays quiet for the duration so a deferred escalation is never mistaken for a stuck delivery.
 
 ### Stuck-crewmate recovery
 

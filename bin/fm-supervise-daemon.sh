@@ -120,6 +120,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# Overnight blackout predicate (fm_in_blackout). Away-mode injections cost tokens
+# (they start a firstmate turn), so during the quiet-hours window the daemon
+# defers every injection; the escalation buffer is preserved and flushes after the
+# window ends. This extends the same zero-overnight-burn guarantee to away mode.
+# shellcheck source=bin/fm-blackout-lib.sh
+. "$FM_DAEMON_DIR/fm-blackout-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 INJECT_SKIP_DEFAULT="heartbeat"
@@ -521,7 +528,10 @@ housekeeping() {  # <state>
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  # Skip the max-defer retry/wedge-alarm during the overnight blackout: injection
+  # is intentionally deferred then, so a "wedged" alarm would be a false positive.
+  # The buffer is preserved and the retry resumes once the window ends.
+  if afk_active "$state" && ! fm_in_blackout && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
     # as the throttle). A successful flush clears the buffer; a failed one alarms
@@ -619,6 +629,11 @@ inject_msg() {  # <message> [state]
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1b) Overnight blackout: an injection starts a firstmate turn (tokens), which
+  # the captain wants zero of overnight. Defer during the quiet-hours window; the
+  # caller preserves the buffer, so escalations survive and flush after the window
+  # ends. Captain messages are unaffected - this gates only autonomous injection.
+  if fm_in_blackout; then log "inject deferred: overnight blackout"; return 1; fi
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then prepend the sentinel marker — firstmate's afk-exit contract

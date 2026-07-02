@@ -46,6 +46,11 @@ mkdir -p "$STATE"
 # see bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# Overnight blackout predicate (fm_in_blackout, FM_BLACKOUT_EXIT_CODE): while in
+# the quiet-hours window this watcher stops polling/firing and exits cleanly so
+# its parent arm schedules resumption without a token-costing wake.
+# shellcheck source=bin/fm-blackout-lib.sh
+. "$SCRIPT_DIR/fm-blackout-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -334,6 +339,16 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # Overnight blackout: during the quiet-hours window (default 18:00-05:00 ET)
+  # firstmate burns zero autonomous tokens. Stop polling/firing and exit cleanly
+  # with FM_BLACKOUT_EXIT_CODE; the parent arm catches that code and schedules
+  # resumption at ~05:00 ET WITHOUT a token-costing wake. Skipped under afk: there
+  # the daemon owns the watcher and applies the blackout at its injection gate
+  # instead, so this watcher keeps its normal one-shot behavior for the daemon.
+  if ! afk_present && fm_in_blackout; then
+    exit "$FM_BLACKOUT_EXIT_CODE"
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is

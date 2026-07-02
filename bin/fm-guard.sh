@@ -24,6 +24,8 @@ queue_pending=false
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-blackout-lib.sh
+. "$SCRIPT_DIR/fm-blackout-lib.sh"
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
@@ -83,7 +85,11 @@ fi
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
-if [ "$watcher_fresh" = false ]; then
+# EXCEPT during the overnight blackout window, when an absent active watcher is the
+# EXPECTED state (supervision is intentionally stopped and auto-resumes at the end
+# of the window), so the banner would be a false alarm. The queued-wakes guard
+# below and the worktree-tangle guard above still run in both windows.
+if [ "$watcher_fresh" = false ] && ! fm_in_blackout; then
   if "$queue_pending"; then
     fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
   else
