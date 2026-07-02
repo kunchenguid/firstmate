@@ -14,6 +14,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ID=$1
 URL=$2
 
+# Quarterdeck: arming the merge poll implies the work is accepted — gated on an
+# independent verifier approve exactly like fm-merge-local. Spec:
+# docs/specs/2026-07-01-agent-os-council.md. FM_VERIFY_OVERRIDE=1 bypasses loudly.
+# shellcheck source=bin/fm-verdict-lib.sh
+. "$SCRIPT_DIR/fm-verdict-lib.sh"
+fm_verdict_require_approve "$STATE" "$ID" fm-pr-check
+
 META="$STATE/$ID.meta"
 if [ -f "$META" ] && ! grep -qxF "pr=$URL" "$META"; then
   echo "pr=$URL" >> "$META"
