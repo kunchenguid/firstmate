@@ -227,21 +227,26 @@ fm_preview_install_deps() {
 }
 
 fm_preview_subdir_with_package() {
-  local wt=$1 override=$2 candidates=$3 part
+  local wt=$1 override=$2 candidates=$3 cmd_override=${4:-} part
   if [ -n "$override" ]; then
-    [ -f "$wt/$override/package.json" ] || { echo "error: package.json not found in $wt/$override" >&2; return 1; }
+    [ -d "$wt/$override" ] || { echo "error: preview directory not found: $wt/$override" >&2; return 1; }
+    [ -n "$cmd_override" ] || [ -f "$wt/$override/package.json" ] || { echo "error: package.json not found in $wt/$override" >&2; return 1; }
     printf '%s\n' "$wt/$override"
     return 0
   fi
   IFS=,
   for part in $candidates; do
-    if [ -f "$wt/$part/package.json" ]; then
+    if { [ -n "$cmd_override" ] && [ -d "$wt/$part" ]; } || { [ -z "$cmd_override" ] && [ -f "$wt/$part/package.json" ]; }; then
       printf '%s\n' "$wt/$part"
       unset IFS
       return 0
     fi
   done
   unset IFS
+  if [ -n "$cmd_override" ]; then
+    printf '%s\n' "$wt"
+    return 0
+  fi
   [ -f "$wt/package.json" ] || { echo "error: package.json not found in preview worktree; set FM_PREVIEW_BACKEND_DIR/FM_PREVIEW_FRONTEND_DIR or command overrides" >&2; return 1; }
   printf '%s\n' "$wt"
 }
@@ -340,13 +345,13 @@ fm_preview_main() {
   head=$(printf '%s' "$pr_json" | fm_preview_json_field headRefOid)
   [ -n "$head" ] || { echo "error: GitHub PR data did not include a head SHA for $repo#$pr" >&2; return 1; }
 
-  fm_preview_stop_role "$meta" backend
-  fm_preview_stop_role "$meta" frontend
-
   if ! git -C "$project" fetch --no-tags origin "$(fm_preview_pr_refspec "$pr")" >/dev/null 2>&1; then
     echo "error: failed to fetch PR $repo#$pr; ask firstmate/captain to handle GitHub auth/network" >&2
     return 1
   fi
+  fm_preview_stop_role "$meta" backend
+  fm_preview_stop_role "$meta" frontend
+
   if [ -d "$wt/.git" ] || git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     :
   elif [ -e "$wt" ]; then
@@ -358,10 +363,10 @@ fm_preview_main() {
   git -C "$wt" reset --hard "$head" >/dev/null
   git -C "$wt" clean -fd >/dev/null
 
-  backend_dir=$(fm_preview_subdir_with_package "$wt" "${FM_PREVIEW_BACKEND_DIR:-}" "backend,server,api")
-  frontend_dir=$(fm_preview_subdir_with_package "$wt" "${FM_PREVIEW_FRONTEND_DIR:-}" "frontend,client,web,app")
   backend_cmd=${FM_PREVIEW_BACKEND_CMD:-}
   frontend_cmd=${FM_PREVIEW_FRONTEND_CMD:-}
+  backend_dir=$(fm_preview_subdir_with_package "$wt" "${FM_PREVIEW_BACKEND_DIR:-}" "backend,server,api" "$backend_cmd")
+  frontend_dir=$(fm_preview_subdir_with_package "$wt" "${FM_PREVIEW_FRONTEND_DIR:-}" "frontend,client,web,app" "$frontend_cmd")
   if [ -z "$backend_cmd" ]; then
     if [ "$backend_dir" = "$frontend_dir" ]; then
       backend_script=$(fm_preview_package_script "$backend_dir" "dev:backend,backend,server,api" || true)

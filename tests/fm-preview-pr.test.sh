@@ -78,6 +78,34 @@ test_pr_refspec_forces_pr_head_refresh() {
   pass "PR refspec forces reusable PR head refreshes"
 }
 
+test_command_override_resolves_directory_without_package_json() {
+  local wt got
+  wt="$TMP_ROOT/non-node-preview"
+  mkdir -p "$wt/backend" "$wt/ui"
+
+  got=$(fm_preview_subdir_with_package "$wt" "" "backend,server,api" "go run ./cmd/api")
+  [ "$got" = "$wt/backend" ] || fail "command override did not use existing backend directory without package.json"
+
+  got=$(fm_preview_subdir_with_package "$wt" "ui" "frontend,client,web,app" "python3 -m http.server")
+  [ "$got" = "$wt/ui" ] || fail "command override did not use explicit frontend directory without package.json"
+
+  pass "command overrides resolve directories without package.json"
+}
+
+test_package_script_resolution_still_requires_package_json() {
+  local wt rc
+  wt="$TMP_ROOT/package-required-preview"
+  mkdir -p "$wt/backend"
+
+  set +e
+  fm_preview_subdir_with_package "$wt" "" "backend,server,api" "" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "script discovery accepted a directory without package.json"
+  pass "package script resolution still requires package.json"
+}
+
 test_pick_port_skips_occupied_port() {
   local port picked server_pid
   port=$(fm_preview_pick_port 19000)
@@ -156,6 +184,45 @@ test_cleanup_started_stops_each_started_role() {
   pass "cleanup_started stops all started preview roles"
 }
 
+test_failed_fetch_keeps_existing_preview_process() {
+  local project preview_id meta pid pgid sig rc
+  project="$TMP_ROOT/projects/app"
+  STATE="$TMP_ROOT/fetch-before-stop-state"
+  mkdir -p "$project" "$STATE/previews"
+  preview_id="app-$(fm_preview_path_hash "$project")-pr7"
+  meta="$STATE/previews/$preview_id.meta"
+  setsid sh -c 'sleep 60' &
+  pid=$!
+  sleep 1
+  pgid=$(ps -p "$pid" -o pgid= | awk '{print $1}')
+  sig=$(fm_preview_pid_sig "$pid")
+  fm_write_meta "$meta" "backend_pid=$pid" "backend_pgid=$pgid" "backend_pgid_isolated=1" "backend_sig=$sig"
+
+  fm_preview_project_path() { printf '%s\n' "$project"; }
+  fm_preview_repo_slug() { printf '%s\n' "owner/repo"; }
+  fm_preview_pr_json() { printf '%s\n' '{"headRefName":"feature","headRefOid":"abcdef"}'; }
+  git() {
+    case "$*" in
+      *" fetch "*) return 1 ;;
+      *) command git "$@" ;;
+    esac
+  }
+
+  set +e
+  fm_preview_main "$project" 7 >/dev/null 2>"$TMP_ROOT/fetch-fail.err"
+  rc=$?
+  set -e
+  unset -f fm_preview_project_path fm_preview_repo_slug fm_preview_pr_json git
+
+  [ "$rc" -ne 0 ] || fail "fetch failure should fail the preview refresh"
+  kill -0 "$pid" 2>/dev/null || fail "existing preview process was stopped before failed fetch"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_grep 'failed to fetch PR owner/repo#7' "$TMP_ROOT/fetch-fail.err" \
+    "fetch failure did not report the failed PR fetch"
+  pass "failed fetch keeps existing preview process running"
+}
+
 test_stop_role_skips_signature_mismatch() {
   local meta pid pgid
   meta="$TMP_ROOT/mismatch.meta"
@@ -181,8 +248,11 @@ test_meta_get_reads_last_value
 test_json_field_reads_piped_json
 test_path_hash_distinguishes_same_basename
 test_pr_refspec_forces_pr_head_refresh
+test_command_override_resolves_directory_without_package_json
+test_package_script_resolution_still_requires_package_json
 test_pick_port_skips_occupied_port
 test_stop_role_kills_matching_recorded_process
 test_stop_role_without_isolated_pgid_kills_pid_only
 test_cleanup_started_stops_each_started_role
+test_failed_fetch_keeps_existing_preview_process
 test_stop_role_skips_signature_mismatch
