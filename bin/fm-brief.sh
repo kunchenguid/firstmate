@@ -216,6 +216,8 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
+Immediately before invoking /no-mistakes, or any other command that pushes to the no-mistakes gate remote, re-run \`export PWD="\$(pwd -P)"\` in your shell. firstmate already re-exports a correct \`PWD\` once at spawn time, but the underlying \`treehouse get\` subshell bug that corrupts it has been observed to recur later in a long-lived session too, so the one-time spawn export alone is not sufficient protection for a push that happens well after spawn.
+
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
