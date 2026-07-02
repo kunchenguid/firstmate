@@ -5,6 +5,7 @@ on:
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
+      - backend-abstraction
 
 permissions:
   contents: read
