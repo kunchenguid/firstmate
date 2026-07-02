@@ -389,6 +389,22 @@ EOF
   esac
 fi
 
+# Warm the code-graph index for this worktree so the crewmate's first
+# graph-augmented search is fast (the global PreToolUse hook queries this index;
+# see AGENTS.md section 8). Best-effort and fully backgrounded — indexing must
+# never block or fail a spawn. auto_index also covers this incrementally.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ]; then
+  CBM=$(command -v codebase-memory-mcp 2>/dev/null || true)
+  if [ -z "$CBM" ]; then
+    for c in "$HOME/.local/bin/codebase-memory-mcp" /usr/local/bin/codebase-memory-mcp /opt/homebrew/bin/codebase-memory-mcp; do
+      if [ -x "$c" ]; then CBM=$c; break; fi
+    done
+  fi
+  if [ -n "$CBM" ]; then
+    nohup "$CBM" cli index_repository "{\"repo_path\":\"$WT\"}" >/dev/null 2>&1 &
+  fi
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a

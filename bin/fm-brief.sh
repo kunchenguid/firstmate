@@ -135,6 +135,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
+# Code intelligence
+A code-graph index of this repo is available, and your \`grep\`/Grep searches are auto-augmented with graph context (matching symbols, definition sites, files) with no action on your part.
+For structural investigation prefer the graph tools over reading many files: \`mcp__codebase-memory-mcp__get_architecture\`, \`trace_path\` (callers/callees, depth 1-5), \`search_graph\`, and \`detect_changes\` (change blast-radius). They are degrade-safe; if unavailable, fall back to normal search.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -217,6 +221,11 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Code intelligence
+A code-graph index of this repo is available, and your \`grep\`/Grep searches are auto-augmented with graph context (matching symbols, definition sites, files) with no action on your part.
+For structural questions prefer the graph tools over reading many files: \`mcp__codebase-memory-mcp__get_architecture\`, \`trace_path\` (callers/callees, depth 1-5), and \`search_graph\`.
+At the review stage, run the \`detect_changes\` tool on your branch diff to see affected symbols + blast radius + risk, and fold that into your review notes. The tooling is degrade-safe; if unavailable, proceed with normal search.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

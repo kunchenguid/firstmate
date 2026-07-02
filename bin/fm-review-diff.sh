@@ -61,6 +61,42 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
+# Optional code-graph blast radius (codebase-memory-mcp detect_changes). The
+# worktree was warm-indexed at its clean base when the task was spawned, so
+# detect_changes surfaces the symbols changed on the branch since that baseline.
+# Fully degrade-safe: prints nothing if the binary, the index, or a delta is
+# absent. Never affects the git diff below.
+cbm_bin() {
+  local c
+  c=$(command -v codebase-memory-mcp 2>/dev/null) && { echo "$c"; return 0; }
+  for c in "$HOME/.local/bin/codebase-memory-mcp" /usr/local/bin/codebase-memory-mcp /opt/homebrew/bin/codebase-memory-mcp; do
+    [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+cbm_blast_radius() {
+  local bin proj_slug wt_abs
+  bin=$(cbm_bin) || return 0
+  wt_abs=$(cd "$WT" 2>/dev/null && pwd -P) || return 0
+  proj_slug=$("$bin" cli list_projects '{}' 2>/dev/null | node -e '
+    let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+      try{const t=process.argv[1];const p=(JSON.parse(d).projects||[]).find(x=>x.root_path===t);process.stdout.write(p?p.name:"")}catch{ }
+    })' "$wt_abs" 2>/dev/null) || return 0
+  [ -n "$proj_slug" ] || return 0
+  "$bin" cli detect_changes "{\"project\":\"$proj_slug\"}" 2>/dev/null | node -e '
+    let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+      try{
+        const j=JSON.parse(d);
+        if(!j||!j.changed_count)return;
+        const syms=(j.impacted_symbols||[]).filter(s=>s.label&&s.label!=="Module");
+        console.log("code-graph blast radius: "+j.changed_count+" changed file(s), "+syms.length+" impacted symbol(s)");
+        syms.slice(0,12).forEach(s=>console.log("  - "+s.name+" ("+s.label+") "+(s.file||"")));
+        if(syms.length>12)console.log("  ... +"+(syms.length-12)+" more");
+      }catch{ }
+    })' 2>/dev/null || true
+  return 0
+}
+
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
   BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -87,6 +123,8 @@ if git -C "$WT" diff --quiet "$BASE...$BRANCH" --; then
 fi
 
 git -C "$WT" diff --stat "$BASE...$BRANCH" --
+BR=$(cbm_blast_radius) || true
+[ -n "$BR" ] && { echo; printf '%s\n' "$BR"; }
 if ! "$STAT_ONLY"; then
   echo
   git -C "$WT" diff "$BASE...$BRANCH" --

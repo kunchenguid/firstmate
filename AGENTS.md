@@ -504,6 +504,16 @@ Token discipline: status files before panes; default peeks to 40 lines; never st
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 
+### Code intelligence (code-graph)
+
+Every crewmate gets graph-level code intelligence with zero manual steps, and it is forced through the search path so it works even when the agent uses plain `grep`.
+The engine is `codebase-memory-mcp` (tree-sitter AST graph, no API keys, no LLM pipeline), registered once at **user scope** so every worktree inherits the `mcp__codebase-memory-mcp__*` tools with no per-project write.
+A global, non-blocking PreToolUse hook (`~/.claude/hooks/cbm-graph-augment.js`, registered on `Grep` and `Bash`) intercepts each code search, queries the graph for the search token, and injects matching symbols and definition sites as reference `additionalContext` alongside the raw search output.
+The hook is structurally non-blocking: it exits 0 on every path, runs on a short timeout, degrades silently when the binary or index is unavailable, and never denies a tool (set `CBM_HOOK_OFF=1` to disable it).
+This replaces the retired graphify/`codegrep` approach, whose sin was blocking real work.
+Indexes live out-of-tree in `~/.cache/codebase-memory-mcp/`, so nothing is ever written into a project (rule #1 safe).
+The lifecycle wiring keeps it invisible: `fm-bootstrap.sh` enables `auto_index` and indexes each base clone; `fm-spawn.sh` warm-indexes each new worktree at its clean base; `fm-brief.sh` points crewmates at the graph tools (`get_architecture`, `trace_path`, `search_graph`); and `fm-review-diff.sh` surfaces `detect_changes` blast radius for a branch.
+
 ### Sub-supervisor (presence-gated via `/afk`)
 
 `bin/fm-supervise-daemon.sh` is the away-mode engine: it wraps `fm-watch.sh`, runs the watcher as a child, classifies each wake reason in bash, and **self-handles the routine majority without consuming a firstmate turn**.
