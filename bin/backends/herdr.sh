@@ -94,8 +94,8 @@ fm_backend_herdr_server_ensure() {  # <session>
 fm_backend_herdr_workspace_find() {  # <session>
   local session=$1 list
   list=$(HERDR_SESSION="$session" herdr workspace list 2>/dev/null) || return 0
-  printf '%s' "$list" | jq -r --arg label "$FM_BACKEND_HERDR_WORKSPACE_LABEL" \
-    '.result.workspaces[]? | select(.label == $label) | .workspace_id' 2>/dev/null | head -1
+  printf '%s' "$list" | jq -r --arg wanted_label "$FM_BACKEND_HERDR_WORKSPACE_LABEL" \
+    '.result.workspaces[]? | select(.label == $wanted_label) | .workspace_id' 2>/dev/null | head -1
 }
 
 # fm_backend_herdr_workspace_ensure: the persistent "firstmate" workspace
@@ -135,7 +135,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
   session=${container%%:*}
   wsid=${container#*:}
   list=$(HERDR_SESSION="$session" herdr tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup=$(printf '%s' "$list" | jq -r --arg label "$label" '.result.tabs[]? | select(.label == $label) | .tab_id' 2>/dev/null | head -1)
+  dup=$(printf '%s' "$list" | jq -r --arg wanted_label "$label" '.result.tabs[]? | select(.label == $wanted_label) | .tab_id' 2>/dev/null | head -1)
   if [ -n "$dup" ]; then
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
@@ -332,8 +332,8 @@ fm_backend_herdr_resolve_bare_selector() {  # <name>
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(HERDR_SESSION="$session" herdr tab list 2>/dev/null) || continue
-    tab_id=$(printf '%s' "$tabs" | jq -r --arg label "$name" \
-      '.result.tabs[]? | select(.label == $label) | .tab_id' 2>/dev/null | head -1)
+    tab_id=$(printf '%s' "$tabs" | jq -r --arg wanted_label "$name" \
+      '.result.tabs[]? | select(.label == $wanted_label) | .tab_id' 2>/dev/null | head -1)
     [ -n "$tab_id" ] || continue
     wsid=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null | head -1)
     [ -n "$wsid" ] || continue
