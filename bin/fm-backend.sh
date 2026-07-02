@@ -9,7 +9,8 @@
 # into bin/backends/tmux.sh, with those SAME command sequences, so the default
 # (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, an
 # EXPERIMENTAL backend behind `--backend herdr`/`FM_BACKEND=herdr`/
-# `config/backend`; see herdr-addendum.md and
+# `config/backend`, and behind runtime auto-detection when firstmate itself is
+# running inside herdr with no explicit backend setting; see herdr-addendum.md and
 # data/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
