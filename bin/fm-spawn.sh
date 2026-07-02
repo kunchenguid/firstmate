@@ -1007,6 +1007,7 @@ if [ "$KIND" != secondmate ]; then
   # point firstmate controls. Secondmate panes never run treehouse get (tmux's own
   # -c sets their cwd directly at process start), so they are not known to hit
   # this and are left alone.
+  # shellcheck disable=SC2016  # single quotes are deliberate: $(pwd -P) expands in the crewmate pane, not here
   spawn_send_text_line "$T" 'export PWD="$(pwd -P)"'
   sleep 0.3
 fi

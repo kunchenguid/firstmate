@@ -755,6 +755,7 @@ test_spawn_conformance_old_vs_new() {
   # entering the worktree). Strip that known, separately-tested addition
   # before the byte-identical diff so this conformance check still catches
   # any OTHER unintended drift between old and new.
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string, not a live expansion
   grep -v $'\x1f''export PWD="$(pwd -P)"'$'\x1f' "$log_new" > "$TMP_ROOT/spawn-new-filtered.log"
   diff -u "$log_old" "$TMP_ROOT/spawn-new-filtered.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
     || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
@@ -763,6 +764,7 @@ test_spawn_conformance_old_vs_new() {
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
   assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string, not a live expansion
   assert_contains "$(cat "$log_new")" $'\x1f''export PWD="$(pwd -P)"' "spawn tmux log missing the PWD re-export send"
   assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
     "spawn tmux log missing the literal launch-command send"

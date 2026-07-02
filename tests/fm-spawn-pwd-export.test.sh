@@ -32,6 +32,7 @@ test_pwd_export_present_and_guarded() {
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings
   grep -F 'export PWD="$(pwd -P)"' "$SPAWN" >/dev/null \
     || fail "fm-spawn PWD re-export must resolve via pwd -P, not bare pwd or \$PWD"
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'fm_backend_tmux_send_text_line "$T" '\''export PWD="$(pwd -P)"'\''' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: PWD re-export sent into pane via fm_backend_tmux_send_text_line"
   pass "fm-spawn re-exports PWD via pwd -P into the pane"
@@ -40,7 +41,9 @@ test_pwd_export_present_and_guarded() {
 test_pwd_export_ordered_after_gotmpdir_before_launch() {
   local gotmpdir_line pwd_line launch_line
   gotmpdir_line=$(grep -n 'export GOTMPDIR=' "$SPAWN" | head -1 | cut -d: -f1)
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings
   pwd_line=$(grep -n 'export PWD="\$(pwd -P)"' "$SPAWN" | head -1 | cut -d: -f1)
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   launch_line=$(grep -n 'fm_backend_tmux_send_literal "\$T" "\$LAUNCH"' "$SPAWN" | head -1 | cut -d: -f1)
   [ -n "$gotmpdir_line" ] || fail "could not locate GOTMPDIR export line"
   [ -n "$pwd_line" ] || fail "could not locate PWD re-export line"
@@ -57,7 +60,9 @@ test_pwd_export_scoped_to_non_secondmate() {
   # secondmate panes get their cwd from tmux's own -c flag, not a subshell, so
   # the export must be guarded by `[ "$KIND" != secondmate ]`.
   local guard_line pwd_line
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   guard_line=$(grep -n 'if \[ "\$KIND" != secondmate \]; then' "$SPAWN" | tail -1 | cut -d: -f1)
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings
   pwd_line=$(grep -n 'export PWD="\$(pwd -P)"' "$SPAWN" | head -1 | cut -d: -f1)
   [ -n "$guard_line" ] || fail "could not locate a KIND != secondmate guard near the PWD export"
   [ -n "$pwd_line" ] || fail "could not locate PWD re-export line"
