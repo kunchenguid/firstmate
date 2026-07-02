@@ -922,6 +922,63 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    cursor*)
+      # cursor fires a `stop` hook at every turn boundary (verified interactive,
+      # cursor-agent 2026.07.01; it does NOT fire in -p headless mode, but crewmates
+      # run interactively). Unlike grok's standalone files, cursor hooks live in the
+      # operator's SHARED hooks.json, so firstmate MERGES its stop entry idempotently
+      # (preserving existing sessionStart/stop hooks) and the hook reads the stop
+      # payload's workspace_roots from stdin JSON (not an env var). The hook is a
+      # guarded no-op unless a workspace holds a .fm-cursor-turnend token pointer that
+      # matches the firstmate-owned registry, and it emits {} on stdout as cursor expects.
+      CURSOR_CFG="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
+      CURSOR_HOOKS_DIR="$CURSOR_CFG/hooks"
+      CURSOR_AUTH_DIR="$CURSOR_HOOKS_DIR/fm-turn-end.d"
+      mkdir -p "$CURSOR_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
+      sq_cursor_auth_dir=$(shell_quote "$CURSOR_AUTH_DIR")
+      cat > "$CURSOR_HOOKS_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_cursor_auth_dir
+payload=\$(cat 2>/dev/null || true)
+roots=\$(printf '%s' "\$payload" | jq -r '.workspace_roots[]?' 2>/dev/null) || roots=
+while IFS= read -r ws; do
+  [ -n "\$ws" ] || continue
+  p="\$ws/.fm-cursor-turnend"
+  [ -f "\$p" ] || continue
+  first=
+  IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || continue
+  case "\$first" in token=*) token=\${first#token=} ;; *) continue ;; esac
+  case "\$token" in fm.????????????) : ;; *) continue ;; esac
+  case "\$token" in *[!A-Za-z0-9._-]*) continue ;; esac
+  t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || continue
+  case "\$t" in /*.turn-ended) : ;; *) continue ;; esac
+  touch "\$t" 2>/dev/null || true
+done <<ROOTS
+\$roots
+ROOTS
+printf '{}'
+exit 0
+EOF
+      chmod +x "$CURSOR_HOOKS_DIR/fm-turn-end.sh"
+      HOOKS_JSON="$CURSOR_CFG/hooks.json"
+      [ -f "$HOOKS_JSON" ] || printf '{"version":1,"hooks":{}}\n' > "$HOOKS_JSON"
+      cursor_hook_cmd="$CURSOR_HOOKS_DIR/fm-turn-end.sh"
+      cursor_hook_tmp=$(mktemp)
+      if jq --arg cmd "$cursor_hook_cmd" '.hooks.stop = ((.hooks.stop // []) | if any(.command == $cmd) then . else . + [{"command":$cmd,"timeout":10}] end)' "$HOOKS_JSON" > "$cursor_hook_tmp" 2>/dev/null; then
+        mv "$cursor_hook_tmp" "$HOOKS_JSON"
+      else
+        rm -f "$cursor_hook_tmp"
+      fi
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
+      exclude_path '.fm-cursor-turnend'
+      ;;
   esac
 fi
 

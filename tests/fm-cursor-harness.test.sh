@@ -116,7 +116,43 @@ SH
   pass "fm-lock recognizes cursor-agent harness processes"
 }
 
+test_cursor_turnend_hook() {
+  local rec case_dir home proj wt fakebin cursor_cfg id log out status hook token target evil evil_target
+  rec=$(make_spawn_case turnend)
+  IFS='|' read -r case_dir home proj wt fakebin cursor_cfg id <<EOF
+$rec
+EOF
+  # Pre-seed existing hooks so the test proves the merge preserves them.
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[{"command":"hooks/existing-start.sh","timeout":10}],"stop":[{"command":"hooks/notify-stop.sh","timeout":10}]}}' > "$cursor_cfg/hooks.json"
+  log="$case_dir/sendkeys.log"; : > "$log"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$cursor_cfg" "$id" "$log")
+  status=$?
+  expect_code 0 "$status" "cursor spawn should succeed"
+
+  hook="$cursor_cfg/hooks/fm-turn-end.sh"
+  assert_present "$hook" "cursor turn-end hook script was not installed"
+  assert_grep 'existing-start.sh' "$cursor_cfg/hooks.json" "sessionStart hook was clobbered by the merge"
+  assert_grep 'notify-stop.sh' "$cursor_cfg/hooks.json" "pre-existing stop hook was clobbered by the merge"
+  assert_grep 'fm-turn-end.sh' "$cursor_cfg/hooks.json" "fm-turn-end stop hook was not added to hooks.json"
+
+  assert_grep 'token=' "$wt/.fm-cursor-turnend" "cursor pointer did not contain a token"
+  token=$(sed -n 's/^token=//p' "$wt/.fm-cursor-turnend")
+  assert_present "$cursor_cfg/hooks/fm-turn-end.d/$token" "cursor auth registry entry was not written"
+  target=$(cat "$cursor_cfg/hooks/fm-turn-end.d/$token")
+  assert_no_grep "$target" "$wt/.fm-cursor-turnend" "cursor pointer exposed the turn-end path"
+
+  evil="$case_dir/evil"; evil_target="$case_dir/evil-target.turn-ended"; mkdir -p "$evil"
+  printf '%s\n' "$evil_target" > "$evil/.fm-cursor-turnend"
+  printf '%s' "{\"workspace_roots\":[\"$evil\"]}" | bash "$hook" >/dev/null
+  assert_absent "$evil_target" "unregistered cursor pointer touched an arbitrary target"
+
+  printf '%s' "{\"workspace_roots\":[\"$wt\"]}" | bash "$hook" >/dev/null
+  assert_present "$target" "registered cursor pointer did not touch the task turn-end file"
+  pass "cursor stop-hook fires only for a registered worktree and preserves existing hooks"
+}
+
 test_detects_cursor_via_env_marker
 test_claude_still_wins_when_both_set
 test_fm_lock_recognizes_cursor_holder
 test_cursor_launch_template
+test_cursor_turnend_hook
