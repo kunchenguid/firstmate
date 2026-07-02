@@ -913,10 +913,30 @@ META_WINDOW=$T
 # so a stale old-version hook can't fail the push with "invalid gate path" and
 # silently skip the pipeline run (bin/fm-nm-gate.sh). The gate is shared by the
 # main clone and every worktree of it, so refreshing the main clone (PROJ_ABS)
-# heals the one bare repo the worktree pushes to. Best-effort: never block the
-# spawn, and keep its status line off this script's parseable stdout.
+# heals the one bare repo the worktree pushes to. Best-effort and
+# timeout-bounded (FM_NM_GATE_TIMEOUT seconds, default 10, same portable
+# background-and-poll pattern as bootstrap's fleet-sync bound): a failure or a
+# hung `no-mistakes init` warns to stderr instead of stalling the spawn, and
+# its status line stays off this script's parseable stdout.
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null || true
+  NM_GATE_TIMEOUT=${FM_NM_GATE_TIMEOUT:-10}
+  case "$NM_GATE_TIMEOUT" in ''|*[!0-9]*) NM_GATE_TIMEOUT=10 ;; esac
+  NM_GATE_MONITOR_WAS_ON=0
+  case $- in *m*) NM_GATE_MONITOR_WAS_ON=1 ;; esac
+  set -m 2>/dev/null || true
+  "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null &
+  NM_GATE_PID=$!
+  NM_GATE_START=$SECONDS
+  while jobs -r -p | grep -qx "$NM_GATE_PID"; do
+    if [ $((SECONDS - NM_GATE_START)) -ge "$NM_GATE_TIMEOUT" ]; then
+      kill -TERM "-$NM_GATE_PID" 2>/dev/null || kill "$NM_GATE_PID" 2>/dev/null || true
+      echo "warning: no-mistakes gate refresh timed out after ${NM_GATE_TIMEOUT}s; gate may be stale" >&2
+      break
+    fi
+    sleep 1
+  done
+  wait "$NM_GATE_PID" 2>/dev/null || true
+  [ "$NM_GATE_MONITOR_WAS_ON" -eq 1 ] || set +m 2>/dev/null || true
 fi
 
 {

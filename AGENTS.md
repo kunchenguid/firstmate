@@ -515,7 +515,7 @@ For ship and scout tasks, tmux/herdr/zellij create a runtime endpoint and run `t
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
 For a `no-mistakes`-mode ship task, the script also refreshes the project's gate via `bin/fm-nm-gate.sh` (the sanctioned idempotent `no-mistakes init` of section 6) before launch, so a crewmate pushing `no-mistakes <branch>` from its treehouse worktree always hits a current post-receive hook and a run is created.
 no-mistakes keys one shared gate per repo identity (the origin URL), used by the main clone and every worktree of it; an older `no-mistakes init` left a stale hook that failed the push with `invalid gate path` and silently skipped the run, and this refresh self-heals that without touching project files.
-The refresh is best-effort: a failure warns to stderr and never blocks the spawn.
+The refresh is best-effort and bounded by `FM_NM_GATE_TIMEOUT` seconds (default 10): a failure or timed-out refresh warns to stderr and the spawn proceeds.
 For `kind=secondmate`, the script creates the same kind of runtime endpoint but starts directly in the persistent home.
 With herdr, ordinary crewmate and scout spawns use the current `FM_HOME` workspace; a primary `--secondmate` spawn uses the secondmate target home's workspace, so secondmate-owned tabs do not mix into the primary `firstmate` space.
 With zellij there is no per-home workspace split: every task, primary or secondmate, lands as a tab in the one shared `firstmate` zellij session (docs/zellij-backend.md).
