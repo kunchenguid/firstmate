@@ -74,8 +74,11 @@ test_pr_refspec_forces_pr_head_refresh() {
   local got
   got=$(fm_preview_pr_refspec 42)
 
-  [ "$got" = "+pull/42/head:refs/remotes/origin/pr/42" ] || fail "PR refspec was not forced"
-  pass "PR refspec forces reusable PR head refreshes"
+  [ "$got" = "+pull/42/head:refs/fm-preview-pr/42" ] || fail "PR refspec did not target private firstmate namespace"
+  case "$got" in
+    *":refs/remotes/origin/"*) fail "PR refspec targeted origin tracking namespace" ;;
+  esac
+  pass "PR refspec forces private reusable PR head refreshes"
 }
 
 test_command_override_resolves_directory_without_package_json() {

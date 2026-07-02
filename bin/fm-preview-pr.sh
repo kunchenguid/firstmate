@@ -40,7 +40,7 @@ fm_preview_path_hash() {
 }
 
 fm_preview_pr_refspec() {
-  printf '+pull/%s/head:refs/remotes/origin/pr/%s\n' "$1" "$1"
+  printf '+pull/%s/head:refs/fm-preview-pr/%s\n' "$1" "$1"
 }
 
 fm_preview_project_path() {
