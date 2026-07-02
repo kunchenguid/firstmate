@@ -16,7 +16,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:48:28.739Z"
+      "last_verified": "2026-07-02T05:18:51.710Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -33,7 +33,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:48:28.739Z"
+      "last_verified": "2026-07-02T05:18:51.710Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:48:28.739Z"
+      "last_verified": "2026-07-02T05:18:51.710Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:48:28.739Z"
+      "last_verified": "2026-07-02T05:18:51.710Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,24 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-06-26T05:48:28.739Z"
+      "last_verified": "2026-07-02T05:18:51.710Z"
+    },
+    {
+      "id": "gate-q1-verdict-grammar",
+      "title": "Verdict grammar: only approve/reject/escalate/lens lines; last-decision and reject-count read correctly",
+      "observable": "fm_verdict_append refuses an invalid kind; fm_verdict_last ignores lens lines; fm_verdict_reject_count counts only reject lines",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-01-agent-os-council.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-quarterdeck-q1.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-07-02T05:17:48.415Z",
+      "mutation_verified": null,
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-07-01T00:00:00Z",
+      "last_verified": "2026-07-02T05:18:51.710Z"
     }
   ]
 }
