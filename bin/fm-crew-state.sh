@@ -137,12 +137,16 @@ crew_pane_is_busy() {  # <target>
   case "$TASK_BACKEND" in
     tmux) fm_pane_is_busy "$1" ;;
     *)
-      local bs
+      local bs tail40
       bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
       case "$bs" in
         busy) return 0 ;;
         idle) return 1 ;;
-        *) fm_pane_is_busy "$1" ;;
+        *)
+          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 2>/dev/null) || return 1
+          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+            | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+          ;;
       esac
       ;;
   esac

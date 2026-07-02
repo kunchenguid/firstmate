@@ -456,7 +456,7 @@ EOF
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
             rm -f "$ssf"
-            mark_surfaced "$STATE/$(window_to_task "$w").status"
+            mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
             wake "stale: $w"
           fi
         else
@@ -472,7 +472,7 @@ EOF
           #     status, waiting on a decision, or wedged) instead of leaving the
           #     finish to wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w")"; then
+            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed non-terminal stale (provably working): $w"

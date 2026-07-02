@@ -309,7 +309,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
-  task=$(window_to_task "$win")
+  task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
@@ -352,14 +352,14 @@ _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
 }
 
@@ -388,7 +388,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
-      task=$(window_to_task "$arg")
+      task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && mark_status_seen "$state" "$task" "$last" ;;
@@ -553,7 +553,7 @@ housekeeping() {  # <state>
 window_for_task() {  # <task-key>
   local key=$1 w t
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w")
+    t=$(window_to_task "$w" "$(_state_root)")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done
   return 1

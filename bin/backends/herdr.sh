@@ -157,6 +157,11 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+fm_backend_herdr_target_ready() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
@@ -170,7 +175,7 @@ fm_backend_herdr_parse_target() {  # <target>
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
 fm_backend_herdr_current_path() {  # <target>
-  fm_backend_herdr_parse_target "$1" || return 0
+  fm_backend_herdr_target_ready "$1" || return 0
   HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
@@ -180,7 +185,7 @@ fm_backend_herdr_current_path() {  # <target>
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
-  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_target_ready "$1" || return 1
   HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -189,7 +194,7 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
-  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_target_ready "$1" || return 1
   HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -210,7 +215,7 @@ fm_backend_herdr_normalize_key() {  # <key>
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
 fm_backend_herdr_send_key() {  # <target> <key>
-  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_target_ready "$1" || return 1
   local key
   key=$(fm_backend_herdr_normalize_key "$2")
   HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
@@ -230,11 +235,13 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # a generous fetch far above any realistic viewport height, then trim to the
 # caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_parse_target "$1" || return 1
-  local lines=$2 fetch=$2
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-200} fetch out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null \
-    | tail -n "$lines"
+  out=$(HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -276,7 +283,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.
 fm_backend_herdr_kill() {  # <target>
-  fm_backend_herdr_parse_target "$1" || return 0
+  fm_backend_herdr_target_ready "$1" || return 0
   HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || true
 }
 
@@ -288,7 +295,7 @@ fm_backend_herdr_kill() {  # <target>
 # stale pane needing attention, not suppress it as busy); unknown/unparseable
 # -> unknown, the caller's cue to fall back to pane-regex detection.
 fm_backend_herdr_busy_state() {  # <target>
-  fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
   local out status
   out=$(HERDR_SESSION="$FM_BACKEND_HERDR_SESSION" herdr agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || { printf 'unknown'; return 0; }
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
