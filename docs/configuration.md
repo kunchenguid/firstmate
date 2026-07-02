@@ -101,6 +101,19 @@ It uses the same live secondmate discovery and propagation helper as bootstrap, 
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## PR preview helper
+
+`bin/fm-preview-pr.sh <project-name-or-path> <pr-number>` refreshes a reusable preview worktree for a GitHub PR and starts one backend plus one frontend dev server without opening tmux panes.
+Project names resolve under `projects/` or `FM_PROJECTS_OVERRIDE`; paths are accepted directly.
+The helper stores per-project/per-PR metadata under `state/previews/` and the detached preview checkout under `state/preview-worktrees/`.
+It stops only the previously recorded owned backend/frontend process group for that same project and PR, fetches the latest PR head, reuses or installs package dependencies in the preview worktree, picks stable available local ports, waits for both servers to respond, and prints a canonical `ready:` line with frontend and backend URLs.
+Pass `--open-path <path>` to verify a frontend route other than `/`, and repeat `--expect <text>` to require visible response text before the preview is accepted.
+
+By default the helper looks for Node package scripts in common backend and frontend subdirectories.
+Set `FM_PREVIEW_BACKEND_CMD` or `FM_PREVIEW_FRONTEND_CMD` to use explicit commands; set `FM_PREVIEW_BACKEND_DIR` or `FM_PREVIEW_FRONTEND_DIR` when the server lives in a specific subdirectory.
+`FM_PREVIEW_TIMEOUT` controls the readiness wait per server.
+The helper requires `gh-axi`, `gh`, `git`, `curl`, and `python3`, and reports GitHub auth, network, or missing-tool failures without stopping an existing preview first.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -157,6 +170,11 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_PREVIEW_BACKEND_CMD=  # explicit backend command for fm-preview-pr.sh
+FM_PREVIEW_FRONTEND_CMD= # explicit frontend command for fm-preview-pr.sh
+FM_PREVIEW_BACKEND_DIR=  # backend subdirectory relative to the preview worktree
+FM_PREVIEW_FRONTEND_DIR= # frontend subdirectory relative to the preview worktree
+FM_PREVIEW_TIMEOUT=60   # seconds fm-preview-pr.sh waits for each server to respond
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

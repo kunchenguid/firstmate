@@ -116,6 +116,14 @@ GitHub lookup errors fall back to the content check and still refuse if that che
 If no `pr=` was ever recorded, teardown can still discover a merged PR by matching the worktree branch name and fetching `refs/pull/<n>/head` when the head branch was deleted.
 Those PR-head and content checks let a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local default-branch merge or after the branch is pushed to any remote.
 
+## PR previews are reusable and owned
+
+`bin/fm-preview-pr.sh` gives firstmate a repeatable way to inspect a project PR in a detached preview worktree without disturbing the project's main clone or any task worktree.
+Each project path and PR number maps to one preview id, one checkout under `state/preview-worktrees/`, one metadata file under `state/previews/`, and a stable frontend/backend port pair when those ports are available.
+On refresh, the helper fetches the latest PR head before stopping anything, then stops only the backend and frontend processes whose recorded pid signatures still match the previous run for that same preview id.
+That ownership check keeps unrelated local servers, including processes that happen to occupy the preferred ports, out of the blast radius.
+The helper verifies both server URLs, optionally checks expected frontend text, and prints a `ready:` line that can be copied directly into browser or review workflows.
+
 ## Optional X mode
 
 X mode is opt-in presence for the shared `@myfirstmate` bot.
