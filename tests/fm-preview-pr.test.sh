@@ -70,6 +70,14 @@ test_path_hash_distinguishes_same_basename() {
   pass "path hash distinguishes same-basename project paths"
 }
 
+test_pr_refspec_forces_pr_head_refresh() {
+  local got
+  got=$(fm_preview_pr_refspec 42)
+
+  [ "$got" = "+pull/42/head:refs/remotes/origin/pr/42" ] || fail "PR refspec was not forced"
+  pass "PR refspec forces reusable PR head refreshes"
+}
+
 test_pick_port_skips_occupied_port() {
   local port picked server_pid
   port=$(fm_preview_pick_port 19000)
@@ -172,6 +180,7 @@ test_project_path_is_accepted
 test_meta_get_reads_last_value
 test_json_field_reads_piped_json
 test_path_hash_distinguishes_same_basename
+test_pr_refspec_forces_pr_head_refresh
 test_pick_port_skips_occupied_port
 test_stop_role_kills_matching_recorded_process
 test_stop_role_without_isolated_pgid_kills_pid_only

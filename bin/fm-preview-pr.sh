@@ -39,6 +39,10 @@ fm_preview_path_hash() {
   printf '%s' "$1" | cksum | awk '{printf "%x\n", $1}'
 }
 
+fm_preview_pr_refspec() {
+  printf '+pull/%s/head:refs/remotes/origin/pr/%s\n' "$1" "$1"
+}
+
 fm_preview_project_path() {
   local arg=$1
   case "$arg" in
@@ -339,7 +343,7 @@ fm_preview_main() {
   fm_preview_stop_role "$meta" backend
   fm_preview_stop_role "$meta" frontend
 
-  if ! git -C "$project" fetch --no-tags origin "pull/$pr/head:refs/remotes/origin/pr/$pr" >/dev/null 2>&1; then
+  if ! git -C "$project" fetch --no-tags origin "$(fm_preview_pr_refspec "$pr")" >/dev/null 2>&1; then
     echo "error: failed to fetch PR $repo#$pr; ask firstmate/captain to handle GitHub auth/network" >&2
     return 1
   fi
