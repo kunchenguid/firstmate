@@ -77,7 +77,7 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
-config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = tmux; only tmux is verified today; not inherited into secondmate homes
+config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = tmux; tmux is the verified reference backend, herdr is a second, experimental backend (docs/herdr-backend.md); not inherited into secondmate homes
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -91,7 +91,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a task on a non-default runtime backend also records backend= (absent means tmux, the only implemented backend today; bin/fm-backend.sh, section 8) (fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a task on a non-default runtime backend also records backend= (absent means tmux, the verified reference backend; herdr is a second, experimental backend recording herdr_session=, herdr_workspace_id=, herdr_tab_id=, herdr_pane_id= too - docs/herdr-backend.md; bin/fm-backend.sh, section 8) (fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -447,7 +447,8 @@ bin/fm-spawn.sh <id> projects/<repo> --harness codex   # explicit per-task harne
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> grok        # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
-bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # explicit runtime backend; only tmux is verified today
+bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # explicit runtime backend; tmux is the verified reference backend
+bin/fm-spawn.sh <id> projects/<repo> --backend herdr  # experimental herdr backend (docs/herdr-backend.md); version-gates at spawn
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
@@ -645,7 +646,7 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-Each task's backend live-task inventory is the ground truth (tmux by default; a task's meta may record a different `backend=`, though tmux is the only one implemented today).
+Each task's backend live-task inventory is the ground truth (tmux by default; a task's meta may record a different `backend=` - herdr is the one other implemented, experimental backend today, docs/herdr-backend.md).
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

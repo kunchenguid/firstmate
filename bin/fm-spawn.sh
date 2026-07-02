@@ -549,19 +549,62 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-# (Session-provider container-ensure; see bin/backends/tmux.sh.)
-SES=$(fm_backend_tmux_container_ensure)
-
+# Session-provider container-ensure + task creation. tmux stays exactly as P1
+# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
+# a herdr spawn goes through the version-gated, workspace-per-firstmate,
+# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5;
+# data/fm-backend-design-d7/herdr-addendum.md). Both branches converge on the
+# same $T ("target") string that every downstream operation (send/capture/kill)
+# already treats as opaque per-backend routing (fm_backend_resolve_selector).
 W="fm-$ID"
-T="$SES:$W"
-fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+case "$BACKEND" in
+  tmux)
+    SES=$(fm_backend_tmux_container_ensure)
+    T="$SES:$W"
+    fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+    ;;
+  herdr)
+    CONTAINER=$(fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    HERDR_SES=${CONTAINER%%:*}
+    HERDR_WORKSPACE_ID=${CONTAINER#*:}
+    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+    [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || { echo "error: herdr did not return a tab/pane id for $W" >&2; exit 1; }
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    ;;
+esac
+spawn_send_text_line() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+  esac
+}
+spawn_current_path() {  # <target>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" ;;
+  esac
+}
+spawn_send_literal() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+  esac
+}
+spawn_send_key() {  # <target> <key>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
+  esac
+}
 if [ "$KIND" != secondmate ]; then
-  fm_backend_tmux_send_text_line "$T" 'treehouse get'
+  spawn_send_text_line "$T" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
-    p=$(fm_backend_tmux_current_path "$T" || true)
+    p=$(spawn_current_path "$T" || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
@@ -741,6 +784,12 @@ fi
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$BACKEND" = herdr ]; then
+    echo "herdr_session=$HERDR_SES"
+    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+    echo "herdr_tab_id=$HERDR_TAB_ID"
+    echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -764,10 +813,10 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-fm_backend_tmux_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
-fm_backend_tmux_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
-fm_backend_tmux_send_key "$T" Enter
+spawn_send_key "$T" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

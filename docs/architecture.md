@@ -38,12 +38,13 @@ Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-a
 
 The runtime backend is the session-provider layer below firstmate's scripts.
 It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery, live-window fallback lookup, and endpoint teardown.
-`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the only verified adapter today.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter, and `bin/backends/herdr.sh` (P2) is an experimental second adapter.
 New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then default `tmux`.
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
-`fm-watch.sh` still polls the tmux pull primitives for capture, live-window inventory, and busy-state regexes.
-That poll loop is now the default event source for backends with no native push events, so P1 names the abstraction without changing watcher behavior.
+`fm-watch.sh` polls each window's backend for a busy state: tmux has no native primitive and always reports unknown, preserving its original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first, falling back to the same regex only when it reports unknown.
+That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
+Herdr is opt-in and experimental: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, verified CLI facts, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
 
 ## Worktrees, not branches in your checkout
 

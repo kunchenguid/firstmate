@@ -4,10 +4,13 @@
 #
 # Design: data/fm-backend-design-d7/report.md ("Backend Interface") and
 # data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
-# abstraction"). This is P1: it extracts the tmux command sequences that
-# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already
-# ran inline into bin/backends/tmux.sh, with those SAME command sequences, so
-# the default (tmux) path is byte-identical. No other backend exists yet.
+# abstraction"). P1 extracted the tmux command sequences that fm-send.sh,
+# fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already ran inline
+# into bin/backends/tmux.sh, with those SAME command sequences, so the default
+# (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, an
+# EXPERIMENTAL backend behind `--backend herdr`/`FM_BACKEND=herdr`/
+# `config/backend`; see herdr-addendum.md and
+# data/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
@@ -33,8 +36,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
-# section 4's harness-verification discipline.
-FM_BACKEND_KNOWN="tmux"
+# section 4's harness-verification discipline. herdr is EXPERIMENTAL (P2;
+# data/fm-backend-design-d7/herdr-addendum.md) - verified against the real
+# v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
+# but newer than tmux's long-proven default path.
+FM_BACKEND_KNOWN="tmux herdr"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
 fm_backend_is_known() {  # <name>
@@ -108,6 +114,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
+    herdr)
+      if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/herdr.sh
+        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh"
+        _FM_BACKEND_HERDR_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -163,6 +176,7 @@ fm_backend_capture() {  # <backend> <target> <lines>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
+    herdr) fm_backend_herdr_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -174,19 +188,21 @@ fm_backend_send_key() {  # <backend> <target> <key>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
+    herdr) fm_backend_herdr_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the verdict
-# (empty|pending|unknown|send-failed for the tmux adapter).
+# (empty|pending|unknown|send-failed for the tmux and herdr adapters).
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle>
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
+    herdr) fm_backend_herdr_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -200,6 +216,22 @@ fm_backend_kill() {  # <backend> <target>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
+    herdr) fm_backend_herdr_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
+# native agent-state (herdr-addendum "busy state" row - the first backend
+# where this gets real semantics beyond pane-regex). Backends with no such
+# primitive (tmux) report unknown, the fm-watch.sh contract's cue to fall back
+# to its own pane-hash + FM_BUSY_REGEX detection, unchanged from P1.
+fm_backend_busy_state() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_busy_state "$@" ;;
+    *) printf 'unknown' ;;
   esac
 }

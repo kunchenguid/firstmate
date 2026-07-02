@@ -152,6 +152,26 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
+# a backend's native semantic busy state (fm_backend_busy_state - herdr's
+# agent.get; herdr-addendum "busy state" row, "the first backend where
+# fm_session_busy_state gets real semantics"); falls back to the existing
+# pane-tail regex ONLY when the backend reports unknown (tmux always does, so
+# its path is unchanged byte-for-byte). <tail40> is the same bounded capture
+# already read for hashing, so this adds no extra backend calls on the
+# regex-fallback path.
+window_is_busy() {  # <window> <tail40>
+  local w=$1 tail40=$2 bs
+  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
+  case "$bs" in
+    busy) return 0 ;;
+    idle) return 1 ;;
+    *)
+      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      ;;
+  esac
+}
+
 window_kind() {
   local w=$1 meta mw kind
   for meta in "$STATE"/*.meta; do
@@ -416,10 +436,11 @@ EOF
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
-      # Busy match runs on the last 6 non-blank lines only (the TUI footer area,
-      # where every verified harness renders its busy indicator) so busy-looking
-      # strings in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
+      # Busy match: a backend's native semantic state when available (herdr),
+      # else the last 6 non-blank lines only (the TUI footer area, where every
+      # verified harness renders its busy indicator) so busy-looking strings
+      # in displayed content cannot suppress stale detection.
+      if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if afk_present; then
