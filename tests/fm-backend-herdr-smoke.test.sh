@@ -29,9 +29,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 
 SESSION="fm-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
+SM_SCRATCH=
 trap cleanup_all EXIT
 
 cleanup_all() {
+  [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 
@@ -72,6 +74,82 @@ if fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp >/dev/null 2>&1; then
   fail "create_task should refuse a duplicate label (herdr itself does not enforce uniqueness)"
 fi
 pass "real herdr: create_task creates a tab/pane and refuses a duplicate label"
+
+# --- workspace-per-home: a secondmate-shaped home gets its OWN space --------
+# (docs/herdr-backend.md "Task container shape", AGENTS.md task
+# herdr-sm-spaces-k4). Reuses this suite's own isolated $SESSION - a SECOND,
+# distinct workspace inside the SAME session, never a second session. Placed
+# here (both workspaces' tabs still alive) so the restart-stability check
+# right after it exercises the true multi-workspace shape, not a
+# possibly-emptied-and-auto-closed primary workspace.
+
+SM_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-sm.XXXXXX")
+SM_HOME="$SM_SCRATCH/secondmate-home"
+mkdir -p "$SM_HOME"
+printf 'smoketest-sm1\n' > "$SM_HOME/.fm-secondmate-home"
+
+SM_CONTAINER=$(FM_HOME="$SM_HOME" fm_backend_herdr_container_ensure /tmp) || fail "secondmate-shaped container_ensure failed"
+case "$SM_CONTAINER" in
+  "$SESSION":w*) : ;;
+  *) fail "secondmate container_ensure returned an unexpected shape: $SM_CONTAINER" ;;
+esac
+[ "$SM_CONTAINER" != "$CONTAINER" ] || fail "a secondmate-shaped home must get a DIFFERENT workspace than the primary's, got the same: $SM_CONTAINER"
+pass "real herdr: a secondmate-shaped home (.fm-secondmate-home) gets its OWN herdr workspace, distinct from the primary's, in the SAME session"
+
+SM_WSID=${SM_CONTAINER#*:}
+SM_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+[ "$SM_LABEL_REAL" = "firstmate-smoketest-sm1" ] || fail "the secondmate workspace's real herdr label should be firstmate-smoketest-sm1, got '$SM_LABEL_REAL'"
+pass "real herdr: the secondmate-shaped home's workspace is labeled firstmate-<secondmate-id> in herdr itself"
+
+SM_TASK_LABEL="fm-smtask1"
+SM_TASK_IDS=$(FM_HOME="$SM_HOME" fm_backend_herdr_create_task "$SM_CONTAINER" "$SM_TASK_LABEL" /tmp) || fail "secondmate create_task failed"
+read -r SM_TAB_ID SM_PANE_ID <<EOF
+$SM_TASK_IDS
+EOF
+if [ -z "$SM_TAB_ID" ] || [ -z "$SM_PANE_ID" ]; then
+  fail "secondmate create_task did not return tab/pane ids"
+fi
+pass "real herdr: a task spawned into the secondmate-shaped home lands as a tab inside the secondmate's OWN workspace"
+
+# list_live for each home must never see the OTHER home's task.
+PRIMARY_LIVE=$(fm_backend_herdr_list_live "$SESSION")
+case "$PRIMARY_LIVE" in
+  *"$SM_TASK_LABEL"*) fail "the primary home's list_live must not see a secondmate-shaped home's task"$'\n'"$PRIMARY_LIVE" ;;
+esac
+SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
+case "$SM_LIVE" in
+  *"$SM_TASK_LABEL"*) : ;;
+  *) fail "the secondmate-shaped home's list_live did not see its own task"$'\n'"$SM_LIVE" ;;
+esac
+case "$SM_LIVE" in
+  *"$LABEL"*) fail "the secondmate-shaped home's list_live must not see the primary's task ($LABEL)"$'\n'"$SM_LIVE" ;;
+esac
+pass "real herdr: list_live stays scoped to each home's own workspace - neither home sees the other's tasks"
+
+# --- restart stability in the MULTI-workspace shape --------------------------
+# P2 (herdr-verification-p2.md "ID stability") verified this for a single
+# workspace only. Both this suite's workspaces (and their tabs/panes) must
+# still resolve, unchanged, after a `session stop` + fresh server restart, all
+# scoped to this suite's OWN isolated $SESSION - never the default session.
+
+herdr session stop "$SESSION" --session "$SESSION" --json >/dev/null 2>&1 \
+  || fail "could not stop the isolated session for the restart-stability check"
+sleep 0.5
+fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
+
+POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
+POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
+POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "firstmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
+[ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
+[ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"
+
+POST_PANE=$(herdr pane get "$PANE_ID" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
+[ "$POST_PANE" = "$PANE_ID" ] || fail "the primary task's pane id did not survive the restart: before=$PANE_ID after=$POST_PANE"
+POST_SM_PANE=$(herdr pane get "$SM_PANE_ID" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
+[ "$POST_SM_PANE" = "$SM_PANE_ID" ] || fail "the secondmate task's pane id did not survive the restart: before=$SM_PANE_ID after=$POST_SM_PANE"
+pass "real herdr: BOTH workspace ids/labels AND both tasks' pane ids survive a session stop + fresh server restart (multi-workspace shape)"
+
+fm_backend_herdr_kill "$SESSION:$SM_PANE_ID"
 
 # --- send_text_line (atomic run) ---------------------------------------------
 

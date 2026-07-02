@@ -556,11 +556,12 @@ fi
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-firstmate,
-# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5;
-# data/fm-backend-design-d7/herdr-addendum.md). Both branches converge on the
-# same $T ("target") string that every downstream operation (send/capture/kill)
-# already treats as opaque per-backend routing (fm_backend_resolve_selector).
+# a herdr spawn goes through the version-gated, workspace-per-HOME,
+# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
+# docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
+# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
+# that every downstream operation (send/capture/kill) already treats as opaque
+# per-backend routing (fm_backend_resolve_selector).
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -569,10 +570,25 @@ case "$BACKEND" in
     fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
     ;;
   herdr)
-    CONTAINER=$(fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    # fm_backend_herdr_workspace_label resolves the target workspace from
+    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
+    # already the right home (the primary spawning its own crewmate/scout, or
+    # a secondmate spawning ITS OWN crewmate/scout from its own process's
+    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
+    # one case that does: it is the PRIMARY's own fm-spawn.sh process
+    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
+    # secondmate's home), so FM_HOME here still names the primary. Shadow it
+    # to PROJ_ABS for just these two calls (bash restores it automatically
+    # after each prefixed simple-command call) so the secondmate's tab lands
+    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    HERDR_LABEL_HOME=$FM_HOME
+    if [ "$KIND" = secondmate ]; then
+      HERDR_LABEL_HOME=$PROJ_ABS
+    fi
+    CONTAINER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
