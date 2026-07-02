@@ -273,12 +273,12 @@ fm_preview_start_process() {
   isolated=0
   if command -v setsid >/dev/null 2>&1; then
     isolated=1
-    setsid sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh "$dir" \
+    setsid sh -c "cd \"\$1\" || exit 1; shift; exec \"\$@\"" sh "$dir" \
       env FM_PREVIEW_ID="$id" PORT="$port" BACKEND_PORT="$backend_port" FRONTEND_PORT="$frontend_port" \
       VITE_BACKEND_URL="http://127.0.0.1:$backend_port" VITE_API_URL="http://127.0.0.1:$backend_port" API_URL="http://127.0.0.1:$backend_port" \
       sh -c "$cmd" >"$log" 2>&1 &
   else
-    sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh "$dir" \
+    sh -c "cd \"\$1\" || exit 1; shift; exec \"\$@\"" sh "$dir" \
       env FM_PREVIEW_ID="$id" PORT="$port" BACKEND_PORT="$backend_port" FRONTEND_PORT="$frontend_port" \
       VITE_BACKEND_URL="http://127.0.0.1:$backend_port" VITE_API_URL="http://127.0.0.1:$backend_port" API_URL="http://127.0.0.1:$backend_port" \
       sh -c "$cmd" >"$log" 2>&1 &
@@ -292,7 +292,7 @@ fm_preview_start_process() {
 }
 
 fm_preview_main() {
-  local project_arg pr open_path=/ expects=() want= project project_name project_slug project_hash preview_id state_dir meta wt
+  local project_arg pr open_path=/ expects=() want project project_name project_slug project_hash preview_id state_dir meta wt
   local repo pr_json branch head stable backend_desired frontend_desired backend_port frontend_port
   local backend_dir frontend_dir backend_cmd frontend_cmd backend_script frontend_script frontend_url backend_url ready tmp_meta
   local cleanup_roles=()
