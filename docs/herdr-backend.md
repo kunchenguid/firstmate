@@ -71,7 +71,8 @@ Verified empirically against the real binary, in an isolated session:
 - `--focus` reliably DOES focus (both the workspace and, for a tab, the pane within it) - confirming the flag has real effect and isn't a no-op, so its absence is meaningful.
 
 Both `fm_backend_herdr_workspace_ensure`'s workspace create and `fm_backend_herdr_create_task`'s tab create now pass `--no-focus` unconditionally.
-This is defense in depth rather than a behavior change in the already-safe steady state: it eliminates the one bootstrap edge case (the very-first-workspace-in-a-session auto-focus) that the pre-P3 adapter did not explicitly guard against, so spawning - primary or secondmate, workspace or tab - never switches whatever space the captain is actively watching.
+This is defense in depth rather than a behavior change in the already-safe steady state: it guards workspace and tab creation after the session already has a focused workspace, but it cannot prevent herdr's unavoidable first-workspace focus in a brand-new empty session.
+Once a workspace exists, spawning - primary or secondmate, workspace or tab - should not switch whatever space the captain is actively watching.
 
 ### Label collisions: adopt-don't-duplicate, unchanged in spirit
 
