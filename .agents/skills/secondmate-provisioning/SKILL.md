@@ -49,6 +49,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+Verified harness templates are wrapped in `bash -c` for that launch path too, while raw launch commands stay unwrapped for adapter verification.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The same launch also propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into the secondmate home's `config/`.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
