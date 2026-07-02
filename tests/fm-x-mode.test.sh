@@ -37,6 +37,14 @@ while [ $# -gt 0 ]; do
     -o) ofile=$2; shift 2 ;;
     -X) method=$2; shift 2 ;;
     --data) data=$2; shift 2 ;;
+    --data-binary)
+      case "$2" in
+        @-) data=$(cat) ;;
+        @*) data=$(cat -- "${2#@}") ;;
+        *) data=$2 ;;
+      esac
+      shift 2
+      ;;
     -H)
       case "$2" in
         @*) while IFS= read -r header; do case "$header" in Authorization:*) auth=$header ;; esac; done < "${2#@}" ;;
@@ -72,6 +80,17 @@ exit 0
 SH
   chmod +x "$fakebin/curl"
   printf '%s\n' "$fakebin"
+}
+
+make_sample_image() {
+  local path=$1
+  case "$path" in
+    *.png) printf '\211PNG\r\n\032\nfirstmate-test-png' > "$path" ;;
+    *.jpg|*.jpeg) printf '\377\330\377firstmate-test-jpeg' > "$path" ;;
+    *.gif) printf 'GIF89afirstmate-test-gif' > "$path" ;;
+    *.webp) printf 'RIFF....WEBPfirstmate-test-webp' > "$path" ;;
+    *) printf 'firstmate-test-image' > "$path" ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -313,12 +332,61 @@ test_reply_non_2xx_fails() {
   pass "fm-x-reply exits non-zero on a non-2xx relay response"
 }
 
+test_reply_auth_header_tempfile_cleans_up_on_interrupted_post() {
+  local home fakebin log out rc auth_file
+  home="$TMP_ROOT/reply-auth-interrupt"; mkdir -p "$home"
+  fakebin=$(fm_fakebin "$home")
+  log="$home/auth-file.txt"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+auth_file=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H)
+      case "$2" in @*) auth_file=${2#@} ;; esac
+      shift 2
+      ;;
+    -o|-w|-X|-m|--data|--data-binary) shift 2 ;;
+    -s) shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$auth_file" > "$FAKE_AUTH_FILE_LOG"
+kill -TERM "$PPID"
+exit 143
+SH
+  chmod +x "$fakebin/curl"
+  printf 'FMX_PAIRING_TOKEN=tok-clean\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_AUTH_FILE_LOG="$log" \
+    "$ROOT/bin/fm-x-reply.sh" "req-clean" "Hello." 2>"$home/err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted relay post must fail"
+  [ -z "$out" ] || fail "interrupted relay post must not echo the request_id (got: $out)"
+  auth_file=$(cat "$log")
+  [ -n "$auth_file" ] || fail "fake curl must record the auth header temp file"
+  [ ! -e "$auth_file" ] || fail "auth header temp file must be removed after an interrupted post"
+  pass "fm-x-reply cleans up auth header temp files on interrupted posts"
+}
+
 test_reply_usage_error() {
-  local home rc
+  local home rc err
   home="$TMP_ROOT/reply-usage"; mkdir -p "$home"
-  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-reply.sh" "only-one" >/dev/null 2>&1; rc=$?
+  err="$home/err.txt"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-reply.sh" "only-one" >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "reply usage error exit"
+  assert_grep "--image <path>" "$err" "reply usage must mention --image"
   pass "fm-x-reply rejects missing arguments with a usage error"
+}
+
+test_reply_help_mentions_image() {
+  local home out rc
+  home="$TMP_ROOT/reply-help"; mkdir -p "$home"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-reply.sh" --help); rc=$?
+  expect_code 0 "$rc" "reply --help exit"
+  assert_contains "$out" "--image <path>" "reply help must mention --image"
+  assert_contains "$out" "threaded replies attach it to the opener tweet" \
+    "reply help must document thread image placement"
+  pass "fm-x-reply --help makes image support discoverable"
 }
 
 test_reply_whitespace_text_rejected() {
@@ -693,6 +761,125 @@ test_reply_thread_live_posts_texts() {
   pass "fm-x-reply posts a thread payload (texts[]) to the relay"
 }
 
+test_reply_image_live_posts_image_object() {
+  local home fakebin log out rc data img expected
+  home="$TMP_ROOT/reply-image-live"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/diagram.png"
+  make_sample_image "$img"
+  expected=$(base64 < "$img" | tr -d '\n\r')
+  printf 'FMX_PAIRING_TOKEN=tok-img\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-img" --image "$img" "Here is the illustration."); rc=$?
+  expect_code 0 "$rc" "reply image live exit"
+  [ "$out" = "req-img" ] || fail "image reply must echo only the request_id (got: $out)"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  [ "$(printf '%s' "$data" | jq -r '.image.media_type')" = "image/png" ] \
+    || fail "image reply must detect PNG media_type"
+  [ "$(printf '%s' "$data" | jq -r '.image.data_base64')" = "$expected" ] \
+    || fail "image reply must include base64 image bytes"
+  [ "$(printf '%s' "$data" | jq -r '.text')" = "Here is the illustration." ] \
+    || fail "image reply must preserve text"
+  pass "fm-x-reply --image posts an image object on answer"
+}
+
+test_reply_image_live_streams_payload_file() {
+  local home fakebin log out rc data img i
+  home="$TMP_ROOT/reply-image-stream"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/large.png"
+  make_sample_image "$img"
+  i=0
+  while [ "$i" -lt 4096 ]; do
+    printf '0123456789abcdef0123456789abcdef' >> "$img"
+    i=$((i + 1))
+  done
+  printf 'FMX_PAIRING_TOKEN=tok-img-stream\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-stream" --image "$img" "Here is the illustration."); rc=$?
+  expect_code 0 "$rc" "streamed image reply exit"
+  [ "$out" = "req-img-stream" ] || fail "streamed image reply must echo only the request_id (got: $out)"
+  assert_grep "--data-binary @" "$log" "image reply must stream the POST body from a file"
+  grep '^argv=' "$log" | tail -1 | grep -F 'data_base64' >/dev/null 2>&1 \
+    && fail "image reply must not place image JSON in curl argv"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  printf '%s' "$data" | jq -e '.image.media_type == "image/png" and (.image.data_base64 | length > 100000)' >/dev/null \
+    || fail "streamed image reply must still send the base64 image body"
+  pass "fm-x-reply streams large image payloads outside curl argv"
+}
+
+test_reply_image_thread_dry_run_records_compact_marker() {
+  local home fakebin log out rc img bytes
+  home="$TMP_ROOT/reply-image-thread-dry"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/illustration.webp"
+  make_sample_image "$img"
+  bytes=$(wc -c < "$img" | tr -d '[:space:]')
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 FMX_X_REPLY_MAX_CHARS=50 \
+    FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-dry" --image "$img" \
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november" \
+    2>"$home/err"); rc=$?
+  expect_code 0 "$rc" "reply image dry-run exit"
+  [ "$out" = "req-img-dry" ] || fail "image dry-run must echo the request_id (got: $out)"
+  [ -f "$log" ] && grep -q "method=POST" "$log" && fail "image dry-run must not POST"
+  assert_present "$home/state/x-outbox/req-img-dry.json" "image dry-run must record the preview"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-img-dry.json" >/dev/null \
+    || fail "image dry-run thread must keep texts[]"
+  [ "$(jq -r '.image.media_type' "$home/state/x-outbox/req-img-dry.json")" = "image/webp" ] \
+    || fail "image dry-run marker must hold media_type"
+  [ "$(jq -r '.image.bytes' "$home/state/x-outbox/req-img-dry.json")" = "$bytes" ] \
+    || fail "image dry-run marker must hold byte count"
+  [ "$(jq -r '.image.source_path' "$home/state/x-outbox/req-img-dry.json")" = "$img" ] \
+    || fail "image dry-run marker must hold source_path"
+  jq -e '.image | has("data_base64") | not' "$home/state/x-outbox/req-img-dry.json" >/dev/null \
+    || fail "image dry-run marker must not include base64 bytes"
+  pass "fm-x-reply dry-run records compact image metadata for threaded replies"
+}
+
+test_reply_image_dry_run_cleans_payload_temp_files() {
+  local home tmpdir img out rc leftovers
+  home="$TMP_ROOT/reply-image-temp-clean"; mkdir -p "$home"
+  tmpdir="$home/tmp"; mkdir -p "$tmpdir"
+  img="$home/preview.png"
+  make_sample_image "$img"
+  out=$(PATH="$BASE_PATH" TMPDIR="$tmpdir" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-temp-clean" --image "$img" "Here is the image." \
+    2>"$home/err"); rc=$?
+  expect_code 0 "$rc" "reply image temp cleanup exit"
+  [ "$out" = "req-img-temp-clean" ] || fail "image dry-run temp cleanup must echo the request_id (got: $out)"
+  leftovers=$(find "$tmpdir" -type f -name 'fm-x-reply.*' -print)
+  [ -z "$leftovers" ] || fail "reply temp files must be cleaned (left: $leftovers)"
+  pass "fm-x-reply cleans image and payload temp files"
+}
+
+test_reply_image_path_errors_are_clear() {
+  local home out rc err img
+  home="$TMP_ROOT/reply-image-errors"; mkdir -p "$home"
+  err="$home/err.txt"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-missing" --image "$home/missing.png" "text" 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "missing image path must fail"
+  [ -z "$out" ] || fail "missing image path must not echo the request_id (got: $out)"
+  assert_grep "image file does not exist" "$err" "missing image path must explain the error"
+  img="$home/not-image.txt"
+  printf 'not an image' > "$img"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-badtype" --image "$img" "text" 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "unsupported image path must fail"
+  assert_grep "unsupported image media type" "$err" "unsupported image path must explain the error"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-noarg" --image 2>"$err"); rc=$?
+  expect_code 2 "$rc" "missing --image argument exit"
+  assert_grep "missing --image path" "$err" "missing --image argument must explain the error"
+  pass "fm-x-reply --image rejects missing and unsupported image paths clearly"
+}
+
 # --- follow-up reply mode (--followup -> /connector/followup) ----------------
 
 test_reply_followup_live_posts_to_followup_endpoint() {
@@ -715,6 +902,30 @@ test_reply_followup_live_posts_to_followup_endpoint() {
   [ "$keys" = "request_id,text" ] || fail "followup live body must carry only request_id,text (got: $keys)"
   [ "$(printf '%s' "$data" | jq -r .request_id)" = "req-7" ] || fail "followup body request_id"
   pass "fm-x-reply --followup posts to /connector/followup with the same request-bound body"
+}
+
+test_reply_followup_image_live_posts_image_object() {
+  local home fakebin log out rc data img expected
+  home="$TMP_ROOT/reply-followup-image-live"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/result.jpg"
+  make_sample_image "$img"
+  expected=$(base64 < "$img" | tr -d '\n\r')
+  printf 'FMX_PAIRING_TOKEN=tok-fu-img\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-fu-img" --followup --image "$img" \
+    "Done - here is the generated image."); rc=$?
+  expect_code 0 "$rc" "followup image live exit"
+  [ "$out" = "req-fu-img" ] || fail "followup image must echo only the request_id (got: $out)"
+  assert_grep "url=https://relay.test/connector/followup" "$log" "image followup must hit followup endpoint"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  [ "$(printf '%s' "$data" | jq -r '.image.media_type')" = "image/jpeg" ] \
+    || fail "image followup must detect JPEG media_type"
+  [ "$(printf '%s' "$data" | jq -r '.image.data_base64')" = "$expected" ] \
+    || fail "image followup must include base64 image bytes"
+  pass "fm-x-reply --followup --image posts an image object"
 }
 
 test_reply_followup_flag_position_is_flexible() {
@@ -774,6 +985,25 @@ test_reply_followup_thread_dry_run() {
   [ "$(jq -r '.text' "$home/state/x-outbox/req-ft.json")" = "$(jq -r '.texts[0]' "$home/state/x-outbox/req-ft.json")" ] \
     || fail "followup thread text must equal the first chunk"
   pass "fm-x-reply --followup auto-splits a long follow-up into a marked thread"
+}
+
+test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image() {
+  local home out rc img
+  home="$TMP_ROOT/reply-followup-image-dry"; mkdir -p "$home"
+  img="$home/result.gif"
+  make_sample_image "$img"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-fu-img-dry" --followup --image "$img" "Done with art." \
+    2>"$home/err"); rc=$?
+  expect_code 0 "$rc" "followup image dry-run exit"
+  [ "$out" = "req-fu-img-dry" ] || fail "followup image dry-run must echo the request_id (got: $out)"
+  [ "$(jq -r '.endpoint' "$home/state/x-outbox/req-fu-img-dry.json")" = "followup" ] \
+    || fail "followup image dry-run must carry endpoint marker"
+  [ "$(jq -r '.image.media_type' "$home/state/x-outbox/req-fu-img-dry.json")" = "image/gif" ] \
+    || fail "followup image dry-run must detect GIF media_type"
+  jq -e '.image | has("data_base64") | not' "$home/state/x-outbox/req-fu-img-dry.json" >/dev/null \
+    || fail "followup image dry-run must omit base64 bytes"
+  pass "fm-x-reply followup dry-run keeps endpoint marker and compact image metadata"
 }
 
 # --- fm-x-dismiss: drop a mention at the relay without replying ---------------
@@ -1027,6 +1257,32 @@ test_followup_post_within_window_posts_and_clears() {
   pass "fm-x-followup posts the follow-up and clears the link on success"
 }
 
+test_followup_post_forwards_image_to_reply_client() {
+  local home fakebin log out rc meta data img expected
+  home="$TMP_ROOT/fu-post-image"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  img="$home/followup.png"
+  make_sample_image "$img"
+  expected=$(base64 < "$img" | tr -d '\n\r')
+  printf 'FMX_PAIRING_TOKEN=tok-fu-img\n' > "$home/.env"
+  mk_linked_task "$home" task-img req-img 1700000000
+  meta="$home/state/task-img.meta"
+  printf 'Done - generated image attached.' > "$home/reply.txt"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-followup.sh" task-img --image "$img" --text-file "$home/reply.txt"); rc=$?
+  expect_code 0 "$rc" "followup wrapper image post exit"
+  [ "$out" = "req-img" ] || fail "followup wrapper image post must echo the request_id (got: $out)"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  [ "$(printf '%s' "$data" | jq -r '.image.media_type')" = "image/png" ] \
+    || fail "followup wrapper must forward image media_type"
+  [ "$(printf '%s' "$data" | jq -r '.image.data_base64')" = "$expected" ] \
+    || fail "followup wrapper must forward image base64"
+  assert_no_grep "x_request=" "$meta" "a successful image followup must clear the link"
+  pass "fm-x-followup --image forwards the attachment through fm-x-reply --followup"
+}
+
 test_followup_post_failure_keeps_link() {
   local home fakebin out rc meta
   home="$TMP_ROOT/fu-post-fail"; mkdir -p "$home/state"
@@ -1088,16 +1344,26 @@ test_followup_post_dry_run_records_and_clears() {
 }
 
 test_followup_usage_errors() {
-  local home rc
+  local home rc err out
   home="$TMP_ROOT/fu-usage"; mkdir -p "$home/state"
-  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" >/dev/null 2>&1; rc=$?
+  err="$home/err.txt"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "followup no-args exit"
+  assert_grep "--image <path>" "$err" "followup usage must mention --image"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --check >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "followup --check no-id exit"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" some-task >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "followup post no-text-source exit"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --help); rc=$?
+  expect_code 0 "$rc" "followup --help exit"
+  assert_contains "$out" "--image <path>" "followup help must mention --image"
+  assert_contains "$out" "threaded replies attach it to the opener tweet" \
+    "followup help must document thread image placement"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" "../evil" --text-file /dev/null >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "followup unsafe-id exit"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" some-task --image >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup missing --image argument exit"
+  assert_grep "missing --image path" "$err" "followup missing --image argument must explain the error"
   pass "fm-x-followup rejects malformed invocations"
 }
 
@@ -1114,7 +1380,9 @@ test_poll_rejects_unsafe_request_id
 test_reply_success_posts_request_bound_only
 test_reply_text_file_and_stdin
 test_reply_non_2xx_fails
+test_reply_auth_header_tempfile_cleans_up_on_interrupted_post
 test_reply_usage_error
+test_reply_help_mentions_image
 test_reply_whitespace_text_rejected
 test_reply_dry_run_records_not_posts
 test_reply_dry_run_needs_no_token
@@ -1126,10 +1394,17 @@ test_reply_single_no_texts
 test_reply_thread_dry_run
 test_reply_max_chars_floor_clamps_to_minimum
 test_reply_thread_live_posts_texts
+test_reply_image_live_posts_image_object
+test_reply_image_live_streams_payload_file
+test_reply_image_thread_dry_run_records_compact_marker
+test_reply_image_dry_run_cleans_payload_temp_files
+test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
+test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
 test_reply_followup_thread_dry_run
+test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
 test_dismiss_success_posts_request_only
 test_dismiss_dry_run_records_not_posts
 test_dismiss_dry_run_needs_no_token
@@ -1143,6 +1418,7 @@ test_link_rejects_unsafe_and_missing
 test_followup_check_states
 test_followup_check_expired_prunes_link
 test_followup_post_within_window_posts_and_clears
+test_followup_post_forwards_image_to_reply_client
 test_followup_post_failure_keeps_link
 test_followup_post_expired_skips_and_clears
 test_followup_post_not_linked_is_noop

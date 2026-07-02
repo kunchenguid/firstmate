@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Post firstmate's composed answer back to the relay for a pending X mention.
 #
-# Usage: fm-x-reply.sh <request_id> <text>
-#        fm-x-reply.sh <request_id> --text-file <path>   # read the reply from a file
-#        fm-x-reply.sh <request_id> -                    # read the reply from stdin
-#        fm-x-reply.sh <request_id> --followup ...       # post a completion follow-up
+# Usage: fm-x-reply.sh <request_id> [--image <path>] <text>
+#        fm-x-reply.sh <request_id> [--image <path>] --text-file <path>
+#        fm-x-reply.sh <request_id> [--image <path>] -
+#        fm-x-reply.sh <request_id> --followup [--image <path>] ...
 #
 # The --text-file / stdin forms exist so a caller never has to inline reply text
 # (which may be influenced by a public mention) into a shell command, where shell
 # expansion or quote-breakage could bite. fmx-respond uses them; the positional
 # <text> form is kept for back-compat and tests.
+#
+# Optional --image <path> attaches one local image file to the answer or followup
+# POST body as {media_type,data_base64}. Supported extension mapping includes
+# PNG, JPEG, GIF, WebP, BMP, and TIFF. If long text becomes a thread, the relay
+# attaches that image to the first/opener tweet only.
 #
 # Two endpoints, one client. By default the reply is the single answer to a
 # mention, POSTed to $RELAY/connector/answer. With --followup it is instead the
@@ -31,20 +36,23 @@
 # sends {request_id, text}; a thread sends {request_id, text, texts:[chunk,...]}
 # where `texts` is the ordered "(k/n)" chunks for the relay to post as chained
 # replies, and `text` is the first chunk so a relay that only reads `text` still
-# posts the opener. At most FMX_X_THREAD_MAX tweets (default 25) are produced.
+# posts the opener. If --image is present, the relay attaches it to this opener.
+# At most FMX_X_THREAD_MAX tweets (default 25) are produced.
 #
 # Live post config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN
 # (required), FMX_RELAY_URL (default https://myfirstmate.io). Auth:
 # Authorization: Bearer <token>.
 #
 # Preview / dry-run: with FMX_DRY_RUN set (truthy), the reply is NOT posted.
-# Instead the full would-be POST body ({request_id, text}, or {request_id, text,
-# texts} for a thread) is recorded to state/x-outbox/<request_id>.json and a
-# "DRY RUN" summary is printed to stderr; stdout still echoes the request_id and
-# the exit is 0, so the loop runs end to end without a public tweet. A follow-up
+# Instead the would-be POST body ({request_id, text}, or {request_id, text,
+# texts} for a thread) is recorded to state/x-outbox/<request_id>.json and a "DRY
+# RUN" summary is printed to stderr; stdout still echoes the request_id and the
+# exit is 0, so the loop runs end to end without a public tweet. A follow-up
 # dry-run additionally carries an "endpoint":"followup" marker in the recorded
-# body so a preview is self-describing; the live POST body is unchanged. Dry-run
-# needs neither a token nor the relay.
+# body so a preview is self-describing; the live POST body is unchanged. With
+# --image, the dry-run record replaces image bytes with a compact image marker
+# {media_type,bytes,source_path}, not the base64 bytes. Dry-run needs neither a
+# token nor the relay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,9 +62,46 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
-usage() {
-  echo "usage: fm-x-reply.sh <request_id> [--followup] <text> | [--followup] --text-file <path> | [--followup] -" >&2
+TMP_FILES=()
+cleanup_tmp_files() {
+  if [ "${#TMP_FILES[@]}" -gt 0 ]; then
+    rm -f "${TMP_FILES[@]}"
+  fi
 }
+trap cleanup_tmp_files EXIT
+
+reply_make_tmp_file() {
+  local var_name=$1 file
+  file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reply.XXXXXX") || return 1
+  TMP_FILES+=("$file")
+  printf -v "$var_name" '%s' "$file"
+}
+
+usage() {
+  echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] <text> | [--followup] [--image <path>] --text-file <path> | [--followup] [--image <path>] -" >&2
+}
+
+help() {
+  cat <<'EOF'
+usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] <text>
+       fm-x-reply.sh <request_id> [--followup] [--image <path>] --text-file <path>
+       fm-x-reply.sh <request_id> [--followup] [--image <path>] -
+
+Post a public-safe X answer to the relay, or a completion follow-up with --followup.
+
+Options:
+  --followup       POST to /connector/followup instead of /connector/answer.
+  --image <path>   Attach one local image file; threaded replies attach it to the opener tweet.
+  --text-file <path>
+                   Read reply text from a file instead of the command line.
+  -                Read reply text from stdin.
+  --help           Show this help.
+EOF
+}
+
+case "${1:-}" in
+  --help|-h) help; exit 0 ;;
+esac
 
 REQ=${1:-}
 if [ -z "$REQ" ]; then
@@ -67,13 +112,23 @@ shift
 
 # --followup selects the relay's /connector/followup endpoint instead of
 # /connector/answer; it may appear anywhere after the request_id, so strip it out
-# and process the remaining args (the text source) exactly as the answer path
-# always has.
+# along with --image and process the remaining args (the text source) exactly as
+# the answer path always has.
 FOLLOWUP=0
+IMAGE_PATH=
 ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --followup) FOLLOWUP=1 ;;
+    --image)
+      shift
+      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+        echo "fm-x-reply: missing --image path" >&2
+        usage
+        exit 2
+      fi
+      IMAGE_PATH=$1
+      ;;
     *) ARGS+=("$1") ;;
   esac
   shift
@@ -87,7 +142,7 @@ set -- "${ARGS[@]}"
 case "$1" in
   --text-file)
     if [ "$#" -lt 2 ]; then
-      echo "usage: fm-x-reply.sh <request_id> [--followup] --text-file <path>" >&2
+      echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] --text-file <path>" >&2
       exit 2
     fi
     TEXT=$(cat -- "$2") || { echo "fm-x-reply: cannot read text file: $2" >&2; exit 1; }
@@ -122,6 +177,17 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
+IMAGE_PAYLOAD_FILE=
+IMAGE_PREVIEW=
+PAYLOAD_FILE=
+if [ -n "$IMAGE_PATH" ]; then
+  reply_make_tmp_file IMAGE_PAYLOAD_FILE || {
+    echo "fm-x-reply: cannot create image payload temp file" >&2; exit 1; }
+  IMAGE_PREVIEW=$(fmx_image_payload_file "$IMAGE_PATH" fm-x-reply "$IMAGE_PAYLOAD_FILE") || exit 1
+  printf '%s' "$IMAGE_PREVIEW" | jq -e . >/dev/null 2>&1 || {
+    echo "fm-x-reply: failed to build image preview" >&2; exit 1; }
+fi
+
 # Auto-split a long reply into a numbered thread (premium-independent: each tweet
 # stays within the per-tweet budget). A reply that fits in one tweet stays a
 # single, unnumbered tweet.
@@ -133,16 +199,17 @@ N=$(printf '%s' "$CHUNKS" | jq 'length' 2>/dev/null) || N=
 case "$N" in ''|*[!0-9]*) echo "fm-x-reply: failed to split reply into a thread" >&2; exit 1 ;; esac
 [ "$N" -gt 0 ] || { echo "fm-x-reply: empty reply text" >&2; exit 2; }
 
-# Build the body with jq so the text is correctly JSON-escaped. This is exactly
-# what would be POSTed (and, in dry-run, exactly what we record/preview). A
-# single tweet sends {request_id, text}; a thread also sends {texts: [...]} (the
-# ordered chunks) for the relay to post as chained replies, keeping `text` as the
-# first chunk so a relay that only understands `text` still posts the opener.
-if [ "$N" -le 1 ]; then
-  PAYLOAD=$(printf '%s' "$CHUNKS" | jq -c --arg rid "$REQ" '{request_id:$rid, text:(.[0] // "")}') || {
+# Build the body with jq so the text and optional image object are correctly
+# JSON-escaped. A single tweet sends {request_id, text}; a thread also sends
+# {texts: [...]} for the relay to post as chained replies. When image is present
+# on a thread, the relay attaches it to the first chunk only.
+reply_make_tmp_file PAYLOAD_FILE || {
+  echo "fm-x-reply: cannot create request payload temp file" >&2; exit 1; }
+if [ -n "$IMAGE_PAYLOAD_FILE" ]; then
+  fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" "$IMAGE_PAYLOAD_FILE" > "$PAYLOAD_FILE" || {
     echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
 else
-  PAYLOAD=$(printf '%s' "$CHUNKS" | jq -c --arg rid "$REQ" '{request_id:$rid, text:.[0], texts:.}') || {
+  fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" > "$PAYLOAD_FILE" || {
     echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
 fi
 
@@ -154,15 +221,11 @@ if [ -n "$FMX_DRY" ]; then
     echo "fm-x-reply: cannot create dry-run outbox: $outbox_dir" >&2
     exit 1
   }
-  # The recorded body is the would-be POST body; a follow-up preview additionally
-  # carries an "endpoint":"followup" marker so an outbox record is self-describing
-  # (the live POST body stays exactly {request_id, text[, texts]} for both paths).
-  if [ "$FOLLOWUP" = 1 ]; then
-    OUTREC=$(printf '%s' "$PAYLOAD" | jq -c '. + {endpoint:"followup"}') || {
-      echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
-  else
-    OUTREC=$PAYLOAD
-  fi
+  # The recorded body is the would-be POST body, except image bytes are replaced
+  # by a compact marker. A follow-up preview additionally carries an
+  # "endpoint":"followup" marker so an outbox record is self-describing.
+  OUTREC=$(fmx_reply_outbox_json "$REQ" "$CHUNKS" "$N" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
+    echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
   printf '%s\n' "$OUTREC" > "$outbox_file" 2>/dev/null || {
     echo "fm-x-reply: cannot write dry-run outbox: $outbox_file" >&2
     exit 1
@@ -183,22 +246,14 @@ if [ -z "$FMX_TOKEN" ]; then
   echo "fm-x-reply: X mode not configured (no FMX_PAIRING_TOKEN)" >&2
   exit 1
 fi
-command -v curl >/dev/null 2>&1 || { echo "fm-x-reply: curl not found" >&2; exit 1; }
-AUTH_HEADER_FILE=$(fmx_auth_header_file) || {
-  echo "fm-x-reply: invalid FMX_PAIRING_TOKEN" >&2
-  exit 1
-}
-trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
-
-code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
-  -X POST \
-  -H "@$AUTH_HEADER_FILE" \
-  -H 'Content-Type: application/json' \
-  --data "$PAYLOAD" \
-  "$FMX_RELAY/connector/$ENDPOINT" 2>/dev/null) || {
-  echo "fm-x-reply: request to relay failed" >&2
-  exit 1
-}
+code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE")
+post_rc=$?
+case "$post_rc" in
+  0) : ;;
+  127) echo "fm-x-reply: curl not found" >&2; exit 1 ;;
+  3) echo "fm-x-reply: invalid FMX_PAIRING_TOKEN" >&2; exit 1 ;;
+  *) echo "fm-x-reply: request to relay failed" >&2; exit 1 ;;
+esac
 
 case "$code" in
   2[0-9][0-9]) printf '%s\n' "$REQ" ;;

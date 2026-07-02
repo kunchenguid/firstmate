@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh tests/*.sh
+      - run: shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
 
   tests:
     name: Behavior tests
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Require tmux for e2e tests
         run: |
           set -eu

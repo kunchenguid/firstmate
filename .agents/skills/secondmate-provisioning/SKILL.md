@@ -1,12 +1,12 @@
 ---
 name: secondmate-provisioning
-description: Agent-only reference for persistent secondmate setup and retirement. Use when creating, seeding, validating, recovering, handing backlog to, or retiring a secondmate home, or when editing data/secondmates.md. Covers home leases, transactional seeding, project clone restrictions, idle charter, handoff helper, and teardown safety.
+description: Agent-only reference for persistent secondmate setup and retirement. Use when creating, seeding, validating, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, or when editing data/secondmates.md. Covers home leases, transactional seeding, project clone restrictions, inherited config push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 ---
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, handing backlog to, recovering, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, handing backlog to, recovering, pushing inherited config into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -48,8 +48,12 @@ The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
-`bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
+`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
+The same launch also propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into the secondmate home's `config/`.
+`config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited-config change without running the tracked-file fast-forward or nudging the agents.
+It uses the same live-home discovery and propagation helper as bootstrap and reports each item as `pushed`, `unchanged`, `skipped`, or `error`.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
@@ -90,7 +94,8 @@ bin/fm-spawn.sh <id> --secondmate
 
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent on-disk home.
-Respawn uses the same guarded pre-launch sync, so recovered secondmates converge to the primary firstmate version without fetching from origin whenever their home can be cleanly fast-forwarded.
+Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inheritable config, so recovered secondmates converge to the primary firstmate version and local dispatch, crew-harness, and backlog-backend settings whenever their home can be cleanly fast-forwarded.
+If the secondmate is already running and only inherited config changed, prefer `bin/fm-config-push.sh` over respawning.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.

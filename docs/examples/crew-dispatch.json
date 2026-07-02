@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {
+      "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
+      "use": { "harness": "grok" },
+      "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
+    },
+    {
+      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
+      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
+      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
+    },
+    {
+      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
+      "use": { "harness": "codex", "model": "gpt-5.5", "effort": "high" },
+      "why": "Use a stronger coding profile for broad design and implementation work."
+    }
+  ],
+  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+}

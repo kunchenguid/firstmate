@@ -224,6 +224,40 @@ dirty_status() {
   fi
 }
 
+secondmate_registry_field() {
+  local reg=$1 id=$2 key=$3 line value
+  [ -f "$reg" ] || return 1
+  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
+  [ -n "$line" ] || return 1
+  case "$key" in
+    home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;
+    projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects:[[:space:]]*\([^;)]*\); added .*/\1/p' | sed 's/[[:space:]]*$//') ;;
+    *) return 1 ;;
+  esac
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# List this home's LIVE secondmate direct reports from state/<id>.meta records.
+# The meta file is the liveness signal; data/secondmates.md is only the fallback
+# for durable fields such as home= when an older/incomplete meta lacks them.
+# Output is pipe-delimited: id|home|window|meta-file.
+live_secondmate_meta_records() {
+  local state=$1 registry=${2:-} meta id home window
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta" .meta)
+    home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -z "$home" ] && [ -n "$registry" ]; then
+      home=$(secondmate_registry_field "$registry" "$id" home || true)
+    fi
+    window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    printf '%s|%s|%s|%s\n' "$id" "$home" "$window" "$meta"
+  done
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -375,15 +409,11 @@ process_secondmate() {
 # kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
 # nudge_requires_instr through to process_secondmate. Accumulates into
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
+# The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} meta id home window
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
   [ -d "$state" ] || return 0
-  for meta in "$state"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
-    id=$(basename "$meta" .meta)
-    home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  while IFS='|' read -r id home window meta; do
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
-  done
+  done < <(live_secondmate_meta_records "$state" "$registry")
 }

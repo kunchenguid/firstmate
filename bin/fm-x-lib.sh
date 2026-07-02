@@ -12,6 +12,13 @@
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
 #   fmx_split_thread <max> <cap> - split a reply (stdin) into a numbered thread
+#   fmx_image_payload_file <path> <client> <payload-file> - encode one image
+#                                attachment to a JSON file and print preview JSON
+#   fmx_reply_payload_json <request_id> <chunks> <n> [image-json-file]
+#                                - build the answer/followup POST body
+#   fmx_reply_outbox_json <request_id> <chunks> <n> <followup-0|1> [image-preview-json]
+#                                - build the dry-run record without image bytes
+#   fmx_post_json <endpoint> <payload-file> - POST JSON to the relay, printing HTTP code
 # Callers must have FM_HOME set before calling fmx_load_config.
 
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
@@ -126,6 +133,159 @@ fmx_auth_header_file() {
   printf 'Authorization: Bearer %s\n' "$FMX_TOKEN" > "$file" || { rm -f "$file"; return 1; }
   printf '%s\n' "$file"
 }
+
+fmx_image_media_type_from_path() {
+  local path=$1 lower detected
+  lower=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *.png) printf 'image/png\n' ;;
+    *.jpg|*.jpeg) printf 'image/jpeg\n' ;;
+    *.gif) printf 'image/gif\n' ;;
+    *.webp) printf 'image/webp\n' ;;
+    *.bmp) printf 'image/bmp\n' ;;
+    *.tif|*.tiff) printf 'image/tiff\n' ;;
+    *)
+      if command -v file >/dev/null 2>&1; then
+        detected=$(file --mime-type -b -- "$path" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        case "$detected" in
+          image/png|image/jpeg|image/pjpeg|image/gif|image/webp|image/bmp|image/tiff) printf '%s\n' "$detected" ;;
+          *) return 1 ;;
+        esac
+      else
+        return 1
+      fi
+      ;;
+  esac
+}
+
+# fmx_image_payload_file <path> <client-name> <payload-file>: validate and encode
+# a local outbound image. The relay payload object is written to <payload-file>.
+# The compact preview object is printed for FMX_DRY_RUN outbox records.
+fmx_image_payload_file() {
+  local path=$1 client=${2:-fm-x-reply} payload_file=${3:-} media_type bytes
+  if [ -z "$payload_file" ]; then
+    echo "$client: missing image payload destination" >&2
+    return 1
+  fi
+  if [ ! -e "$path" ]; then
+    echo "$client: image file does not exist: $path" >&2
+    return 1
+  fi
+  if [ ! -f "$path" ]; then
+    echo "$client: image path is not a regular file: $path" >&2
+    return 1
+  fi
+  if [ ! -r "$path" ]; then
+    echo "$client: image file is not readable: $path" >&2
+    return 1
+  fi
+  media_type=$(fmx_image_media_type_from_path "$path") || {
+    echo "$client: unsupported image media type for: $path" >&2
+    return 1
+  }
+  command -v base64 >/dev/null 2>&1 || {
+    echo "$client: base64 not found" >&2
+    return 1
+  }
+  bytes=$(wc -c < "$path" | tr -d '[:space:]') || {
+    echo "$client: cannot stat image file: $path" >&2
+    return 1
+  }
+  if [ "$bytes" = 0 ]; then
+    echo "$client: image file is empty: $path" >&2
+    return 1
+  fi
+  if ! (set -o pipefail; base64 < "$path" | tr -d '\n\r' \
+    | jq -Rsc --arg media_type "$media_type" \
+      '{media_type:$media_type,data_base64:.}' > "$payload_file"); then
+    rm -f "$payload_file"
+    echo "$client: cannot read image file: $path" >&2
+    return 1
+  fi
+  jq -cn \
+    --arg media_type "$media_type" \
+    --arg source_path "$path" \
+    --argjson bytes "$bytes" \
+    '{media_type:$media_type,bytes:$bytes,source_path:$source_path}'
+}
+
+fmx_reply_payload_json() {
+  local rid=$1 chunks=$2 n=$3 image_json_file=${4:-}
+  if [ -n "$image_json_file" ]; then
+    if [ "$n" -le 1 ]; then
+      printf '%s' "$chunks" | jq -c --arg rid "$rid" --slurpfile image "$image_json_file" \
+        '{request_id:$rid, text:(.[0] // ""), image:$image[0]}'
+    else
+      printf '%s' "$chunks" | jq -c --arg rid "$rid" --slurpfile image "$image_json_file" \
+        '{request_id:$rid, text:.[0], texts:., image:$image[0]}'
+    fi
+  else
+    if [ "$n" -le 1 ]; then
+      printf '%s' "$chunks" | jq -c --arg rid "$rid" '{request_id:$rid, text:(.[0] // "")}'
+    else
+      printf '%s' "$chunks" | jq -c --arg rid "$rid" '{request_id:$rid, text:.[0], texts:.}'
+    fi
+  fi
+}
+
+fmx_reply_outbox_json() {
+  local rid=$1 chunks=$2 n=$3 followup=$4 image_preview_json=${5:-}
+  if [ -n "$image_preview_json" ]; then
+    if [ "$followup" = 1 ]; then
+      if [ "$n" -le 1 ]; then
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" --argjson image "$image_preview_json" \
+          '{request_id:$rid, text:(.[0] // ""), image:$image, endpoint:"followup"}'
+      else
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" --argjson image "$image_preview_json" \
+          '{request_id:$rid, text:.[0], texts:., image:$image, endpoint:"followup"}'
+      fi
+    else
+      if [ "$n" -le 1 ]; then
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" --argjson image "$image_preview_json" \
+          '{request_id:$rid, text:(.[0] // ""), image:$image}'
+      else
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" --argjson image "$image_preview_json" \
+          '{request_id:$rid, text:.[0], texts:., image:$image}'
+      fi
+    fi
+  else
+    if [ "$followup" = 1 ]; then
+      if [ "$n" -le 1 ]; then
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" \
+          '{request_id:$rid, text:(.[0] // ""), endpoint:"followup"}'
+      else
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" \
+          '{request_id:$rid, text:.[0], texts:., endpoint:"followup"}'
+      fi
+    else
+      if [ "$n" -le 1 ]; then
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" '{request_id:$rid, text:(.[0] // "")}'
+      else
+        printf '%s' "$chunks" | jq -c --arg rid "$rid" '{request_id:$rid, text:.[0], texts:.}'
+      fi
+    fi
+  fi
+}
+
+fmx_post_json() (
+  local endpoint=$1 payload_file=$2 auth_header_file code rc
+  command -v curl >/dev/null 2>&1 || return 127
+  [ -r "$payload_file" ] || return 2
+  auth_header_file=$(fmx_auth_header_file) || return 3
+  trap 'rm -f "$auth_header_file"' EXIT
+  trap 'rm -f "$auth_header_file"; exit 143' HUP INT TERM
+  code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
+    -X POST \
+    -H "@$auth_header_file" \
+    -H 'Content-Type: application/json' \
+    --data-binary "@$payload_file" \
+    "$FMX_RELAY/connector/$endpoint" 2>/dev/null)
+  rc=$?
+  rm -f "$auth_header_file"
+  trap - EXIT HUP INT TERM
+  [ "$rc" = 0 ] || return 4
+  printf '%s\n' "$code"
+)
 
 # --- task <-> X-request link (state/<id>.meta backed) -----------------------
 #
