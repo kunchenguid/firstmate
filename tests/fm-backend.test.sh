@@ -454,18 +454,26 @@ test_spawn_conformance_old_vs_new() {
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
-    || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
+  grep -F -v $'\x1f''export GOTMPDIR=' "$log_old" | grep -F -v $'\x1f''-l'$'\x1f' > "$TMP_ROOT/spawn-old-normalized.log"
+  grep -F -v $'\x1f''export GOTMPDIR=' "$log_new" | grep -F -v $'\x1f''-l'$'\x1f' > "$TMP_ROOT/spawn-new-normalized.log"
+  diff -u "$TMP_ROOT/spawn-old-normalized.log" "$TMP_ROOT/spawn-new-normalized.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+    || fail "fm-spawn.sh: non-launch tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
-  assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
-  assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
-  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
-    "spawn tmux log missing the literal launch-command send"
+  local log_new_contents
+  log_new_contents=$(cat "$log_new")
+  assert_contains "$log_new_contents" $'\x1f''new-window' "spawn tmux log missing new-window"
+  assert_contains "$log_new_contents" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
+  assert_contains "$log_new_contents" "export GOTMPDIR='/tmp/fm-$id/gotmp'" \
+    "spawn tmux log missing the shell-portable GOTMPDIR export"
+  assert_contains "$log_new_contents" $'\x1f''-l'$'\x1f''bash -c ' \
+    "spawn tmux log missing the bash-wrapped launch-command send"
+  assert_contains "$log_new_contents" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
+    "spawn tmux log missing the templated claude launch"
 
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new for a ship-task claude spawn"
+  pass "fm-spawn.sh: non-launch tmux command log still matches old behavior, and templated launches are bash-wrapped"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
