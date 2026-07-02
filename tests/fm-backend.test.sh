@@ -10,9 +10,9 @@
 #      and fm-teardown.sh (checked out from the merge-base with `main`, the
 #      commit this branch started from) against the SAME fake tmux/treehouse
 #      binaries and fixtures as the REFACTORED versions in this checkout, then
-#      diffs the two command logs byte-for-byte - the report's P1 checklist
-#      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs".
+#      diffs the two command logs. fm-spawn's non-launch commands still compare
+#      directly, while its launch command is asserted separately because verified
+#      harness templates are now wrapped in bash.
 #   3. Asserts the new `--backend`/`FM_BACKEND` selection refuses an unknown
 #      backend loudly (tmux is the only verified adapter in P1).
 #

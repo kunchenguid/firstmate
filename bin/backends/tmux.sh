@@ -4,9 +4,8 @@
 # Reference backend (AGENTS.md section 8; data/fm-backend-design-d7). P1 moves
 # the tmux command sequences that fm-send.sh, fm-peek.sh, fm-watch.sh,
 # fm-spawn.sh, and fm-teardown.sh already ran inline into named functions
-# here, running the EXACT same commands in the EXACT same order, so the
-# default (tmux, `backend=` absent) path stays byte-identical. Sourced only
-# through bin/fm-backend.sh's fm_backend_source, never directly.
+# here. Sourced only through bin/fm-backend.sh's fm_backend_source, never
+# directly.
 #
 # Worktree acquisition (running `treehouse get` inside the pane, and polling
 # its cwd) is unchanged by this extraction: P1 scopes only the session
@@ -86,9 +85,8 @@ fm_backend_tmux_current_path() {  # <target>
 }
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification - used for the fixed spawn-time commands
-# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
-# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
+# composer verification - used for fixed spawn-time commands such as
+# `treehouse get`. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
 }
