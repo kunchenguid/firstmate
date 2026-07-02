@@ -61,10 +61,14 @@ for id in "$ID_NUM" "$ID_OUT"; do
   printf 'test brief\n' > "$HOME_DIR/data/$id/brief.md"
 done
 
-# Pane-side fakes. The tmux server starts with PANEBIN on PATH, so every pane
-# shell sees them: 'treehouse get' moves the pane into the worktree named by the
-# pointer file (the real subshell behavior fm-spawn waits for), and 'claude'
-# makes the typed launch command a no-op instead of starting a real agent.
+# Pane-side fakes. The pane shell's PATH is pinned to PANEBIN via default-command
+# below, so every pane resolves these: 'treehouse get' moves the pane into the
+# worktree named by the pointer file (the real subshell behavior fm-spawn waits
+# for), and 'claude' makes the typed launch command a no-op instead of starting a
+# real agent. Pinning is deterministic on purpose: relying on the tmux server
+# inheriting PANEBIN through its environment is fragile (it broke in CI, where no
+# real 'treehouse' exists to mask a missing fake), so the pane PATH is set
+# explicitly rather than inherited.
 cat > "$PANEBIN/treehouse" <<SH
 #!/usr/bin/env bash
 set -u
@@ -88,11 +92,12 @@ chmod +x "$SHIMBIN/tmux"
 
 # Private server: decoy session first, then a session literally named "7" so it
 # is the server's current session; occupy its window indices 1..7 to make the
-# historical bare `-t 7` collide deterministically. Pane shells stay rc-free so
-# the fake-bin PATH from the server environment survives.
-PATH="$PANEBIN:$PATH" "$REAL_TMUX" -L "$SOCKET" new-session -d -s other -x 200 -y 50 \
+# historical bare `-t 7` collide deterministically. default-command pins PANEBIN
+# onto every pane's PATH (and keeps panes rc-free), so a typed `treehouse`/`claude`
+# resolves to the fakes regardless of the server's inherited environment.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s other -x 200 -y 50 \
   || fail "could not start private tmux server"
-tt set-option -g default-command 'bash --noprofile --norc'
+tt set-option -g default-command "PATH=\"$PANEBIN\":\$PATH exec bash --noprofile --norc"
 tt new-session -d -s 7 -x 200 -y 50
 for i in 1 2 3 4 5 6 7; do tt new-window -d -t "=7:$i"; done
 
@@ -103,6 +108,23 @@ FAKE_TMUX_ENV="$SOCK_PATH,$$,0"
 # the numeric one, exactly the world fm-spawn resolves SES from.
 [ "$(TMUX="$FAKE_TMUX_ENV" "$REAL_TMUX" display-message -p '#S')" = "7" ] \
   || fail "precondition: current session on the private server is not '7'"
+
+# Fail fast, with a clear message, if a pane cannot resolve the fake treehouse -
+# the exact CI failure mode (fm-spawn otherwise just times out after 60s on the
+# missing worktree handoff). Runs one throwaway pane through the pinned PATH.
+probe_pane_resolves_fake_treehouse() {
+  local probe="$TMP_ROOT/probe.out" flag="$TMP_ROOT/probe.flag"
+  rm -f "$probe" "$flag"
+  tt new-window -d -t '=7:' -n fm-probe
+  tt send-keys -t '=7:fm-probe' \
+    "command -v treehouse > '$probe' 2>&1; printf done > '$flag'" Enter
+  local _
+  for _ in $(seq 1 40); do [ -f "$flag" ] && break; sleep 0.25; done
+  tt kill-window -t '=7:fm-probe' 2>/dev/null || true
+  grep -qx "$PANEBIN/treehouse" "$probe" 2>/dev/null
+}
+probe_pane_resolves_fake_treehouse \
+  || fail "pane shell cannot resolve the fake treehouse (PANEBIN not on pane PATH); test world misconfigured"
 
 wait_for_window() { # <session> <window-name> -> 0 once present within ~15s
   local ses=$1 name=$2
