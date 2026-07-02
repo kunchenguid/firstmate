@@ -33,6 +33,15 @@
 # pid, so it can never touch another home's watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
+
+# Some harnesses run validation with SIGHUP ignored. Bash cannot install a trap
+# for a signal that was ignored when Bash started, so reset HUP in a tiny parent
+# process before the shell reaches its cleanup traps.
+if [ "${FM_WATCH_ARM_HUP_RESET:-}" != 1 ]; then
+  export FM_WATCH_ARM_HUP_RESET=1
+  exec perl -e '$SIG{HUP} = "DEFAULT"; exec @ARGV' bash "$0" "$@"
+fi
+
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
