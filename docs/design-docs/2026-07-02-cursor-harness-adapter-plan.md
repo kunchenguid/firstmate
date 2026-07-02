@@ -27,11 +27,17 @@ Created:
 - `tests/fm-cursor-harness.test.sh` - detection, spawn, turn-end hook, teardown, fm-lock, hooks.json merge
 - Local, gitignored (not committed to the PR): `config/crew-dispatch.json`, `config/crew-harness` in the operator's firstmate home
 
-Key facts to resolve first (Task 0), then substituted throughout:
-- `BIN` = canonical Cursor CLI command (`cursor-agent` preferred; `agent` fallback)
-- `BUSY` = Cursor busy-pane signature string
-- `EXITKEY`, `INTKEY` = exit / interrupt keys
-- `SKILLFORM` = `/no-mistakes` invocation form
+Key facts (RESOLVED by Task 0 on 2026-07-02):
+- `BIN` = **`cursor-agent`** (canonical; `agent` is a symlink to it). Use `cursor-agent` in ancestry/lock matchers.
+- Detection marker: **`CURSOR_AGENT=1`**; `CLAUDECODE` unset in Cursor sessions.
+- `BUSY` = **`ctrl+c to stop`** (also a `Working` spinner). Neither matches the existing `FM_BUSY_REGEX`, so it must be added. Regex-safe form: `ctrl\+c to stop`.
+- `INTKEY` = **Ctrl+C** (from the on-screen `ctrl+c to stop` hint).
+- `EXITKEY` = **unresolved** - Ctrl+D and `/quit` did not exit; teardown kills the tmux window regardless, so non-blocking. Record as open in the SKILL.
+- Trust dialog: **"Do you trust the contents of this directory?" → accept by sending `a`** (peek-and-accept in spawn).
+- Autonomy: `--force` → footer shows **"Run Everything"**.
+- Turn-end `stop` hook: **fires in interactive sessions** (NOT in `-p` headless mode - fine, crewmates are interactive). Payload keys include `workspace_roots` (array of absolute paths), `hook_event_name`, `status`, `loop_count`, `conversation_id`, `model`; hook must emit JSON (`{}`) on stdout.
+- `SKILLFORM` = `/no-mistakes` (Cursor uses slash commands; confirm on first real no-mistakes run).
+- Idle composer shows a `→ Add a follow-up` placeholder - verify it is dim (SGR2) so the composer reader ignores it; if not, set `FM_COMPOSER_IDLE_RE`.
 
 ---
 
