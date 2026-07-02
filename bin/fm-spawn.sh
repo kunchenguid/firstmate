@@ -307,6 +307,16 @@ case "$ARG3" in
     ;;
 esac
 
+# jq is required for cursor to merge the turn-end hook into ~/.cursor/hooks.json
+# (shared with cmux). Fail before launching the agent if missing (bootstrap
+# reports it when crew-harness or secondmate-harness selects cursor).
+if [ "$HARNESS" = "cursor" ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required for cursor harness (to install the stop hook that fires state/<id>.turn-ended)" >&2
+  echo "MISSING: jq (install: brew install jq  # or equivalent for your platform)" >&2
+  exit 1
+fi
+
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so

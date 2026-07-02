@@ -414,6 +414,20 @@ fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
+
+# jq is required for cursor harness (to jq-merge the stop hook into the shared
+# ~/.cursor/hooks.json). Already required for X-mode and crew-dispatch (above).
+if [ "$crew" = "cursor" ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+  fi
+fi
+sm=
+[ -f "$CONFIG/secondmate-harness" ] && sm=$(head -1 "$CONFIG/secondmate-harness" 2>/dev/null | tr -d '[:space:]' | cut -d' ' -f1 || true)
+if [ "$sm" = "cursor" ] && ! command -v jq >/dev/null 2>&1; then
+  echo "MISSING: jq (install: $(install_cmd jq))"
+fi
+
 crew_dispatch_validate
 if ! fm_backlog_backend_manual "$CONFIG"; then
   if fm_tasks_axi_compatible; then
