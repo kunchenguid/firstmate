@@ -168,6 +168,11 @@ EOF
 # definition of done below rather than repeated in each mode's heredoc.
 GATE_CHECK="Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply."
 
+# Quarterdeck clause: ship-mode independent verification (spec:
+# docs/specs/2026-07-01-agent-os-council.md). Like GATE_CHECK it is
+# mode-independent, so defined once and appended to the definition of done.
+VERIFY_CHECK="Independent verification (the Quarterdeck): \`done:\` is a claim, not an acceptance. An independent verifier will re-prove your claims against your worktree - re-running gates, tests, and the definition of done above. If it rejects, firstmate relays the findings; fix them and append a fresh \`done:\` line. After 3 rejects the task escalates to the captain. Make the work reproducible; do not argue with the verifier through the status file."
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -260,5 +265,6 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 $GATE_CHECK
+$VERIFY_CHECK
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

@@ -369,6 +369,26 @@ The no-mistakes pipeline fixes auto-fix findings on its own (inside its own work
 When it reports `needs-decision` (ask-user findings), relay the findings to the captain unless `yolo=on` permits routine approval on your judgment, then send the decision back as a short instruction (the crewmate responds via `no-mistakes axi respond`).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
+### Quarterdeck: done is a claim, not an acceptance
+
+A ship task's `done:` line triggers verification, never direct acceptance. Run
+`bin/fm-verify.sh <id>`: it runs a foreign-lens review of the diff (Fugu ->
+codex -> none, degrading loudly), then an independent fresh-context verifier
+(default-REJECT) that re-proves the brief's definition of done from the
+crewmate's worktree. The decision lands in `state/<id>.verdict` (append-only:
+`approve:` / `reject:` / `escalate:` / `lens:` evidence lines).
+
+- `approve:` - proceed with the normal delivery path. `fm-merge-local.sh` and
+  `fm-pr-check.sh` structurally refuse to run without a trailing approve
+  (captain bypass: `FM_VERIFY_OVERRIDE=1`, loud and logged).
+- `reject:` - fm-verify already relayed the findings to the crewmate; expect a
+  fresh `done:`. Three rejects auto-escalate.
+- `escalate:` - the captain decides. Infrastructure failures (verifier would
+  not run) land here too: the stage fails closed, never open.
+
+Scout and secondmate tasks skip the Quarterdeck (Phase 1 scope). Spec:
+`docs/specs/2026-07-01-agent-os-council.md`.
+
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
