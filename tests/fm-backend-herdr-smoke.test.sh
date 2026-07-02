@@ -55,7 +55,9 @@ TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp) || fail "cre
 read -r TAB_ID PANE_ID <<EOF
 $TASK_IDS
 EOF
-[ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
+if [ -z "$TAB_ID" ] || [ -z "$PANE_ID" ]; then
+  fail "create_task did not return tab/pane ids"
+fi
 TARGET="$SESSION:$PANE_ID"
 
 if fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp >/dev/null 2>&1; then

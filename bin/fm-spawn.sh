@@ -571,7 +571,10 @@ case "$BACKEND" in
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-    [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || { echo "error: herdr did not return a tab/pane id for $W" >&2; exit 1; }
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+      echo "error: herdr did not return a tab/pane id for $W" >&2
+      exit 1
+    fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
 esac

@@ -143,7 +143,10 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
   out=$(HERDR_SESSION="$session" herdr tab create --workspace "$wsid" --cwd "$cwd" --label "$label" 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  [ -n "$tab_id" ] && [ -n "$pane_id" ] || { echo "error: could not parse tab/pane id from herdr tab create output" >&2; return 1; }
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    echo "error: could not parse tab/pane id from herdr tab create output" >&2
+    return 1
+  fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
