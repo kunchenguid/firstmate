@@ -19,6 +19,12 @@
 # need a live attached tmux client, which a background test script cannot
 # manufacture; the selection LOGIC for that case is already exercised for real
 # by fm_backend_detect's own unit coverage plus that fake-tmux fm-spawn test.
+#
+# Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
+# ONLY herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
+# stop` - that command killed the captain's live default herdr server twice in
+# production because HERDR_SESSION-based targeting (env var OR inline prefix)
+# is not reliably honored once another herdr server is already running.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +42,9 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+
 # Physically-resolved (mktemp -d "$(pwd -P)"-relative), not the logical
 # ${TMPDIR:-/tmp} path: on macOS /tmp is a symlink to /private/tmp, and
 # fm-spawn.sh's PROJ_ABS uses a logical `cd && pwd` while herdr's own
@@ -52,9 +61,7 @@ trap cleanup_all EXIT
 
 cleanup_all() {
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
-  HERDR_SESSION="$SESSION" herdr server stop >/dev/null 2>&1 || true
-  sleep 0.5
-  HERDR_SESSION="$SESSION" herdr session delete "$SESSION" --json >/dev/null 2>&1 || true
+  herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
 
@@ -127,7 +134,7 @@ FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
 status=$?
 [ "$status" -eq 0 ] || fail "fm-teardown.sh failed for the auto-detected herdr task"$'\n'"$(cat "$TEARDOWN_OUT")"
 [ -f "$META" ] && fail "fm-teardown.sh did not remove $META"
-if HERDR_SESSION="$SESSION" herdr pane get "$PANE" >/dev/null 2>&1; then
+if herdr pane get "$PANE" --session "$SESSION" >/dev/null 2>&1; then
   fail "fm-teardown.sh did not close the auto-detected herdr pane"
 fi
 WT=

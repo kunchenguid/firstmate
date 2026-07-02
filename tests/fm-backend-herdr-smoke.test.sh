@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-smoke.test.sh - real herdr smoke test for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
-# data/fm-backend-design-d7 (herdr-addendum.md). Mirrors
+# data/fm-backend-design-d7 (herdr-addendum.md), extended for the P3
+# workspace-per-home pass (AGENTS.md task herdr-sm-spaces-k4). Mirrors
 # tests/fm-backend-tmux-smoke.test.sh's structure: every other suite fakes the
 # CLI, this one talks to a REAL herdr server - but ALWAYS on a private, named,
 # throwaway HERDR_SESSION (never the default session), so it never touches a
 # captain's real herdr usage. Skips cleanly when herdr (or jq) is not
 # installed, so CI/dev machines without herdr are unaffected.
+#
+# Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
+# ONLY herdr_safe_stop_and_delete, never a bare/ambient `herdr server stop` -
+# that command killed the captain's live default herdr server twice in
+# production because HERDR_SESSION-based targeting (env var OR inline prefix)
+# is not reliably honored once another herdr server is already running.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,14 +24,15 @@ pass() { printf 'ok - %s\n' "$1"; }
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+
 SESSION="fm-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 trap cleanup_all EXIT
 
 cleanup_all() {
-  herdr server stop >/dev/null 2>&1 || true
-  sleep 0.5
-  herdr session delete "$SESSION" --json >/dev/null 2>&1 || true
+  herdr_safe_stop_and_delete "$SESSION"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -136,7 +144,7 @@ fi
 # --- kill -----------------------------------------------------------------
 
 fm_backend_herdr_kill "$TARGET"
-if HERDR_SESSION="$SESSION" herdr pane get "$PANE_ID" >/dev/null 2>&1; then
+if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "kill did not remove the pane"
 fi
 # Best-effort contract: killing an already-gone pane must not error.
