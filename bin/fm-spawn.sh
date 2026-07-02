@@ -432,9 +432,12 @@ json_escape() {
 # per-task gate lives in the command, not here.
 fm_cursor_merge_hooks() {
   local hooks_file=$1 fm_command=$2
+  # Guarded by early check in spawn when HARNESS=cursor (plus bootstrap reporting).
+  # If we reach here without jq, something is wrong — fail hard.
   if ! command -v jq >/dev/null 2>&1; then
-    echo "warning: jq not found; cannot install cursor turn-end hook into $hooks_file" >&2
-    return 0
+    echo "error: jq is required for cursor harness turn-end hook" >&2
+    echo "MISSING: jq (install: brew install jq  # or equivalent for your platform)" >&2
+    exit 1
   fi
   [ -f "$hooks_file" ] || printf '{"hooks":{},"version":1}\n' > "$hooks_file"
   cp -p "$hooks_file" "$hooks_file.fm-bak" 2>/dev/null || true
