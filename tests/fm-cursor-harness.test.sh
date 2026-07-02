@@ -6,7 +6,8 @@ set -u
 # CURSOR_AGENT=1 and from a cursor-agent process name; fm-spawn.sh launch_template
 # emitting the verified `cursor-agent --yolo ...` string; and the SHARED
 # ~/.cursor/hooks.json merge being idempotent (apply twice -> same content) while
-# preserving an unrelated existing (cmux) entry.
+# preserving an unrelated existing (cmux) entry, using Cursor's documented flat
+# "command" schema for stop entries.
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -146,8 +147,10 @@ test_cursor_hook_merge_idempotent_and_preserves_cmux() {
 $rec
 EOF
   # Pre-seed the SHARED hooks.json with cmux's own entries (the realistic state).
+  # Use Cursor's documented flat schema: each stop (and other hook) entry has a
+  # top-level "command" (not a nested {"hooks":[{...}]} wrapper).
   hooks="$home/.cursor/hooks.json"
-  printf '%s\n' '{"hooks":{"afterAgentResponse":[{"hooks":[{"type":"command","command":"cmux-after.sh"}]}],"stop":[{"hooks":[{"type":"command","command":"cmux-stop.sh"}]}]},"version":1}' > "$hooks"
+  printf '%s\n' '{"hooks":{"afterAgentResponse":[{"command":"cmux-after.sh"}],"stop":[{"command":"cmux-stop.sh"}]},"version":1}' > "$hooks"
   cmux_hash=$(jq -S . "$hooks" | shasum)
 
   out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
@@ -159,13 +162,13 @@ EOF
   assert_present "$auth/fm-turn-end.sh" "cursor guard script was not installed"
 
   # cmux's afterAgentResponse entry must survive the merge untouched.
-  jq -e '.hooks.afterAgentResponse[0].hooks[0].command == "cmux-after.sh"' "$hooks" >/dev/null \
+  jq -e '.hooks.afterAgentResponse[0].command == "cmux-after.sh"' "$hooks" >/dev/null \
     || fail "cursor merge clobbered cmux's afterAgentResponse entry"
   # cmux's own stop entry must survive; firstmate's stop entry added alongside it.
-  jq -e '.hooks.stop | map(select(.hooks[0].command == "cmux-stop.sh")) | length == 1' "$hooks" >/dev/null \
+  jq -e '.hooks.stop | map(select(.command == "cmux-stop.sh")) | length == 1' "$hooks" >/dev/null \
     || fail "cursor merge dropped cmux's stop entry"
   fm_count=$(jq --arg cmd "$auth/fm-turn-end.sh" \
-    '.hooks.stop | map(select(any(.hooks[]?; (.command | test($cmd))))) | length' "$hooks")
+    '.hooks.stop | map(select(.command | test($cmd))) | length' "$hooks")
   [ "$fm_count" = "1" ] || fail "expected exactly one firstmate stop entry, got $fm_count"
 
   # Re-run the SAME spawn a second time (simulating a respawn or a second task
@@ -174,9 +177,9 @@ EOF
   out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id")
   expect_code 0 $? "second cursor spawn should succeed"
   fm_count2=$(jq --arg cmd "$home/.cursor/fm-turn-end.d/fm-turn-end.sh" \
-    '.hooks.stop | map(select(any(.hooks[]?; (.command | test($cmd))))) | length' "$hooks")
+    '.hooks.stop | map(select(.command | test($cmd))) | length' "$hooks")
   [ "$fm_count2" = "1" ] || fail "second cursor spawn duplicated the firstmate stop entry (got $fm_count2)"
-  jq -e '.hooks.afterAgentResponse[0].hooks[0].command == "cmux-after.sh"' "$hooks" >/dev/null \
+  jq -e '.hooks.afterAgentResponse[0].command == "cmux-after.sh"' "$hooks" >/dev/null \
     || fail "second cursor spawn clobbered cmux's afterAgentResponse"
 
   # The guard must fire the right target: this task's pointer -> its turn-ended,

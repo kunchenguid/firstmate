@@ -414,11 +414,12 @@ json_escape() {
 # Merge firstmate's stop hook into the SHARED ~/.cursor/hooks.json additively and
 # idempotently. The file is shared with cmux and already holds cmux's own entries,
 # so this NEVER clobbers existing hooks: it backs up the file, ensures the top-level
-# {"hooks": ...,"version":1} shape exists, and adds exactly one stop entry whose
-# command is the firstmate guard script - but only if a stop entry with that exact
-# firstmate command is not already present (the idempotency key). Other stop entries
-# (cmux's or the captain's) are left intact. Re-running spawn for any task produces
-# the same single firstmate entry; the per-task gate lives in the command, not here.
+# {"hooks": ...,"version":1} shape exists, and adds exactly one stop entry with a
+# direct top-level "command" (per Cursor's documented hooks schema) - but only if
+# a stop entry with that exact firstmate command is not already present (the
+# idempotency key). Other stop entries (cmux's or the captain's) are left intact.
+# Re-running spawn for any task produces the same single firstmate entry; the
+# per-task gate lives in the command, not here.
 fm_cursor_merge_hooks() {
   local hooks_file=$1 fm_command=$2
   if ! command -v jq >/dev/null 2>&1; then
@@ -433,9 +434,9 @@ fm_cursor_merge_hooks() {
       ( . + {"version":1} ) as $base
       | ($base.hooks // {}) as $h
       | ($h.stop // []) as $stops
-      | ($stops | map(select(.hooks // [] | any(.command == $cmd))) | length) as $have
+      | ($stops | map(select(.command == $cmd)) | length) as $have
       | (if $have > 0 then $stops
-         else $stops + [{"hooks":[{"type":"command","command":$cmd}]}] end) as $newstops
+         else $stops + [{"command":$cmd}] end) as $newstops
       | $base + {"hooks":($h + {"stop":$newstops})}
     ' "$hooks_file" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$hooks_file"
