@@ -44,9 +44,23 @@ Ordering matters as insurance: a Cursor session running a Claude model reports `
 Empirically, `CURSOR_AGENT=1` is set for Cursor agent child and tool processes, and `CLAUDECODE` is unset, but the ordering removes the risk regardless.
 Add a `*cursor*` case to the process-ancestry backstop as a secondary signal.
 
+Session lock detection is separate and does not use the env marker.
+`bin/fm-lock.sh` defines `HARNESS_RE` and walks process ancestry to find the session-holding harness PID.
+Because the first mate itself runs on Cursor, `fm-lock.sh` must recognize the Cursor process in the ancestry, or `harness_pid()` fails with "cannot locate harness process in ancestry" and the session lock breaks.
+This is ancestry-only, so `CURSOR_AGENT` does not help here; the canonical binary token (see the binary-name note below) must be added to `HARNESS_RE`.
+
+Binary-name caution: the canonical binary name is resolved during verification, but `agent` is dangerously generic for the ancestry and lock matchers.
+The design prefers a specific token (`cursor-agent`).
+If only `agent` exists, the ancestry and lock matchers must use a tightened pattern rather than a bare `*agent*`, and detection should lean on the `CURSOR_AGENT` env marker wherever possible.
+
 ### 2. Launch mechanics (`bin/fm-spawn.sh`)
 
-- Add `cursor` to the accepted adapter names.
+- Add `cursor` to every adapter-name enumeration in the script, not just one.
+  There are several distinct lists that each need a `cursor` arm:
+  - the `launch_template()` case that maps a harness to its command template;
+  - `model_flag_for_harness()` (currently only `claude|codex|opencode|pi|grok`), which must gain a `cursor` case or `__MODELFLAG__` is left empty and the full model id is never passed, defeating the tiered-model plan;
+  - the `--secondmate` bare-name-versus-path list (currently `''|claude|codex|opencode|pi|grok`);
+  - the per-harness effort handling (cursor emits no effort flag).
 - Launch template (positional prompt plus autonomy):
 
 ```sh
@@ -65,7 +79,20 @@ agent __MODELFLAG__--force "$(cat __BRIEF__)"
 - On each spawn firstmate writes `<worktree>/.fm-cursor-turnend` (a token pointer, gitignored via `git info/exclude`) and a registry entry at `~/.cursor/hooks/fm-turn-end.d/<token>` naming that task's `state/<id>.turn-ended`.
 - On a `stop` event the hook reads the payload's `workspace_roots`, finds the pointer in that root, resolves the registry entry, and touches the referenced `turn-ended` file.
   It is a no-op for any non-firstmate Cursor session.
-- Teardown removes the per-task pointer and registry entry; the global hook stays installed as a harmless no-op.
+
+Teardown (`bin/fm-teardown.sh`) needs concrete cursor branches mirroring the four grok touch points, not just a vague "remove the pointer":
+
+- the dirty-check regex (which currently excludes `.claude/` and `.fm-grok-turnend`) must also exclude `.fm-cursor-turnend`, or a stale pointer in a pooled worktree trips the dirty guard and blocks teardown;
+- the two hardcoded worktree-pointer removals (`rm -f ... .fm-grok-turnend`) need a `.fm-cursor-turnend` analog, or the pointer leaks into a reused pool worktree and can fire signals for a dead task;
+- the state token cleanup: a `remove_cursor_turnend_auth()` equivalent plus removal of the `$STATE/$ID.cursor-turnend-token` file at both teardown sites (grok has `remove_grok_turnend_auth()` and two `$STATE/$ID.grok-turnend-token` removals).
+
+The global hook itself stays installed on teardown as a harmless no-op.
+
+### 3a. Bootstrap verified-harness allowlist (`bin/fm-bootstrap.sh`)
+
+`fm-bootstrap.sh` hardcodes the verified-harness allowlist (`["claude","codex","opencode","pi","grok"]`) used by `crew_dispatch_validate`.
+Until `cursor` is added there, any `crew-dispatch.json` rule with `harness: cursor` is rejected at bootstrap as an unverified harness, which would break the entire configuration plan below.
+The `effort_ok` check has no `cursor` arm and falls through to `true`, so cursor model ids and effort are not machine-validated; this is acceptable but must be stated (the ZDR guardrail is a comment, not an enforced check).
 
 ### 4. Busy signature and supervision (`bin/fm-watch.sh`, `bin/fm-tmux-lib.sh`)
 
@@ -75,6 +102,20 @@ agent __MODELFLAG__--force "$(cat __BRIEF__)"
 ### 5. Adapter knowledge (`.agents/skills/harness-adapters/SKILL.md`)
 
 Add a `cursor (VERIFIED <date>)` section recording the busy signature, exit command, interrupt key, trust-dialog handling, the `/no-mistakes` skill-invocation form, resume behavior (`agent resume` / `--continue`), the env marker `CURSOR_AGENT=1`, the autonomy flag `--force`, and a launch-profile row (model via full id, no effort flag).
+
+## Complete touch-point checklist
+
+Derived from a full audit of every place the grok adapter touches the code.
+Each item must gain a `cursor` arm:
+
+- `bin/fm-harness.sh`: `CURSOR_AGENT=1` env-marker check before `CLAUDECODE`; `*cursor*` ancestry backstop case.
+- `bin/fm-lock.sh`: add the canonical Cursor binary token to `HARNESS_RE` (ancestry-based; required for the first mate to hold the session lock).
+- `bin/fm-spawn.sh`: `launch_template()` cursor case; `model_flag_for_harness()` cursor case; `--secondmate` bare-name list; per-harness effort handling (no flag); the global stop-hook install plus per-task pointer and registry writes.
+- `bin/fm-teardown.sh`: dirty-check regex exclusion for `.fm-cursor-turnend`; the two pointer removals; `remove_cursor_turnend_auth()` plus `$STATE/$ID.cursor-turnend-token` removal at both sites.
+- `bin/fm-bootstrap.sh`: add `cursor` to the verified-harness allowlist used by `crew_dispatch_validate`.
+- `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`: add the Cursor busy signature to `FM_BUSY_REGEX`.
+- `.agents/skills/harness-adapters/SKILL.md`: the `cursor (VERIFIED ...)` knowledge section and launch-profile row.
+- New files: `~/.cursor/hooks/fm-turn-end.sh` (firstmate-owned) and the `~/.cursor/hooks/fm-turn-end.d/` registry directory; per-task `<worktree>/.fm-cursor-turnend` pointer, gitignored via `git info/exclude` (no repo `.gitignore` change needed).
 
 ## Configuration
 
@@ -105,14 +146,23 @@ The verification is driven directly from a Cursor agent, which can observe Curso
 
 - All work happens on the `feat/cursor-harness-adapter` branch in a dedicated worktree, leaving the fleet's primary checkout on `main`.
 - Implement the adapter (sections 1 through 5) plus the configuration documentation.
-- Add tests mirroring existing patterns such as `fm-secondmate-harness.test.sh`: detection (`CURSOR_AGENT` maps to `cursor`, and ordering relative to `CLAUDECODE`), the spawn launch template (autonomy flag present, model passed as a full id, no effort flag), turn-end pointer creation, and teardown cleanup.
+- Add tests mirroring existing patterns, using `tests/fm-grok-harness.test.sh` as the primary template since grok is the closest adapter:
+  - detection: `CURSOR_AGENT` maps to `cursor`, and ordering relative to `CLAUDECODE`;
+  - spawn launch template: autonomy flag present, model passed as a full id via `--model`, no effort flag;
+  - turn-end: per-task pointer and registry entry creation;
+  - teardown: pointer removal, state token removal, and dirty-check exclusion (grok's test explicitly checks token removal);
+  - `fm-lock` recognition: an `fm-lock` cursor-holder test (grok has `test_fm_lock_recognizes_grok_holder`);
+  - bootstrap: a `crew-dispatch.json` validation test asserting `harness: cursor` is accepted (mirroring the grok case in `fm-bootstrap.test.sh`);
+  - hooks.json merge: a dedicated test that adding the firstmate stop hook preserves the operator's existing `sessionStart` hooks and the bell `notify-stop.sh`, and that teardown leaves them untouched.
 - Run the behavior suite (`tests/*.test.sh` per `.no-mistakes.yaml`), open the PR, and the captain merges.
 - Because firstmate cannot reliably run on Claude, this implementation is done directly from a Cursor agent rather than dispatched to a Claude crewmate; this is the bootstrap that makes the fleet self-hosting on Cursor afterward.
 
 ## Risks and open questions
 
 - Binary name (`agent` versus `cursor-agent`) is resolved during verification.
+  `agent` is dangerously generic for the ancestry and lock matchers, so the design prefers `cursor-agent`; if only `agent` exists, use a tightened pattern and lean on the `CURSOR_AGENT` env marker rather than a bare `*agent*`.
 - First-run trust dialog per repository is handled in spawn with a peek-and-accept, like claude, codex, and pi.
-- The `hooks.json` merge must be idempotent and must preserve existing hooks.
-- ZDR guardrail: dispatch rules are restricted to ZDR-safe model ids, with a comment so Fable 5 is not added later.
+- The shared `hooks.json` merge is genuinely new risk surface, not a grok mirror: grok installs standalone files it fully owns, whereas Cursor merges into the operator's shared `~/.cursor/hooks.json`.
+  The idempotent jq merge and the "leave the no-op installed on teardown" behavior must be treated as their own tested unit, verifying the operator's existing `sessionStart` hooks and `notify-stop.sh` survive both add and teardown.
+- ZDR guardrail: dispatch rules are restricted to ZDR-safe model ids by convention and comment only; nothing in the pipeline enforces the allowlist (`effort_ok` has no cursor arm and falls through to `true`), so Fable 5 exclusion is a discipline, not a machine check.
 - Long orchestration sessions on the Cursor agent are expected to be fine but will be watched on the first real run.
