@@ -103,11 +103,15 @@ FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# Shared tmux pane primitives (busy/composer detection + verify-retry submit).
-# Sourced at top level so BOTH the executed daemon and the unit tests (which
-# source this file for its pure functions) get the corrected composer detection.
+# Shared tmux pane primitives for supervisor injection (busy/composer detection
+# + verify-retry submit). Sourced at top level so BOTH the executed daemon and
+# the unit tests (which source this file for its pure functions) get the
+# corrected composer detection. Stale task rechecks use fm-backend.sh below.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
+
+# shellcheck source=bin/fm-backend.sh
+. "$FM_DAEMON_DIR/fm-backend.sh"
 
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
@@ -130,9 +134,9 @@ MAX_DEFER_SECS_DEFAULT=300
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
-# (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
-# overrides the busy set here, as before.
+# Composer-empty detection and the tmux busy-footer fallback live in
+# bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
+# FM_BUSY_REGEX still overrides the fallback busy set here, as before.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -309,7 +313,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
-  task=$(window_to_task "$win")
+  task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
@@ -352,14 +356,14 @@ _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
 }
 
@@ -388,7 +392,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
-      task=$(window_to_task "$arg")
+      task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && mark_status_seen "$state" "$task" "$last" ;;
@@ -407,6 +411,28 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # afk-invx-i5 and composer-robust).
 pane_is_busy() { fm_pane_is_busy "$@"; }        # <window>
 pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
+
+task_window_backend() {  # <window> <state>
+  local win=$1 state=$2 task meta
+  task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  fm_backend_of_meta "$meta"
+}
+
+stale_window_is_busy() {  # <window> <state>
+  local win=$1 state=$2 backend tail40 bs
+  backend=$(task_window_backend "$win" "$state")
+  tail40=$(fm_backend_capture "$backend" "$win" 40 2>/dev/null) || return 2
+  bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  case "$bs" in
+    busy) return 0 ;;
+    idle) return 1 ;;
+    *)
+      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+        | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+      ;;
+  esac
+}
 
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
@@ -517,19 +543,20 @@ housekeeping() {  # <state>
     key="${marker##*.subsuper-stale-}"
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    # Reconstruct the window name from the key (best-effort: session is unknown,
-    # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
+    # Reconstruct the window target from metadata, with the live tmux list as the
+    # legacy fallback for old markers that predate meta lookup.
+    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
-    if pane_is_busy "$win"; then
-      rm -f "$marker"   # crewmate resumed: benign
-    else
-      escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-      stale_marker_remove "$win" "$state"
-    fi
+    stale_window_is_busy "$win" "$state"
+    case "$?" in
+      0) rm -f "$marker" ;;
+      2) rm -f "$marker" ;;
+      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+         stale_marker_remove "$win" "$state" ;;
+    esac
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
@@ -549,11 +576,18 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
+# Find a recorded or live window target whose task id matches the marker key.
+window_for_task() {  # <task-key> [state]
+  local key=$1 state=${2:-$(_state_root)} meta task w t
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    [ "$(_stale_key "$task")" = "$key" ] || continue
+    w=$(fm_meta_get "$meta" window)
+    [ -n "$w" ] && { printf '%s' "$w"; return 0; }
+  done
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w")
+    t=$(window_to_task "$w" "$state")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done
   return 1

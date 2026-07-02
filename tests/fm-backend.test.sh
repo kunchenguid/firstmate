@@ -53,17 +53,19 @@ BASE_REF=$(resolve_base_ref) \
 
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
-# build_old_bin echoes a directory whose bin/ subdir holds the "old" baseline
+# build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling those five
-# source - the real, current files, which BASE_REF's versions load unchanged.
-# The runtime-backend adapter (fm-backend.sh plus the backends/ dir) is included
-# here too, because once the backend refactor itself is IN BASE_REF the extracted
-# "old" scripts source fm-backend.sh and it must resolve under this shim root; a
-# pre-refactor BASE_REF simply never sources it and runs tmux inline. Either way
-# both sides drive the SAME backend, so the send/peek/teardown command logs stay
-# comparable. FM_ROOT_OVERRIDE pointed at this dir's root makes
-# "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
+# five source - all unchanged by this task, so the real files are exactly
+# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
+# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
+# of the five REFACTORED scripts sources; it must be a real, reachable file in
+# the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
+# hence it is a symlinked sibling, not an extracted-from-BASE_REF file: for a
+# tmux-only conformance run the tmux adapter's behavior is what is under test,
+# and that is unchanged by any later (e.g. non-tmux backend) addition to
+# fm-backend.sh's own dispatch surface.
 OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
@@ -71,13 +73,11 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   local name=$1 root bin f
   root="$TMP_ROOT/$name"
   bin="$root/bin"
-  mkdir -p "$bin/backends"
+  mkdir -p "$bin"
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
     ln -s "$ROOT/bin/$f" "$bin/$f"
   done
-  # The tmux adapter lives in a subdir; fm-backend.sh sources it as
-  # "$FM_BACKEND_LIB_DIR/backends/tmux.sh", so mirror that layout here.
-  ln -s "$ROOT/bin/backends/tmux.sh" "$bin/backends/tmux.sh"
+  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
@@ -159,6 +159,24 @@ SH
   [ "$out" = "firstmate:adhoc" ] || fail "an ad hoc bare name should resolve via the tmux live-window fallback, got '$out'"
 
   pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via tmux list-windows"
+}
+
+test_backend_of_selector_matches_explicit_target_meta() {
+  local state=$TMP_ROOT/backend-selector-state
+  mkdir -p "$state"
+  fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
+  fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
+
+  [ "$(fm_backend_of_selector 'fm-herdr-task' 'default:w1:p2' "$state")" = herdr ] \
+    || fail "bare fm-<id> selector should use its recorded backend"
+  [ "$(fm_backend_of_selector 'default:w1:p2' 'default:w1:p2' "$state")" = herdr ] \
+    || fail "explicit backend target matching metadata should use that task's backend"
+  [ "$(fm_backend_of_selector 'firstmate:fm-tmux-task' 'firstmate:fm-tmux-task' "$state")" = tmux ] \
+    || fail "explicit tmux-shaped target with absent backend= should default to tmux"
+  [ "$(fm_backend_of_selector 'manual:outside' 'manual:outside' "$state")" = tmux ] \
+    || fail "explicit target with no matching metadata should keep the tmux compatibility default"
+
+  pass "fm_backend_of_selector: fm-<id> and matching explicit targets inherit metadata backend"
 }
 
 # --- old vs new: fm-send.sh --------------------------------------------------
@@ -449,6 +467,7 @@ test_backend_name_precedence
 test_backend_validate_refuses_unknown
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
+test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_teardown_conformance_old_vs_new

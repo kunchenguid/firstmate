@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Send one line of literal text to a crewmate window, then Enter.
-# Usage: fm-send.sh <window> <text...>
-#   <window> may be a bare firstmate window name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or explicit session:window.
-# Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
+# Send one line of literal text to a crewmate endpoint, then Enter.
+# Usage: fm-send.sh <target> <text...>
+#   <target> may be a bare firstmate task name (fm-xyz), resolved through
+#   this home's state/<id>.meta, or an explicit backend target.
+# Special keys instead of text: fm-send.sh <target> --key Escape   (or Enter, C-c, ...)
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
 # Enter is positively confirmed (the text is still sitting in the composer after
 # all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
-# The composer/submit logic is shared with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Submission dispatches through the target's recorded backend; the tmux adapter
+# shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
+# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
@@ -19,7 +20,7 @@
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
 # (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
 # or a status-pointed doc instead of stranding it in chat the main firstmate
-# never reads. A crewmate/scout target, an explicit session:window escape-hatch
+# never reads. A crewmate/scout target, an explicit backend-target escape-hatch
 # target, and the --key path are never marked - their behavior is unchanged.
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: a cleared composer only proves the text was
@@ -48,8 +49,8 @@ shift
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
 # resolved through this home's meta and recording kind=secondmate, is marked: the
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).
-# An explicit session:window target (the escape hatch for windows outside this
-# home) and any crewmate/scout target are left unmarked, and so is the --key path.
+# An explicit backend target (the escape hatch for endpoints outside this home)
+# and any crewmate/scout target are left unmarked, and so is the --key path.
 MARK_PREFIX=""
 case "$RAW_TARGET" in
   fm-*)
@@ -62,19 +63,17 @@ esac
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A bare fm-<id> target carries
-# meta; an explicit session:window escape-hatch target has none, so its harness is
+# meta; an explicit backend-target escape hatch has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
-# The target's BACKEND is resolved the same way (defaulting to tmux, the P1
-# compatibility contract) so the send-key/send-text dispatch below routes
-# through the same backend the selector itself was resolved against.
+# The target's BACKEND comes from fm-<id> meta, or from matching the resolved
+# explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
-TARGET_BACKEND=tmux
+TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
       TARGET_HARNESS=$(fm_meta_get "$meta" harness)
-      TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     fi
     ;;
 esac

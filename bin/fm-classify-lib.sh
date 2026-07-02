@@ -50,9 +50,21 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
-# task id from a tmux window name "<session>:fm-<id>" -> "<id>"
+# task id from a recorded window target, falling back to the tmux-shaped
+# "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
-  local w=$1 t
+  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw t
+  if [ -n "$state" ]; then
+    for meta in "$state"/*.meta; do
+      [ -e "$meta" ] || continue
+      mw=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ "$mw" = "$w" ] || continue
+      t=$(basename "$meta")
+      t=${t%.meta}
+      printf '%s' "$t"
+      return 0
+    done
+  fi
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
@@ -135,7 +147,7 @@ signal_crew_provably_working() {  # <file> ...
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win").status")
+  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

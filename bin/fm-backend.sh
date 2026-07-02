@@ -4,16 +4,19 @@
 #
 # Design: data/fm-backend-design-d7/report.md ("Backend Interface") and
 # data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
-# abstraction"). This is P1: it extracts the tmux command sequences that
-# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already
-# ran inline into bin/backends/tmux.sh, with those SAME command sequences, so
-# the default (tmux) path is byte-identical. No other backend exists yet.
+# abstraction"). P1 extracted the tmux command sequences that fm-send.sh,
+# fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already ran inline
+# into bin/backends/tmux.sh, with those SAME command sequences, so the default
+# (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, an
+# EXPERIMENTAL backend behind `--backend herdr`/`FM_BACKEND=herdr`/
+# `config/backend`; see herdr-addendum.md and
+# data/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a future
-# non-tmux backend would ever carry an explicit `backend=` line.
+# default-path metas stay byte-identical. Only a task spawned on a non-tmux
+# backend, currently experimental herdr, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -33,8 +36,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
-# section 4's harness-verification discipline.
-FM_BACKEND_KNOWN="tmux"
+# section 4's harness-verification discipline. herdr is EXPERIMENTAL (P2;
+# data/fm-backend-design-d7/herdr-addendum.md) - verified against the real
+# v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
+# but newer than tmux's long-proven default path.
+FM_BACKEND_KNOWN="tmux herdr"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
 fm_backend_is_known() {  # <name>
@@ -96,6 +102,33 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${v:-tmux}"
 }
 
+fm_backend_meta_for_window() {  # <target> <state-dir>
+  local target=$1 state=$2 meta window
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    window=$(fm_meta_get "$meta" window)
+    [ "$window" = "$target" ] || continue
+    printf '%s' "$meta"
+    return 0
+  done
+  return 1
+}
+
+fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
+  local raw=$1 resolved=$2 state=$3 meta
+  case "$raw" in
+    fm-*)
+      meta="$state/${raw#fm-}.meta"
+      [ -f "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+      ;;
+  esac
+  if [ -n "$resolved" ]; then
+    meta=$(fm_backend_meta_for_window "$resolved" "$state" 2>/dev/null || true)
+    [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+  fi
+  printf 'tmux'
+}
+
 # fm_backend_source: source the named backend's adapter file, once per shell.
 fm_backend_source() {  # <name>
   local name=$1
@@ -108,22 +141,30 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
+    herdr)
+      if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/herdr.sh
+        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh"
+        _FM_BACKEND_HERDR_SOURCED=1
+      fi
+      ;;
   esac
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
 # selector to a live session-provider target. Three forms, in order:
-#   "session:window"  used as-is (the escape hatch for a window outside this
-#                      firstmate home) - backend-independent, a literal string.
+#   target with ":"   used as-is (the escape hatch for a window/pane outside
+#                      this firstmate home) - backend-independent, a literal string.
 #   "fm-<id>"          routed through <state-dir>/<id>.meta's `window=` field -
 #                      backend-independent, a stored value, NOT re-verified
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
 #                      without a live re-check).
 #   anything else      an ad hoc bare window name with no meta, resolved by
-#                      searching the DEFAULT backend's live inventory (tmux in
-#                      P1) - the one form that is genuinely backend-specific,
-#                      because it has to enumerate live sessions.
+#                      searching the legacy tmux live inventory. This remains
+#                      the compatibility fallback; herdr tasks should be
+#                      targeted by fm-<id> metadata or an explicit recorded
+#                      target.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 meta window
   case "$raw" in
@@ -153,8 +194,8 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 #
 # Thin case-dispatch wrappers so a caller names an operation and a backend
 # rather than hand-writing `case "$backend" in tmux) fm_backend_tmux_x ;; esac`
-# at every call site. P1 has exactly one backend, so every case has one arm;
-# a future backend adds its own arm here, never changes a call site.
+# at every call site. Each verified backend adds its own arm here, without
+# changing call sites.
 
 # fm_backend_capture: bounded plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines>
@@ -163,6 +204,7 @@ fm_backend_capture() {  # <backend> <target> <lines>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
+    herdr) fm_backend_herdr_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -174,19 +216,21 @@ fm_backend_send_key() {  # <backend> <target> <key>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
+    herdr) fm_backend_herdr_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the verdict
-# (empty|pending|unknown|send-failed for the tmux adapter).
+# (empty|pending|unknown|send-failed for the tmux and herdr adapters).
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle>
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
+    herdr) fm_backend_herdr_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -200,6 +244,22 @@ fm_backend_kill() {  # <backend> <target>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
+    herdr) fm_backend_herdr_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
+# native agent-state (herdr-addendum "busy state" row - the first backend
+# where this gets real semantics beyond pane-regex). Backends with no such
+# primitive (tmux) report unknown, the fm-watch.sh contract's cue to fall back
+# to its own pane-hash + FM_BUSY_REGEX detection, unchanged from P1.
+fm_backend_busy_state() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_busy_state "$@" ;;
+    *) printf 'unknown' ;;
   esac
 }

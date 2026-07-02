@@ -11,8 +11,8 @@
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
-#   tmux. Only tmux is verified today. Default tmux spawns do not write backend=
-#   to meta; absent backend= means tmux.
+#   tmux. Known backends are the reference tmux adapter and experimental herdr.
+#   Default tmux spawns do not write backend= to meta; absent backend= means tmux.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -60,7 +60,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -134,10 +134,10 @@ esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else default tmux (fm_backend_name).
-# tmux-only for now - fm_backend_validate refuses anything else loudly. The
-# resolved value is recorded in meta only when it is NOT tmux (fm-teardown.sh
-# and fm-watch.sh's window_backend/fm_backend_of_meta already treat an absent
-# backend= as tmux), so the default path's meta stays byte-identical.
+# fm_backend_validate refuses anything not implemented. The resolved value is
+# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
+# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
+# so the default path's meta stays byte-identical.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
@@ -549,21 +549,70 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-# (Session-provider container-ensure; see bin/backends/tmux.sh.)
-SES=$(fm_backend_tmux_container_ensure)
-
+# Session-provider container-ensure + task creation. tmux stays exactly as P1
+# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
+# a herdr spawn goes through the version-gated, workspace-per-firstmate,
+# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5;
+# data/fm-backend-design-d7/herdr-addendum.md). Both branches converge on the
+# same $T ("target") string that every downstream operation (send/capture/kill)
+# already treats as opaque per-backend routing (fm_backend_resolve_selector).
 W="fm-$ID"
-T="$SES:$W"
-# Create the task window through the tmux backend. The backend captures a stable
-# window id and pins the window name (disabling automatic-rename/allow-rename) so a
-# captain's non-default tmux config cannot rename it away from fm-<id> once treehouse
-# cd's into the worktree, which would break firstmate's name-based targeting ($SES:$W).
-# The persisted window= handle below stays the name form; the stable id is used only
-# for the rename-critical spawn steps that follow.
-WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+case "$BACKEND" in
+  tmux)
+    SES=$(fm_backend_tmux_container_ensure)
+    T="$SES:$W"
+    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
+    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+    # non-default tmux config cannot rename the window away from fm-<id> once
+    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
+    # rename-critical worktree-detection steps below; the persisted window= handle
+    # stays $T (the name form), which is safe now that rename is disabled.
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WT_TARGET="$WID"
+    ;;
+  herdr)
+    CONTAINER=$(fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    HERDR_SES=${CONTAINER%%:*}
+    HERDR_WORKSPACE_ID=${CONTAINER#*:}
+    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+      echo "error: herdr did not return a tab/pane id for $W" >&2
+      exit 1
+    fi
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    # herdr addresses its pane by id already, so its detection target is just $T.
+    WT_TARGET="$T"
+    ;;
+esac
+spawn_send_text_line() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+  esac
+}
+spawn_current_path() {  # <target>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" ;;
+  esac
+}
+spawn_send_literal() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+  esac
+}
+spawn_send_key() {  # <target> <key>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
+  esac
+}
 if [ "$KIND" != secondmate ]; then
-  fm_backend_tmux_send_text_line "$WID" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -571,7 +620,7 @@ if [ "$KIND" != secondmate ]; then
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
   for _ in $(seq 1 60); do
-    p=$(fm_backend_tmux_current_path "$WID" || true)
+    p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
@@ -751,6 +800,12 @@ fi
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$BACKEND" = herdr ]; then
+    echo "herdr_session=$HERDR_SES"
+    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+    echo "herdr_tab_id=$HERDR_TAB_ID"
+    echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -774,10 +829,10 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-fm_backend_tmux_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
-fm_backend_tmux_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
-fm_backend_tmux_send_key "$T" Enter
+spawn_send_key "$T" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

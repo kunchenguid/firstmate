@@ -19,10 +19,12 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 ## Runtime backend (config/backend / FM_BACKEND)
 
 The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
-Today `tmux` is the only verified backend.
+`tmux` is the verified reference backend; `herdr` is a second, experimental backend (see `docs/herdr-backend.md`) - treehouse remains the worktree provider for both, since herdr is a session provider only.
 New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then default `tmux`.
-Any value other than `tmux` is rejected until another adapter is implemented and verified.
+Any value other than `tmux` or `herdr` is rejected until another adapter is implemented and verified.
+A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 The `config/backend` file is not inherited by secondmate homes.
 
 ## Gate defaults (.no-mistakes.yaml)
@@ -166,7 +168,8 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_BACKEND=tmux         # runtime session-provider backend override for new spawns; only tmux is verified today
+FM_BACKEND=tmux         # runtime session-provider backend override for new spawns; tmux (reference) or herdr (experimental)
+HERDR_SESSION=default  # herdr-only: the named herdr session a herdr-backend spawn/op uses (docs/herdr-backend.md)
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

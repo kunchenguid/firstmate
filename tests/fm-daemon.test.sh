@@ -93,6 +93,10 @@ test_stale_terminal_escalates() {
   printf 'done: ready in branch fm/t1\n' > "$state/fin-t5.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-t5" "$state")
   case "$out" in escalate\|*) ;; *) fail "terminal stale did not escalate: $out" ;; esac
+  fm_write_meta "$state/herdr-t5.meta" "window=default:w1:p2" "backend=herdr"
+  printf 'done: ready in branch fm/herdr\n' > "$state/herdr-t5.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "default:w1:p2" "$state")
+  case "$out" in escalate\|*) ;; *) fail "terminal herdr stale did not escalate through metadata: $out" ;; esac
   pass "stale + terminal status escalates immediately"
 }
 
@@ -130,6 +134,62 @@ test_housekeeping_resumed_stale_cleared() {
   [ -e "$state/.subsuper-stale-$key" ] && fail "resumed stale marker was not cleared"
   [ -s "$state/.subsuper-escalations" ] && fail "resumed stale was escalated"
   pass "resumed (busy) stale clears its marker without escalating"
+}
+
+test_housekeeping_herdr_persistent_stale_resolves_meta() {
+  local dir state key
+  dir=$(make_supercase stale-herdr-persistent)
+  state="$dir/state"
+  fm_write_meta "$state/herdr-w7.meta" "window=default:w1:p2" "backend=herdr"
+  printf 'working\n' > "$state/herdr-w7.status"
+  key=$(printf '%s' "herdr-w7" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() {
+      [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
+      [ "$2" = "default:w1:p2" ] || fail "expected herdr window target, got $2"
+      printf 'idle prompt\n'
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] || fail "expected herdr busy backend, got $1"
+      [ "$2" = "default:w1:p2" ] || fail "expected herdr busy target, got $2"
+      printf 'idle'
+    }
+    fm_backend_capture herdr default:w1:p2 40 >/dev/null
+    [ "$(fm_backend_busy_state herdr default:w1:p2)" = idle ] || fail "herdr busy stub did not report idle"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "herdr persistent stale housekeeping failed"
+  [ -s "$state/.subsuper-escalations" ] || fail "persistent herdr stale was not escalated"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "herdr stale marker not cleared after escalation"
+  pass "persistent herdr stale resolves the target from metadata and escalates"
+}
+
+test_housekeeping_herdr_resumed_stale_cleared() {
+  local dir state key
+  dir=$(make_supercase stale-herdr-resumed)
+  state="$dir/state"
+  fm_write_meta "$state/herdr-busy.meta" "window=default:w1:p3" "backend=herdr"
+  printf 'working\n' > "$state/herdr-busy.status"
+  key=$(printf '%s' "herdr-busy" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() {
+      [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
+      [ "$2" = "default:w1:p3" ] || fail "expected herdr window target, got $2"
+      printf 'unchanged pane\n'
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] || fail "expected herdr busy backend, got $1"
+      [ "$2" = "default:w1:p3" ] || fail "expected herdr busy target, got $2"
+      printf 'busy'
+    }
+    fm_backend_capture herdr default:w1:p3 40 >/dev/null
+    [ "$(fm_backend_busy_state herdr default:w1:p3)" = busy ] || fail "herdr busy stub did not report busy"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "herdr resumed stale housekeeping failed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "busy herdr stale marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "busy herdr stale was escalated"
+  pass "resumed herdr stale clears through backend-aware busy state"
 }
 
 test_escalate_batches_into_one_digest() {
@@ -691,6 +751,8 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_housekeeping_herdr_persistent_stale_resolves_meta
+test_housekeeping_herdr_resumed_stale_cleared
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
