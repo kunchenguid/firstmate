@@ -389,7 +389,7 @@ EOF
 }
 
 no_mistakes_processes_in_worktree() {
-  local worktree=$1 abs_wt out line pid= comm= cwd= resolved found=0
+  local worktree=$1 abs_wt out line pid='' comm='' cwd='' resolved found=0
   command -v lsof >/dev/null 2>&1 || return 1
   abs_wt=$(removal_target_abs_path "$worktree" 2>/dev/null || true)
   [ -n "$abs_wt" ] || return 1
