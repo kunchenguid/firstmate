@@ -87,6 +87,7 @@ Tmux's submit-verification reads the cursor row with ANSI styling to strip ghost
 Herdr's CLI exposes no equivalent ANSI/cursor-row-only capture primitive, so the herdr adapter verifies differently: capture the pane right after typing (the "typed" baseline, unsubmitted), then after each Enter attempt capture again.
 Unchanged means the Enter did nothing and the adapter retries (bounded).
 Changed means something happened - submitted, output appeared, or a popup resolved.
+A dedicated composer-state or cursor-row read primitive is a candidate upstream Herdr feature request; it would let this backend eventually match tmux's stronger submit-verification guarantee.
 
 Both backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching at all.
 
