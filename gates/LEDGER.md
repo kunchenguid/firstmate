@@ -16,3 +16,4 @@
 | gate-q2-merge-refuses-unverified | green | fm-merge-local refuses without a trailing approve verdict; approve merges; override is loud |
 | gate-q3-prcheck-refuses-unverified | green | fm-pr-check refuses to arm the merge poll without a trailing approve verdict |
 | gate-q4-reject-roundtrip | green | fm-verify: approve path records approve; reject relays findings to the crewmate and exits 2; non-ship tasks skip |
+| gate-q5-attempt-cap | green | Third reject escalates instead of spinning; at-cap tasks escalate without re-running the verifier |
