@@ -121,6 +121,18 @@ It uses the same live secondmate discovery and propagation helper as bootstrap, 
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Overnight quiet-hours blackout (config/blackout.env)
+
+An opt-in blackout window, by default 18:00-05:00 America/New_York, during which firstmate burns zero autonomous tokens: no watcher polling, no wakes, no away-mode injections.
+With no local config this is a complete no-op; every consumer behaves exactly as if the feature did not exist.
+Enable it per home by copying [`docs/examples/blackout.env`](examples/blackout.env) to the local, gitignored `config/blackout.env`, which sets `FM_BLACKOUT_ENABLED=1` plus optional `FM_BLACKOUT_START_HOUR`, `FM_BLACKOUT_END_HOUR`, and `FM_BLACKOUT_TZ` overrides.
+The shared predicate `fm_in_blackout` lives in [`bin/fm-blackout-lib.sh`](../bin/fm-blackout-lib.sh) and is sourced by `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-guard.sh`, and the away-mode daemon, so enablement is consistent everywhere; the window math uses the system tz database, so EST/EDT and other DST transitions are handled automatically.
+When enabled, a running watcher exits cleanly on crossing into the window, `bin/fm-watch-arm.sh` becomes a zero-token, singleton-safe sleeper that auto-restarts the real watcher at window end instead of starting an active watcher, `bin/fm-guard.sh` treats a missing watcher as expected during the window (its other guards keep firing), and the away-mode daemon defers injections until the window ends.
+This gates only autonomous polling, wakes, and away-mode injections; it never gates a message from the captain.
+The captain can pull supervision back into the evening on demand with `bin/fm-blackout-extend.sh <HH:MM|+Nh|+Nm>`, which persists a future epoch to the local, gitignored `state/blackout-override`; `--clear` cancels an active extension early and `--status` reports the current state.
+An expired (past) override is ignored automatically, so an extension never lingers into the next day.
+Because X-mode polling (below) rides inside the same watcher check sweep, an enabled blackout suppresses it too while active, and it resumes automatically with the watcher at window end.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -203,6 +215,13 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working non-
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_BLACKOUT_ENABLED=    # truthy enables the overnight quiet-hours blackout; off by default (complete no-op)
+FM_BLACKOUT_START_HOUR=18   # blackout window start, wall-clock hour (0-23) in FM_BLACKOUT_TZ
+FM_BLACKOUT_END_HOUR=5      # blackout window end, wall-clock hour (0-23) in FM_BLACKOUT_TZ
+FM_BLACKOUT_TZ=America/New_York   # tz-database name for the blackout window computation
+FM_BLACKOUT_CONFIG=     # override path to config/blackout.env, mainly for tests
+FM_BLACKOUT_NOW_EPOCH=  # injectable "current time" for unit-testing the blackout predicate
+FM_BLACKOUT_SLEEP_CHUNK=60   # seconds between beacon refreshes while the arm's blackout sleeper blocks
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok

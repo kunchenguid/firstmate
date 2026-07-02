@@ -27,11 +27,16 @@ A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if 
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
+An opt-in overnight quiet-hours blackout (default 18:00-05:00 America/New_York, off by default) suppresses this whole loop for a configurable window: enabling it via the local `config/blackout.env` makes a running watcher exit cleanly on crossing into the window, `bin/fm-watch-arm.sh` become a zero-token sleeper that auto-restarts the real watcher at window end instead of starting an active one, and `bin/fm-guard.sh` treat a missing watcher as expected for the duration while its other guards keep firing.
+The shared predicate (`bin/fm-blackout-lib.sh`) is sourced by the watcher, the arm, the guard, and the away-mode daemon so the window is enforced consistently, uses the system tz database so DST transitions are automatic, and never gates a message from the captain - only autonomous polling, wakes, and away-mode injections.
+`bin/fm-blackout-extend.sh` lets the captain defer the window into the evening on demand; see [configuration.md](configuration.md) for the config file, override state, and environment variables.
+
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
 The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-Its tmux supervisor injection path shares the same submit core used by the tmux send backend, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+During an enabled overnight blackout, the daemon defers every injection until the window ends instead of escalating, preserving the buffer, and suppresses its own wedge alarm for the duration so a deferred escalation is never mistaken for a stuck delivery.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using the target's recorded `harness=` meta, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 ## Runtime session backends

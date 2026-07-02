@@ -95,6 +95,12 @@ afk mode the composer guard is belt-and-suspenders (no human is typing), but it
 protects against the race window between the captain returning and their
 message landing, and against the daemon's own previous injection sitting unsent.
 
+## Overnight blackout interaction
+
+If the opt-in overnight quiet-hours blackout (`bin/fm-blackout-lib.sh`, off by default) is enabled and currently active, `inject_msg` defers every injection until the window ends instead of escalating, because an injection starts a token-costing firstmate turn and the captain wants zero of those overnight.
+The buffer in `state/.subsuper-escalations` is preserved, so nothing is lost, and the max-defer wedge-alarm retry (below) is skipped for the duration so a deferred escalation is never mistaken for a stuck delivery.
+This never changes afk's presence-gating or approval authority; it only adds a second gate ahead of the pane injection.
+
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and empty composer.
