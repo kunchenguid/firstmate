@@ -406,9 +406,11 @@ other_branch_active_run:
   id: "run-other"
   branch: fm/other
   status: running
-count: 2 of 2 total
-runs[2]{id,branch,status,head,pr}:
+count: 4 of 4 total
+runs[4]{id,branch,status,head,pr}:
   "run-other",fm/other,running,abc123,"https://github.com/example/repo/pull/99"
+  "run-fixing",fm/fixing,fixing,ghi789,"https://github.com/example/repo/pull/100"
+  "run-ci",fm/ci,ci,jkl012,"https://github.com/example/repo/pull/101"
   "run-current",fm/task-x1,failed,def456,""
 EOF
 fi
@@ -426,6 +428,10 @@ SH
     || fail "nm-other-active: missing active-run refusal: $(cat "$case_dir/stderr")"
   grep -F 'run-other on fm/other' "$case_dir/stderr" >/dev/null \
     || fail "nm-other-active: refusal did not name the active run: $(cat "$case_dir/stderr")"
+  grep -F 'run-fixing on fm/fixing' "$case_dir/stderr" >/dev/null \
+    || fail "nm-other-active: refusal did not treat fixing as active: $(cat "$case_dir/stderr")"
+  grep -F 'run-ci on fm/ci' "$case_dir/stderr" >/dev/null \
+    || fail "nm-other-active: refusal did not treat ci as active: $(cat "$case_dir/stderr")"
   ! grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null \
     || fail "nm-other-active: teardown completed despite unrelated active run"
   pass "teardown refuses before treehouse return when another no-mistakes run is active"

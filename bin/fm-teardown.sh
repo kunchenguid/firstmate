@@ -342,7 +342,7 @@ no_mistakes_axi_list() {
 
 no_mistakes_status_is_active() {
   case "$1" in
-    running|awaiting_approval|fix_review|queued|pending|started) return 0 ;;
+    running|fixing|ci|awaiting_approval|fix_review|queued|pending|started) return 0 ;;
     *) return 1 ;;
   esac
 }
