@@ -827,7 +827,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 # `export VAR=value` is accepted by fish, bash, and zsh; the bash-only syntax is
 # inside the templated launch strings, so only those need the wrapper below.
-fm_backend_tmux_send_text_line "$T" "export GOTMPDIR=$sq_gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$sq_gotmp"
 sleep 0.3
 if [ "$WRAP_LAUNCH_IN_BASH" = 1 ]; then
   LAUNCH="export GOTMPDIR=$sq_gotmp; $LAUNCH"
