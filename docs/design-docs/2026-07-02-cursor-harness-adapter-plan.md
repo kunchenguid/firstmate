@@ -59,11 +59,29 @@ bin/fm-spawn.sh cursor-verify-x1 <scratch-project-dir> "<BIN> --force \"\$(cat <
 ```
 Attach to the `fm-cursor-verify-x1` tmux window and record: the busy-pane line while it works (`BUSY`), the exit key (`EXITKEY`), the interrupt key (`INTKEY`), any first-run trust dialog and how it is accepted, the `/no-mistakes` invocation form (`SKILLFORM`), and whether an empty composer shows ghost/suggested text.
 
-- [ ] **Step 3: Record findings**
+- [ ] **Step 3: Confirm the stop-hook contract (highest-risk, novel piece)**
 
-Write all resolved values into `docs/design-docs/cursor-verification-notes.md`. Do not commit this scratch file.
+Before Task 4 hardcodes it, empirically confirm Cursor's `stop`-hook API. Install a temporary logging stop hook in a scratch `CURSOR_CONFIG_DIR` and run one turn:
+```bash
+export CURSOR_CONFIG_DIR=$(mktemp -d)
+mkdir -p "$CURSOR_CONFIG_DIR/hooks"
+cat > "$CURSOR_CONFIG_DIR/hooks/log.sh" <<'SH'
+#!/usr/bin/env bash
+cat > /tmp/cursor-stop-payload.json
+printf '{}'
+SH
+chmod +x "$CURSOR_CONFIG_DIR/hooks/log.sh"
+printf '{"version":1,"hooks":{"stop":[{"command":"%s/hooks/log.sh","timeout":10}]}}' "$CURSOR_CONFIG_DIR" > "$CURSOR_CONFIG_DIR/hooks.json"
+# run a one-shot cursor turn in the scratch config, then:
+cat /tmp/cursor-stop-payload.json
+```
+Confirm and record: the event key is `stop`, the payload contains `workspace_roots` (array of absolute paths), the entry shape is `{"command","timeout"}`, and the hook is expected to emit JSON (`{}`) on stdout. If any differ, update Task 4 before implementing it.
 
-- [ ] **Step 4: Tear down the trial**
+- [ ] **Step 4: Record findings**
+
+Write all resolved values (including the stop-hook schema) into `docs/design-docs/cursor-verification-notes.md`. Do not commit this scratch file. Note that the installed hook shells out to `jq` at turn-end, so `jq` is a runtime dependency (it fails safe to a no-op if absent, meaning turn-end wakes silently stop - record this in the SKILL).
+
+- [ ] **Step 5: Tear down the trial**
 
 ```bash
 bin/fm-teardown.sh cursor-verify-x1 --force
@@ -165,7 +183,7 @@ HARNESS_RE='claude|codex|opencode|grok|cursor-agent|^pi$'
 - Modify: `bin/fm-spawn.sh` - `launch_template()` (~line 216), `model_flag_for_harness()` (line 282), `--secondmate` bare-name case (line 156)
 - Test: `tests/fm-cursor-harness.test.sh`
 
-- [ ] **Step 1: Write the failing test** - a spawn test (mirror `run_grok_spawn`/`make_spawn_case` from `tests/fm-grok-harness.test.sh`, using `cursor` as the harness arg and a fake `BIN`), asserting the spawn succeeds (`spawned <id> harness=cursor`) and that the tmux send-keys captured launch line contains `--force` and `--model <id>` and NO `--effort`. (Capture the launch by having the fake `tmux` log `send-keys -l` payloads to a file.)
+- [ ] **Step 1: Write the failing test** - a spawn test (mirror `run_grok_spawn`/`make_spawn_case` from `tests/fm-grok-harness.test.sh`, using `cursor` as the harness arg and a fake `BIN`), asserting the spawn succeeds (`spawned <id> harness=cursor`) and that the launch line contains `--force` and `--model <id>` and NO `--effort`. Note: the grok test's fake `tmux` discards `send-keys` (`send-keys) exit 0`), so write a NEW tmux stub that logs the launch payload - and filter specifically to the `send-keys -t <t> -l <payload>` invocation, because `fm-spawn.sh` also sends `export GOTMPDIR=...` and a bare `Enter` (lines 714/718). Capture only the `-l` payload.
 
 - [ ] **Step 2: Run it red.**
 
@@ -249,7 +267,8 @@ The novel piece. Cursor hooks live in the shared `~/.cursor/hooks.json` (or `$CU
     tmp=$(mktemp)
     jq --arg cmd "$cmd" '.hooks.stop = ((.hooks.stop // []) | if any(.command == $cmd) then . else . + [{"command":$cmd,"timeout":10}] end)' "$HOOKS_JSON" > "$tmp" && mv "$tmp" "$HOOKS_JSON"
     ```
-  - Skip the pointer for `kind=secondmate`, exactly as grok does.
+  - The entire turn-end `case "$HARNESS"` block is already wrapped in `if [ "$KIND" != secondmate ]` (fm-spawn.sh:574), so the `cursor*)` arm needs NO internal secondmate guard - grok's arm has none either.
+  - Heredoc caution: the `cat > .../fm-turn-end.sh <<EOF` block (and its nested `done <<ROOTS` ... `ROOTS`) uses a plain (non-`<<-`) heredoc, so every line - the `#!/usr/bin/env bash` shebang, the nested heredoc body, and the `ROOTS` terminator - must be emitted flush-left at column 0, exactly as grok's arm does at fm-spawn.sh:637-654, or the generated script gets an invalid shebang or unterminated heredoc.
 
 - [ ] **Step 4: Run it green.**
 
@@ -270,7 +289,7 @@ The novel piece. Cursor hooks live in the shared `~/.cursor/hooks.json` (or `$CU
 - [ ] **Step 3: Implement** - add cursor arms mirroring every grok touch point:
   - dirty-check regex: `grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-cursor-turnend$)'`
   - both `rm -f ... .fm-grok-turnend` sites: also `rm -f "$WT/.fm-cursor-turnend"`
-  - add `remove_cursor_turnend_auth()` (read token from `$STATE/$ID.cursor-turnend-token`, `rm -f "$CURSOR_AUTH_DIR/$token"`) and call it at both teardown sites, then `rm -f "$STATE/$ID.cursor-turnend-token"`.
+  - add `remove_cursor_turnend_auth()` mirroring `remove_grok_turnend_auth()` (fm-teardown.sh:94): compute the registry dir LOCALLY inside the function as `"${CURSOR_CONFIG_DIR:-$HOME/.cursor}/hooks/fm-turn-end.d"` (there is no global `$CURSOR_AUTH_DIR` in teardown), read the token from `$STATE/$ID.cursor-turnend-token`, `rm -f "<dir>/$token"`; call it at both teardown sites, then `rm -f "$STATE/$ID.cursor-turnend-token"`.
   - Leave the global hook + hooks.json entry installed (harmless no-op).
 
 - [ ] **Step 4: Run it green.**
