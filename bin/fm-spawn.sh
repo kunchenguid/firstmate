@@ -430,6 +430,9 @@ json_escape() {
 # idempotency key). Other stop entries (cmux's or the captain's) are left intact.
 # Re-running spawn for any task produces the same single firstmate entry; the
 # per-task gate lives in the command, not here.
+#
+# Failures (bad JSON, unmergeable, etc.) are fatal: the spawn exits non-zero rather
+# than launching without a working turn-end hook.
 fm_cursor_merge_hooks() {
   local hooks_file=$1 fm_command=$2
   # Guarded by early check in spawn when HARNESS=cursor (plus bootstrap reporting).
@@ -455,7 +458,8 @@ fm_cursor_merge_hooks() {
     mv "$tmp" "$hooks_file"
   else
     rm -f "$tmp"
-    echo "warning: cursor hooks merge failed; left $hooks_file untouched" >&2
+    echo "error: cursor hooks merge failed for $hooks_file (malformed JSON or unmergeable shape); refusing to launch without the turn-end hook" >&2
+    exit 1
   fi
 }
 
