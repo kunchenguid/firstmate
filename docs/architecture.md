@@ -128,6 +128,7 @@ PR-head containment covers an exact PR head match, a local `HEAD` that is an anc
 GitHub lookup errors fall back to the content check and still refuse if that check is inconclusive.
 If no `pr=` was ever recorded, teardown can still discover a merged PR by matching the worktree branch name and fetching `refs/pull/<n>/head` when the head branch was deleted.
 Those PR-head and content checks let a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local default-branch merge or after the branch is pushed to any remote.
+The final `treehouse return` is guarded against no-mistakes daemon collateral: teardown refuses while another branch has an active no-mistakes run, and it refuses when `lsof` shows a `no-mistakes` process cwd inside the returned worktree, because treehouse terminates worktree-cwd processes.
 
 ## Optional X mode
 

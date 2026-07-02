@@ -485,7 +485,18 @@ set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = axi ]; then
+  printf '%s\n' 'current_branch: fm/teardownconform1' 'count: 0 of 0 total' 'runs[0]{id,branch,status,head,pr}:'
+fi
+exit 0
+SH
+  cat > "$fb/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/no-mistakes" "$fb/lsof"
   printf '%s\n' "$fb"
 }
 

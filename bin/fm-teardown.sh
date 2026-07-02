@@ -94,6 +94,22 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
+trim() {
+  local s=${1:-}
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+strip_quotes() {
+  local s
+  s=$(trim "${1:-}")
+  case "$s" in
+    \"*\") s=${s#\"}; s=${s%\"} ;;
+  esac
+  trim "$s"
+}
+
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir
   token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
@@ -281,12 +297,156 @@ path_is_ancestor_of() {
   return 1
 }
 
+path_is_or_is_inside() {
+  local ancestor=$1 path=$2
+  [ -n "$ancestor" ] || return 1
+  [ -n "$path" ] || return 1
+  [ "$ancestor" = "$path" ] && return 0
+  path_is_ancestor_of "$ancestor" "$path"
+}
+
 removal_target_abs_path() {
   local target=$1
   if [ -d "$target" ]; then
     cd "$target" && pwd -P
   else
     cd "$(dirname "$target")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$target")"
+  fi
+}
+
+no_mistakes_cmd() {
+  local cmd
+  cmd=$(command -v no-mistakes 2>/dev/null || true)
+  if [ -n "$cmd" ] && [ -x "$cmd" ]; then
+    printf '%s\n' "$cmd"
+    return 0
+  fi
+  for cmd in "$HOME/.local/bin/no-mistakes" "$HOME/.no-mistakes/bin/no-mistakes"; do
+    if [ -x "$cmd" ]; then
+      printf '%s\n' "$cmd"
+      return 0
+    fi
+  done
+  return 1
+}
+
+no_mistakes_axi_list() {
+  local worktree=$1 cmd timeout
+  cmd=$(no_mistakes_cmd) || return 127
+  timeout=${FM_TEARDOWN_NM_TIMEOUT:-10}
+  (
+    cd "$worktree" &&
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout" "$cmd" axi
+  ) 2>/dev/null
+}
+
+no_mistakes_status_is_active() {
+  case "$1" in
+    running|awaiting_approval|fix_review|queued|pending|started) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+no_mistakes_other_active_runs() {
+  local worktree=$1 output=$2 current in_runs=0 row id rest branch status head pr found=0
+  current=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  while IFS= read -r row; do
+    if [[ $(trim "$row") =~ ^runs\[[0-9]+\]\{.*\}:$ ]]; then
+      in_runs=1
+      continue
+    fi
+    [ "$in_runs" = 1 ] || continue
+    case "$row" in
+      '') continue ;;
+      [[:space:]]*) ;;
+      *) break ;;
+    esac
+    row=$(trim "$row")
+    case "$row" in
+      *,*,*,*) ;;
+      *) continue ;;
+    esac
+    id=$(strip_quotes "${row%%,*}")
+    rest=${row#*,}
+    branch=$(strip_quotes "${rest%%,*}")
+    rest=${rest#*,}
+    status=$(strip_quotes "${rest%%,*}")
+    rest=${rest#*,}
+    head=$(strip_quotes "${rest%%,*}")
+    pr=$(strip_quotes "${rest#*,}")
+    if [ "$branch" != "$current" ] && no_mistakes_status_is_active "$status"; then
+      found=1
+      if [ -n "$pr" ]; then
+        printf '  %s on %s (%s, %s, %s)\n' "$id" "$branch" "$status" "$head" "$pr"
+      else
+        printf '  %s on %s (%s, %s)\n' "$id" "$branch" "$status" "$head"
+      fi
+    fi
+  done <<EOF
+$output
+EOF
+  [ "$found" = 1 ]
+}
+
+no_mistakes_processes_in_worktree() {
+  local worktree=$1 abs_wt out line pid= comm= cwd= resolved found=0
+  command -v lsof >/dev/null 2>&1 || return 1
+  abs_wt=$(removal_target_abs_path "$worktree" 2>/dev/null || true)
+  [ -n "$abs_wt" ] || return 1
+  out=$(lsof -F pcn -c no-mistakes -a -d cwd 2>/dev/null || true)
+  [ -n "$out" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p}; comm=; cwd= ;;
+      c*) comm=${line#c} ;;
+      n*)
+        cwd=${line#n}
+        resolved=$(removal_target_abs_path "$cwd" 2>/dev/null || printf '%s' "$cwd")
+        if path_is_or_is_inside "$abs_wt" "$resolved"; then
+          found=1
+          printf '  %s (%s) cwd %s\n' "${comm:-no-mistakes}" "${pid:-unknown}" "$resolved"
+        fi
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  [ "$found" = 1 ]
+}
+
+guard_no_mistakes_before_treehouse_return() {
+  local worktree=$1 out rc timeout active processes
+  if no_mistakes_cmd >/dev/null 2>&1; then
+    set +e
+    out=$(no_mistakes_axi_list "$worktree")
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      timeout=${FM_TEARDOWN_NM_TIMEOUT:-10}
+      echo "REFUSED: timed out checking no-mistakes runs before returning $worktree." >&2
+      echo "Retry after no-mistakes responds, or inspect with no-mistakes axi." >&2
+      return 1
+    fi
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 127 ]; then
+      echo "REFUSED: could not check no-mistakes runs before returning $worktree." >&2
+      echo "Retry after no-mistakes responds, or inspect with no-mistakes axi." >&2
+      return 1
+    fi
+    active=$(no_mistakes_other_active_runs "$worktree" "$out" || true)
+    if [ -n "$active" ]; then
+      echo "REFUSED: no-mistakes has active run(s) on other branch(es); deferring treehouse return so the shared daemon and unrelated validations stay alive." >&2
+      printf '%s\n' "$active" >&2
+      echo "Wait for those runs to finish, then retry teardown." >&2
+      return 1
+    fi
+  fi
+
+  processes=$(no_mistakes_processes_in_worktree "$worktree" || true)
+  if [ -n "$processes" ]; then
+    echo "REFUSED: no-mistakes process cwd is inside $worktree; treehouse return terminates worktree-cwd processes." >&2
+    printf '%s\n' "$processes" >&2
+    echo "Move or stop the no-mistakes process first, then retry teardown." >&2
+    return 1
   fi
 }
 
@@ -644,6 +804,7 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  guard_no_mistakes_before_treehouse_return "$WT" || exit 1
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then

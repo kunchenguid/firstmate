@@ -26,6 +26,18 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = axi ]; then
+  printf '%s\n' 'current_branch: fm/grok-teardown-x1' 'count: 0 of 0 total' 'runs[0]{id,branch,status,head,pr}:'
+fi
+exit 0
+SH
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/lsof"
   printf '%s\n' "$fakebin"
 }
 

@@ -88,7 +88,19 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = axi ]; then
+  printf '%s\n' 'current_branch: fm/task-x1' 'count: 0 of 0 total' 'runs[0]{id,branch,status,head,pr}:'
+fi
+exit 0
+SH
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+# Default: no no-mistakes process has cwd inside the teardown target.
+exit 1
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/lsof"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -376,6 +388,81 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+test_no_mistakes_other_active_run_refuses_before_treehouse_return() {
+  local case_dir rc
+  case_dir=$(make_case nm-other-active)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = axi ]; then
+  cat <<'EOF'
+current_branch: fm/task-x1
+other_branch_active_run:
+  id: "run-other"
+  branch: fm/other
+  status: running
+count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  "run-other",fm/other,running,abc123,"https://github.com/example/repo/pull/99"
+  "run-current",fm/task-x1,failed,def456,""
+EOF
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-other-active: teardown should defer while another no-mistakes run is active"
+  grep -F 'active run(s) on other branch' "$case_dir/stderr" >/dev/null \
+    || fail "nm-other-active: missing active-run refusal: $(cat "$case_dir/stderr")"
+  grep -F 'run-other on fm/other' "$case_dir/stderr" >/dev/null \
+    || fail "nm-other-active: refusal did not name the active run: $(cat "$case_dir/stderr")"
+  ! grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null \
+    || fail "nm-other-active: teardown completed despite unrelated active run"
+  pass "teardown refuses before treehouse return when another no-mistakes run is active"
+}
+
+test_no_mistakes_process_cwd_inside_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-process-cwd)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+cat <<'EOF'
+p83721
+cno-mistakes
+fcwd
+n$case_dir/wt
+EOF
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-process-cwd: teardown should refuse when no-mistakes cwd is inside the worktree"
+  grep -F 'no-mistakes process cwd is inside' "$case_dir/stderr" >/dev/null \
+    || fail "nm-process-cwd: missing cwd refusal: $(cat "$case_dir/stderr")"
+  grep -F 'no-mistakes (83721)' "$case_dir/stderr" >/dev/null \
+    || fail "nm-process-cwd: refusal did not name no-mistakes process: $(cat "$case_dir/stderr")"
+  ! grep -F 'teardown task-x1 complete' "$case_dir/stdout" >/dev/null \
+    || fail "nm-process-cwd: teardown completed despite no-mistakes cwd match"
+  pass "teardown refuses before treehouse return when no-mistakes cwd is inside the worktree"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -677,6 +764,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_no_mistakes_other_active_run_refuses_before_treehouse_return
+test_no_mistakes_process_cwd_inside_worktree_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
