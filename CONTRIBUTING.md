@@ -44,6 +44,12 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` must pass, and CI enforces it.
+  Scripts must also run under bash 3.2, macOS's default `/bin/bash` (Apple ships this ancient version due to GPLv3 licensing).
+  CI runs on `ubuntu-latest` with a modern bash and will not catch a 3.2-only regression, so verify locally on macOS when touching quoting-sensitive constructs.
+  In particular, never write `VAR=$(cat <<EOF ... EOF)`.
+  Bash 3.2 has a parser bug where a heredoc nested inside a `$(...)` command substitution mis-scans a bare apostrophe in the body, hunting for a matching quote past the heredoc's own terminator until it hits a spurious "unexpected EOF" past real end-of-file.
+  Use `read -r -d '' VAR <<EOF ... EOF || true` instead; the trailing `|| true` absorbs `read`'s expected exit-1 from hitting EOF without its NUL delimiter.
+  This form is immune because the heredoc is a plain redirection target, not wrapped in a command substitution.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant docs, following `docs/herdr-backend.md` for non-tmux backends.
 - In Markdown, put each full sentence on its own line.
