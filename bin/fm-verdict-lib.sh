@@ -29,7 +29,8 @@ fm_verdict_last() {  # <state-dir> <id> -> kind of last decision line
   local f line
   f=$(fm_verdict_file "$1" "$2")
   [ -f "$f" ] || return 1
-  line=$(grep -E '^(approve|reject|escalate):' "$f" | tail -1) || return 1
+  line=$(grep -E '^(approve|reject|escalate):' "$f" | tail -1)
+  [ -n "$line" ] || return 1
   printf '%s\n' "${line%%:*}"
 }
 

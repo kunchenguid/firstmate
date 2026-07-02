@@ -48,6 +48,12 @@ last=$(fm_verdict_last "$S" t1) || fail "last decision must still resolve"
 [ "$(fm_verdict_reject_count "$S" ghost)" = 0 ] || fail "missing file must count 0"
 fm_verdict_last "$S" ghost >/dev/null 2>&1 && fail "no file must mean no decision"
 
+# file exists but holds only lens evidence -> still no decision (exit 1, no output)
+fm_verdict_append "$S" t3 lens "evidence only"
+if out=$(fm_verdict_last "$S" t3 2>/dev/null); then
+  fail "lens-only file must mean no decision (got exit 0, output: '$out')"
+fi
+
 # require_approve: approve passes, reject-last refuses with banner, override passes
 fm_verdict_require_approve "$S" t1 test-label || fail "approve-last must pass require_approve"
 fm_verdict_append "$S" t2 reject "not yet"
