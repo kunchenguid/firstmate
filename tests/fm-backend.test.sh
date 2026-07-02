@@ -35,10 +35,21 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 
-# The commit this branch started from - the P1 "current main" baseline. Using
-# merge-base (not a hardcoded sha) keeps this correct even after this branch
-# gains commits of its own.
-BASE_REF=$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || git -C "$ROOT" rev-parse HEAD)
+# The commit this branch started from - the P1 "current main" baseline.
+resolve_base_ref() {
+  local ref base
+  for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
+    if git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null; then
+      base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
+      [ -n "$base" ] || continue
+      printf '%s\n' "$base"
+      return 0
+    fi
+  done
+  return 1
+}
+BASE_REF=$(resolve_base_ref) \
+  || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
