@@ -297,3 +297,33 @@ fm_backend_busy_state() {  # <backend> <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_target_exists: cheap, READ-ONLY existence check - does the
+# recorded TARGET endpoint still exist on BACKEND? Never starts a server or
+# session: for herdr this deliberately queries the pane directly instead of
+# going through fm_backend_herdr_target_ready (which auto-starts the herdr
+# server as a side effect via fm_backend_herdr_server_ensure - fine for an
+# operation that is about to use the pane, wrong for a passive liveness
+# probe). A gone tmux window or an unqueryable herdr pane (server down, pane
+# closed) both simply fail, which IS "does not exist" for this purpose.
+# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
+# primitive so callers that only need a fast alive/dead read (recovery
+# digests, the session-start fleet digest) do not re-derive it inline.
+fm_backend_target_exists() {  # <backend> <target>
+  local backend=$1 target=$2 session pane
+  case "$backend" in
+    tmux)
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      HERDR_SESSION="$session" herdr pane get "$pane" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}

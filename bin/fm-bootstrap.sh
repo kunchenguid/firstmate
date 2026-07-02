@@ -41,6 +41,13 @@
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the three MUTATING sweeps
+#          (secondmate_sync, x_mode_setup, fleet_sync) while still printing
+#          every read-only detect line above. Used by fm-session-start.sh's
+#          read-only path when another live session holds the fleet lock, so
+#          a second concurrent session never race-mutates secondmate homes,
+#          X-mode artifacts, or project clones. Unset/0 (the default) runs
+#          every sweep exactly as before - this flag is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -409,7 +416,9 @@ if ! fm_backlog_backend_manual "$CONFIG"; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
 fi
-secondmate_sync
-x_mode_setup
-fleet_sync
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  secondmate_sync
+  x_mode_setup
+  fleet_sync
+fi
 exit 0
