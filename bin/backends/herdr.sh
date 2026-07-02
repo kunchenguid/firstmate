@@ -265,11 +265,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  typed=$(fm_backend_herdr_capture "$target" 6)
+  typed=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     sleep "$sleep_s"
-    after=$(fm_backend_herdr_capture "$target" 6)
+    after=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
     if [ "$after" != "$typed" ]; then
       printf 'empty'
       return 0

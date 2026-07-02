@@ -368,6 +368,29 @@ test_send_text_submit_send_failed() {
   pass "fm_backend_herdr_send_text_submit: reports 'send-failed' when the literal send-text call itself errors"
 }
 
+test_send_text_submit_unknown_on_baseline_capture_failure() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-baseline-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "send_text_submit should report unknown when the typed baseline cannot be captured, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when typed-baseline capture fails"
+}
+
+test_send_text_submit_unknown_on_after_capture_failure() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-after-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s' $'❯ hello captain' > "$resp/2.out"
+  printf '1\n' > "$resp/4.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "send_text_submit should report unknown when post-Enter capture fails, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when post-Enter capture fails"
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -407,5 +430,7 @@ test_busy_state_unknown_on_no_agent
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_send_failed
+test_send_text_submit_unknown_on_baseline_capture_failure
+test_send_text_submit_unknown_on_after_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
