@@ -98,7 +98,9 @@ assert_contains_local "$(cat "$META")" "herdr_session=$SESSION" \
 pass "real herdr: auto-detected spawn records backend=herdr and herdr_session/workspace/tab/pane fields in meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-[ -n "$WT" ] && [ -d "$WT" ] || fail "auto-detected spawn did not report a real worktree path"
+if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  fail "auto-detected spawn did not report a real worktree path"
+fi
 
 PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 [ -n "$PANE" ] || fail "auto-detected spawn meta is missing herdr_pane_id"
