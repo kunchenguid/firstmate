@@ -108,7 +108,7 @@ state/               volatile runtime signals; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a task is always named `fm-<id>`.
+For the tmux backend, the task window is always named `fm-<id>`.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -283,7 +283,7 @@ Reconcile reality with your records before doing anything else:
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
    Treat status files as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
-4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
+4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those backend endpoints (tmux panes today).
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
 5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
@@ -298,7 +298,7 @@ Reconcile reality with your records before doing anything else:
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in each task's backend live-task inventory (tmux by default), state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -447,22 +447,24 @@ bin/fm-spawn.sh <id> projects/<repo> --harness codex   # explicit per-task harne
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> grok        # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
+bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # explicit runtime backend; only tmux is verified today
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
 bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
 ```
 
-Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, shared `--scout`, `--harness`, `--model`, and `--effort` flags apply to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
+Dispatch several tasks in one call by passing `id=repo` pairs instead of a single `<id> <project>`; each pair is spawned through the same single-task path, shared `--scout`, `--harness`, `--model`, `--effort`, and `--backend` flags apply to all, and the looping happens inside the script so you never hand-write a multi-task shell loop.
 If one pair fails, the rest still run and the batch exits non-zero.
 When `config/crew-dispatch.json` exists, include a shared `--harness` for every crewmate or scout batch after consulting the dispatch rules.
 
-The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
+The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then `tmux`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
+A non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 When `config/crew-dispatch.json` exists, the script refuses crewmate or scout launches without an explicit harness because firstmate must have already resolved the profile choice at intake.
 When `--model` or `--effort` is omitted, the corresponding meta value is `default` and no launch flag is passed for that axis, except that a `kind=secondmate` spawn can fill the omitted axis from the optional tokens in `config/secondmate-harness`.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For ship and scout tasks, the script creates the runtime endpoint (a window in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
 For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Before launching a secondmate, the script fast-forwards its home worktree to firstmate's own current default-branch commit, so a freshly spawned or recovery-respawned secondmate always starts on firstmate's current version.

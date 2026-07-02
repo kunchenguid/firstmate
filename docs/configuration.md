@@ -16,6 +16,15 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Runtime backend (config/backend / FM_BACKEND)
+
+The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
+Today `tmux` is the only verified backend.
+New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then default `tmux`.
+Any value other than `tmux` is rejected until another adapter is implemented and verified.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+The `config/backend` file is not inherited by secondmate homes.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -157,6 +166,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_BACKEND=tmux         # runtime session-provider backend override for new spawns; only tmux is verified today
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

@@ -34,6 +34,17 @@ The daemon escalates only captain-relevant events as one batched, single-line di
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using the target's recorded `harness=` meta, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Runtime session backends
+
+The runtime backend is the session-provider layer below firstmate's scripts.
+It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery, live-window fallback lookup, and endpoint teardown.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the only verified adapter today.
+New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then default `tmux`.
+Unknown backend names fail loudly.
+For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
+`fm-watch.sh` still polls the tmux pull primitives for capture, live-window inventory, and busy-state regexes.
+That poll loop is now the default event source for backends with no native push events, so P1 names the abstraction without changing watcher behavior.
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
@@ -66,7 +77,7 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
+`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
@@ -162,7 +173,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-All state lives in tmux, no-mistakes run records, status event logs, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
+All state lives in each task's session-provider backend (tmux today), no-mistakes run records, status event logs, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
 Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## Development notes

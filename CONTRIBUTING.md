@@ -58,7 +58,7 @@ Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistak
 Check and test the toolbelt before pushing:
 
 ```sh
-bash -n bin/*.sh                          # syntax-check the toolbelt
+for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
