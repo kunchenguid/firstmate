@@ -9,7 +9,14 @@
 #                                        # (default port 8737, binds 127.0.0.1)
 #
 # Renders one self-contained HTML page (inline CSS, no CDN, renders offline;
-# dark theme) showing, per direct report (every state/<id>.meta): task id,
+# dark theme). At the top, a "Decisions needed" section lists everything
+# waiting on the captain, oldest first (by status-file mtime), with
+# warning-accent styling: tasks whose current state is parked (needs-decision)
+# or blocked, showing the latest needs-decision:/blocked: status line as the
+# ask; and tasks with pr= in meta whose checks are green, where the pending
+# decision is the merge (full PR URL linked). When nothing is waiting it shows
+# a quiet "Nothing needs you." Below that, per direct report (every
+# state/<id>.meta): task id,
 # project, kind, current state from bin/fm-crew-state.sh, last-reported time
 # (status-file mtime), last-activity time (turn-ended mtime), the latest
 # status line, a PR link when meta records pr=, and a stage-based progress
@@ -143,11 +150,16 @@ TOTAL=0
 RUNNING=0
 ATTENTION=0
 ROWS=""
+# DECS accumulates "sort-epoch<TAB><li>...</li>" records for the decisions
+# section; sorted numerically (oldest first) before rendering. Entries with no
+# readable mtime sort last via the 9999999999 sentinel.
+DECS=""
 
 collect_tasks() {
   local meta id project pname kind pr statusf turnf last_line smt tmt
   local csline cs_state cs_source cs_detail rest
   local pct cls label pr_cell status_cell bar
+  local dec_ask dec_mt dec_when dec_pr
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     TOTAL=$(( TOTAL + 1 ))
@@ -223,6 +235,37 @@ collect_tasks() {
     if [ "$cs_state" = working ]; then RUNNING=$(( RUNNING + 1 )); fi
     case "$cs_state" in parked|blocked|failed|unknown) ATTENTION=$(( ATTENTION + 1 )) ;; esac
 
+    # Decisions needed (best-effort, see header): a parked/blocked task's ask
+    # is its latest needs-decision:/blocked: status line (falling back to the
+    # state detail); a checks-green task with a recorded PR waits on the merge.
+    dec_ask=""
+    case "$cs_state" in
+      parked|blocked)
+        dec_ask=$(grep -E '^[[:space:]]*(needs-decision|blocked):' "$statusf" 2>/dev/null | tail -1 || true)
+        [ -n "$dec_ask" ] || dec_ask="$cs_state: ${cs_detail:-waiting on a decision}"
+        ;;
+      done)
+        if [ -n "$pr" ]; then
+          case "$cs_detail $last_line" in
+            *'checks green'*|*checks-passed*) dec_ask='merge? checks are green' ;;
+          esac
+        fi
+        ;;
+    esac
+    if [ -n "$dec_ask" ]; then
+      dec_ask=$(printf '%s' "$dec_ask" | tr '\t' ' ')
+      dec_mt=${smt:-${tmt:-}}
+      if [ -n "$dec_mt" ]; then
+        dec_when="waiting $(rel_age "$dec_mt")"; dec_when=${dec_when% ago}
+      else
+        dec_when='waiting time unknown'
+      fi
+      dec_pr=""
+      [ -n "$pr" ] && dec_pr=" · <a href=\"$(html_escape "$pr")\">$(html_escape "$pr")</a>"
+      DECS="$DECS${dec_mt:-9999999999}	<li><span class=\"decask\">$(html_escape "$(truncate_str "$dec_ask" 160)")</span><span class=\"decmeta\"> — $(html_escape "$pname") · $dec_when$dec_pr</span></li>
+"
+    fi
+
     if [ -n "$pct" ]; then
       bar="<div class=\"bar\"><div class=\"fill f-$cls\" style=\"width:${pct}%\"></div></div><div class=\"plabel\">${pct}% · $(html_escape "$label") <span class=\"stagenote\">(stage)</span></div>"
     else
@@ -275,7 +318,7 @@ backlog_items() {  # <section-header-regex> [limit]
 # --- page ---------------------------------------------------------------------
 
 generate_page() {
-  local beat_mt beat_cell wakes queued_html done_html
+  local beat_mt beat_cell wakes queued_html done_html dec_items dec_count
   collect_tasks
 
   beat_mt=$(mtime_of "$STATE/.last-watcher-beat" || true)
@@ -344,6 +387,15 @@ a{color:#58a6ff;text-decoration:none}
 a:hover{text-decoration:underline}
 .empty{background:#12261e;border:1px solid #238636;border-radius:8px;padding:28px;
   text-align:center;color:#3fb950;font-size:16px;margin:18px 0}
+.decisions{background:#1c1607;border:1px solid #9e6a03;border-radius:8px;margin:18px 0}
+.decisions h2{margin:0;padding:10px 14px;color:#e3b341;font-size:15px;border-bottom:1px solid #3a2d0e}
+ul.dec{list-style:none;margin:0;padding:0}
+ul.dec li{padding:9px 14px;border-bottom:1px solid #3a2d0e;font-size:13px;word-break:break-word}
+ul.dec li:last-child{border-bottom:none}
+.decask{color:#e3b341;font-weight:600}
+.decmeta{color:#8b949e;font-size:12px}
+.decnone{background:#161b22;border:1px solid #21262d;border-radius:8px;margin:18px 0;
+  padding:12px 14px;color:#8b949e;font-size:13px}
 .cols{display:flex;gap:24px;flex-wrap:wrap}
 .col{flex:1;min-width:300px}
 ul.bl{list-style:none;padding:0;margin:8px 0;background:#161b22;border:1px solid #21262d;border-radius:8px}
@@ -363,6 +415,14 @@ footer{margin-top:24px;color:#57606a;font-size:11px}
 <div class="card"><div class="num $([ "$wakes" -gt 0 ] && echo warn || echo good)">$wakes</div><div class="lbl">queued wakes</div></div>
 </div>
 HTMLHEAD
+
+  if [ -n "$DECS" ]; then
+    dec_items=$(printf '%s' "$DECS" | sort -n | cut -f2-)
+    dec_count=$(printf '%s\n' "$dec_items" | grep -c '<li' || true)
+    printf '<div class="decisions">\n<h2>⚠ Decisions needed (%s)</h2>\n<ul class="dec">\n%s\n</ul>\n</div>\n' "$dec_count" "$dec_items"
+  else
+    printf '<div class="decnone">Nothing needs you.</div>\n'
+  fi
 
   if [ "$TOTAL" -eq 0 ]; then
     printf '<div class="empty">✓ No work in flight — the fleet is idle and healthy.</div>\n'
