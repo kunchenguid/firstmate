@@ -82,6 +82,7 @@ config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
+  learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
@@ -163,6 +164,8 @@ Then read `data/secondmates.md` if present so intake can route work by registere
 Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
 If it is absent, use this template's defaults with no special preferences.
 Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
+Then read `data/learnings.md` if present, to load fleet-local operational facts and gotchas this home has captured.
+If it is absent, there is nothing yet to load and that is fine.
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
 Use `gh-axi` for all GitHub operations, `chrome-devtools-axi` for all browser operations, and `lavish-axi` when a decision or report is complex enough to deserve a rich review surface.
@@ -363,6 +366,19 @@ Firstmate's own not-yet-committed project knowledge lives in `data/` until a cre
 Create a project's `AGENTS.md` lazily on first need.
 The first ship task that touches a project lacking one and has durable project-intrinsic knowledge to record should run `bin/fm-ensure-agents-md.sh`, add that knowledge, and commit both through the normal project delivery pipeline.
 Do not eagerly backfill every project.
+
+### Knowledge routing
+
+Route each piece of durable knowledge to its most specific home:
+
+| Kind of knowledge | Home |
+| --- | --- |
+| Captain preferences and working style | `data/captain.md` |
+| Project-intrinsic knowledge | that project's own `AGENTS.md`, via normal crewmate delivery, never hand-written by firstmate |
+| Fleet-local operational facts and gotchas | `data/learnings.md` |
+| Knowledge generalizable to every firstmate user | the shared `AGENTS.md`, shipped via PR through the pipeline |
+| Task-scoped notes | backlog item notes (`tasks-axi update --append`, or hand-edit per the active backend) |
+| Investigation findings | scout reports at `data/<id>/report.md` |
 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
