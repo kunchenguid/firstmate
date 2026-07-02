@@ -371,7 +371,13 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 
 ### Quarterdeck: done is a claim, not an acceptance
 
-A ship task's `done:` line triggers verification, never direct acceptance. Run
+A ship task's `done:` line triggers verification, never direct acceptance.
+Verification runs on the crewmate's FIRST completion claim — for no-mistakes-mode
+tasks that is `done: {summary}`, before firstmate instructs /no-mistakes (catch
+problems before the expensive pipeline, and the recorded `approve:` already
+satisfies fm-pr-check's gate at PR time; the later `done: PR {url} checks green`
+does not re-verify). For local-only and direct-PR tasks there is only one `done:`
+and it verifies. Run
 `bin/fm-verify.sh <id>`: it runs a foreign-lens review of the diff (Fugu ->
 codex -> none, degrading loudly), then an independent fresh-context verifier
 (default-REJECT) that re-proves the brief's definition of done from the
