@@ -37,11 +37,8 @@
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
 #                       state/*.status tail per task, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
-#   6. closing reminder - arm the watcher yourself; this script deliberately
-#                       never does (AGENTS.md section 8: a script-internal
-#                       fire-and-forget arm would be reaped when this script
-#                       exits, which is exactly the silent supervision gap
-#                       that discipline exists to prevent).
+#   6. closing reminder - prints the context-specific watcher next step; this
+#                       script deliberately never arms the watcher itself.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
@@ -72,6 +69,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -147,14 +145,15 @@ fi
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness banners land right here too, ahead of the bulk
 # digest below. The read-only path never touches the queue (another session
-# may be actively draining it) but still runs fm-guard.sh directly - a
-# read-only check with no locking of its own - so the same banners surface.
+# may be actively draining it) but still runs fm-guard.sh directly with
+# non-mutating advisory text, so the same alarms surface without repair
+# commands.
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
   printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
-  GUARD_OUT=$("$SCRIPT_DIR/fm-guard.sh" 2>&1)
+  GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
@@ -208,7 +207,9 @@ done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
+AFK_PRESENT=0
 if [ -e "$STATE/.afk" ]; then
+  AFK_PRESENT=1
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
@@ -216,6 +217,29 @@ fi
 
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
+if [ "$READ_ONLY" -eq 1 ]; then
+  cat <<'EOF'
+This session did not acquire the fleet lock. Stay read-only: do not arm,
+drain, spawn, steer, merge, or repair fleet state from here. The session
+holding the lock owns mutable follow-up.
+
+EOF
+elif [ "$AFK_PRESENT" -eq 1 ]; then
+  cat <<'EOF'
+Away mode is active. Do not arm the normal watcher directly; load /afk and
+ensure the daemon is running, because the daemon owns watcher supervision.
+
+EOF
+elif [ -f "$CONFIG/x-mode.env" ]; then
+  cat <<EOF
+Arm the watcher yourself as your harness's own tracked background task with
+the X-mode cadence sourced first - this script never arms it itself.
+
+  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+  bin/fm-watch-arm.sh
+
+EOF
+else
 cat <<'EOF'
 Arm the watcher yourself as your harness's own tracked background task - this
 script never does, and never should: a fire-and-forget arm from inside a
@@ -224,6 +248,9 @@ supervision (AGENTS.md section 8).
 
   bin/fm-watch-arm.sh
 
+EOF
+fi
+cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
 data/projects.md, data/secondmates.md, data/captain.md, data/learnings.md,
 data/backlog.md, state/*.meta, or state/*.status now - they were just

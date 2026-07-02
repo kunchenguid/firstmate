@@ -9,6 +9,8 @@
 #     skipped (including bootstrap's three mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
+#   - context-aware next-step guidance for read-only, AFK, X mode, and normal
+#     watcher ownership
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
@@ -198,6 +200,7 @@ EOF
   # FM_BOOTSTRAP_DETECT_ONLY=1 actually suppressed the mutating sweep.
   mkdir -p "$home/other-secondmate/state"
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
+  append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
 
   sleep 300 &
   holder_pid=$!
@@ -213,6 +216,12 @@ EOF
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
+  assert_contains "$out" "queued wakes pending - left untouched for the session holding the fleet lock" "read-only guard did not leave queued wakes to the lock holder"
+  assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
+  assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
+  assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
+  assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
@@ -387,6 +396,47 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_next_step_sources_x_mode_cadence() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-x)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" curl jq
+  printf 'FMX_PAIRING_TOKEN=tok-next-step\n' > "$home/.env"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
+  assert_contains "$out" "X-mode cadence sourced first" "next step did not mention X cadence"
+  assert_contains "$out" "[ -f \"$home/config/x-mode.env\" ] && . \"$home/config/x-mode.env\"" "next step did not source the generated X cadence file"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "next step did not retain the watcher arm command after sourcing X cadence"
+
+  pass "next step sources the X-mode cadence before arming the watcher"
+}
+
+test_next_step_afk_delegates_to_daemon() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-afk)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
+  assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
+  assert_contains "$out" "daemon owns watcher supervision" "next step did not delegate watcher ownership to the daemon"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
+
+  pass "next step delegates watcher ownership to the AFK daemon"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
@@ -395,3 +445,5 @@ test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
+test_next_step_sources_x_mode_cadence
+test_next_step_afk_delegates_to_daemon
