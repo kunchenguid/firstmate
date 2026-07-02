@@ -7,10 +7,11 @@
 # "invalid gate path: ." and no run was created. The fix is to re-run the
 # idempotent `no-mistakes init` to refresh the hook. This helper does exactly
 # that, guarded and best-effort, so a stale or absent gate never blocks a spawn.
-# These cases pin every branch hermetically with a fake `no-mistakes`:
+# These cases pin the helper's branch behavior hermetically with a fake
+# `no-mistakes`:
 #   (a) usage error (no arg)                         -> exit 2
 #   (b) usage error (too many args)                  -> exit 2
-#   (c) non-directory / non-git path                 -> skip, exit 0
+#   (c) non-git directory                            -> skip, exit 0
 #   (d) git repo without an origin remote            -> skip, exit 0
 #   (e) git repo + origin + no-mistakes installed    -> refreshed (init invoked)
 #   (f) no-mistakes not on PATH                       -> skip, exit 0
