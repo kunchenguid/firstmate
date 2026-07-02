@@ -151,8 +151,31 @@ EOF
   pass "cursor stop-hook fires only for a registered worktree and preserves existing hooks"
 }
 
+test_cursor_teardown_removes_pointer_and_token() {
+  local rec case_dir home proj wt fakebin cursor_cfg id log out token
+  rec=$(make_spawn_case teardown)
+  IFS='|' read -r case_dir home proj wt fakebin cursor_cfg id <<EOF
+$rec
+EOF
+  log="$case_dir/sendkeys.log"; : > "$log"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$cursor_cfg" "$id" "$log")
+  expect_code 0 $? "cursor spawn should succeed before teardown"
+  token=$(sed -n 's/^token=//p' "$wt/.fm-cursor-turnend")
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    CURSOR_CONFIG_DIR="$cursor_cfg" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
+    || fail "cursor teardown failed"
+
+  assert_absent "$wt/.fm-cursor-turnend" "cursor pointer survived teardown"
+  assert_absent "$cursor_cfg/hooks/fm-turn-end.d/$token" "cursor auth token survived teardown"
+  assert_absent "$home/state/$id.cursor-turnend-token" "cursor state token survived teardown"
+  pass "cursor teardown removes pointer and token state"
+}
+
 test_detects_cursor_via_env_marker
 test_claude_still_wins_when_both_set
 test_fm_lock_recognizes_cursor_holder
 test_cursor_launch_template
 test_cursor_turnend_hook
+test_cursor_teardown_removes_pointer_and_token
