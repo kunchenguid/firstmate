@@ -86,6 +86,8 @@ Typing `/mem` into a live `claude` composer inside a herdr pane and reading the 
 This confirms the same hazard tmux already mitigates: submitting immediately after a `/`- or `$`-prefixed send risks Enter landing on a popup selection instead of the literal typed command.
 `fm_backend_herdr_send_text_submit` takes the same settle-before-first-Enter parameter tmux's submit core does; the settle-duration DECISION itself lives in `fm-send.sh` (harness-aware, backend-independent), so neither adapter needs its own settle policy.
 
+`fm-spawn.sh` wraps verified harness templates in the same `bash -c` launch string before sending them through herdr's literal-send + Enter path; raw launch commands remain unwrapped for adapter verification.
+
 `escape` was verified to dismiss the popup while leaving the typed text in the composer, not a full clear.
 The adapter's own verify-and-retry logic does not depend on this; it is delta/content-based (see below), not popup-state-based.
 

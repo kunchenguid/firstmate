@@ -115,7 +115,7 @@ It routes each request to a crewmate in its own session endpoint and git worktre
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
-Verified harness templates are launched through `bash -c` inside tmux, so fish, zsh, and bash pane shells behave consistently; raw launch commands stay raw for adapter verification.
+Verified harness templates are launched through `bash -c` inside each runtime pane, so fish, zsh, and bash pane shells behave consistently; raw launch commands stay raw for adapter verification.
 Secondmate launch can use a separate local `config/secondmate-harness`, whose first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]` to durably pin that secondmate's launch profile.
 The runtime session-provider backend is selected from explicit `--backend`, `FM_BACKEND`, local `config/backend`, runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then the hard `tmux` default.
 `tmux` is the verified reference backend, and `herdr` is experimental.

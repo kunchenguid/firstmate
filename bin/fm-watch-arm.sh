@@ -33,6 +33,10 @@
 # pid, so it can never touch another home's watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
+#
+# If the parent harness starts this script with SIGHUP ignored, the script
+# re-execs itself once with HUP reset before installing traps, so cleanup remains
+# reliable when the tracked background task is hung up.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

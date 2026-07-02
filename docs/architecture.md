@@ -75,7 +75,7 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
-Verified harness templates are wrapped in `bash -c` before being sent into tmux, so firstmate does not depend on the pane's interactive shell understanding bash-only template syntax.
+Verified harness templates are wrapped in `bash -c` before being sent into the runtime endpoint, so firstmate does not depend on the pane's interactive shell understanding bash-only template syntax.
 Raw launch commands remain raw for adapter-verification work.
 
 ## Optional secondmates

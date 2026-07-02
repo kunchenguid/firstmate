@@ -47,7 +47,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path.
-Verified harness templates are wrapped in `bash -c` by `fm-spawn.sh`, which keeps their bash substitutions independent of the tmux pane's interactive shell.
+Verified harness templates are wrapped in `bash -c` by `fm-spawn.sh`, which keeps their bash substitutions independent of the runtime pane's interactive shell.
 Raw launch commands are not wrapped, so adapter verification still exercises exactly what was supplied.
 
 | Harness | Model flag | Effort flag | Notes |
