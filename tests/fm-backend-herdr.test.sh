@@ -406,6 +406,41 @@ test_dispatch_busy_state_unknown_for_tmux() {
   pass "fm_backend_busy_state: tmux (no native primitive) always reports unknown, preserving the P1 regex-only path"
 }
 
+test_scripts_route_explicit_target_through_meta_backend() {
+  local dir state log resp fb neutral out
+  dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  neutral="$dir/neutral-root"; mkdir -p "$neutral"
+  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
+  touch "$state/.last-watcher-beat"
+  printf 'captured herdr pane\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'tmux should not be used for a metadata-matched herdr target\n' >&2
+exit 42
+SH
+  chmod +x "$fb/tmux"
+
+  out=$( PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    "$ROOT/bin/fm-peek.sh" default:w1:p2 5 2>/dev/null )
+  [ "$out" = "captured herdr pane" ] || fail "fm-peek did not capture through herdr for an explicit metadata-matched target, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
+    "fm-peek did not route the explicit stale target through herdr capture"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    "$ROOT/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
+  expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through herdr"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''escape' \
+    "fm-send did not route the explicit stale target through herdr send-key"
+
+  pass "fm-peek/fm-send: explicit stale targets matching metadata use the recorded backend"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -434,3 +469,4 @@ test_send_text_submit_unknown_on_baseline_capture_failure
 test_send_text_submit_unknown_on_after_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
+test_scripts_route_explicit_target_through_meta_backend

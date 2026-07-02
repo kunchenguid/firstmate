@@ -161,6 +161,24 @@ SH
   pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via tmux list-windows"
 }
 
+test_backend_of_selector_matches_explicit_target_meta() {
+  local state=$TMP_ROOT/backend-selector-state
+  mkdir -p "$state"
+  fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
+  fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
+
+  [ "$(fm_backend_of_selector 'fm-herdr-task' 'default:w1:p2' "$state")" = herdr ] \
+    || fail "bare fm-<id> selector should use its recorded backend"
+  [ "$(fm_backend_of_selector 'default:w1:p2' 'default:w1:p2' "$state")" = herdr ] \
+    || fail "explicit backend target matching metadata should use that task's backend"
+  [ "$(fm_backend_of_selector 'firstmate:fm-tmux-task' 'firstmate:fm-tmux-task' "$state")" = tmux ] \
+    || fail "explicit tmux-shaped target with absent backend= should default to tmux"
+  [ "$(fm_backend_of_selector 'manual:outside' 'manual:outside' "$state")" = tmux ] \
+    || fail "explicit target with no matching metadata should keep the tmux compatibility default"
+
+  pass "fm_backend_of_selector: fm-<id> and matching explicit targets inherit metadata backend"
+}
+
 # --- old vs new: fm-send.sh --------------------------------------------------
 
 make_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $FM_TMUX_LOG
@@ -485,6 +503,7 @@ test_backend_name_precedence
 test_backend_validate_refuses_unknown
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
+test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_conformance_old_vs_new

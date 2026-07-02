@@ -64,17 +64,15 @@ esac
 # scope the codex `$<skill>` popup-settle below. A bare fm-<id> target carries
 # meta; an explicit session:window escape-hatch target has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
-# The target's BACKEND is resolved the same way (defaulting to tmux, the P1
-# compatibility contract) so the send-key/send-text dispatch below routes
-# through the same backend the selector itself was resolved against.
+# The target's BACKEND comes from fm-<id> meta, or from matching the resolved
+# explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
-TARGET_BACKEND=tmux
+TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
       TARGET_HARNESS=$(fm_meta_get "$meta" harness)
-      TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     fi
     ;;
 esac

@@ -102,6 +102,33 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${v:-tmux}"
 }
 
+fm_backend_meta_for_window() {  # <target> <state-dir>
+  local target=$1 state=$2 meta window
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    window=$(fm_meta_get "$meta" window)
+    [ "$window" = "$target" ] || continue
+    printf '%s' "$meta"
+    return 0
+  done
+  return 1
+}
+
+fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
+  local raw=$1 resolved=$2 state=$3 meta
+  case "$raw" in
+    fm-*)
+      meta="$state/${raw#fm-}.meta"
+      [ -f "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+      ;;
+  esac
+  if [ -n "$resolved" ]; then
+    meta=$(fm_backend_meta_for_window "$resolved" "$state" 2>/dev/null || true)
+    [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+  fi
+  printf 'tmux'
+}
+
 # fm_backend_source: source the named backend's adapter file, once per shell.
 fm_backend_source() {  # <name>
   local name=$1
