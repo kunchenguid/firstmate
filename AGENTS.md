@@ -200,7 +200,7 @@ If the captain expresses a standing dispatch preference such as "use grok for ne
 Crewmates default to the same harness you are running on.
 The captain may override the static default at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single adapter name; absent or `default` means mirror your own harness).
 Resolve `default` with `bin/fm-harness.sh`; resolve the active static crewmate harness with `bin/fm-harness.sh crew`.
-Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
+Verified adapter names are `claude`, `codex`, `opencode`, `pi`, `grok`, and `cursor`.
 
 ### Crew dispatch profiles
 
