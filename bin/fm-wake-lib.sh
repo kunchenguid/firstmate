@@ -34,10 +34,10 @@ fm_pid_identity() {
 }
 
 fm_path_mtime() {
-  if stat -c %Y "$FM_WAKE_LIB_DIR" >/dev/null 2>&1; then
-    stat -c %Y "$1" 2>/dev/null
-  else
+  if [ "$(uname)" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
   fi
 }
 
