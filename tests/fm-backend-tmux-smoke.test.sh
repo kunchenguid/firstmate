@@ -48,6 +48,13 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+# Pin a clean, rc-free bash for every window this private server spawns. The
+# task window's shell must run the POSIX sh syntax this test sends (PS1=...,
+# `for i in $(seq ...); do ... done`); a login/interactive shell can re-exec
+# into the user's preferred shell (e.g. a ~/.bashrc ending in `exec fish`),
+# which cannot parse it, so the sent commands never run.
+tmux set-option -g default-command 'bash --norc --noprofile' \
+  || fail "real tmux: could not pin a POSIX default-command"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
