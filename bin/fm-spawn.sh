@@ -994,6 +994,22 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+if [ "$KIND" != secondmate ]; then
+  # Re-export a correct PWD into the pane right after treehouse get lands it in the
+  # worktree. treehouse get's subshell reliably chdir()s the pane (the isolation
+  # guard above confirms this via pwd -P), but has been observed to leave the
+  # pane's $PWD env var stale/wrong (e.g. literally "."). Every child process the
+  # pane spawns inherits that broken $PWD verbatim, including git push's
+  # post-receive hook chain, where the no-mistakes gate hook calls bare `pwd`
+  # (logical mode) and trusts $PWD without verifying it against the real cwd.
+  # `pwd -P` ignores $PWD and resolves the real physical directory via getcwd(),
+  # so re-exporting from it repairs the inherited environment at the earliest
+  # point firstmate controls. Secondmate panes never run treehouse get (tmux's own
+  # -c sets their cwd directly at process start), so they are not known to hit
+  # this and are left alone.
+  spawn_send_text_line "$T" 'export PWD="$(pwd -P)"'
+  sleep 0.3
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
