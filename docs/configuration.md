@@ -215,6 +215,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
+FM_NM_GATE_TIMEOUT=10   # seconds allowed for the best-effort no-mistakes gate refresh before a no-mistakes ship launch
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
