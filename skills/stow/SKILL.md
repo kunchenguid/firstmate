@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current conversation for durable knowledge - user preferences, project facts, operational gotchas, and unfinished next steps - and file each into wherever the project or user already keeps that kind of note, so nothing is lost when the session ends. Use when the user invokes /stow, asks to save or write down what was learned this session, or before a context reset or long break.
+description: Sweep the current conversation for durable knowledge - user preferences, project facts, operational gotchas, and unfinished next steps - and file each through explicit instructions, existing local conventions, or the private `.stow-notes.md` fallback, so nothing is lost when the session ends. Use when the user invokes /stow, asks to save or write down what was learned this session, or before a context reset or long break.
 user-invocable: true
 ---
 
@@ -8,7 +8,7 @@ user-invocable: true
 
 # stow
 
-Sweep this conversation for durable knowledge that only exists in chat right now, and write it to wherever this project or user already keeps that kind of note.
+Sweep this conversation for durable knowledge that only exists in chat right now, and write it through the user's explicit instructions, this project's existing local conventions, or the private `.stow-notes.md` fallback in the current directory.
 The goal is a conversation that is safe to end, reset, or hand off because everything durable has already been captured on disk, not left stranded in the transcript.
 Everything this skill files goes to a local file by default; it only ever reaches an external system such as an issue tracker when you have explicitly said to use one.
 
@@ -26,7 +26,7 @@ Everything this skill files goes to a local file by default; it only ever reache
    - A project-level memory file, such as `CLAUDE.md`, `AGENTS.md`, or an equivalent at the repo root or nearby.
    - A user-level (global) memory file the running agent reads across projects, if one exists and is readable.
    - A `TODO`, `BACKLOG`, `NOTES`, or similarly named plain file already tracked in the project.
-   This step is about local, private files only.
+   This step is about local files only, not remote systems.
    Do not scan for or infer an issue tracker here - see the priority order in step 3.
 
 3. **Route each finding using this fixed priority order, local-first.**
