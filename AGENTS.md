@@ -816,11 +816,11 @@ Map firstmate's real backlog operations to the approved commands:
 - Hand a task off to a secondmate home: keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
 - Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.
 
-**Note hygiene.** Keep backlog and task notes free of volatile specifics that rot: temp paths, versions, IDs, state locations, URLs.
-Reference the authoritative source instead of duplicating it into a note - "state per the module's backend config", not a literal path.
+**Note hygiene:** Keep free-form backlog and task note/status prose free of volatile incidental specifics that rot: temp paths, in-flight versions, moving state locations, and ephemeral IDs.
+Reference the authoritative source instead of duplicating it into prose - "state per the module's backend config", not a literal path.
 Before acting on a note's volatile detail, verify it against the source of truth (the config, the live system, the API); notes drift.
-Correct or delete a stale note the moment you catch one.
-Durable facts belong in curated memory (section 6's knowledge-routing homes), not scattered across one-off task notes.
+The backlog format's structured fields are different: task IDs, blocked-by IDs, and Done-entry PR URLs or report paths from `tasks-axi done --pr <url>` or `--report <path>` are the durable record required by this schema.
+Correct or delete stale free-form notes the moment you catch them, and put durable facts in curated memory (section 6's knowledge-routing homes), not scattered across one-off task notes.
 
 ## 11. Crewmate briefs
 
