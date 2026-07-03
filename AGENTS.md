@@ -314,7 +314,10 @@ Reconcile reality with your records before doing anything else, working from the
    Do not sweep every `fm-*` tmux window, herdr tab, zellij tab, or Orca terminal across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
 5. If the digest reports a recorded direct-report's endpoint as `dead` (or a meta has no `window=`), reconcile it through its meta as described below.
 6. For meta with no window, or an endpoint the digest reported dead, reconcile by kind.
-   For ordinary crewmates, check the recorded backend metadata first; use `treehouse status` for treehouse-backed tasks, and the recorded `orca_worktree_id=`/`terminal=` for Orca tasks.
+   For ordinary crewmates, check the recorded backend metadata first.
+   For treehouse-backed `kind=ship`/`kind=scout` tasks whose recorded `worktree=` still exists on disk, use `bin/fm-resume-worktree.sh <id>` to recreate the runtime endpoint and relaunch directly in that existing worktree - it never runs `treehouse get` and never provisions a fresh worktree, so unlanded work in the worktree is untouched.
+   If the worktree itself is gone, check `treehouse status` in that project, salvage or report.
+   For Orca tasks, use the recorded `orca_worktree_id=`/`terminal=` values instead.
    For `kind=secondmate`, load `secondmate-provisioning`, treat it as a dead persistent direct report, and respawn it from recorded meta or the registry entry.
 7. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.

@@ -474,10 +474,16 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
   local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
   [ "${1:-}" = -- ] && shift
   : > "$log"
+  # Proxy vars forced empty (not unset via env -u, which is not portable to the
+  # BSD env on macOS): the new fm-spawn.sh's proxy-passthrough addition
+  # (bin/fm-spawn.sh's proxy_env_prefix) must not leak the real test runner's
+  # ambient proxy config into this conformance fixture; proxy propagation gets
+  # its own dedicated test below.
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
+    HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= ALL_PROXY= all_proxy= NO_PROXY= no_proxy= \
     "$bin/bin/fm-spawn.sh" "$@"
 }
 
@@ -507,18 +513,29 @@ test_spawn_conformance_old_vs_new() {
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
-    || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
+  # Normalize away KNOWN, intentional post-BASE_REF additions to the new log
+  # before the conformance diff: the GOTMPDIR export (pre-existing, predates
+  # this suite's last update) and the fleet default-model flag (this task,
+  # data/fleet-constitution.md item 17) both change the literal command
+  # sequence on purpose. Everything else must still be byte-identical - this
+  # keeps the test doing its actual job (catching an UNINTENTIONAL behavior
+  # change in the tmux backend abstraction) instead of bit-rotting into a
+  # permanent, uninformative failure.
+  sed -e '/export GOTMPDIR=/d' \
+      -e "s/--dangerously-skip-permissions --model 'claude-sonnet-5' /--dangerously-skip-permissions /" \
+      "$log_new" > "$TMP_ROOT/spawn-new-normalized.log"
+  diff -u "$log_old" "$TMP_ROOT/spawn-new-normalized.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+    || fail "fm-spawn.sh: tmux command log differs old vs new (beyond the known GOTMPDIR/default-model deltas)"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
   assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
-  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
-    "spawn tmux log missing the literal launch-command send"
+  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-sonnet-5' \"\$(cat '$data/$id/brief.md')\"" \
+    "spawn tmux log missing the literal launch-command send (with the default-model flag)"
 
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new for a ship-task claude spawn"
+  pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new (modulo known deltas) for a ship-task claude spawn"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------

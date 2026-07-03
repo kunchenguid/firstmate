@@ -89,6 +89,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= ALL_PROXY= all_proxy= NO_PROXY= no_proxy= \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -105,7 +106,7 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
-test_no_profile_keeps_claude_launch_unchanged() {
+test_no_profile_defaults_claude_to_fleet_model() {
   local rec id out status expected launch
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
@@ -115,12 +116,17 @@ test_no_profile_keeps_claude_launch_unchanged() {
   status=$?
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  # data/fleet-constitution.md item 17: an unspecified --model on the claude
+  # harness gets the fleet default (claude-sonnet-5), not the ambient claude
+  # CLI default, and that default is recorded as tier=default so it stays
+  # distinguishable from an explicit --model override (tier=override).
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude claude-sonnet-5 default
+  assert_grep "tier=default" "$HOME_DIR/state/$id.meta" "meta missing tier=default for the fleet default model"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-sonnet-5' \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "no-profile claude launch missing the fleet default model"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "no --model/--effort defaults claude to the fleet model (claude-sonnet-5) and records tier=default"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -218,6 +224,7 @@ test_claude_threads_model_and_effort() {
   status=$?
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
+  assert_grep "tier=override" "$HOME_DIR/state/$id.meta" "meta missing tier=override for an explicit --model"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
@@ -364,7 +371,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
-test_no_profile_keeps_claude_launch_unchanged
+test_no_profile_defaults_claude_to_fleet_model
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
