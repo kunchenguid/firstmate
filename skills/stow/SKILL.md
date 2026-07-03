@@ -25,14 +25,16 @@ The goal is a conversation that is safe to end, reset, or hand off because every
    - A project-level memory file, such as `CLAUDE.md`, `AGENTS.md`, or an equivalent at the repo root or nearby.
    - A user-level (global) memory file the running agent reads across projects, if one exists and is readable.
    - A `TODO`, `BACKLOG`, `NOTES`, or similarly named plain file already tracked in the project.
-   - An issue tracker the repo evidently uses - a configured git host remote, a `.github/` or `.gitlab/` folder, or a tracker referenced in existing docs or config.
+   - An issue tracker only when there is real evidence issues are the active backlog convention, such as a tracker explicitly referenced in the project's own docs or config, or existing open-issue activity visible to the current tools.
+     A configured git host remote or a bare `.github/`/`.gitlab/` folder is only weak hosting evidence; use it to identify a possible tracker, not to make the tracker the suggested destination.
    Use only what genuinely exists; do not invent a location that isn't already a convention here.
 
 3. **Route each finding to the most specific existing home.**
    - User preferences -> the discovered user-level memory file, if one exists and is writable.
    - Project facts -> the project's own memory file (e.g. `CLAUDE.md`/`AGENTS.md`), if it exists.
    - Operational gotchas -> the same project memory file, or a project `NOTES`/`BACKLOG` file if that is this project's convention for that kind of thing.
-   - Undone next steps -> the project's issue tracker if it has one, otherwise its `TODO`/`BACKLOG` file.
+   - Undone next steps -> the project's `TODO`/`BACKLOG`/`NOTES` file when that exists, or the project's issue tracker only when real active-backlog evidence exists and the user explicitly confirms filing that specific item there.
+     Before creating any external/public tracker item, always ask the user for explicit confirmation first; never silently file GitHub/GitLab issues or other external tracker records.
 
 4. **When it's genuinely ambiguous, ask once - then remember the answer.**
    If no discovered convention clearly fits a finding, or more than one plausibly does, ask the user once, plainly, where they want that kind of note to live going forward.
