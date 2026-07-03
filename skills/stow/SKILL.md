@@ -9,7 +9,8 @@ user-invocable: true
 # stow
 
 Sweep this conversation for durable knowledge that only exists in chat right now, and write it to wherever this project or user already keeps that kind of note.
-The goal is a conversation that is safe to end, reset, or hand off because everything durable has already been captured on disk (or in a tracker), not left stranded in the transcript.
+The goal is a conversation that is safe to end, reset, or hand off because everything durable has already been captured on disk, not left stranded in the transcript.
+Everything this skill files goes to a local file by default; it only ever reaches an external system such as an issue tracker when you have explicitly said to use one.
 
 ## What it does
 
@@ -25,24 +26,28 @@ The goal is a conversation that is safe to end, reset, or hand off because every
    - A project-level memory file, such as `CLAUDE.md`, `AGENTS.md`, or an equivalent at the repo root or nearby.
    - A user-level (global) memory file the running agent reads across projects, if one exists and is readable.
    - A `TODO`, `BACKLOG`, `NOTES`, or similarly named plain file already tracked in the project.
-   - An issue tracker only when there is real evidence issues are the active backlog convention, such as a tracker explicitly referenced in the project's own docs or config, or existing open-issue activity visible to the current tools.
-     A configured git host remote or a bare `.github/`/`.gitlab/` folder is only weak hosting evidence; use it to identify a possible tracker, not to make the tracker the suggested destination.
-   Use only what genuinely exists; do not invent a location that isn't already a convention here.
+   This step is about local, private files only.
+   Do not scan for or infer an issue tracker here - see the hard rule in step 3.
 
-3. **Route each finding to the most specific existing home.**
+3. **Route each finding to the most specific existing home, local-first.**
    - User preferences -> the discovered user-level memory file, if one exists and is writable.
    - Project facts -> the project's own memory file (e.g. `CLAUDE.md`/`AGENTS.md`), if it exists.
    - Operational gotchas -> the same project memory file, or a project `NOTES`/`BACKLOG` file if that is this project's convention for that kind of thing.
-   - Undone next steps -> the project's `TODO`/`BACKLOG`/`NOTES` file when that exists, or the project's issue tracker only when real active-backlog evidence exists and the user explicitly confirms filing that specific item there.
-     Before creating any external/public tracker item, always ask the user for explicit confirmation first; never silently file GitHub/GitLab issues or other external tracker records.
+   - Undone next steps -> **always local by default**: the project's `TODO`/`BACKLOG`/`NOTES` file when one already exists, or otherwise a small local notes/scratch file you create for this purpose.
+     A freshly created local notes file lives only on the user's own machine, is private, and is trivially reversible, so creating one for this specific case is fine even though step 5 otherwise avoids inventing new files.
+   **Hard rule: never route anything to an external or public system - an issue tracker, a hosted project board, a ticketing system, or similar - based on inference or heuristics.**
+   A configured git host remote, a `.github/`/`.gitlab/` folder, or any other signal that a tracker probably exists is never by itself grounds to file anything there.
+   Use a tracker (or any other non-local system) only when the user has explicitly told you to - either said plainly earlier in this conversation, or previously recorded as a standing choice in the discovered user-level memory file (see step 4).
+   Absent that explicit instruction, everything stays local, and no confirmation dance is needed for the local-first default itself.
 
 4. **When it's genuinely ambiguous, ask once - then remember the answer.**
-   If no discovered convention clearly fits a finding, or more than one plausibly does, ask the user once, plainly, where they want that kind of note to live going forward.
-   Once they answer, offer to remember it for next time: with their explicit permission, record a short standing note of that choice in the discovered (or newly agreed) user-level memory file, so the same question doesn't need to be asked again in this project.
+   If no discovered convention clearly fits a finding (for user preferences, project facts, or operational gotchas), or more than one plausibly does, ask the user once, plainly, where they want that kind of note to live going forward.
+   The same applies if the user gives an explicit instruction to use a tracker or other non-local system going forward rather than just for one item right now.
+   Once they answer, offer to remember it for next time: with their explicit permission, record a short standing note of that choice in the discovered (or newly agreed) user-level memory file, so the same question - or the same tracker instruction - doesn't need to be repeated in this project.
    Always ask before adding that note - never establish the convention silently on your own judgment.
 
-5. **Write only into locations that already exist as a real convention, or that the user just approved in step 4.**
-   Do not invent new note files, new folders, or new tracker categories the project doesn't already have.
+5. **Write only into locations that already exist as a real convention, the local scratch-file fallback from step 3, or a destination the user just approved in step 4.**
+   Do not invent new shared files, new folders, or new tracker categories the project doesn't already have.
    If nothing existing fits and the user doesn't want to establish a new convention, say so plainly and leave that finding unfiled rather than fabricate a destination for it.
 
 6. **Curate, don't just append.**
@@ -56,3 +61,4 @@ The goal is a conversation that is safe to end, reset, or hand off because every
 
 It does not invent a new note-taking system, initialize version control, or commit/push anything on the user's behalf beyond editing a file the discovered convention already made writable.
 It never files credentials, secrets, or other sensitive material - only knowledge that's safe to keep in plain text wherever it lands.
+It never files anything to an issue tracker, hosted board, or other external/public system on its own inference - that only ever happens on the user's explicit say-so, per the hard rule in step 3.
