@@ -90,10 +90,11 @@ tests/fm-pr-merge.test.sh                 # fm-pr-merge.sh records pr= and avail
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 tests/fm-backend.test.sh                  # runtime-backend abstraction: fm-backend.sh selection/meta/dispatch helpers, and old-vs-new fake-tool command-log conformance for fm-send/fm-peek/fm-spawn/fm-teardown
 tests/fm-backend-tmux-smoke.test.sh       # real (private-socket) tmux smoke test for the tmux adapter: create/duplicate-refuse, send text + Enter, send literal + key, bounded capture, live-window resolve, kill
-tests/fm-backend-herdr.test.sh            # fake herdr CLI unit tests for the experimental herdr adapter, including version/tool gates, target parsing, send/capture, native busy state, per-home workspace-label resolution, and verified CLI bug workarounds
+tests/fm-backend-herdr.test.sh            # fake herdr CLI unit tests for the experimental herdr adapter, including version/tool gates, target parsing, send/capture, native busy state, per-home workspace-label resolution, default-tab prune safety, and verified CLI bug workarounds
 tests/fm-backend-herdr-smoke.test.sh      # real herdr adapter smoke test, skipped when herdr or jq is unavailable, using an isolated throwaway HERDR_SESSION and guarded session cleanup
 tests/fm-backend-autodetect-smoke.test.sh # real herdr auto-detection smoke test, skipped when herdr, jq, or treehouse is unavailable, using the same guarded session cleanup
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh # mandatory isolated E2E for workspace-per-home: primary and secondmate-shaped homes, a crewmate spawned from a secondmate home, teardown, list-live recovery
+tests/fm-backend-herdr-prune-safety-e2e.test.sh # isolated real-herdr E2E for the default-tab prune self-kill regression: adopted label-collision workspaces are never pruned, while freshly created workspaces still prune their seeded default tab
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
