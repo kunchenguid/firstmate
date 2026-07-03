@@ -84,7 +84,7 @@ EOF
 
 test_detects_cursor_via_env_marker() {
   local out
-  out=$(CURSOR_AGENT=1 CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= "$HARNESS")
+  out=$(CURSOR_AGENT=1 CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' "$HARNESS")
   assert_contains "$out" "cursor" "CURSOR_AGENT=1 should detect the cursor harness"
   pass "detects cursor via CURSOR_AGENT marker"
 }
