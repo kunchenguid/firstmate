@@ -130,12 +130,14 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+A ship task dispatched with `fm-spawn.sh --base <branch>` records that branch as `base=` in its meta, the single source of truth that makes the brief scaffold, `bin/fm-review-diff.sh`, `bin/fm-merge-local.sh`, and teardown's landed-work checks branch from and land into it instead of the default branch; absent `base=` keeps default-branch behavior, and the flag is refused for scout and secondmate spawns.
+The `no-mistakes` pipeline still opens its PR against its configured push target, so the end-to-end `--base` flows are `local-only` and `direct-PR`.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched default branch.
+Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched landing branch (the task's recorded `base=` branch, else the default branch).
 PR-head containment covers an exact PR head match, a local `HEAD` that is an ancestor of the PR head, or unpushed local patches whose patch IDs appear in the PR head after no-mistakes replayed the branch.
 GitHub lookup errors fall back to the content check and still refuse if that check is inconclusive.
 If no `pr=` was ever recorded, teardown can still discover a merged PR by matching the worktree branch name and fetching `refs/pull/<n>/head` when the head branch was deleted.
-Those PR-head and content checks let a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local default-branch merge or after the branch is pushed to any remote.
+Those PR-head and content checks let a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local merge into the landing branch or after the branch is pushed to any remote, and a recorded `base=` branch that no longer exists locally refuses loudly instead of passing unlanded work.
 
 ## Optional X mode
 
