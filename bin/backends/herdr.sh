@@ -178,31 +178,94 @@ fm_backend_herdr_workspace_find() {  # <session>
     '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
 }
 
-# fm_backend_herdr_workspace_prune_default_tabs: close the tab herdr
-# auto-creates inside a freshly created workspace (label "1", never an
-# fm-<id> task tab), so the persistent "firstmate" workspace holds only real
-# task tabs - the documented one-tab-per-task shape. Best-effort: a failure
+# fm_backend_herdr_workspace_prune_seeded_default_tab: close EXACTLY
+# <seeded_tab_id>, the auto-created default tab id that THIS SAME
+# fm_backend_herdr_workspace_ensure call captured straight from its own
+# `workspace create` response (never re-derived from a label pattern at
+# create_task time - see the incident note below). Best-effort: a failure
 # here never fails the caller, mirroring the fm_backend_herdr_kill `|| true`
 # contract.
 #
-# Verified real-herdr behavior (not modeled by the fake-CLI unit tests):
-# closing a workspace's LAST remaining tab deletes the whole workspace, not
-# just the tab. So this must never run while the auto-created default tab is
-# still the ONLY tab - callers only invoke it once at least one other (real
-# task) tab exists alongside it, never right after workspace creation.
-fm_backend_herdr_workspace_prune_default_tabs() {  # <session> <workspace_id>
-  local session=$1 wsid=$2 tabs tab_id pane_id
+# Live-fire incident fix (2026-07-02): the prior implementation
+# (fm_backend_herdr_workspace_prune_default_tabs, removed) re-derived
+# "prunable" at create_task time from a pure label heuristic - exactly one
+# tab, labeled "1" - run against whatever workspace fm_backend_herdr_workspace_find
+# had just resolved. Herdr enforces no label uniqueness (docs/herdr-backend.md
+# "Label collisions") and derives an unlabeled workspace's DISPLAYED label from
+# its pane cwd's basename, so a captain launching herdr directly inside a
+# directory named "firstmate" produces a workspace that looks byte-identical,
+# by label alone, to firstmate's own auto-created container - one tab, label
+# "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
+# by the label match, the heuristic matched too, and the very next spawn
+# closed the captain's own live pane 27ms after creating its task tab. The
+# fix is structural, not another heuristic: only a workspace THIS SAME
+# fm_backend_herdr_workspace_ensure call just created carries a non-empty
+# seeded_tab_id at all (see FM_BACKEND_HERDR_WS_SEEDED_TAB_ID below); an
+# ADOPTED workspace's seeded_tab_id is always empty, so create_task never
+# calls this function for one, regardless of how its tabs happen to be
+# labeled.
+#
+# Defense in depth on top of that gate (not the primary safety mechanism):
+# re-verify <seeded_tab_id> is still present, still carries label "1" (a
+# human could have renamed or repurposed it in the interim), and refuse to
+# close it if its pane hosts an actively working agent per herdr's own
+# agent-state detection (`agent get`) - belt-and-suspenders against any other
+# unforeseen path landing a live agent in a tab this function was about to
+# close.
+#
+# Verified real-herdr behavior (not modeled by the canned-response fake-CLI
+# unit tests; modeled by make_herdr_statefake): closing a workspace's LAST
+# remaining tab deletes the whole workspace, not just the tab. So this must
+# never run while the seeded default tab is still the ONLY tab in the
+# workspace - callers only invoke it once at least one other (real task) tab
+# exists alongside it, never right after workspace creation - and this
+# function independently re-checks the tab count as a second layer.
+fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id>
+  local session=$1 wsid=$2 tab_id=$3 tabs tab_count current_label pane_id agent_out agent_status
+  [ -n "$tab_id" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
-  while IFS= read -r tab_id; do
-    [ -n "$tab_id" ] || continue
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
-    fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label // "" | startswith("fm-")) | not) | .tab_id' 2>/dev/null)
+  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
+  case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
+  current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
+  [ "$current_label" = "1" ] || return 0
+  pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
+  [ -n "$pane_id" ] || return 0
+  agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
+  agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  [ "$agent_status" = working ] && return 0
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
 }
 
 # fm_backend_herdr_workspace_ensure: this HOME's persistent workspace inside
-# <session>, creating it in <cwd> if absent. Echoes its workspace_id.
+# <session>, creating it in <cwd> if absent. Must be called as a PLAIN
+# STATEMENT, never through command substitution ($(...)) - it communicates
+# through these globals, not solely through stdout, and a command
+# substitution forks a subshell that would discard them:
+#   FM_BACKEND_HERDR_WS_ID          - the resolved workspace_id (also echoed,
+#                                      for callers that only need the id)
+#   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID - non-empty ONLY when THIS call just
+#                                      CREATED the workspace: the tab_id of
+#                                      the auto-created default tab herdr
+#                                      seeded it with, read straight from the
+#                                      `workspace create` response's
+#                                      `.result.tab.tab_id` (verified
+#                                      empirically against the real binary -
+#                                      no follow-up tab-list call needed).
+#                                      Empty whenever this call instead
+#                                      ADOPTED a pre-existing workspace
+#                                      (fm_backend_herdr_workspace_find
+#                                      matched by label - docs/herdr-backend.md
+#                                      "Label collisions": that match can
+#                                      never distinguish an explicitly
+#                                      `--label`-created workspace from one
+#                                      whose label only coincidentally
+#                                      matches this home's own, e.g. a
+#                                      cwd-basename-derived label). An
+#                                      ADOPTED workspace's tabs are NEVER
+#                                      inspected or identified as prunable by
+#                                      this function, no matter what they are
+#                                      labeled - see
+#                                      fm_backend_herdr_workspace_prune_seeded_default_tab.
 # --no-focus (docs/herdr-backend.md "Focus behavior"): verified that workspace
 # create does NOT focus by default once at least one workspace already exists
 # in the session, matching pre-existing (flagless) behavior; the ONE exception
@@ -212,8 +275,11 @@ fm_backend_herdr_workspace_prune_default_tabs() {  # <session> <workspace_id>
 # depth and because it is a no-op in the already-safe case.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 wsid out label
+  FM_BACKEND_HERDR_WS_ID=""
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   wsid=$(fm_backend_herdr_workspace_find "$session")
   if [ -n "$wsid" ]; then
+    FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
     return 0
   fi
@@ -221,25 +287,38 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
+  FM_BACKEND_HERDR_WS_ID=$wsid
   # Herdr seeds a new workspace with one auto-created default tab firstmate
   # never uses. It is NOT pruned here: at this instant it is the workspace's
   # ONLY tab, and closing a workspace's last tab deletes the workspace itself
   # (verified against the real herdr binary) - pruning here would destroy the
   # workspace we just created. fm_backend_herdr_create_task prunes it instead,
-  # once the first real task tab exists alongside it.
+  # once the first real task tab exists alongside it, and only ever targets
+  # this exact captured tab_id.
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   printf '%s' "$wsid"
 }
 
 # fm_backend_herdr_container_ensure: the full spawn-time container-ensure
-# sequence (version gate, server, workspace). Echoes "<session>:<workspace_id>"
-# for fm_backend_herdr_create_task.
+# sequence (version gate, server, workspace). Echoes
+# "<session>:<workspace_id>\t<seeded_default_tab_id>" - a single TAB character
+# always separates the two fields (the second is empty for an ADOPTED
+# workspace) so a caller can split unambiguously with
+# CONTAINER=${RAW%%$'\t'*}; SEEDED_TAB_ID=${RAW#*$'\t'}. The seeded tab id
+# must be threaded through to fm_backend_herdr_create_task, which is the only
+# function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
 fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
-  local cwd=${1:-$PWD} session wsid label
+  local cwd=${1:-$PWD} session label
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
-  wsid=$(fm_backend_herdr_workspace_ensure "$session" "$cwd") || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
-  printf '%s:%s' "$session" "$wsid"
+  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
+  if [ -z "$FM_BACKEND_HERDR_WS_ID" ]; then
+    label=$(fm_backend_herdr_workspace_label)
+    echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2
+    return 1
+  fi
+  printf '%s:%s\t%s' "$session" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"
 }
 
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
@@ -248,13 +327,19 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # label), so the duplicate check is ours, mirroring tmux's manual check.
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
-# If <container>'s workspace was JUST created (its only tab beforehand was
-# herdr's auto-created default, label "1"), prune that default tab now that
-# this call has added a real tab alongside it - see
-# fm_backend_herdr_workspace_ensure for why pruning cannot happen any earlier.
-# Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd>
-  local container=$1 label=$2 cwd=$3 session wsid list dup out tab_id pane_id only_default
+# <seeded_default_tab_id> (4th arg, may be empty) is exactly the value
+# fm_backend_herdr_workspace_ensure captured as FM_BACKEND_HERDR_WS_SEEDED_TAB_ID
+# for THIS SAME container - non-empty only when this spawn's own
+# container_ensure call just created the workspace. Once the real task tab
+# above is created, this is the ONLY input that may trigger a prune, and it is
+# passed by the caller, never re-derived here from tab list contents or
+# labels (the live-fire self-kill fix - see
+# fm_backend_herdr_workspace_prune_seeded_default_tab for the incident and
+# the safety argument). An ADOPTED workspace's caller always passes an empty
+# 4th arg, so this function never even queries for a prune candidate in that
+# case. Echoes "<tab_id> <pane_id>" on success.
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup out tab_id pane_id
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -263,8 +348,6 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
   fi
-  only_default=$(printf '%s' "$list" | jq -r \
-    'if (.result.tabs? // [] | length) == 1 and .result.tabs[0].label == "1" then "1" else empty end' 2>/dev/null)
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
@@ -272,7 +355,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd>
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
-  [ -z "$only_default" ] || fm_backend_herdr_workspace_prune_default_tabs "$session" "$wsid"
+  [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
