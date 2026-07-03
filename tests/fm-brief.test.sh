@@ -59,6 +59,35 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The scout and secondmate scaffolds are the remaining generator paths; they
+# must exit 0 and produce clean briefs under the same parser, so a future
+# quote/heredoc regression in either block is caught the same way as the
+# ship-mode DOD blocks.
+test_scout_and_secondmate_briefs() {
+  local home brief status
+  home="$TMP_ROOT/variant-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scout-c1 some-proj --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --scout should exit 0"
+  brief="$home/data/brief-scout-c1/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "report.md" "$brief" "scout brief missing the report deliverable"
+  assert_grep "{TASK}" "$brief" "scout brief missing the {TASK} placeholder"
+  assert_no_grep "EOF" "$brief" "scout brief leaked a heredoc EOF marker (unterminated heredoc)"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER="Own the fixture domain." \
+    "$ROOT/bin/fm-brief.sh" brief-secondmate-c2 --secondmate alpha beta >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --secondmate should exit 0"
+  brief="$home/data/brief-secondmate-c2/brief.md"
+  assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_grep "# Charter" "$brief" "secondmate brief missing the Charter section"
+  assert_grep "Own the fixture domain." "$brief" "secondmate brief lost the charter text"
+  assert_grep "- alpha" "$brief" "secondmate brief missing the project list"
+  assert_no_grep "EOF" "$brief" "secondmate brief leaked a heredoc EOF marker (unterminated heredoc)"
+  pass "fm-brief.sh: scout and secondmate briefs generate cleanly"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -95,5 +124,6 @@ test_ship_project_memory_wording() {
 
 test_script_parses
 test_ship_modes_generate_clean_briefs
+test_scout_and_secondmate_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

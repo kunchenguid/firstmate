@@ -17,6 +17,30 @@ jobs:
       - uses: actions/checkout@v6
       - run: shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
 
+  bash32:
+    name: Bash 3.2 parse check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Every script here runs via `#!/usr/bin/env bash`, and on stock macOS
+      # that is /bin/bash 3.2.57, whose lexer chokes on constructs modern bash
+      # accepts (e.g. an apostrophe inside a heredoc nested in `$(...)`, issue
+      # #166). The runner's own bash is too new to catch that class, so this
+      # job parses everything under the real 3.2 binary from the official
+      # docker image - a true macOS-system-bash syntax gate.
+      - name: Parse all shell scripts under bash 3.2.57
+        run: |
+          set -eu
+          docker run --rm -v "$PWD:/repo:ro" bash:3.2.57 bash -c '
+            set -u
+            rc=0
+            for f in /repo/bin/*.sh /repo/bin/backends/*.sh /repo/tests/*.sh; do
+              bash -n "$f" || { echo "bash 3.2 parse failure: $f" >&2; rc=1; }
+            done
+            [ "$rc" = 0 ] && echo "bash 3.2 parse: all scripts OK"
+            exit "$rc"
+          '
+
   tests:
     name: Behavior tests
     runs-on: ubuntu-latest
