@@ -34,6 +34,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$SCRIPT_DIR/fm-verdict-lib.sh"
+# shellcheck source=bin/fm-lens-lib.sh
+. "$SCRIPT_DIR/fm-lens-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -86,52 +88,11 @@ DIFF_FILE="$DATA/$ID/lens-diff.patch"
   fi
 } | head -c 200000 > "$DIFF_FILE"
 
-# --- 2. foreign lens: FM_LENS_CMD > Fugu > codex > none ------------------------
+# --- 2. foreign lens: shared chain (fm-lens-lib.sh) ----------------------------
 LENS_REVIEW="$DATA/$ID/lens-review.md"
 LENS_PROMPT="You are a hostile senior reviewer. Roast this diff before it ships: correctness bugs, untested claims, security holes, scope drift. Be specific (file:line). End with the findings that most deserve a reject, or 'no blocking findings'."
 
-lens_fugu() {
-  [ -n "${FUGU_API_KEY:-}" ] || return 1
-  command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$DIFF_FILE" "$LENS_PROMPT" <<'PY' > "$LENS_REVIEW" && [ -s "$LENS_REVIEW" ]
-import json, os, sys, urllib.request
-diff = open(sys.argv[1], errors="replace").read()
-body = json.dumps({"model": "fugu", "messages": [
-    {"role": "system", "content": sys.argv[2]},
-    {"role": "user", "content": diff}]}).encode()
-req = urllib.request.Request(
-    "https://api.sakana.ai/v1/chat/completions", data=body,
-    headers={"Authorization": "Bearer " + os.environ["FUGU_API_KEY"],
-             "Content-Type": "application/json"})
-resp = json.load(urllib.request.urlopen(req, timeout=180))
-content = resp["choices"][0]["message"]["content"]
-if not content.strip():
-    raise SystemExit("empty lens review")
-print(content)
-PY
-}
-
-lens_codex() {
-  command -v codex >/dev/null 2>&1 || return 1
-  codex exec --cd "$WORKTREE" \
-    "$LENS_PROMPT Review the diff at $DIFF_FILE against the worktree around you." \
-    > "$LENS_REVIEW" 2>/dev/null && [ -s "$LENS_REVIEW" ]
-}
-
-LENS=none
-if [ -n "${FM_LENS_CMD:-}" ]; then
-  if sh -c "$FM_LENS_CMD" < "$DIFF_FILE" > "$LENS_REVIEW" 2>/dev/null && [ -s "$LENS_REVIEW" ]; then
-    LENS=custom
-  fi
-elif lens_fugu 2>/dev/null; then
-  LENS=fugu
-elif lens_codex; then
-  LENS=codex
-fi
-if [ "$LENS" = none ]; then
-  printf 'no foreign lens available (FUGU_API_KEY unset or failed; codex not on PATH)\n' > "$LENS_REVIEW"
-  echo "warning: foreign lens degraded to none for task $ID" >&2
-fi
+LENS=$(fm_lens_run "$DIFF_FILE" "$LENS_REVIEW" "$LENS_PROMPT" fugu "$WORKTREE" "task $ID")
 fm_verdict_append "$STATE" "$ID" lens "$LENS $(head -c 120 "$LENS_REVIEW" | tr '\n' ' ')"
 
 # --- 3. independent verifier (fail closed) -------------------------------------
