@@ -73,9 +73,13 @@ ok('综合断言全过', domAssert(dom, { includes: ['<canvas'], excludes: ['Err
 ok('失败时给出原因列表', domAssert(dom, { includes: ['x'] }).fails.length === 1)
 
 // —— parseFlags(`--min selector=count`) ——
+eq('inc/exc 解析成功', parseFlags(['--inc', '<canvas', '--exc', 'Error']), { includes: ['<canvas'], excludes: ['Error'], minCount: {} })
 eq('min 按最后一个等号切 selector/count', parseFlags(['--min', '<div class="row"=3']).minCount, { '<div class="row"': 3 })
 throws('min 缺 count 直接失败', () => parseFlags(['--min', '<div class="row"=']))
 throws('min 非数字 count 直接失败', () => parseFlags(['--min', '<div class="row"=x']))
+throws('inc 缺 value 直接失败', () => parseFlags(['--inc']))
+throws('exc 缺 value 直接失败', () => parseFlags(['--exc', '--inc', '<canvas']))
+throws('未知 flag 直接失败', () => parseFlags(['--incl', '<canvas']))
 
 // —— parseAE(解析 ImageMagick AE 输出)——
 eq('AE 纯数字', parseAE('48000'), 48000)

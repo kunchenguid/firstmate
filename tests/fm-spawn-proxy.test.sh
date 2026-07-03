@@ -35,7 +35,13 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
+  kill-window)
+    if [ -n "${FM_FAKE_KILL_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_KILL_LOG"
+    fi
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
       printf -- '--- send-keys ---\n' >> "$FM_FAKE_SEND_LOG"
@@ -100,6 +106,7 @@ run_spawn_with_proxy() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH_OVERRIDE:-$WT_DIR}" TMUX="fake,1,0" \
     FM_FAKE_SEND_LOG="$sendlog" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_FAKE_KILL_LOG="${FM_FAKE_KILL_LOG:-}" \
     GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
     HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= ALL_PROXY= all_proxy= NO_PROXY= no_proxy= \
     "${proxy_args[@]+"${proxy_args[@]}"}" \
@@ -197,12 +204,12 @@ test_proxy_env_propagates_to_secondmate_launch_without_window_export() {
 }
 
 test_proxy_env_file_is_removed_when_spawn_fails_before_meta() {
-  local rec id out status sendlog launchlog proxy_value tasktmp proxyfile bad_path meta
+  local rec id out status sendlog launchlog killlog proxy_value tasktmp proxyfile bad_path meta
   id=proxy-fail-z4
   rm -rf "/tmp/fm-$id"
   rec=$(make_spawn_case proxy-fail claude "$id")
   read_case_record "$rec"
-  sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"
+  sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"; killlog="$CASE_DIR/kill.log"
   tasktmp="/tmp/fm-$id"
   proxyfile="$tasktmp/proxy-env.sh"
   proxy_value="http://user:token@proxy.local:7890"
@@ -210,13 +217,15 @@ test_proxy_env_file_is_removed_when_spawn_fails_before_meta() {
   meta="$HOME_DIR/state/$id.meta"
   mkdir -p "$bad_path"
 
-  out=$(FM_FAKE_PANE_PATH_OVERRIDE="$bad_path" run_spawn_with_proxy "$sendlog" "$launchlog" \
+  : > "$killlog"
+  out=$(FM_FAKE_PANE_PATH_OVERRIDE="$bad_path" FM_FAKE_KILL_LOG="$killlog" run_spawn_with_proxy "$sendlog" "$launchlog" \
     HTTP_PROXY="$proxy_value" \
     -- "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "spawn should fail when treehouse does not yield an isolated worktree"
 
   assert_contains "$out" "did not yield an isolated worktree" "spawn failure should explain the isolation guard refusal"
+  assert_contains "$(cat "$killlog")" "firstmate:fm-$id" "pre-meta spawn failure must kill the untracked endpoint"
   assert_absent "$proxyfile" "pre-meta spawn failure must remove credentialed proxy env file"
   assert_absent "$meta" "failed spawn must not write task meta before the isolation guard passes"
   pass "pre-meta spawn failure removes credentialed proxy env file"

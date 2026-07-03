@@ -701,6 +701,7 @@ mkdir -p "$TASK_TMP/gotmp"
 TASK_TMP_META_RECORDED=0
 spawn_pre_meta_cleanup() {
   if [ "$TASK_TMP_META_RECORDED" -eq 0 ]; then
+    [ -z "${T:-}" ] || fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
     rm -f "$TASK_TMP/proxy-env.sh" "$TASK_TMP"/proxy-env.sh.* 2>/dev/null || true
     rmdir "$TASK_TMP/gotmp" "$TASK_TMP" 2>/dev/null || true
   fi

@@ -261,17 +261,25 @@ function diff(a, b, threshold) {
 export function parseFlags(rest) {
   const o = { includes: [], excludes: [], minCount: {} }
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i] === '--inc') o.includes.push(rest[++i])
-    else if (rest[i] === '--exc') o.excludes.push(rest[++i])
-    else if (rest[i] === '--min') {
+    if (rest[i] === '--inc') {
+      const value = rest[++i]
+      if (value === undefined || value.startsWith('--')) throw new Error('--inc requires a value')
+      o.includes.push(value)
+    } else if (rest[i] === '--exc') {
+      const value = rest[++i]
+      if (value === undefined || value.startsWith('--')) throw new Error('--exc requires a value')
+      o.excludes.push(value)
+    } else if (rest[i] === '--min') {
       const spec = rest[++i]
-      if (spec === undefined) throw new Error('--min requires selector=count')
+      if (spec === undefined || spec.startsWith('--')) throw new Error('--min requires selector=count')
       const eq = spec.lastIndexOf('=')
       if (eq <= 0 || eq === spec.length - 1) throw new Error('--min requires selector=count')
       const s = spec.slice(0, eq)
       const n = spec.slice(eq + 1)
       if (!/^\d+$/.test(n)) throw new Error('--min count must be a non-negative integer: ' + spec)
       o.minCount[s] = Number(n)
+    } else {
+      throw new Error('unknown flag: ' + rest[i])
     }
   }
   return o
