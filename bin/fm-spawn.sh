@@ -11,8 +11,12 @@
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
-#   tmux. Known backends are the reference tmux adapter and experimental herdr.
-#   Default tmux spawns do not write backend= to meta; absent backend= means tmux.
+#   runtime auto-detection (the runtime firstmate itself is executing inside -
+#   $TMUX or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then tmux.
+#   Known backends are the reference tmux adapter and experimental herdr. An
+#   auto-detected herdr spawn prints a loud stderr notice; auto-detected tmux
+#   stays silent. Default tmux spawns do not write backend= to meta; absent
+#   backend= means tmux.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -133,9 +137,10 @@ case "$EFFORT" in
 esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else default tmux (fm_backend_name).
-# fm_backend_validate refuses anything not implemented. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
+# FM_BACKEND env, else config/backend, else runtime auto-detection, else
+# default tmux (fm_backend_name). fm_backend_validate refuses anything not
+# implemented. The resolved value is recorded in meta only when it is NOT tmux
+# (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$BACKEND_SET" -eq 1 ]; then
@@ -175,9 +180,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
@@ -551,11 +556,12 @@ fi
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-firstmate,
-# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5;
-# data/fm-backend-design-d7/herdr-addendum.md). Both branches converge on the
-# same $T ("target") string that every downstream operation (send/capture/kill)
-# already treats as opaque per-backend routing (fm_backend_resolve_selector).
+# a herdr spawn goes through the version-gated, workspace-per-HOME,
+# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
+# docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
+# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
+# that every downstream operation (send/capture/kill) already treats as opaque
+# per-backend routing (fm_backend_resolve_selector).
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -571,10 +577,33 @@ case "$BACKEND" in
     WT_TARGET="$WID"
     ;;
   herdr)
-    CONTAINER=$(fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    # fm_backend_herdr_workspace_label resolves the target workspace from
+    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
+    # already the right home (the primary spawning its own crewmate/scout, or
+    # a secondmate spawning ITS OWN crewmate/scout from its own process's
+    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
+    # one case that does: it is the PRIMARY's own fm-spawn.sh process
+    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
+    # secondmate's home), so FM_HOME here still names the primary. Shadow it
+    # to PROJ_ABS for just these two calls (bash restores it automatically
+    # after each prefixed simple-command call) so the secondmate's tab lands
+    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    HERDR_LABEL_HOME=$FM_HOME
+    if [ "$KIND" = secondmate ]; then
+      HERDR_LABEL_HOME=$PROJ_ABS
+    fi
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+    # (the second field empty when this call ADOPTED a pre-existing workspace
+    # rather than creating a fresh one). Split on the guaranteed single tab
+    # character; the seeded tab id is threaded through to create_task
+    # untouched, which is the only function permitted to prune it (never
+    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
