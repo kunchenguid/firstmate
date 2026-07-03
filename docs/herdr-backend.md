@@ -137,6 +137,18 @@ Before the workaround, an early version of the real-herdr smoke test flaked inte
 It always requests a generous floor (>= 200 lines, comfortably above any realistic pane viewport) from herdr, then trims to the caller's actual requested bound locally with `tail -n N`.
 Verified this eliminates the flake across repeated full smoke-test runs.
 
+## Verified gap: `agent.get` reads idle during a long foreground tool call
+
+`herdr agent get <pane>` -> `.result.agent.agent_status` was verified against a short interactive `claude` exchange (see "Busy state" above): `working` while the model streams a turn, `done` once it stops.
+That verification did not cover a crew blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, per `AGENTS.md` section 11.
+For that entire span the model is not generating - it already finished the turn that invoked the tool and is waiting on the tool's result - so `agent_status` reads `idle` (or `blocked`, which the adapter also maps to `idle`), even though the pane's own rendered text keeps showing the harness's busy banner (`BUSY_REGEX`, e.g. `esc to interrupt`) the whole time, exactly as it would in a plain tmux pane.
+
+This surfaced as a real fleet incident (2026-07-02): `bin/fm-watch.sh`'s absorb-only-when-provably-working stale path (`AGENTS.md` section 8) treats a herdr `idle` verdict from `crew_pane_is_busy` as final, so it skipped the shared tail-regex corroboration that `unknown` already gets.
+Combined with a no-mistakes run-step lookup that can also miss attribution (the CLI's own `axi`/`no-mistakes runs` recent-runs listing has a hard cap - 10 entries, no flag to raise it - so a long-running validation can fall outside that window on a repo with heavy run history), this let a genuinely still-working herdr crew read as not provably working, triggering an immediate (non-wedge) stale wake instead of the intended absorb-then-escalate behavior.
+
+**Fix:** `bin/fm-crew-state.sh`'s `crew_pane_is_busy` now corroborates BOTH `idle` and unknown/unparseable native verdicts with the shared tail-regex before concluding "not busy" - only a bare `busy` verdict is trusted outright.
+This does not mask a genuinely human-blocked agent (a permission dialog, not mid-tool-call): that pane does not render the busy banner, so the corroboration still correctly reports not-busy for it.
+
 ## Slash/`$` autocomplete popup hazard (confirmed, same mitigation as tmux)
 
 Typing `/mem` into a live `claude` composer inside a herdr pane and reading the pane back within 0.1 seconds already shows the full autocomplete popup.

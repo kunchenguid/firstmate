@@ -509,6 +509,58 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr unknown native state falls back to backend capture busy regex"
 }
 
+# Regression: herdr's agent.get reports generation state ("working" only while
+# the model is actively streaming a turn - docs/herdr-backend.md "Busy state"),
+# not "this crew's tool call is still in progress". A crew blocked on its own
+# long-running foreground `no-mistakes axi run` (no --yes; blocks until a gate
+# or outcome) is not generating for that whole span, so agent.get can read
+# idle while the pane's own rendered text still shows the busy banner
+# (BUSY_REGEX) for the entire call. `idle` must be corroborated with that text
+# exactly like `unknown` already is, not trusted outright - the bug this
+# regression pins: crew_pane_is_busy previously returned "not busy" on a bare
+# `idle` verdict without ever looking at the pane.
+test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr idle corroboration skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-idle-busy-pane)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-idle
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" "backend=herdr"
+  # No run attributable (mirrors a no-mistakes run-step lookup that missed
+  # attribution, e.g. the crew's own run fell outside the CLI's recent-runs
+  # window): the pane fallback is the only remaining signal.
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_AXI_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-herdr-idle)
+  assert_contains "$out" "state: working" "herdr idle agent_status with a busy-banner pane -> working"
+  assert_contains "$out" "source: pane" "herdr idle agent_status with a busy-banner pane -> pane source"
+  pass "herdr idle agent_status is corroborated by the pane text, not trusted outright"
+}
+
+# The corroboration must not mask a genuinely idle/human-blocked agent: idle
+# agent_status AND an idle-looking pane (no busy banner) still reads not-busy.
+test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr idle+idle-pane skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-idle-idle-pane)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-stopped
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" "backend=herdr"
+  printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_AXI_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-herdr-stopped)
+  assert_not_contains "$out" "source: pane" "herdr idle agent_status with an idle pane must not read as busy from the pane"
+  assert_contains "$out" "source: status-log" "herdr idle agent_status with an idle pane falls to the status log"
+  pass "herdr idle agent_status with a genuinely idle pane stays not-busy (no regression for a human-blocked agent)"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -672,6 +724,8 @@ test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
+test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
