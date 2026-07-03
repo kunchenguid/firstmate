@@ -489,6 +489,22 @@ path_is_ancestor_of() {
   return 1
 }
 
+# A captured pane path is the treehouse lease only when it is an existing
+# directory UNDER the treehouse root AND a git worktree. The wait loop below
+# accepts the first pane cwd that differs from the project dir, but shell-init
+# noise (e.g. a transient ~/.oh-my-zsh cwd during zsh startup - itself a git repo)
+# can appear before `treehouse get` lands; the treehouse-root containment is what
+# distinguishes the real lease from such noise, so the loop keeps polling for the
+# genuine worktree instead of recording the noise. The isolation guard after the
+# loop is the backstop; this keeps the loop from ever selecting the wrong path.
+is_treehouse_worktree() {
+  local path=$1 root=$2
+  [ -d "$path" ] || return 1
+  path_is_ancestor_of "$root" "$path" || return 1
+  [ "$(git -C "$path" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || return 1
+  return 0
+}
+
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -649,6 +665,45 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Resolve a git worktree's common dir to an absolute real path. `git rev-parse
+# --git-common-dir` may return a path relative to the worktree, so anchor a
+# relative result to the worktree before canonicalizing with pwd -P; this lets
+# two worktrees of the same repository be compared regardless of symlinked paths.
+git_common_dir_real() {
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  [ -d "$common" ] || return 1
+  (cd "$common" && pwd -P)
+}
+
+# A captured pane path is the genuine treehouse lease only when it is a worktree
+# of the SAME repository as the project, resolved distinctly from it. The wait
+# loop below accepts the first pane cwd that differs from the project dir, but
+# shell-init noise (e.g. a transient ~/.oh-my-zsh cwd during zsh startup - itself
+# a git repo, but a DIFFERENT repository) can appear before `treehouse get`
+# lands. Comparing canonical git common dirs distinguishes the real lease from
+# such noise no matter where treehouse.toml places the pool root, and resolving
+# every path with pwd -P keeps a symlinked $HOME from breaking the match. The
+# isolation guard after the loop is the backstop; this keeps the loop from ever
+# selecting the wrong path.
+is_project_worktree() {
+  local candidate=$1 proj_abs=$2 cand_real proj_real cand_common proj_common
+  [ -d "$candidate" ] || return 1
+  [ "$(git -C "$candidate" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || return 1
+  cand_common=$(git_common_dir_real "$candidate") || return 1
+  proj_common=$(git_common_dir_real "$proj_abs") || return 1
+  [ "$cand_common" = "$proj_common" ] || return 1
+  cand_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
+  proj_real=$(cd "$proj_abs" 2>/dev/null && pwd -P) || return 1
+  [ "$cand_real" != "$proj_real" ] || return 1
+  return 0
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -807,20 +862,23 @@ spawn_send_key() {  # <target> <key>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$T" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Wait for the treehouse subshell: the pane's cwd moves from the project to the
+  # worktree. Only accept a captured path that is genuinely a worktree of the SAME
+  # repository as the project - a bare "differs from the project dir" check once
+  # recorded shell-init noise (e.g. a transient ~/.oh-my-zsh cwd during zsh startup)
+  # that appears before `treehouse get` lands. This needs no knowledge of the
+  # treehouse pool root, so it works wherever treehouse.toml places it.
+  wt_wait="${FM_SPAWN_WORKTREE_WAIT:-60}"
+  for _ in $(seq 1 "$wt_wait"); do
     p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+    if [ -n "$p" ] && is_project_worktree "$p" "$PROJ_ABS"; then
       WT="$p"
       break
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${wt_wait}s; inspect window $T" >&2
     exit 1
   fi
 
