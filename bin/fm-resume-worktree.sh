@@ -93,6 +93,22 @@ BRIEF="$DATA/$ID/brief.md"
 
 LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (unverified adapter; resume it by hand)" >&2; exit 1; }
 
+rewrite_resume_meta() {
+  local tmp_meta
+  tmp_meta=$(mktemp "$STATE/.$ID.meta.XXXXXX") || return 1
+  awk -v new_window="window=$T" -v new_tasktmp="tasktmp=$TASK_TMP" '
+    BEGIN { window_done=0; tasktmp_done=0 }
+    /^window=/ { print new_window; window_done=1; next }
+    /^tasktmp=/ { if ($0 == "tasktmp=") print new_tasktmp; else print; tasktmp_done=1; next }
+    { print }
+    END {
+      if (!window_done) print new_window
+      if (!tasktmp_done) print new_tasktmp
+    }
+  ' "$META" > "$tmp_meta" || { rm -f "$tmp_meta"; return 1; }
+  mv "$tmp_meta" "$META"
+}
+
 # Session-provider container-ensure + task creation, mirroring fm-spawn.sh's
 # own tmux branch, but with the window's starting cwd set directly to the
 # EXISTING worktree ($WT) instead of the project dir - there is no
@@ -100,9 +116,23 @@ LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch templat
 W="fm-$ID"
 SES=$(fm_backend_tmux_container_ensure)
 T="$SES:$W"
+TASK_TMP="${RECORDED_TASK_TMP:-/tmp/fm-$ID}"
 fm_backend_tmux_create_task "$SES" "$W" "$WT" || exit 1
 
-TASK_TMP="${RECORDED_TASK_TMP:-/tmp/fm-$ID}"
+meta_tracked=0
+if [ "$T" = "$OLD_T" ] && [ -n "$RECORDED_TASK_TMP" ]; then
+  meta_tracked=1
+fi
+cleanup_untracked_endpoint() {
+  [ "$meta_tracked" -eq 1 ] || fm_backend_tmux_kill "$T" 2>/dev/null || true
+}
+trap cleanup_untracked_endpoint EXIT INT TERM HUP
+if [ "$meta_tracked" -eq 0 ]; then
+  rewrite_resume_meta || exit 1
+fi
+meta_tracked=1
+trap - EXIT INT TERM HUP
+
 mkdir -p "$TASK_TMP/gotmp"
 PROXY_SOURCE_CMD=$(proxy_env_source_command "$TASK_TMP") || exit 1
 
@@ -126,20 +156,5 @@ sleep 0.3
 fm_backend_tmux_send_literal "$T" "$LAUNCH"
 sleep 0.3
 fm_backend_tmux_send_key "$T" Enter
-
-if [ "$T" != "$OLD_T" ] || [ -z "$RECORDED_TASK_TMP" ]; then
-  tmp_meta=$(mktemp "$STATE/.$ID.meta.XXXXXX")
-  awk -v new_window="window=$T" -v new_tasktmp="tasktmp=$TASK_TMP" '
-    BEGIN { window_done=0; tasktmp_done=0 }
-    /^window=/ { print new_window; window_done=1; next }
-    /^tasktmp=/ { if ($0 == "tasktmp=") print new_tasktmp; else print; tasktmp_done=1; next }
-    { print }
-    END {
-      if (!window_done) print new_window
-      if (!tasktmp_done) print new_tasktmp
-    }
-  ' "$META" > "$tmp_meta"
-  mv "$tmp_meta" "$META"
-fi
 
 echo "resumed $ID harness=$HARNESS kind=$KIND window=$T worktree=$WT"

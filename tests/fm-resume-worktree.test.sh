@@ -134,6 +134,28 @@ test_appends_tasktmp_when_missing_from_older_meta() {
   pass "resume appends tasktmp for older meta so teardown can clean resumed temp root"
 }
 
+test_records_meta_before_temp_setup_failure() {
+  local rec out status meta tasktmp
+  rec=$(make_resume_case premeta-failure dead)
+  read_resume_case "$rec"
+  sed -i.bak -e '/^tasktmp=/d' -e "s|^window=.*|window=stale:fm-$ID|" "$STATE_DIR/$ID.meta"
+  rm -f "$STATE_DIR/$ID.meta.bak"
+  tasktmp="/tmp/fm-$ID"
+  rm -rf "$tasktmp"
+  mkdir -p "$tasktmp"
+  : > "$tasktmp/gotmp"
+
+  out=$(run_resume "$ID")
+  status=$?
+  rm -rf "$tasktmp"
+  expect_code 1 "$status" "resume should fail when gotmp cannot be created"
+
+  meta="$STATE_DIR/$ID.meta"
+  assert_grep "window=firstmate:fm-$ID" "$meta" "resume should record the new window before temp setup"
+  assert_grep "tasktmp=$tasktmp" "$meta" "resume should record tasktmp before temp setup"
+  pass "resume records window and tasktmp before later setup failures"
+}
+
 test_refuses_when_endpoint_still_alive() {
   local rec out status
   rec=$(make_resume_case alive-endpoint alive)
@@ -188,6 +210,7 @@ test_refuses_unknown_task() {
 
 test_resumes_into_existing_worktree_with_no_treehouse_call
 test_appends_tasktmp_when_missing_from_older_meta
+test_records_meta_before_temp_setup_failure
 test_refuses_when_endpoint_still_alive
 test_refuses_missing_worktree
 test_refuses_secondmate_kind
