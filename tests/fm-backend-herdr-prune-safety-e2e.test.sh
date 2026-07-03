@@ -66,8 +66,9 @@ CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" 
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 LIVE_TAB_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.tab.tab_id // empty')
 LIVE_PANE_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.root_pane.pane_id // empty')
-[ -n "$LIVE_WSID" ] && [ -n "$LIVE_TAB_ID" ] && [ -n "$LIVE_PANE_ID" ] \
-  || fail "could not parse the startup workspace's ids from workspace create: $CREATE_OUT"
+if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
+  fail "could not parse the startup workspace's ids from workspace create: $CREATE_OUT"
+fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace's derived label should be 'firstmate' (from the cwd basename), got '$LIVE_LABEL' - repro setup is wrong"
@@ -100,7 +101,9 @@ TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_C
 read -r NEW_TAB_ID NEW_PANE_ID <<EOF
 $TASK_IDS
 EOF
-[ -n "$NEW_TAB_ID" ] && [ -n "$NEW_PANE_ID" ] || fail "create_task did not return tab/pane ids"
+if [ -z "$NEW_TAB_ID" ] || [ -z "$NEW_PANE_ID" ]; then
+  fail "create_task did not return tab/pane ids"
+fi
 
 # --- 3. assert the live pane survived untouched -----------------------------
 
