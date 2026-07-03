@@ -26,6 +26,7 @@ pick_parse_bash() {
 test_toolbelt_and_tests_parse() {
   local parse_bash parse_ver f rc=0
   parse_bash=$(pick_parse_bash)
+  # shellcheck disable=SC2016  # single quotes are deliberate: $BASH_VERSION expands in the probed bash, not here
   parse_ver=$("$parse_bash" -c 'echo "$BASH_VERSION"')
   for f in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh "$ROOT"/tests/*.sh; do
     "$parse_bash" -n "$f" || { echo "parse failure: $f" >&2; rc=1; }
