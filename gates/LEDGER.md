@@ -19,3 +19,4 @@
 | gate-q5-attempt-cap | green | Third reject escalates instead of spinning; at-cap tasks escalate without re-running the verifier |
 | gate-q6-lens-degrade | green | No Fugu key + no codex -> lens degrades to none loudly; verify still completes |
 | gate-q7-fail-closed | green | Verifier infrastructure failure escalates - never approves |
+| gate-i1-intake-grammar | green | Intake grammar: only proceed/revise/escalate/panel lines; last-decision ignores panel lines and no-decision files |

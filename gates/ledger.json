@@ -16,7 +16,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -33,7 +33,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q1-verdict-grammar",
@@ -104,7 +104,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q2-merge-refuses-unverified",
@@ -123,7 +123,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q3-prcheck-refuses-unverified",
@@ -142,7 +142,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q4-reject-roundtrip",
@@ -161,7 +161,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q5-attempt-cap",
@@ -180,7 +180,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q6-lens-degrade",
@@ -199,7 +199,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
     },
     {
       "id": "gate-q7-fail-closed",
@@ -218,7 +218,24 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-07-02T06:34:34.232Z"
+      "last_verified": "2026-07-03T12:23:35.820Z"
+    },
+    {
+      "id": "gate-i1-intake-grammar",
+      "title": "Intake grammar: only proceed/revise/escalate/panel lines; last-decision ignores panel lines and no-decision files",
+      "observable": "fm_intake_append refuses an invalid kind; fm_intake_last ignores panel lines and returns 1 on missing file or decision-free file; fm_intake_revise_count counts only revise lines",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-03-wardroom-intake.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-wardroom-i1.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-07-03T12:23:01.435Z",
+      "mutation_verified": null,
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-07-03T00:00:00Z",
+      "last_verified": "2026-07-03T12:23:35.820Z"
     }
   ]
 }
