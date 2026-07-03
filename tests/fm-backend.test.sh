@@ -523,8 +523,11 @@ test_spawn_conformance_old_vs_new() {
   # permanent, uninformative failure.
   sed -e '/export GOTMPDIR=/d' \
       -e "s/--dangerously-skip-permissions --model 'claude-sonnet-5' /--dangerously-skip-permissions /" \
+      "$log_old" > "$TMP_ROOT/spawn-old-normalized.log"
+  sed -e '/export GOTMPDIR=/d' \
+      -e "s/--dangerously-skip-permissions --model 'claude-sonnet-5' /--dangerously-skip-permissions /" \
       "$log_new" > "$TMP_ROOT/spawn-new-normalized.log"
-  diff -u "$log_old" "$TMP_ROOT/spawn-new-normalized.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+  diff -u "$TMP_ROOT/spawn-old-normalized.log" "$TMP_ROOT/spawn-new-normalized.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
     || fail "fm-spawn.sh: tmux command log differs old vs new (beyond the known GOTMPDIR/default-model deltas)"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an

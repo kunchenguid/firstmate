@@ -109,6 +109,7 @@ run_spawn_with_proxy() {
 test_no_proxy_env_sends_no_export_and_clean_launch() {
   local rec id out status sendlog launchlog launch
   id=proxy-off-z1
+  rm -rf "/tmp/fm-$id"
   rec=$(make_spawn_case proxy-off claude "$id")
   read_case_record "$rec"
   sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"
@@ -122,42 +123,55 @@ test_no_proxy_env_sends_no_export_and_clean_launch() {
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-sonnet-5' \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "launch changed with no proxy env set"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no proxy env set: window export and launch command carry no proxy vars"
+  rm -rf "/tmp/fm-$id"
 }
 
 test_proxy_env_propagates_to_window_export_and_launch() {
-  local rec id out status sendlog launchlog launch
+  local rec id out status sendlog launchlog launch http_proxy_value https_proxy_value tasktmp proxyfile combined_log
   id=proxy-on-z2
+  rm -rf "/tmp/fm-$id"
   rec=$(make_spawn_case proxy-on claude "$id")
   read_case_record "$rec"
   sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"
+  tasktmp="/tmp/fm-$id"
+  proxyfile="$tasktmp/proxy-env.sh"
+  http_proxy_value="http://user:token@proxy.local:7890"
+  https_proxy_value="http://secure:secret@proxy.local:7891"
 
   out=$(run_spawn_with_proxy "$sendlog" "$launchlog" \
-    HTTP_PROXY="http://127.0.0.1:7890" HTTPS_PROXY="http://127.0.0.1:7890" \
+    HTTP_PROXY="$http_proxy_value" HTTPS_PROXY="$https_proxy_value" \
     NO_PROXY="localhost,127.0.0.1" \
     -- "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "spawn with proxy env set should succeed"
 
-  # (1) the treehouse-get window: proxy vars exported before `treehouse get`
-  # so treehouse's own git fetch takes firstmate's working route.
-  assert_contains "$(cat "$sendlog")" "export HTTP_PROXY='http://127.0.0.1:7890' HTTPS_PROXY='http://127.0.0.1:7890' NO_PROXY='localhost,127.0.0.1'" \
-    "window export missing the set proxy vars"
+  assert_present "$proxyfile" "proxy env file should exist under tasktmp"
+  assert_grep "HTTP_PROXY='$http_proxy_value'" "$proxyfile" "proxy env file missing HTTP_PROXY"
+  assert_grep "HTTPS_PROXY='$https_proxy_value'" "$proxyfile" "proxy env file missing HTTPS_PROXY"
+  assert_grep "NO_PROXY='localhost,127.0.0.1'" "$proxyfile" "proxy env file missing NO_PROXY"
+
+  combined_log="$(cat "$sendlog")"$'\n'"$(cat "$launchlog")"
+  assert_contains "$combined_log" ". '$proxyfile'" "pane should source proxy env file before worktree/launch commands"
+  assert_not_contains "$combined_log" "$http_proxy_value" "visible spawn command stream must not include raw HTTP_PROXY credentials"
+  assert_not_contains "$combined_log" "$https_proxy_value" "visible spawn command stream must not include raw HTTPS_PROXY credentials"
   assert_not_contains "$(cat "$sendlog")" "http_proxy=" "window export must not fabricate unset lowercase proxy vars"
 
-  # (2) the launch command prefix: the same vars, quoted, ahead of the
-  # harness's own launch command.
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "HTTP_PROXY='http://127.0.0.1:7890' HTTPS_PROXY='http://127.0.0.1:7890' NO_PROXY='localhost,127.0.0.1' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "launch command missing the proxy-var prefix"
-  pass "set proxy env propagates into both the treehouse-get window export and the launch command prefix"
+  assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" "launch command missing harness command"
+  pass "set proxy env propagates through task env file without exposing credentialed URLs in pane commands"
+  rm -rf "$tasktmp"
 }
 
 test_proxy_env_propagates_to_secondmate_launch_without_window_export() {
-  local rec id out status sendlog launchlog launch sm
+  local rec id out status sendlog launchlog launch sm tasktmp proxyfile proxy_value combined_log
   id=proxy-sm-z3
+  rm -rf "/tmp/fm-$id"
   rec=$(make_spawn_case proxy-sm claude "$id")
   read_case_record "$rec"
   sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"
+  tasktmp="/tmp/fm-$id"
+  proxyfile="$tasktmp/proxy-env.sh"
+  proxy_value="socks5h://user:token@127.0.0.1:7890"
   sm="$CASE_DIR/secondmate-home"
   mkdir -p "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
@@ -165,18 +179,21 @@ test_proxy_env_propagates_to_secondmate_launch_without_window_export() {
   printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
 
   out=$(run_spawn_with_proxy "$sendlog" "$launchlog" \
-    ALL_PROXY="socks5h://127.0.0.1:7890" \
+    ALL_PROXY="$proxy_value" \
     -- "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate spawn with proxy env set should succeed"
 
-  # Secondmate spawns skip `treehouse get` entirely (they launch directly in
-  # the persistent home), so there is no window-export send to check - the
-  # launch-command prefix is the only propagation path for this kind.
+  assert_present "$proxyfile" "secondmate proxy env file should exist under tasktmp"
+  assert_grep "ALL_PROXY='$proxy_value'" "$proxyfile" "proxy env file missing ALL_PROXY"
+  combined_log="$(cat "$sendlog")"$'\n'"$(cat "$launchlog")"
+  assert_contains "$combined_log" ". '$proxyfile'" "secondmate pane should source proxy env file before launch"
+  assert_not_contains "$combined_log" "$proxy_value" "visible secondmate command stream must not include raw ALL_PROXY credentials"
   assert_not_contains "$(cat "$sendlog")" "export ALL_PROXY" "secondmate spawn should not send a treehouse-get window export"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "ALL_PROXY='socks5h://127.0.0.1:7890'" "secondmate launch command missing the proxy-var prefix"
-  pass "secondmate spawn (no treehouse-get window) still gets proxy vars via the launch command prefix"
+  assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" "secondmate launch command missing harness command"
+  pass "secondmate spawn (no treehouse-get window) still gets proxy vars via task env file"
+  rm -rf "$tasktmp"
 }
 
 test_no_proxy_env_sends_no_export_and_clean_launch

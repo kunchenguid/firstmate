@@ -58,6 +58,7 @@ MODEL=$(fm_meta_get "$META" model)
 EFFORT=$(fm_meta_get "$META" effort)
 BACKEND=$(fm_backend_of_meta "$META")
 OLD_T=$(fm_meta_get "$META" window)
+RECORDED_TASK_TMP=$(fm_meta_get "$META" tasktmp)
 
 [ "$KIND" != secondmate ] || { echo "error: $ID is kind=secondmate; recover it with '$FM_ROOT/bin/fm-spawn.sh $ID --secondmate' instead (AGENTS.md section 5)" >&2; exit 1; }
 [ -n "$WT" ] || { echo "error: meta for $ID has no worktree= recorded" >&2; exit 1; }
@@ -101,8 +102,9 @@ SES=$(fm_backend_tmux_container_ensure)
 T="$SES:$W"
 fm_backend_tmux_create_task "$SES" "$W" "$WT" || exit 1
 
-TASK_TMP="/tmp/fm-$ID"
+TASK_TMP="${RECORDED_TASK_TMP:-/tmp/fm-$ID}"
 mkdir -p "$TASK_TMP/gotmp"
+PROXY_SOURCE_CMD=$(proxy_env_source_command "$TASK_TMP") || exit 1
 
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
@@ -118,22 +120,25 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 
-launch_proxy_prefix=$(proxy_env_prefix)
-[ -z "$launch_proxy_prefix" ] || LAUNCH="${launch_proxy_prefix# } $LAUNCH"
-
 fm_backend_tmux_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+[ -z "$PROXY_SOURCE_CMD" ] || fm_backend_tmux_send_text_line "$T" "$PROXY_SOURCE_CMD"
 sleep 0.3
 fm_backend_tmux_send_literal "$T" "$LAUNCH"
 sleep 0.3
 fm_backend_tmux_send_key "$T" Enter
 
-# window= is the only field that can legitimately change across a resume (a
-# fresh tmux session name if the old one is gone); everything else in meta
-# (worktree=, project=, harness=, kind=, mode=, yolo=, model=, effort=,
-# tier=) still describes the same task and is left untouched.
-if [ "$T" != "$OLD_T" ]; then
+if [ "$T" != "$OLD_T" ] || [ -z "$RECORDED_TASK_TMP" ]; then
   tmp_meta=$(mktemp "$STATE/.$ID.meta.XXXXXX")
-  awk -v new="window=$T" 'BEGIN{done=0} /^window=/{print new; done=1; next} {print} END{if (!done) print new}' "$META" > "$tmp_meta"
+  awk -v new_window="window=$T" -v new_tasktmp="tasktmp=$TASK_TMP" '
+    BEGIN { window_done=0; tasktmp_done=0 }
+    /^window=/ { print new_window; window_done=1; next }
+    /^tasktmp=/ { if ($0 == "tasktmp=") print new_tasktmp; else print; tasktmp_done=1; next }
+    { print }
+    END {
+      if (!window_done) print new_window
+      if (!tasktmp_done) print new_tasktmp
+    }
+  ' "$META" > "$tmp_meta"
   mv "$tmp_meta" "$META"
 fi
 

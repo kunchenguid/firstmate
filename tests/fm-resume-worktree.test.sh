@@ -105,12 +105,33 @@ test_resumes_into_existing_worktree_with_no_treehouse_call() {
   assert_not_contains "$(cat "$sendlog")" "treehouse get" "resume must never send treehouse get"
   assert_contains "$(cat "$sendlog")" "--model 'claude-sonnet-5'" "resume launch missing the recorded model"
   assert_contains "$(cat "$sendlog")" "\$(cat '$DATA_DIR/$ID/brief.md')" "resume launch missing the brief path"
+  assert_contains "$(cat "$sendlog")" "export GOTMPDIR=$CASE_DIR/tasktmp/gotmp" "resume should use recorded tasktmp for GOTMPDIR"
 
   meta="$STATE_DIR/$ID.meta"
   assert_grep "worktree=$WT_DIR" "$meta" "resume must not change worktree= in meta"
   assert_grep "harness=claude" "$meta" "resume must not change harness= in meta"
   assert_grep "model=claude-sonnet-5" "$meta" "resume must not change model= in meta"
   pass "resume launches directly in the existing worktree, never calling treehouse, preserving the recorded model/harness"
+}
+
+test_appends_tasktmp_when_missing_from_older_meta() {
+  local rec out status meta tasktmp
+  rec=$(make_resume_case old-meta-no-tasktmp dead)
+  read_resume_case "$rec"
+  sed -i.bak '/^tasktmp=/d' "$STATE_DIR/$ID.meta"
+  rm -f "$STATE_DIR/$ID.meta.bak"
+  tasktmp="/tmp/fm-$ID"
+  rm -rf "$tasktmp"
+
+  out=$(run_resume "$ID")
+  status=$?
+  expect_code 0 "$status" "resume should succeed for older meta without tasktmp"$'\n'"$out"
+
+  meta="$STATE_DIR/$ID.meta"
+  assert_grep "tasktmp=$tasktmp" "$meta" "resume should append tasktmp for older meta"
+  assert_present "$tasktmp/gotmp" "resume should create gotmp under appended tasktmp"
+  rm -rf "$tasktmp"
+  pass "resume appends tasktmp for older meta so teardown can clean resumed temp root"
 }
 
 test_refuses_when_endpoint_still_alive() {
@@ -166,6 +187,7 @@ test_refuses_unknown_task() {
 }
 
 test_resumes_into_existing_worktree_with_no_treehouse_call
+test_appends_tasktmp_when_missing_from_older_meta
 test_refuses_when_endpoint_still_alive
 test_refuses_missing_worktree
 test_refuses_secondmate_kind

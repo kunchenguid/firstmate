@@ -33,6 +33,32 @@ proxy_env_prefix() {
   printf '%s' "$prefix"
 }
 
+proxy_env_source_command() {
+  local task_tmp=$1 file tmp pv val wrote old_umask
+  file="$task_tmp/proxy-env.sh"
+  tmp="$file.$$"
+  wrote=0
+  mkdir -p "$task_tmp" || return 1
+  chmod 700 "$task_tmp" || return 1
+  old_umask=$(umask)
+  umask 077
+  : > "$tmp" || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  for pv in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy; do
+    eval "val=\${$pv-}"
+    [ -n "$val" ] || continue
+    printf 'export %s=%s\n' "$pv" "$(shell_quote "$val")" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    wrote=1
+  done
+  if [ "$wrote" -eq 0 ]; then
+    rm -f "$tmp" "$file"
+    return 0
+  fi
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$file" 2>/dev/null || true
+  printf '. %s' "$(shell_quote "$file")"
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0

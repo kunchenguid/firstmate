@@ -1,24 +1,55 @@
 // vischeck.test.mjs —— 视觉/执行第0档的【判决逻辑】确定性自检
-// 只测纯函数(parseSipsDims/nonblankVerdict/diffVerdict/domAssert/parseAE),
+// 只测纯函数(parseSipsDims/pngPixelStats/nonblankVerdict/diffVerdict/domAssert/parseAE),
 // 不依赖 Chrome/图片——判决在代码里就该能脱离 I/O 被验证。
 // 渲染那半(Chrome 截图/dump-dom)是 I/O,由 SKILL.md 里的冒烟命令验,不进单测。
 
-import { parseSipsDims, nonblankVerdict, diffVerdict, domAssert, parseAE } from './vischeck.mjs'
+import { deflateSync } from 'node:zlib'
+import { parseSipsDims, pngPixelStats, nonblankVerdict, diffVerdict, domAssert, parseAE } from './vischeck.mjs'
 
 let pass = 0, fail = 0
 function ok(name, cond) { if (cond) { pass++ } else { fail++; console.error('✗ ' + name) } }
 function eq(name, a, b) { ok(name + ' (got ' + JSON.stringify(a) + ')', JSON.stringify(a) === JSON.stringify(b)) }
+
+function pngChunk(type, data = Buffer.alloc(0)) {
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(data.length)
+  return Buffer.concat([len, Buffer.from(type), data, Buffer.alloc(4)])
+}
+
+function rgbaPng(width, height, pixels) {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  const rows = []
+  for (let y = 0; y < height; y++) {
+    rows.push(Buffer.from([0]))
+    rows.push(Buffer.from(pixels.slice(y * width * 4, (y + 1) * width * 4)))
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(Buffer.concat(rows))),
+    pngChunk('IEND')
+  ])
+}
 
 // —— parseSipsDims ——
 const sips = 'page.png\n  pixelWidth: 1200\n  pixelHeight: 800\n'
 eq('sips 解析尺寸', parseSipsDims(sips), { width: 1200, height: 800 })
 eq('sips 缺字段→0', parseSipsDims('garbage'), { width: 0, height: 0 })
 
-// —— nonblankVerdict ——
-ok('正常截图算非空', nonblankVerdict({ width: 1200, height: 800, bytes: 50000 }).pass === true)
-ok('零字节算空', nonblankVerdict({ width: 1200, height: 800, bytes: 0 }).pass === false)
-ok('零尺寸算空', nonblankVerdict({ width: 0, height: 0, bytes: 50000 }).pass === false)
-ok('字节低于地板算空(白屏兜底)', nonblankVerdict({ width: 1200, height: 800, bytes: 200 }, 1024).pass === false)
+// —— pngPixelStats / nonblankVerdict ——
+const whitePng = rgbaPng(2, 1, [255, 255, 255, 255, 255, 255, 255, 255])
+const mixedPng = rgbaPng(2, 1, [255, 255, 255, 255, 0, 0, 0, 255])
+eq('PNG 纯白 distinct/range', pngPixelStats(whitePng).distinctColors + ':' + pngPixelStats(whitePng).channelRange, '1:0')
+ok('PNG 黑白像素有范围', pngPixelStats(mixedPng).channelRange === 255)
+ok('正常截图算非空', nonblankVerdict({ width: 1200, height: 800, bytes: 50000, pixelStats: pngPixelStats(mixedPng) }).pass === true)
+ok('整页白屏算空', nonblankVerdict({ width: 1200, height: 800, bytes: 50000, pixelStats: pngPixelStats(whitePng) }).pass === false)
+ok('零字节算空', nonblankVerdict({ width: 1200, height: 800, bytes: 0, pixelStats: pngPixelStats(mixedPng) }).pass === false)
+ok('零尺寸算空', nonblankVerdict({ width: 0, height: 0, bytes: 50000, pixelStats: pngPixelStats(mixedPng) }).pass === false)
+ok('字节低于地板算空(白屏兜底)', nonblankVerdict({ width: 1200, height: 800, bytes: 200, pixelStats: pngPixelStats(mixedPng) }, 1024).pass === false)
 
 // —— diffVerdict(像素 diff 比例门)——
 ok('完全一致 diff=0 过', diffVerdict(0, 960000, 0.02).pass === true)

@@ -695,9 +695,13 @@ spawn_send_key() {  # <target> <key>
     orca) fm_backend_orca_send_key "$1" "$2" ;;
   esac
 }
+
+TASK_TMP="/tmp/fm-$ID"
+mkdir -p "$TASK_TMP/gotmp"
+PROXY_SOURCE_CMD=$(proxy_env_source_command "$TASK_TMP") || exit 1
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  proxy_prefix=$(proxy_env_prefix)
-  [ -z "$proxy_prefix" ] || spawn_send_text_line "$T" "export$proxy_prefix"
+  [ -z "$PROXY_SOURCE_CMD" ] || spawn_send_text_line "$T" "$PROXY_SOURCE_CMD"
   spawn_send_text_line "$T" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -716,14 +720,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -898,16 +894,11 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Prefix the launch command itself with firstmate's proxy vars too (not just the
-# treehouse-get window export above): a secondmate spawn skips that export
-# entirely, and prefixing here is a self-contained belt-and-suspenders guarantee
-# that the launched agent process gets the same route regardless of pane history.
-launch_proxy_prefix=$(proxy_env_prefix)
-[ -z "$launch_proxy_prefix" ] || LAUNCH="${launch_proxy_prefix# } $LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+[ -z "$PROXY_SOURCE_CMD" ] || spawn_send_text_line "$T" "$PROXY_SOURCE_CMD"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
