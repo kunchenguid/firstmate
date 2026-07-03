@@ -6,8 +6,15 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout]
+# Usage: fm-brief.sh <task-id> <repo-name> [--base <branch>] [--scout]
 #        fm-brief.sh <task-id> --secondmate <project>...
+#   --base <branch> (ship only) makes the scaffolded Setup start the task branch
+#   from that base branch instead of the clean default-branch detached HEAD
+#   (verify it exists in the worktree, fetch it from origin if needed, then
+#   `git checkout -b fm/<id> <base>`), and points the local-only/direct-PR
+#   landing wording at it. Pair it with fm-spawn.sh --base so the task's meta
+#   records the same branch. Refused for --scout and --secondmate. Without the
+#   flag the output stays byte-identical to the default-branch scaffold.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -39,14 +46,36 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
+BASE=
+BASE_SET=0
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    BASE=$a
+    BASE_SET=1
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BASE_SET" -eq 0 ] || [ -n "$BASE" ] || { echo "error: --base requires a non-empty value" >&2; exit 1; }
+# --base shapes the ship branch/landing contract; a scout worktree is scratch
+# and a secondmate charter has no task branch, so both refuse it.
+if [ -n "$BASE" ] && [ "$KIND" != ship ]; then
+  echo "error: --base applies only to ship briefs; refusing for --$KIND" >&2
+  exit 1
+fi
 ID=${POS[0]}
 
 BRIEF="$DATA/$ID/brief.md"
@@ -171,6 +200,21 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# --base parameterization: without a base these expand to today's exact wording,
+# keeping the scaffold byte-identical; with a base they retarget the branch setup
+# and the landing text at the base branch.
+if [ -n "$BASE" ]; then
+  BRANCH_STEP="1. First action: create your branch from the base branch \`$BASE\`. Verify the base branch exists in the worktree (\`git rev-parse --verify $BASE\`); if it is missing and the project has an origin remote, fetch it first (\`git fetch origin $BASE:$BASE\`). Then create your branch: \`git checkout -b fm/$ID $BASE\`"
+  LOCAL_TARGET=$BASE
+  FF_ONTO="the base branch"
+  PR_BASE_NOTE=" targeting base branch \`$BASE\`, not the default branch"
+else
+  BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+  LOCAL_TARGET=main
+  FF_ONTO="the current default branch"
+  PR_BASE_NOTE=""
+fi
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -179,21 +223,21 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`$PR_BASE_NOTE, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$LOCAL_TARGET\`."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto $FF_ONTO - if \`$LOCAL_TARGET\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`$LOCAL_TARGET\`.
 EOF
 )
     ;;
@@ -235,7 +279,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1

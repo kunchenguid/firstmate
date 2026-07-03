@@ -4,6 +4,11 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
+# When the task's meta records base= (a ship task dispatched with
+# fm-spawn.sh --base), that branch replaces the default branch as the review
+# base under the same logic: origin/<base> after a fetch for remote-backed
+# projects, the local base branch otherwise. Absent base= keeps today's
+# default-branch behavior.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -59,7 +64,14 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# The task's recorded base= is the single source of truth for a non-default
+# review base; absent base= falls back to the default branch as before.
+BASE_BRANCH=$(grep '^base=' "$META" | cut -d= -f2- || true)
+if [ -n "$BASE_BRANCH" ]; then
+  TARGET=$BASE_BRANCH
+else
+  TARGET=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -71,10 +83,10 @@ fi
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet
+  BASE="origin/$TARGET"
 else
-  BASE="$DEFAULT"
+  BASE="$TARGET"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
