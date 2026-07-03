@@ -76,7 +76,7 @@ add_sm_worktree() {
 }
 
 # bump_primary <w> <mode>: advance the PRIMARY's main branch by one local commit.
-# instr changes the instruction surface (AGENTS.md, bin, skills) plus README;
+# instr changes the instruction surface (AGENTS.md, bin, .agents/skills) plus README;
 # readme changes only README. No push - the sync follows the primary's local HEAD.
 bump_primary() {
   local w=$1 mode=$2

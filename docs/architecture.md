@@ -108,6 +108,7 @@ The locked session-start bootstrap step separately propagates the primary's decl
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged by the tracked-file sync.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
+Changes under public `skills/` fast-forward like other tracked files, but they are not part of the running firstmate instruction surface.
 `fm-config-push.sh` is the focused mid-session version of that same inheritance path: it discovers the same live secondmate homes, calls the same propagation helper, and reports per-home/per-item results without running the tracked-file fast-forward or sending reread nudges.
 `fm-spawn.sh --secondmate` performs the same guarded local fast-forward before launch or recovery respawn; skipped syncs warn and the secondmate launches unchanged.
 Secondmate spawn also propagates the same inheritable config before launch.
@@ -170,7 +171,7 @@ The full ownership rule - what is project-intrinsic versus fleet-private, and ho
 
 `/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
 Captain preferences go to `data/captain.md`, fleet-local operational facts and gotchas go to `data/learnings.md`, project-intrinsic knowledge goes through normal crewmate delivery into that project's committed `AGENTS.md`, and task-scoped notes or undone next steps go to the backlog.
-Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; `/stow` deliberately never stores findings in skills.
+Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
 ## Local clones stay fresh
 

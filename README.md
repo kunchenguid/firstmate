@@ -32,7 +32,7 @@ But the moment you want three project tasks done in parallel - fixes, investigat
 firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
-There is no app to install; the orchestrator is `AGENTS.md`, bundled skills, and helper scripts that any terminal coding agent can follow.
+There is no app to install; the orchestrator is `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
 
 This is not an agent harness. This is not a single skill. This is not a CLI.
 This is.. a directory that turns any agent into your firstmate, and you the captain.
