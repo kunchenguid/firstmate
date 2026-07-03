@@ -828,8 +828,9 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Ship briefs also include a UI-evidence contract (section 7): capture rendered evidence for UI-affecting changes, or explicitly state why none was practical, in the `done`/PR-ready status.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
-Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
+Scout briefs do not include the project-memory or UI-evidence steps, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.

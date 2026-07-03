@@ -28,6 +28,9 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# Ship tasks also include a UI-evidence section: capture rendered evidence
+# (screenshot, Playwright capture, short video/GIF, or rendered artifact) for
+# UI-affecting changes, or state why none was practical, in the done/PR-ready status.
 # Refuses to overwrite an existing brief.
 set -eu
 
