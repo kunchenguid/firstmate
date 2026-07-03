@@ -22,3 +22,4 @@
 | gate-i1-intake-grammar | green | Intake grammar: only proceed/revise/escalate/panel lines; last-decision ignores panel lines and no-decision files |
 | gate-i2-spawn-refuses-unvetted | green | fm-spawn refuses a ship task without a trailing intake proceed; scout exempt; override loud |
 | gate-i3-panel-roundtrip | green | fm-intake: both thinkers proceed -> proceed + synthesis; one revise -> revise with count; exit codes 0/2 |
+| gate-i4-revise-cap-fail-closed | green | Second revise escalates; at-cap intakes escalate without running the panel; a PANEL-less thinker escalates, never proceeds |
