@@ -36,6 +36,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
      If the fleet is live, delegate this to a crewmate rather than doing it inline.
    - Knowledge generalizable to every firstmate user: this repo's own `AGENTS.md` (or other shared, tracked material), shipped through the normal branch -> no-mistakes -> PR -> captain-merge pipeline for this repo (section 1), never hand-committed straight to `main`.
    - Task-scoped notes: append to the relevant backlog item's notes with `tasks-axi update <id> --append "<note>"`, or hand-edit `data/backlog.md` per the active backend (section 10).
+     Apply AGENTS.md section 10 note hygiene to those notes: avoid volatile incidental specifics, point to authoritative sources, and correct stale free-form notes when found.
    - Undone next steps: file each as a queued backlog item (section 10), with `blocked-by` recorded if it genuinely depends on something else.
 
 4. **Curate, don't just append.**

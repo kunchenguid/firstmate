@@ -60,6 +60,7 @@ Everything this skill files goes to a local file by default; it only ever reache
 
 6. **Curate, don't just append.**
    When a finding overlaps or supersedes something already recorded, prefer editing or replacing the existing note over piling on a duplicate.
+   When a finding includes volatile incidental details such as temp paths, in-flight versions, moving state locations, or ephemeral IDs, avoid copying them into prose when a stable source of truth exists; point to that source or record the durable fact instead.
 
 7. **Finish with an honest safe-to-end verdict and a resume pointer for the next session.**
    Tell the user, in plain language, what was captured and where, what could not be captured (and why), and whether the conversation is now safe to end or reset - i.e. whether every durable finding from this sweep now lives on disk or in an explicitly requested tracker rather than only in this chat.
