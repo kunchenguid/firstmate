@@ -82,9 +82,8 @@ reject_repo_overrides "$@" || exit 1
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
-merge_args=()
-if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
+if caller_has_merge_method "$@"; then
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "$@"
+else
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --squash "$@"
 fi
-
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
