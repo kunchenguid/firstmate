@@ -188,7 +188,7 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=${1:-$?}
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -698,6 +698,19 @@ spawn_send_key() {  # <target> <key>
 
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP_META_RECORDED=0
+spawn_pre_meta_cleanup() {
+  if [ "$TASK_TMP_META_RECORDED" -eq 0 ]; then
+    rm -f "$TASK_TMP/proxy-env.sh" "$TASK_TMP"/proxy-env.sh.* 2>/dev/null || true
+    rmdir "$TASK_TMP/gotmp" "$TASK_TMP" 2>/dev/null || true
+  fi
+}
+spawn_exit_cleanup() {
+  local status=$?
+  spawn_pre_meta_cleanup
+  orca_spawn_abort_cleanup "$status"
+}
+trap spawn_exit_cleanup EXIT
 PROXY_SOURCE_CMD=$(proxy_env_source_command "$TASK_TMP") || exit 1
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
@@ -879,6 +892,8 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+TASK_TMP_META_RECORDED=1
+trap - EXIT
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

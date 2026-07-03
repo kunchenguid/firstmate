@@ -98,7 +98,7 @@ run_spawn_with_proxy() {
   env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH_OVERRIDE:-$WT_DIR}" TMUX="fake,1,0" \
     FM_FAKE_SEND_LOG="$sendlog" FM_FAKE_LAUNCH_LOG="$launchlog" \
     GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
     HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= ALL_PROXY= all_proxy= NO_PROXY= no_proxy= \
@@ -196,8 +196,36 @@ test_proxy_env_propagates_to_secondmate_launch_without_window_export() {
   rm -rf "$tasktmp"
 }
 
+test_proxy_env_file_is_removed_when_spawn_fails_before_meta() {
+  local rec id out status sendlog launchlog proxy_value tasktmp proxyfile bad_path meta
+  id=proxy-fail-z4
+  rm -rf "/tmp/fm-$id"
+  rec=$(make_spawn_case proxy-fail claude "$id")
+  read_case_record "$rec"
+  sendlog="$CASE_DIR/send.log"; launchlog="$CASE_DIR/launch.log"
+  tasktmp="/tmp/fm-$id"
+  proxyfile="$tasktmp/proxy-env.sh"
+  proxy_value="http://user:token@proxy.local:7890"
+  bad_path="$PROJ_DIR/subdir"
+  meta="$HOME_DIR/state/$id.meta"
+  mkdir -p "$bad_path"
+
+  out=$(FM_FAKE_PANE_PATH_OVERRIDE="$bad_path" run_spawn_with_proxy "$sendlog" "$launchlog" \
+    HTTP_PROXY="$proxy_value" \
+    -- "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn should fail when treehouse does not yield an isolated worktree"
+
+  assert_contains "$out" "did not yield an isolated worktree" "spawn failure should explain the isolation guard refusal"
+  assert_absent "$proxyfile" "pre-meta spawn failure must remove credentialed proxy env file"
+  assert_absent "$meta" "failed spawn must not write task meta before the isolation guard passes"
+  pass "pre-meta spawn failure removes credentialed proxy env file"
+  rm -rf "$tasktmp"
+}
+
 test_no_proxy_env_sends_no_export_and_clean_launch
 test_proxy_env_propagates_to_window_export_and_launch
 test_proxy_env_propagates_to_secondmate_launch_without_window_export
+test_proxy_env_file_is_removed_when_spawn_fails_before_meta
 
 echo "# all fm-spawn-proxy tests passed"

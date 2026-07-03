@@ -248,12 +248,21 @@ function diff(a, b, threshold) {
 
 // ────────────────────────── CLI 分发(import 时不跑) ──────────────────────────
 
-function parseFlags(rest) {
+export function parseFlags(rest) {
   const o = { includes: [], excludes: [], minCount: {} }
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--inc') o.includes.push(rest[++i])
     else if (rest[i] === '--exc') o.excludes.push(rest[++i])
-    else if (rest[i] === '--min') { const [s, n] = rest[++i].split('='); o.minCount[s] = +n }
+    else if (rest[i] === '--min') {
+      const spec = rest[++i]
+      if (spec === undefined) throw new Error('--min requires selector=count')
+      const eq = spec.lastIndexOf('=')
+      if (eq <= 0 || eq === spec.length - 1) throw new Error('--min requires selector=count')
+      const s = spec.slice(0, eq)
+      const n = spec.slice(eq + 1)
+      if (!/^\d+$/.test(n)) throw new Error('--min count must be a non-negative integer: ' + spec)
+      o.minCount[s] = Number(n)
+    }
   }
   return o
 }
@@ -264,7 +273,12 @@ if (isMain) {
   if (cmd === 'render') render(rest[0], rest[1], rest[2], rest[3])
   else if (cmd === 'dom') dumpDom(rest[0])
   else if (cmd === 'nonblank') nonblank(rest[0], rest[1])
-  else if (cmd === 'domcheck') domcheck(rest[0], parseFlags(rest.slice(1)))
+  else if (cmd === 'domcheck') {
+    let flags
+    try { flags = parseFlags(rest.slice(1)) }
+    catch (e) { console.error(e.message); process.exit(2) }
+    domcheck(rest[0], flags)
+  }
   else if (cmd === 'diff') diff(rest[0], rest[1], rest[2])
   else { console.error('用法: render|dom|nonblank|domcheck|diff  (详见文件头注释)'); process.exit(2) }
 }

@@ -4,11 +4,15 @@
 // 渲染那半(Chrome 截图/dump-dom)是 I/O,由 SKILL.md 里的冒烟命令验,不进单测。
 
 import { deflateSync } from 'node:zlib'
-import { parseSipsDims, pngPixelStats, nonblankVerdict, diffVerdict, domAssert, parseAE } from './vischeck.mjs'
+import { parseSipsDims, pngPixelStats, nonblankVerdict, diffVerdict, domAssert, parseAE, parseFlags } from './vischeck.mjs'
 
 let pass = 0, fail = 0
 function ok(name, cond) { if (cond) { pass++ } else { fail++; console.error('✗ ' + name) } }
 function eq(name, a, b) { ok(name + ' (got ' + JSON.stringify(a) + ')', JSON.stringify(a) === JSON.stringify(b)) }
+function throws(name, fn) {
+  try { fn(); fail++; console.error('✗ ' + name) }
+  catch { pass++ }
+}
 
 function pngChunk(type, data = Buffer.alloc(0)) {
   const len = Buffer.alloc(4)
@@ -67,6 +71,11 @@ ok('计数达标→过', domAssert(dom, { minCount: { '<div class="row"': 2 } })
 ok('计数不足→不过', domAssert(dom, { minCount: { '<div class="row"': 3 } }).pass === false)
 ok('综合断言全过', domAssert(dom, { includes: ['<canvas'], excludes: ['Error'], minCount: { '<div': 2 } }).pass === true)
 ok('失败时给出原因列表', domAssert(dom, { includes: ['x'] }).fails.length === 1)
+
+// —— parseFlags(`--min selector=count`) ——
+eq('min 按最后一个等号切 selector/count', parseFlags(['--min', '<div class="row"=3']).minCount, { '<div class="row"': 3 })
+throws('min 缺 count 直接失败', () => parseFlags(['--min', '<div class="row"=']))
+throws('min 非数字 count 直接失败', () => parseFlags(['--min', '<div class="row"=x']))
 
 // —— parseAE(解析 ImageMagick AE 输出)——
 eq('AE 纯数字', parseAE('48000'), 48000)
