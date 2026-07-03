@@ -456,36 +456,111 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_herdr_composer_state: classify the composer's own row - the
+# interior line of its rounded-corner box - as empty|pending|unknown, scanning
+# a generous tail-window capture of <target>. herdr's CLI exposes no
+# cursor-row primitive (unlike tmux's #{cursor_y}), so this locates the
+# composer row structurally: it is the only captured line whose TRIMMED
+# content both STARTS and ENDS with the same border glyph (│, ┃, or a plain
+# ASCII |). The box's own top/bottom rows use rounded corners (╭─…─╮ / ╰─…─╯),
+# which never match; popup item rows and horizontal separator rows carry no
+# border glyph at all; the footer help line ("Enter:send │ … │ …", verified
+# grok 0.2.82) uses │ only as an INTERIOR separator and does not start with
+# one, so it never matches either. Scans forward and keeps the LAST match, so
+# a border-shaped line earlier in scrollback/a popup can never outrank the
+# real (bottom-anchored) composer row.
+#
+#   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
+#             ("Type a message...", verified grok 0.2.82's empty-composer
+#             placeholder). Safe to treat as submitted.
+#   pending - real, unsubmitted text sits in the composer. This deliberately
+#             also covers a slash-command popup that just closed but only
+#             auto-completed or filled an argument-hint placeholder into the
+#             composer (e.g. "/compact" -> "/compact compaction
+#             instructions", verified live against real grok 0.2.82) - that
+#             first Enter is a SELECTION, not a submission.
+#   unknown - the pane could not be read, or no composer row was found in the
+#             captured window.
+FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
+# Known ghost/placeholder composer text. Extend this if another
+# herdr-verified harness needs its own idle placeholder recognized.
+FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
+
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cap line trimmed stripped="" found=0
+  cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
+      *) continue ;;
+    esac
+    stripped=$trimmed
+    found=1
+  done < <(printf '%s\n' "$cap")
+  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # Strip the border glyphs, then trim again.
+  stripped=${stripped//│/}
+  stripped=${stripped//┃/}
+  stripped=${stripped//|/}
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  # A bare prompt glyph = empty composer.
+  case "$stripped" in
+    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+  esac
+  # Strip a leading prompt glyph before judging what remains.
+  case "$stripped" in
+    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+  esac
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  [ -n "$stripped" ] || { printf 'empty'; return 0; }
+  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
+    printf 'empty'; return 0
+  fi
+  printf 'pending'
+}
+
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until the pane visibly changes. Verified hazard
-# (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
-# `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
-# claude/codex popups, so the caller's <settle> before the first Enter matters
-# here the same way it does for tmux.
+# (Enter only, never retyped) until the composer's own row reads empty.
+# Verified hazard (herdr-verification-p2.md "slash/$ autocomplete popup"): a
+# `/`- or `$`-prefixed send opens a completion popup within ~0.1s, exactly
+# like tmux's claude/codex popups, so the caller's <settle> before the first
+# Enter matters here the same way it does for tmux.
 #
-# Verification strategy differs from tmux's ANSI-ghost-aware composer read
-# (herdr's CLI has no cursor-row/ANSI capture primitive exposed): capture the
-# pane right after typing (before any Enter) as the TYPED baseline, then after
-# each Enter attempt capture again - if the capture is UNCHANGED from the typed
-# baseline, nothing happened (Enter was swallowed) and we retry; the moment the
-# capture changes (output appeared, prompt cleared, a popup closed and text
-# resolved), the send is considered submitted. Echoes empty|pending|unknown|
-# send-failed, the SAME vocabulary fm-send.sh already branches on for tmux.
+# Verification strategy (incident 2026-07-03: two grok/herdr crewmates left a
+# fully-typed `/no-mistakes` sitting unsubmitted for minutes, footer still
+# reading "Enter:send", while fm-send exited 0): a prior version of this
+# function verified submission by diffing raw pane content before/after
+# Enter - ANY change counted as "submitted". Live-verified against real grok
+# 0.2.82: a slash command's first Enter closes the completion popup and, for
+# an argument-taking command, EXPANDS the composer text into an argument-hint
+# placeholder ("/compact" -> "/compact compaction instructions") rather than
+# submitting - the raw pane content visibly changes (popup gone, text
+# different) even though nothing was sent, so the old diff-based check
+# false-positived "empty" (submitted) after exactly one Enter, precisely
+# matching the incident. A genuine second Enter was required to actually
+# submit. fm_backend_herdr_composer_state avoids this by classifying the
+# composer's own row specifically: a popup-close-with-placeholder-fill still
+# reads as "pending" (real text remains), so the retry loop below correctly
+# sends the second Enter instead of stopping early. Echoes
+# empty|pending|unknown|send-failed, the SAME vocabulary fm-send.sh already
+# branches on for tmux.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 typed after i=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  typed=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     sleep "$sleep_s"
-    after=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
-    if [ "$after" != "$typed" ]; then
-      printf 'empty'
-      return 0
-    fi
+    state=$(fm_backend_herdr_composer_state "$target")
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done

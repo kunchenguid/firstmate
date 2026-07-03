@@ -194,15 +194,33 @@ This confirms the same hazard tmux already mitigates: submitting immediately aft
 `fm_backend_herdr_send_text_submit` takes the same settle-before-first-Enter parameter tmux's submit core does; the settle-duration DECISION itself lives in `fm-send.sh` (harness-aware, backend-independent), so neither adapter needs its own settle policy.
 
 `escape` was verified to dismiss the popup while leaving the typed text in the composer, not a full clear.
-The adapter's own verify-and-retry logic does not depend on this; it is delta/content-based (see below), not popup-state-based.
 
-## Composer verification: delta-based, not ANSI-cursor-row-based
+## Incident (2026-07-03): a slash command left fully typed but unsubmitted, silently
 
-Tmux's submit-verification reads the cursor row with ANSI styling to strip ghost/placeholder text and classify the composer as empty or pending.
-Herdr's CLI exposes no equivalent ANSI/cursor-row-only capture primitive, so the herdr adapter verifies differently: capture the pane right after typing (the "typed" baseline, unsubmitted), then after each Enter attempt capture again.
-Unchanged means the Enter did nothing and the adapter retries (bounded).
-Changed means something happened - submitted, output appeared, or a popup resolved.
-A dedicated composer-state or cursor-row read primitive is a candidate upstream Herdr feature request; it would let this backend eventually match tmux's stronger submit-verification guarantee.
+Two grok/herdr crewmates were each sent `/no-mistakes` via `fm-send.sh`.
+In both panes the command sat fully typed in the composer, unsubmitted (footer still read `Enter:send`), for minutes, until a manual `fm-send.sh <target> --key Enter` landed it instantly.
+`fm-send.sh` had exited 0 both times - no failure surfaced to the caller.
+
+Root cause, reproduced live against real grok 0.2.82 on an isolated herdr session: the send-text-submit verification at the time (see the delta-based description below, since replaced) declared success whenever the captured pane content changed AT ALL between before and after an Enter.
+For an argument-taking slash command, the FIRST Enter does not submit - it closes the completion popup and, for a command like `/compact [context]`, EXPANDS the composer text into an argument-hint placeholder (`/compact` -> `/compact compaction instructions`).
+The popup disappearing and the composer text changing is a real, visible content change, so the old delta check declared "submitted" after exactly one Enter, even though the composer still held real, unsubmitted text and the footer still read `Enter:send`.
+A genuine second Enter was required to actually submit - exactly the manual recovery that worked both times in the incident.
+Plain (non-argument) commands like `/new` did submit on the first Enter in the same live test, so the false-positive was specific to commands whose popup selection fills an argument placeholder rather than submitting outright - `/no-mistakes` (optional task-first argument) is exactly that shape.
+
+The tmux backend was NOT affected by this incident: `fm_tmux_composer_state` reads the actual cursor row and classifies it as pending whenever real text remains, so its retry loop correctly issued the second Enter and landed the same live repro; this was confirmed side-by-side against the same real grok pane.
+
+**Fix:** `fm_backend_herdr_composer_state` replaces the delta-based check with a structural read of the composer's OWN row, mirroring what the cursor-row read gives tmux.
+Herdr's CLI exposes no cursor-row primitive, so the composer row is located by shape instead of position: it is the only line in a generous tail capture whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain `|`) - the box's own top/bottom rows use rounded corners and never match, popup item rows and separator rows carry no border glyph at all, and the footer help line uses `│` only as an interior separator (never as the first/last character), so none of those can be mistaken for the composer.
+A popup-close-with-placeholder-fill still reads as real content on that row, so it correctly classifies as pending and the retry loop sends the required second Enter, instead of stopping early.
+Known ghost/placeholder composer text (`Type a message...`, verified grok 0.2.82's empty-composer hint) is recognized and still reads as empty.
+See `fm_backend_herdr_composer_state` and `fm_backend_herdr_send_text_submit` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s composer-state and send-text-submit sections (including a dedicated regression test asserting the second Enter is actually sent) for the fake-harness coverage.
+
+## Composer verification: structural border-row read, not delta-based
+
+The herdr adapter's submit-verification no longer diffs raw pane content before/after Enter (see the incident above for why that was unsafe).
+It instead classifies the composer's own row - located structurally, as described above - as empty or pending after each Enter attempt, retried (Enter only, never retyped) until it reads empty or retries are exhausted.
+This mirrors tmux's cursor-row classification in spirit, without needing an equivalent cursor-row read primitive from herdr's CLI.
+A dedicated composer-state or cursor-row read primitive is still a candidate upstream Herdr feature request; it would let this backend eventually verify with the same precision as tmux's native cursor-row read, rather than a structural approximation over a plain-text capture.
 
 All implemented backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching at all.
 

@@ -590,37 +590,142 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
-# --- send_text_submit: delta-based verify-and-retry --------------------------
+# --- composer_state: structural border-row classification --------------------
+
+test_composer_state_bare_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a bare prompt glyph should read as empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
+}
+
+test_composer_state_ghost_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ─────╯\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the ghost placeholder text reads empty, not pending"
+}
+
+test_composer_state_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯ hello captain         │\n  ╰──────── Composer ─────╯\n\n  Enter:send\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real unsubmitted text should read as pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real composer text reads pending"
+}
+
+# Live-verified incident (2026-07-03, real grok 0.2.82 on herdr, isolated
+# session): typing "/compact" opens the completion popup; the FIRST Enter
+# closes the popup and EXPANDS the composer into an argument-hint placeholder
+# ("/compact compaction instructions") rather than submitting - the composer
+# still reads real, unsubmitted text and the footer still shows "Enter:send".
+# A prior raw-diff verification saw the popup vanish and the text change and
+# declared this "submitted". The structural composer-row read must still call
+# this pending.
+test_composer_state_popup_placeholder_fill_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-popup-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭──────────────────────────────────────╮\n  │ ❯ /compact compaction instructions    │\n  ╰──────────────── Composer ─────────────╯\n\n  Enter:send\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "a popup-close-with-placeholder-fill must still read as pending (not yet submitted), got '$out'"
+  pass "fm_backend_herdr_composer_state: a slash-command popup's argument-hint placeholder still reads pending (the incident fix)"
+}
+
+test_composer_state_unknown_on_capture_failure() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/composer-capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  status=$?
+  [ "$status" -eq 0 ] || fail "composer_state should not itself fail the caller"
+  [ "$out" = unknown ] || fail "an unreadable pane should read as unknown, got '$out'"
+  pass "fm_backend_herdr_composer_state: reports unknown when the pane cannot be captured"
+}
+
+test_composer_state_unknown_when_no_composer_row_found() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-no-row"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A capture with no border-delimited row at all (e.g. a bare shell prompt,
+  # never a firstmate-recognized composer box).
+  printf 'plain-shell-prompt$ \n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a capture with no recognizable composer row should read as unknown, got '$out'"
+  pass "fm_backend_herdr_composer_state: reports unknown when no border-delimited composer row is found"
+}
+
+# --- send_text_submit: structural composer-row verify-and-retry --------------
 
 test_send_text_submit_detects_landed_send() {
-  local dir log resp fb out
+  local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: send-text (literal, no output)
-  # 2: capture right after typing (the "typed" baseline)
-  printf '%s' $'❯ hello captain' > "$resp/2.out"
-  # 3: send-keys enter
-  # 4: capture after Enter - CHANGED (submitted)
-  printf '%s' $'hello captain\n❯' > "$resp/4.out"
+  # 2: send-keys enter
+  # 3: capture for composer_state after Enter - composer reads empty (submitted)
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should report empty (submitted) once the pane visibly changes, got '$out'"
+  [ "$out" = empty ] || fail "send_text_submit should report empty (submitted) once the composer row reads empty, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
-  pass "fm_backend_herdr_send_text_submit: reports 'empty' once the pane content changes after Enter (submitted)"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: reports 'empty' once the composer row reads empty after one Enter"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # typed baseline and every subsequent capture return the SAME text (Enter never lands)
-  printf '%s' $'❯ hello captain' > "$resp/2.out"
-  printf '%s' $'❯ hello captain' > "$resp/4.out"
-  printf '%s' $'❯ hello captain' > "$resp/6.out"
+  # Every post-Enter capture still shows the same real, unsubmitted text.
+  printf '  ╭────────────────────────╮\n  │ ❯ hello captain         │\n  ╰──────── Composer ─────╯\n\n  Enter:send\n' > "$resp/3.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ hello captain         │\n  ╰──────── Composer ─────╯\n\n  Enter:send\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
   [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with no visible change, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'pending' when the pane never changes after retried Enters (swallowed)"
+  pass "fm_backend_herdr_send_text_submit: reports 'pending' when the composer never clears after retried Enters (swallowed)"
+}
+
+# The regression test for the 2026-07-03 incident (two grok/herdr crewmates
+# left `/no-mistakes` sitting fully typed but unsubmitted for minutes; a
+# manual retried Enter landed it instantly both times). Reproduces the exact
+# mechanism verified live: Enter #1 closes the popup and fills an
+# argument-hint placeholder (still pending); Enter #2 actually submits. The
+# fixed send_text_submit must retry past the first Enter instead of declaring
+# victory on the raw content change, and must actually issue the second Enter.
+test_send_text_submit_popup_autocomplete_requires_second_enter() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-popup-autocomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text "/compact"
+  # 2: send-keys enter (#1) - closes the popup, fills the placeholder
+  # 3: capture - composer still reads real (pending) text
+  printf '  ╭──────────────────────────────────────╮\n  │ ❯ /compact compaction instructions    │\n  ╰──────────────── Composer ─────────────╯\n\n  Enter:send\n' > "$resp/3.out"
+  # 4: send-keys enter (#2) - actually submits
+  # 5: capture - composer now reads empty
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
+  [ "$out" = empty ] || fail "send_text_submit should eventually report empty once the SECOND Enter actually clears the composer, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "send_text_submit must send a SECOND Enter after the popup-placeholder fill still reads pending (the incident bug: a prior version stopped after just one), got $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a slash-command popup's placeholder fill on Enter #1 does not short-circuit as submitted; Enter #2 is retried and lands it"
 }
 
 test_send_text_submit_send_failed() {
@@ -634,27 +739,15 @@ test_send_text_submit_send_failed() {
   pass "fm_backend_herdr_send_text_submit: reports 'send-failed' when the literal send-text call itself errors"
 }
 
-test_send_text_submit_unknown_on_baseline_capture_failure() {
+test_send_text_submit_unknown_on_capture_failure() {
   local dir log resp fb out
-  dir="$TMP_ROOT/submit-baseline-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/2.exit"
+  dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "send_text_submit should report unknown when the typed baseline cannot be captured, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when typed-baseline capture fails"
-}
-
-test_send_text_submit_unknown_on_after_capture_failure() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/submit-after-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s' $'❯ hello captain' > "$resp/2.out"
-  printf '1\n' > "$resp/4.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "send_text_submit should report unknown when post-Enter capture fails, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when post-Enter capture fails"
+  [ "$out" = unknown ] || fail "send_text_submit should report unknown when the post-Enter capture fails, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter capture fails (never retries past an unreadable pane)"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -970,11 +1063,17 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_composer_state_bare_prompt_is_empty
+test_composer_state_ghost_placeholder_is_empty
+test_composer_state_real_text_is_pending
+test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_unknown_on_capture_failure
+test_composer_state_unknown_when_no_composer_row_found
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_send_failed
-test_send_text_submit_unknown_on_baseline_capture_failure
-test_send_text_submit_unknown_on_after_capture_failure
+test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_scripts_route_explicit_target_through_meta_backend
