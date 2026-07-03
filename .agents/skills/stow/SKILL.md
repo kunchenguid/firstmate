@@ -6,7 +6,7 @@ user-invocable: true
 
 # stow
 
-Sweep this session for durable knowledge that only exists in conversation right now, and write it to the disk locations firstmate already reads on the next bootstrap.
+Sweep this session for durable knowledge that only exists in conversation right now, and write it to the disk locations firstmate already prints in the next session-start context digest.
 The goal is a session that is safe to reset or destroy because everything durable has already been captured.
 
 ## What it does
