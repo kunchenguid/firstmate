@@ -81,7 +81,8 @@ throws('min 非数字 count 直接失败', () => parseFlags(['--min', '<div clas
 eq('AE 纯数字', parseAE('48000'), 48000)
 eq('AE 带括号比例后缀', parseAE('48000 (0.0521)'), 48000)
 eq('AE 浮点四舍五入', parseAE('47999.6'), 48000)
-eq('AE 空→0', parseAE(''), 0)
+throws('AE 空输出直接失败', () => parseAE(''))
+throws('AE 工具错误输出直接失败', () => parseAE("compare: unable to open image 'missing.png': No such file or directory @ error/blob.c/OpenBlob/3596."))
 
 console.log((fail === 0 ? '✓ ' : '✗ ') + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)

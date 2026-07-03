@@ -16,7 +16,7 @@
 //   node vischeck.mjs domcheck <url|htmlfile> --inc s --exc s --min "sel=3" ...  # 结构断言
 //   node vischeck.mjs diff     <a.png> <b.png> <ratioThreshold>   # 像素 diff(需 ImageMagick)
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { inflateSync } from 'node:zlib'
@@ -177,8 +177,9 @@ export function domAssert(dom, { includes = [], excludes = [], minCount = {} } =
 
 // 解析 magick/compare 的 AE 指标输出(可能在 stderr,可能带 " (0.0123)" 后缀)→ 整数像素数
 export function parseAE(text) {
-  const m = /(\d+(?:\.\d+)?)/.exec(String(text || '').trim())
-  return m ? Math.round(parseFloat(m[1])) : 0
+  const m = /^(\d+(?:\.\d+)?)(?:\s+\(\d+(?:\.\d+)?\))?$/.exec(String(text || '').trim())
+  if (!m) throw new Error('invalid-ae-metric')
+  return Math.round(parseFloat(m[1]))
 }
 
 // ────────────────────────── I/O 包装(薄壳,只负责跑命令喂给上面的判决) ──────────────────────────
@@ -236,9 +237,18 @@ function diff(a, b, threshold) {
     process.exit(2)
   }
   const argv = bin === 'magick' ? ['compare', '-metric', 'AE', a, b, 'null:'] : ['-metric', 'AE', a, b, 'null:']
-  let ae = 0
-  try { const o = execFileSync(bin, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); ae = parseAE(o) }
-  catch (e) { ae = parseAE(e.stderr || e.stdout || '0') }  // compare 在图不同时退出码非 0,AE 在 stderr
+  const r = spawnSync(bin, argv, { encoding: 'utf8' })
+  const out = String(r.stderr || r.stdout || '').trim()
+  if (r.error || (r.status !== 0 && r.status !== 1)) {
+    console.error('像素 diff 命令失败:' + (r.error?.message || out || 'exit ' + r.status))
+    process.exit(2)
+  }
+  let ae
+  try { ae = parseAE(out) }
+  catch {
+    console.error('像素 diff 未产出有效 AE 指标:' + (out || 'empty output'))
+    process.exit(2)
+  }
   const sips = execFileSync('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', a], { encoding: 'utf8' })
   const { width, height } = parseSipsDims(sips)
   const v = diffVerdict(ae, width * height, parseFloat(threshold))
