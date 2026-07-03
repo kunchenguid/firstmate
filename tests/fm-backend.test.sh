@@ -476,7 +476,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
   : > "$log"
   # Proxy vars forced empty (not unset via env -u, which is not portable to the
   # BSD env on macOS): the new fm-spawn.sh's proxy-passthrough addition
-  # (bin/fm-spawn.sh's proxy_env_prefix) must not leak the real test runner's
+  # (bin/fm-launch-lib.sh's proxy_env_source_command) must not leak the real test runner's
   # ambient proxy config into this conformance fixture; proxy propagation gets
   # its own dedicated test below.
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \

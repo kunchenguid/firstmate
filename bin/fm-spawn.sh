@@ -286,7 +286,7 @@ fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # launch_template, model_flag_for_harness, effort_flag_for_harness,
-# shell_quote, and proxy_env_prefix now live in fm-launch-lib.sh (sourced
+# shell_quote, and proxy env helpers now live in fm-launch-lib.sh (sourced
 # above), shared with bin/fm-resume-worktree.sh so the two never drift on
 # what a harness's launch command looks like. The knowledge half of each
 # adapter (busy signature, exit command, dialogs, quirks) lives in the

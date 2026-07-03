@@ -24,12 +24,12 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
+Launch command templates and model/effort flag rendering live in `bin/fm-launch-lib.sh`, while spawn-time worktree entry, autonomy setup, and turn-end hooks live in `bin/fm-spawn.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record launch templates in `fm-launch-lib.sh`, spawn-time setup in `fm-spawn.sh`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
 
 ## Detection
 
@@ -60,6 +60,10 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
+
+For ordinary claude crewmate and scout launches, an omitted `--model` is normalized by `fm-spawn.sh` to the fleet default `claude-sonnet-5` instead of using the ambient claude CLI default.
+The task meta records `tier=default` for that fleet default, `tier=override` for an explicit `--model`, and `tier=none` when no effective model is recorded.
+Secondmate launches do not get this claude default policy; they resolve optional model tokens from `config/secondmate-harness` or explicit `--model`.
 
 ## no-mistakes skill invocation
 

@@ -23,4 +23,7 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
+   If the recorded endpoint is dead for a tmux-backed ship or scout task and `state/<id>.meta` still points at an existing `worktree=`, use `bin/fm-resume-worktree.sh <id>` instead of a fresh spawn.
+   It recreates only the runtime endpoint, relaunches with the recorded harness/model/effort, and never runs `treehouse get`.
+   If the endpoint is still alive, `fm-resume-worktree.sh` intentionally refuses; keep using the live-pane recovery path above.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain with evidence.

@@ -6,10 +6,10 @@
 # local routing proxy on a restricted network. A freshly spawned crewmate
 # pane inherits no environment by default, so without this it would take a
 # direct route and be rejected or hang. fm-spawn.sh propagates the same
-# proxy vars firstmate itself has set into (1) the treehouse-get window,
-# before treehouse's own `git fetch` runs, and (2) the final launch command
-# prefix, so the launched agent process gets the same route regardless of
-# pane history.
+# proxy vars firstmate itself has set into a private task env file, then
+# sources that file before treehouse's own `git fetch` runs and again before
+# final launch, so the launched agent process gets the same route regardless
+# of pane history without exposing credentialed proxy URLs in visible sends.
 #
 # Same fake-tmux convention as tests/fm-spawn-dispatch-profile.test.sh: the
 # fake tmux logs every `send-keys` call (both the plain text-line sends and

@@ -86,9 +86,11 @@ For the zellij backend, `FM_HOME` does not split containers; use `FM_ZELLIJ_SESS
 
 claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
-Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Launch command templates and model/effort flag rendering live in [`bin/fm-launch-lib.sh`](../bin/fm-launch-lib.sh), while spawn-time worktree entry and turn-end hooks live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
+For ordinary crewmate and scout launches on the claude harness, an omitted `--model` is not left to the ambient claude CLI default: `fm-spawn.sh` passes `--model claude-sonnet-5`, records `model=claude-sonnet-5`, and records `tier=default`.
+Explicit `--model` values record `tier=override`; launches with no effective model record `tier=none`.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
@@ -100,6 +102,9 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
+
+When firstmate itself has `HTTP_PROXY`, `http_proxy`, `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`, `NO_PROXY`, or `no_proxy` set, `fm-spawn.sh` and `fm-resume-worktree.sh` write those values to a private `proxy-env.sh` under `tasktmp` and source it in the task pane before worktree provisioning or launch.
+This gives treehouse and the launched agent the same network route without printing credentialed proxy URLs into the visible pane command stream.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -232,6 +237,14 @@ FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
+HTTP_PROXY=             # optional proxy vars propagated to spawned/resumed task panes through tasktmp/proxy-env.sh
+http_proxy=             # lowercase proxy variants are honored too
+HTTPS_PROXY=
+https_proxy=
+ALL_PROXY=
+all_proxy=
+NO_PROXY=
+no_proxy=
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
