@@ -310,6 +310,27 @@ For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for 
 
 Write the brief per section 11.
 
+### Wardroom: a brief must be vetted before it spawns
+
+A filled ship brief goes to the intake council, not straight to a crewmate. Run
+`bin/fm-intake.sh <id> <project-dir>`: a foreign deep lens (Fugu ultra ->
+codex -> none, degrading loudly) roasts the brief, then two thinker lenses
+(architecture: right seam, provable DoD, right gates; risk: gaps, hazards,
+YAGNI) each end in a PANEL verdict. The decision lands in `state/<id>.intake`
+(append-only: `proceed:` / `revise:` / `escalate:` decisions, `panel:` evidence).
+
+- `proceed:` - spawn normally. `fm-spawn.sh` structurally refuses a ship spawn
+  without a trailing proceed (captain bypass: `FM_INTAKE_OVERRIDE=1`, loud and
+  logged). Scouts and secondmates are exempt.
+- `revise:` - amend the brief per `data/<id>/intake-review.md` and re-run
+  fm-intake. Two revises auto-escalate.
+- `escalate:` - the captain decides. Thinker infrastructure failures land here
+  too: the stage fails closed, never open.
+
+For new captain-initiated work, run the grill-me interview upstream of the
+brief - the depth of intake sets the ceiling for everything after it. Spec:
+`docs/specs/2026-07-03-wardroom-intake.md`.
+
 ### Spawn
 
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
