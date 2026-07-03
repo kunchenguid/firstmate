@@ -84,9 +84,9 @@ This is a pre-existing characteristic of the adapter's find-before-create patter
 ### No forced migration
 
 Existing live tasks are unaffected by this change: a task's meta already records its own `window=`/`herdr_pane_id=` target, which every backend-scoped operation (send/capture/kill/busy-state) resolves directly and never re-derives from a workspace label.
-So a task spawned before this pass keeps working exactly as before, from whatever workspace it already lives in (the old shared `firstmate` workspace, if that is where its home's tasks previously landed).
-There is no migration step, and none is needed: a secondmate home simply starts using its own labeled workspace the next time it - or the primary spawning it - creates a NEW task, converging naturally on ordinary respawn/recovery rather than requiring an explicit one-time migration of already-live tabs.
-Workspaces created under an older label prefix (e.g. `firstmate-<secondmate-id>` before the rename to `2ndmate-<secondmate-id>`) keep working via find-by-label adopt semantics; to align a live workspace's sidebar label with the current scheme, rename it with `herdr workspace rename`.
+So a task spawned before this pass keeps working exactly as before, from whatever workspace it already lives in (the old shared `firstmate` workspace, or a pre-rename `firstmate-<secondmate-id>` workspace if that is where its home's tasks previously landed).
+New workspace lookup does not adopt old secondmate labels: for new spawns, recovery, and list-live, the adapter exact-matches the current label derived from `FM_HOME` (`2ndmate-<secondmate-id>`).
+If an older live workspace is still labeled `firstmate-<secondmate-id>`, rename it with `herdr workspace rename` before expecting new tasks or recovery/list-live to use that workspace.
 
 Tab-per-task (within each home's own workspace) still wins on the human-watching axis for the reason P2 originally found: attaching once shows every one of that home's tasks as a tab in one tab bar, switchable with `ctrl+b <n>`, matching how a captain already watches a tmux-backed fleet.
 Workspace-per-task - tried against the real binary in P2 and again considered here - would still only show one task's workspace at a time by default, requiring a separate top-level "space" switch to see the rest of even a single home's fleet; that tradeoff is unchanged by the per-home refinement and workspace-per-task remains rejected.
