@@ -15,7 +15,8 @@
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
 #          worktree was fast-forwarded to firstmate's own current default-branch
 #          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
-#          instruction surface actually changed; firstmate nudges each to re-read.
+#          instruction surface (AGENTS.md, bin/, or .agents/skills/) actually
+#          changed; firstmate nudges each to re-read.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inheritable local config
 #          into each validated live secondmate home.
@@ -118,10 +119,11 @@ secondmate_sync() {
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a secondmate home is a worktree of this same repo
   # and already holds the primary's commit (fm-ff-lib.sh). Emits NUDGE_SECONDMATES:
-  # only for RUNNING secondmates whose instruction surface actually changed, so a
-  # secondmate already on the primary's version is never disturbed (AGENTS.md
-  # bootstrap + supervision). Mirrors fm-update's nudge-secondmates: report so
-  # firstmate can live-converge the listed windows.
+  # only for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
+  # .agents/skills/) actually changed, so a secondmate already on the primary's
+  # version is never disturbed (AGENTS.md bootstrap + supervision). Mirrors
+  # fm-update's nudge-secondmates: report so firstmate can live-converge the
+  # listed windows.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then

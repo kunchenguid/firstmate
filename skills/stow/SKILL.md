@@ -54,11 +54,11 @@ Everything this skill files goes to a local file by default; it only ever reache
    When a finding overlaps or supersedes something already recorded, prefer editing or replacing the existing note over piling on a duplicate.
 
 7. **Finish with an honest safe-to-end verdict.**
-   Tell the user, in plain language, what was captured and where, what could not be captured (and why), and whether the conversation is now safe to end or reset - i.e. whether every durable finding from this sweep now lives on disk or in a tracker rather than only in this chat.
+   Tell the user, in plain language, what was captured and where, what could not be captured (and why), and whether the conversation is now safe to end or reset - i.e. whether every durable finding from this sweep now lives on disk or in an explicitly requested tracker rather than only in this chat.
    If something could not be captured yet, say so explicitly instead of reporting the session fully safe.
 
 ## What this skill does not do
 
-It does not invent a new note-taking system, initialize version control, or commit/push anything on the user's behalf beyond editing a file the discovered convention already made writable.
+It does not invent a new note-taking system, initialize version control, or commit/push anything on the user's behalf beyond editing a file the discovered convention already made writable, creating the local scratch-file fallback for undone next steps, or using a destination the user explicitly approved.
 It never files credentials, secrets, or other sensitive material - only knowledge that's safe to keep in plain text wherever it lands.
 It never files anything to an issue tracker, hosted board, or other external/public system on its own inference - that only ever happens on the user's explicit say-so, per the hard rule in step 3.

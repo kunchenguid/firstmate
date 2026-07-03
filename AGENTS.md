@@ -155,7 +155,7 @@ Because `config/` is gitignored this is a separate, primary-authoritative copy i
 For a mid-session inheritable-config change that should reach live secondmates without a full session start, run `bin/fm-config-push.sh`.
 It is config-only: it uses the same live secondmate discovery and the same `propagate_inheritable_config` helper as bootstrap, prints a per-home/per-item summary, does not fast-forward tracked files, and does not nudge secondmates.
 The propagation helper itself keeps stdout silent for existing callers, but warns on stderr when an item is skipped because the destination does not allow it or when a copy/remove error occurs.
-The sweep reports the `NUDGE_SECONDMATES:` line below only when a running secondmate actually advanced with an instruction change, so firstmate knows which ones to live-converge.
+The sweep reports the `NUDGE_SECONDMATES:` line below only when a running secondmate actually advanced with an instruction-surface change (`AGENTS.md`, `bin/`, or `.agents/skills/`), so firstmate knows which ones to live-converge.
 Silence in the bootstrap section of the digest means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
 
@@ -177,7 +177,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
   It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer.
   If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` but still falls back to hand-editing and never blocks work.
   If `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
-- `NUDGE_SECONDMATES: <window-targets...>` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instructions actually changed; for each listed window, send a one-line re-read nudge with `bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` so that secondmate picks up its new instructions.
+- `NUDGE_SECONDMATES: <window-targets...>` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) actually changed; for each listed window, send a one-line re-read nudge with `bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` so that secondmate picks up its new instructions.
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts; follow section 14 for watcher cadence restart only when a running watcher needs the transition applied immediately.
