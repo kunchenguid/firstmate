@@ -133,9 +133,10 @@ Unlike herdr (where closing a tab's only root pane also closes the tab), zellij'
 `close-tab-by-id <id>` on a still-LIVE tab (pane running normally) was separately verified to cleanly remove both the pane and the tab in one call, needing no `close-pane` first.
 This is why `fm_backend_zellij_kill` resolves the owning tab id from the pane when possible, accepts teardown's recorded `zellij_tab_id` as a fallback when the pane has already gone, verifies the expected `fm-<id>` tab name when teardown provides it, and calls `close-tab-by-id`, rather than mirroring herdr's simpler "close the pane, the tab follows" contract.
 
-## Composer verification: delta-based, same as herdr
+## Composer verification: delta-based
 
-Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` uses the same content-diff strategy `docs/herdr-backend.md` describes for herdr: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
+Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` still uses a content-diff strategy: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
+This is now zellij-specific; the herdr adapter moved to structural composer-row verification after the 2026-07-03 grok slash-submit incident described in `docs/herdr-backend.md`.
 All three backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching.
 
 ## Session safety

@@ -8,10 +8,11 @@
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the composer clears. If a swallowed
-# Enter is positively confirmed (the text is still sitting in the composer after
-# all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
+# retried (Enter only, never retyped) until the target backend reports a
+# submitted/cleared composer or an inconclusive send. If a swallowed Enter is
+# positively confirmed (the text is still sitting in the composer after all
+# retries), fm-send exits NON-ZERO so the caller knows the steer did not land
+# instead of silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -90,8 +91,8 @@ else
   # invocation, so a `$...` message to a codex target gets the same settle. That
   # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The retried Enter in
-  # fm_tmux_submit_core still backs the settle up either way.
+  # needlessly slow plain text to claude/opencode/pi. The target backend's
+  # verified submit retry still backs the settle up either way.
   case "$*" in
     /*) settle=1.2 ;;
     \$*)

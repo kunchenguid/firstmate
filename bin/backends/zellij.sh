@@ -413,12 +413,13 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until the pane visibly changes. Verification
-# strategy mirrors herdr's (zellij's CLI has no cursor-row/ANSI capture
-# primitive exposed either): capture the pane right after typing (before any
-# Enter) as the TYPED baseline, then after each Enter attempt capture again -
-# unchanged means Enter was swallowed (retry); changed means submitted. This
-# content-diff approach is also the load-bearing defense against the
+# (Enter only, never retyped) until the pane visibly changes. Unlike herdr's
+# current structural composer-row verifier, zellij still uses a content-diff
+# strategy because its CLI has no cursor-row/ANSI capture primitive exposed:
+# capture the pane right after typing (before any Enter) as the TYPED baseline,
+# then after each Enter attempt capture again - unchanged means Enter was
+# swallowed (retry); changed means submitted. This content-diff approach is
+# also the load-bearing defense against the
 # unconditional-exit-0 CLI quirk documented in the file header: a truly dead
 # target never shows a change, so it correctly reports pending/unknown rather
 # than a false "sent". Echoes empty|pending|unknown|send-failed, the SAME

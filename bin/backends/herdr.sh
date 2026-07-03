@@ -442,10 +442,10 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # is smaller than the pane's current viewport height (observed threshold ~23
 # rows for a default-sized pane), instead of clamping to the last N lines - it
 # does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (a 6-line
-# composer-verification read in send_text_submit). Workaround: always request
-# a generous fetch far above any realistic viewport height, then trim to the
-# caller's requested bound ourselves with `tail`.
+# broke exactly the small bounded reads this adapter relies on most (including
+# the composer-state verification read used by send_text_submit). Workaround:
+# always request a generous fetch far above any realistic viewport height, then
+# trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out

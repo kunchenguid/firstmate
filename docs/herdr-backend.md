@@ -168,7 +168,7 @@ This was the most significant finding of this verification pass.
 `herdr pane read <pane> --source recent --lines N` returns **completely empty output** when `N` is smaller than the pane's current viewport height, instead of clamping to the last `N` lines.
 Reproduced deterministically by binary search against a 23-row pane: `--lines 5/6/8/15` all returned zero bytes; `--lines 20` returned a partial read; `--lines 24` and above returned the full expected content, correctly clamping down even at `--lines 1000`.
 
-This silently broke exactly the small bounded reads the adapter needs most - a 6-line composer-verification read inside the send-and-verify path, and would have affected any small `fm-peek.sh` line count too.
+This silently broke exactly the small bounded reads the adapter needs most - the composer-state verification read inside the send-and-verify path, and would have affected any small `fm-peek.sh` line count too.
 Before the workaround, an early version of the real-herdr smoke test flaked intermittently for exactly this reason.
 
 **Workaround:** `fm_backend_herdr_capture` never passes a caller's small requested line count straight through to herdr's own `--lines` flag.
@@ -201,7 +201,7 @@ Two grok/herdr crewmates were each sent `/no-mistakes` via `fm-send.sh`.
 In both panes the command sat fully typed in the composer, unsubmitted (footer still read `Enter:send`), for minutes, until a manual `fm-send.sh <target> --key Enter` landed it instantly.
 `fm-send.sh` had exited 0 both times - no failure surfaced to the caller.
 
-Root cause, reproduced live against real grok 0.2.82 on an isolated herdr session: the send-text-submit verification at the time (see the delta-based description below, since replaced) declared success whenever the captured pane content changed AT ALL between before and after an Enter.
+Root cause, reproduced live against real grok 0.2.82 on an isolated herdr session: the send-text-submit verification at the time used the old delta-based strategy and declared success whenever the captured pane content changed AT ALL between before and after an Enter.
 For an argument-taking slash command, the FIRST Enter does not submit - it closes the completion popup and, for a command like `/compact [context]`, EXPANDS the composer text into an argument-hint placeholder (`/compact` -> `/compact compaction instructions`).
 The popup disappearing and the composer text changing is a real, visible content change, so the old delta check declared "submitted" after exactly one Enter, even though the composer still held real, unsubmitted text and the footer still read `Enter:send`.
 A genuine second Enter was required to actually submit - exactly the manual recovery that worked both times in the incident.
@@ -213,6 +213,7 @@ The tmux backend was NOT affected by this incident: `fm_tmux_composer_state` rea
 Herdr's CLI exposes no cursor-row primitive, so the composer row is located by shape instead of position: it is the only line in a generous tail capture whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain `|`) - the box's own top/bottom rows use rounded corners and never match, popup item rows and separator rows carry no border glyph at all, and the footer help line uses `│` only as an interior separator (never as the first/last character), so none of those can be mistaken for the composer.
 A popup-close-with-placeholder-fill still reads as real content on that row, so it correctly classifies as pending and the retry loop sends the required second Enter, instead of stopping early.
 Known ghost/placeholder composer text (`Type a message...`, verified grok 0.2.82's empty-composer hint) is recognized and still reads as empty.
+`FM_BACKEND_HERDR_IDLE_RE` extends that placeholder match, and `FM_BACKEND_HERDR_COMPOSER_LINES` controls the tail-window scan depth; both are documented in [`docs/configuration.md`](configuration.md).
 See `fm_backend_herdr_composer_state` and `fm_backend_herdr_send_text_submit` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s composer-state and send-text-submit sections (including a dedicated regression test asserting the second Enter is actually sent) for the fake-harness coverage.
 
 ## Composer verification: structural border-row read, not delta-based
@@ -262,7 +263,7 @@ Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-C
 2. `bin/fm-peek.sh fm-herdr-e2e-t1` - showed the live claude trust dialog.
 3. `bin/fm-send.sh fm-herdr-e2e-t1 --key Enter` - accepted the trust dialog.
 4. `bin/fm-peek.sh fm-herdr-e2e-t1` again - showed claude actively working through the brief (creating the branch, writing the file).
-5. `bin/fm-send.sh fm-herdr-e2e-t1 "captain says: proceed as planned"` - a plain-text steer, exercising the delta-based send-and-verify path; the text appeared correctly in the pane.
+5. `bin/fm-send.sh fm-herdr-e2e-t1 "captain says: proceed as planned"` - a plain-text steer, exercising the send-and-verify path; the text appeared correctly in the pane.
 6. The crewmate appended `done: hello.txt committed on fm/herdr-e2e-t1` to its status file, and its commit (`add hello.txt` on branch `fm/herdr-e2e-t1`) was confirmed present in the project's git history.
 7. `bin/fm-teardown.sh herdr-e2e-t1` **REFUSED**, exactly as required: `REFUSED: local-only worktree ... has work not yet merged into main and not on any remote.`
 8. `bin/fm-merge-local.sh herdr-e2e-t1` - fast-forwarded local `main` to the crewmate's commit.
