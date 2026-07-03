@@ -71,7 +71,7 @@ The parse class is gated by `tests/fm-bash32-parse.test.sh` locally and the `bas
 Check and test the toolbelt before pushing:
 
 ```sh
-for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
+for script in bin/*.sh bin/backends/*.sh tests/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt and tests (same sweep tests/fm-bash32-parse.test.sh runs under bash 3.2)
 shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
