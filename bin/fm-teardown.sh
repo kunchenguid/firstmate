@@ -630,6 +630,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       # into the local landing branch - the recorded base= branch, else the default
       # branch (firstmate does that merge on the captain's approval). Refuse until then.
       DEFAULT=$(landing_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
+      # A recorded base branch that no longer exists must refuse loudly: the
+      # `git log --not <missing-ref>` below would error, the error is swallowed,
+      # and empty output would read as "all merged" - tearing down unlanded work.
+      if [ -n "$BASE_BRANCH" ] && ! git -C "$WT" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+        echo "REFUSED: recorded base branch '$BASE_BRANCH' does not exist in $PROJ; cannot verify the work landed." >&2
+        echo "Restore the base branch (or get the captain's explicit OK to discard, then --force)." >&2
+        exit 1
+      fi
       unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
       if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
         echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
