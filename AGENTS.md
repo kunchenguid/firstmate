@@ -93,6 +93,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
+  <id>.cursor-turnend-token firstmate-owned cursor hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a task on a non-default spawn-capable runtime backend also records backend= (absent means tmux, the verified reference backend; herdr and zellij are experimental backends - herdr records herdr_session=, herdr_workspace_id=, herdr_tab_id=, herdr_pane_id= (docs/herdr-backend.md), zellij records zellij_session=, zellij_tab_id=, zellij_pane_id= (docs/zellij-backend.md); orca is primitive-only and cannot create task meta yet; bin/fm-backend.sh, section 8) (fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
@@ -200,7 +201,7 @@ If the captain expresses a standing dispatch preference such as "use grok for ne
 Crewmates default to the same harness you are running on.
 The captain may override the static default at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single adapter name; absent or `default` means mirror your own harness).
 Resolve `default` with `bin/fm-harness.sh`; resolve the active static crewmate harness with `bin/fm-harness.sh crew`.
-Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
+Verified adapter names are `claude`, `codex`, `opencode`, `pi`, `grok`, and `cursor`.
 
 ### Crew dispatch profiles
 
@@ -262,6 +263,7 @@ The verified profile axes are:
 - `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high|xhigh>`; `max` is not passed because Grok rejects it for `--reasoning-effort`.
 - `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh>`; `max` is not passed because the installed Pi CLI warns that it is invalid.
 - `opencode`: model via `--model <provider/model>`; no verified effort flag for firstmate's interactive `opencode --prompt` launch, so effort is not passed.
+- `cursor`: model via `--model <full-id>`; no effort flag because the effort tier is encoded in the model id (e.g. `claude-opus-4-8-thinking-max`), so effort is not passed.
 
 If the selected profile asks for an effort value the selected harness does not accept, `fm-spawn` records the requested `effort=` in meta for traceability but omits the launch flag so the harness starts successfully.
 Bootstrap reports this as a `CREW_DISPATCH` diagnostic when it can see the invalid harness/effort pair in `config/crew-dispatch.json`.
@@ -513,6 +515,7 @@ For `kind=secondmate`, the same script launches in the registered or explicit fi
 For ship and scout tasks, the script creates the runtime endpoint (a tmux window by default, a herdr tab/pane when `backend=herdr`, or a zellij tab/pane when `backend=zellij`), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 Selecting `backend=orca` for a spawn fails before endpoint creation or meta writes because the Orca adapter currently exposes only capture, text send, Enter/Ctrl-C keys, and close for existing terminals.
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
+For cursor, the turn-end hook is one firstmate-owned `stop` hook script merged idempotently into the operator's shared `~/.cursor/hooks.json` (or `$CURSOR_CONFIG_DIR/hooks.json`), preserving existing hooks, activated only when a workspace in the stop payload holds the per-task `.fm-cursor-turnend` token pointer that matches `state/<id>.cursor-turnend-token`; teardown removes the pointer and token.
 For `kind=secondmate`, the script creates the same kind of runtime endpoint but starts directly in the persistent home.
 With herdr, ordinary crewmate and scout spawns use the current `FM_HOME` workspace; a primary `--secondmate` spawn uses the secondmate target home's workspace, so secondmate-owned tabs do not mix into the primary `firstmate` space.
 With zellij there is no per-home workspace split: every task, primary or secondmate, lands as a tab in the one shared `firstmate` zellij session (docs/zellij-backend.md).

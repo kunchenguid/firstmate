@@ -54,7 +54,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, grok, or cursor), git with GitHub auth, and tmux for the reference session backend.
 Experimental herdr spawns additionally require `herdr` and `jq`, checked at spawn time.
 Experimental zellij spawns additionally require `zellij` and `jq`, checked at spawn time.
 Primitive-only Orca terminal capture, text send, Enter/Ctrl-C keys, and close require the `orca` CLI only when `backend=orca` is selected, but Orca cannot spawn tasks yet.
