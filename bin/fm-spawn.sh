@@ -338,6 +338,17 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Wardroom: a ship task may not spawn until the intake council has proceeded -
+# the last decision line of state/<id>.intake must be `proceed:` (bin/fm-intake.sh
+# writes it). Sits after the brief check so missing-brief stays the first error;
+# scouts and secondmates are exempt. FM_INTAKE_OVERRIDE=1 is the captain's loud,
+# logged bypass. Spec: docs/specs/2026-07-03-wardroom-intake.md.
+if [ "$KIND" = ship ]; then
+  # shellcheck source=bin/fm-intake-lib.sh
+  . "$SCRIPT_DIR/fm-intake-lib.sh"
+  fm_intake_require_proceed "$STATE" "$ID" fm-spawn
+fi
+
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
