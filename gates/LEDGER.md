@@ -23,3 +23,4 @@
 | gate-i2-spawn-refuses-unvetted | green | fm-spawn refuses a ship task without a trailing intake proceed; scout exempt; override loud |
 | gate-i3-panel-roundtrip | green | fm-intake: both thinkers proceed -> proceed + synthesis; one revise -> revise with count; exit codes 0/2 |
 | gate-i4-revise-cap-fail-closed | green | Second revise escalates; at-cap intakes escalate without running the panel; a PANEL-less thinker escalates, never proceeds |
+| gate-i5-intake-lens-degrade | green | Intake with no Fugu key + no codex degrades the lens to none loudly; intake still completes |
