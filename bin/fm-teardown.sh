@@ -12,6 +12,11 @@
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# A task whose meta records base= (a ship task dispatched with fm-spawn.sh --base)
+# treats that branch, not the default branch, as its landing target: the
+# content-in-default fallback checks content-in-base, and the local-only
+# merged-into-local-default acceptance becomes merged-into-the-recorded-base.
+# Genuinely unlanded work still refuses; absent base= keeps today's behavior.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -81,6 +86,9 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+# base= is recorded by fm-spawn --base for ship tasks landing into a non-default
+# branch; absent for every task dispatched without it (default-branch behavior).
+BASE_BRANCH=$(grep '^base=' "$META" | cut -d= -f2- || true)
 
 default_branch() {
   local ref branch
@@ -128,6 +136,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
+
+# The branch a ship task's work lands into: the task's recorded base= when
+# present, else the project's default branch. Fails only on the default-branch
+# path when no default branch can be determined.
+landing_branch() {
+  if [ -n "$BASE_BRANCH" ]; then
+    printf '%s\n' "$BASE_BRANCH"
+    return 0
+  fi
+  default_branch
+}
 
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir
@@ -235,16 +254,17 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date landing branch (the
+# recorded base= branch, else the default branch)? Fetches first, then 3-way
+# merges the landing branch with HEAD: when HEAD introduces nothing the landing
+# branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the landing branch's tree. This isolates branch-only changes,
+# so unrelated commits the landing branch gained past the merge-base do not count
+# as "added". Returns non-zero when inconclusive (no landing ref, or a merge
+# conflict), so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  name=$(landing_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -263,8 +283,9 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# landing branch - the recorded base= branch, else the default branch (fallback,
+# which also covers the no-PR and gh-error paths). False only for genuinely
+# unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
@@ -723,9 +744,9 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
       # local-only ships have no remote in the common case, so the "on a remote"
       # test above is expected to be non-empty. The work is safe once it is merged
-      # into the local default branch (firstmate does that merge on the captain's
-      # approval). Refuse until then.
-      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
+      # into the local landing branch - the recorded base= branch, else the default
+      # branch (firstmate does that merge on the captain's approval). Refuse until then.
+      DEFAULT=$(landing_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
       unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
       if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
         echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
