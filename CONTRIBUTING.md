@@ -50,6 +50,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Bash 3.2 has a parser bug where a heredoc nested inside a `$(...)` command substitution mis-scans a bare apostrophe in the body, hunting for a matching quote past the heredoc's own terminator until it hits a spurious "unexpected EOF" past real end-of-file.
   Use `read -r -d '' VAR <<EOF ... EOF || true` instead; the trailing `|| true` absorbs `read`'s expected exit-1 from hitting EOF without its NUL delimiter.
   This form is immune because the heredoc is a plain redirection target, not wrapped in a command substitution.
+  Also, under `set -u`, bash 3.2 treats `"${arr[@]}"` on a possibly-empty array as an unbound-variable error, unlike bash 4.4+.
+  Guard it with `"${arr[@]+"${arr[@]}"}"` wherever the array can be empty.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant docs, following `docs/herdr-backend.md` for non-tmux backends.
 - In Markdown, put each full sentence on its own line.
