@@ -84,7 +84,7 @@ With the default tmux backend, run it inside tmux for the best experience: launc
 Outside tmux, default-backend crewmates land in a detached `firstmate` session you can attach to.
 When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
 With experimental herdr, attach to the selected `HERDR_SESSION` and switch between firstmate-home workspaces.
-The primary home uses `firstmate`; each secondmate home uses `firstmate-<secondmate-id>`, with that home's task tabs inside its own space.
+The primary home uses `firstmate`; each secondmate home uses `2ndmate-<secondmate-id>`, with that home's task tabs inside its own space.
 
 ## How It Works
 

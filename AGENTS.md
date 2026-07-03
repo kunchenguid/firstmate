@@ -111,7 +111,7 @@ state/               volatile runtime signals; gitignored
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
 For the tmux backend, the task window is always named `fm-<id>`.
 For the herdr backend, the task tab is labeled `fm-<id>` and the recorded `window=` target is `<herdr-session>:<pane-id>`.
-For the herdr backend, task tabs live inside the current firstmate home's workspace: `firstmate` for the primary, `firstmate-<secondmate-id>` for a secondmate home.
+For the herdr backend, task tabs live inside the current firstmate home's workspace: `firstmate` for the primary, `2ndmate-<secondmate-id>` for a secondmate home.
 For a primary-launched `--secondmate` spawn, `fm-spawn.sh` resolves that workspace from the target secondmate home, not the primary home.
 
 ## 3. Bootstrap (run at every session start)

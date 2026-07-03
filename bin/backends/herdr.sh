@@ -58,7 +58,7 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # label (docs/herdr-backend.md "Task container shape"). The PRIMARY home (no
 # secondmate marker) resolves to the constant "firstmate", byte-identical to
 # every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "firstmate-<secondmate-id>", so its tasks land in their own
+# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
 # workspace, obviously distinguishable from the primary's (and from every
 # other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
 # every call rather than cached at source time: FM_HOME is the home's own
@@ -72,7 +72,7 @@ fm_backend_herdr_workspace_label() {
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
-      printf 'firstmate-%s' "$id"
+      printf '2ndmate-%s' "$id"
       return 0
     fi
   fi
