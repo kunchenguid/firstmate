@@ -7,7 +7,7 @@ It is intentionally small: enough for upstream review of the adapter boundary, m
 
 Orca is a proposed runtime session and worktree backend for firstmate.
 It is distinct from the crewmate harness.
-The harness is the agent process firstmate launches inside a task endpoint, such as `claude`, `codex`, `opencode`, `pi`, or `grok`.
+The harness is the agent process firstmate launches inside a task endpoint, such as `claude`, `codex`, `opencode`, `pi`, `grok`, or `cursor`.
 The runtime backend owns the endpoint and worktree lifecycle underneath that harness.
 
 The current verified backends are `tmux` and experimental `herdr`.
