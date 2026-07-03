@@ -286,8 +286,10 @@ fm_backend_kill() {  # <backend> <target>
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown, the fm-watch.sh contract's cue to fall back
-# to its own pane-hash + FM_BUSY_REGEX detection, unchanged from P1.
+# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
+# uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
+# fm-crew-state.sh also corroborates native idle verdicts before treating a
+# no-run crew as not busy.
 fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
