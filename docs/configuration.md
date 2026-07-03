@@ -50,6 +50,11 @@ That evidence policy is specific to the firstmate repo: target projects may legi
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
 It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
 
+## No-mistakes gate refresh (FM_NM_GATE_TIMEOUT)
+
+Before a `no-mistakes` ship spawn, `fm-spawn.sh` calls `fm-nm-gate.sh` to re-run the idempotent `no-mistakes init` against the project clone and refresh the shared gate hook used by all linked worktrees.
+`FM_NM_GATE_TIMEOUT` bounds that best-effort refresh; missing tooling, init failure, or timeout warns but does not block the spawn.
+
 ## Captain preferences (data/captain.md)
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
