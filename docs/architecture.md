@@ -167,6 +167,9 @@ Durable project-intrinsic agent knowledge lives in each project's committed `AGE
 Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (project memory ownership).
 
+Generated ship briefs also carry a UI-evidence contract: for UI-affecting changes, capture rendered evidence (a Storybook/browser screenshot, Playwright screenshot, short video/GIF, or rendered artifact) or state why none was practical, in the `done`/PR-ready status.
+This is a lightweight reporting expectation relayed alongside the outcome, not repo-stored evidence or a CI/PR-template blocker; scout briefs skip it since their deliverable is a report, not a committed change.
+
 ## Operational memory routing
 
 `/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
