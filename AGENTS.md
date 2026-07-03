@@ -331,6 +331,10 @@ For new captain-initiated work, run the grill-me interview upstream of the
 brief - the depth of intake sets the ceiling for everything after it. Spec:
 `docs/specs/2026-07-03-wardroom-intake.md`.
 
+Known boundary: a promoted scout (fm-promote flips kind to ship in place, no
+fm-spawn) bypasses this gate today - the scout report stands in for the vetted
+plan. Structural intake for promotions is a queued follow-up.
+
 ### Spawn
 
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.

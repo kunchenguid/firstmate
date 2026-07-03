@@ -79,3 +79,8 @@ PANEL line; default `claude -p --permission-mode bypassPermissions`),
 
 Panel quality judgment; parallel thinkers (P5); Fugu credits (chain degrades
 until topped up); re-verify-at-PR-time (separate open follow-up from P1).
+
+Known boundary (found in W5-W7 review): fm-promote.sh flips a scout to
+ship in place without fm-spawn, bypassing the intake gate - the scout report
+stands in for the vetted plan. Structural intake for promotions = queued
+follow-up.
