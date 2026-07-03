@@ -156,8 +156,9 @@ parse_pr_url() {
   [ "${rest%%/*}" = pull ] || return 1
   rest=${rest#pull/}
   num=${rest%%[/?#]*}
-  case "$owner:$repo:$num" in *$'\n'*|*' '*|*::*|*:|::* ) return 1 ;; esac
-  case "$num" in ''|*[!0-9]*) return 1 ;; esac
+  case "$owner" in ''|*$'\n'*|*' '*) return 1 ;; esac
+  case "$repo" in ''|*$'\n'*|*' '*) return 1 ;; esac
+  case "$num" in ''|*[!0-9]*|*$'\n'*|*' '*) return 1 ;; esac
   printf '%s\t%s\t%s\n' "$owner" "$repo" "$num"
 }
 
@@ -173,7 +174,9 @@ all_pr_tasks() {
     id=$(basename "$meta" .meta)
     pr=$(meta_value pr "$meta")
     window=$(meta_value window "$meta")
-    [ -n "$pr" ] && [ -n "$window" ] || continue
+    if [ -z "$pr" ] || [ -z "$window" ]; then
+      continue
+    fi
     printf '%s\n' "$id"
   done
 }
@@ -347,7 +350,9 @@ process_task() {
   while IFS= read -r event; do
     [ -n "$event" ] || continue
     key=$(printf '%s' "$event" | jq -r '.type + ":" + .id' 2>/dev/null) || continue
-    [ -n "$key" ] && [ "$key" != null ] || continue
+    if [ -z "$key" ] || [ "$key" = null ]; then
+      continue
+    fi
     grep -qxF "$key" "$seen" 2>/dev/null && continue
     author=$(printf '%s' "$event" | jq -r '.author // ""')
     if is_ignored_author "$author"; then

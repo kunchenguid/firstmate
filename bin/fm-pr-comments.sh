@@ -84,7 +84,9 @@ list_pr_tasks() {
     id=$(basename "$meta" .meta)
     pr=$(meta_value pr "$meta")
     window=$(meta_value window "$meta")
-    [ -n "$pr" ] && [ -n "$window" ] || continue
+    if [ -z "$pr" ] || [ -z "$window" ]; then
+      continue
+    fi
     printf '%s\t%s\t%s\n' "$id" "$window" "$pr"
   done
 }
