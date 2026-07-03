@@ -1,6 +1,7 @@
 # Codex App backend contract
 
-Status: blocked for Firstmate as a selectable shell backend. The Codex Desktop host-tool loop works, including status-file writes, but Firstmate does not yet have a supported shell-callable bridge to those host tools.
+Status: blocked for Firstmate as a selectable shell backend because Codex Desktop does not currently expose a supported shell-callable API or CLI bridge to the verified host tools.
+The Codex Desktop host-tool loop works, including status-file writes.
 
 This document replaces the earlier passive visible-thread ledger shape. A manual ledger is not a backend.
 
@@ -60,22 +61,23 @@ archive:
 
 Result: a Desktop-owned Codex thread can write Firstmate status files when the prompt gives it the absolute status path and the Desktop permission context can write that checkout. The return channel is real at the Codex Desktop host-tool layer.
 
-## Shell-backend blocker
+## Codex Desktop API blocker
 
 Firstmate's backend scripts are Bash entry points. They can call `tmux`, `herdr`, `zellij`, and primitive Orca CLI surfaces directly. The Codex Desktop host tools verified above are available to the Codex Desktop conversation, not to arbitrary Firstmate subprocesses.
+The missing piece is therefore a supported Codex Desktop transport that a Bash backend can call, not another Firstmate-local ledger.
 
-The shell bridge check found useful pieces but not a supported backend transport:
+The available Codex CLI and app-server probes found useful pieces but not a supported visible-thread backend transport:
 
 - `codex app-server --stdio` exposes JSON-RPC methods such as `thread/start`, `turn/start`, `thread/read`, and `thread/archive`.
 - A one-shot stdio probe could create a thread record, and `thread/archive` worked through that same stdio process.
 - The managed daemon path was unavailable in this Desktop install.
 - A raw proxy attempt against the Desktop control socket did not accept plain JSON-RPC framing.
 
-That is not enough to add `codex-app` to `FM_BACKEND_KNOWN` or `FM_BACKEND_SPAWN`. A Firstmate backend must be able to create a thread, start or continue turns, read live state while turns run, and archive/stop the same endpoint through a stable shell-callable API. Shipping a local ledger would only record intentions; it would not supervise the actual Desktop thread.
+That is not enough to add `codex-app` to `FM_BACKEND_KNOWN` or `FM_BACKEND_SPAWN`. A Firstmate backend must be able to create a thread, start or continue turns, read live state while turns run, and archive/stop the same endpoint through a Codex Desktop-supported shell-callable API. Shipping a local ledger would only record intentions; it would not supervise the actual Desktop thread.
 
-## Required bridge before implementation
+## Required Codex Desktop bridge
 
-A future Codex App adapter should be implemented only after one of these exists:
+Firstmate should implement a Codex App adapter only after Codex Desktop exposes one of these supported interfaces:
 
 - A supported CLI wrapper around the Desktop host tools: create thread, send message, read transcript/state, archive thread.
 - A documented JSON-RPC or MCP transport that Firstmate can call from Bash with stable request/response framing.

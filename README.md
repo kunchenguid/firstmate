@@ -109,7 +109,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
-`codex-app` is not a runtime backend yet; the verified Codex Desktop host-tool smoke and blocked Codex Desktop/OpenAI shell bridge contract live in [docs/codex-app-backend.md](docs/codex-app-backend.md).
+`codex-app` is not a runtime backend yet; the verified Codex Desktop host-tool smoke and required Codex Desktop/OpenAI shell-callable API or CLI bridge live in [docs/codex-app-backend.md](docs/codex-app-backend.md).
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
@@ -145,7 +145,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
-- [docs/codex-app-backend.md](docs/codex-app-backend.md) - verified Codex Desktop host-tool smoke and the blocked shell-backend contract.
+- [docs/codex-app-backend.md](docs/codex-app-backend.md) - verified Codex Desktop host-tool smoke and the required Codex Desktop/OpenAI shell-callable API or CLI bridge.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified Claude Code Stop-hook mechanism, scoping, and known gaps.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.

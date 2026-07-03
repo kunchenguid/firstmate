@@ -475,7 +475,7 @@ bin/fm-spawn.sh <id> projects/<repo> --backend herdr  # experimental herdr backe
 bin/fm-spawn.sh <id> projects/<repo> --backend zellij # experimental zellij backend (docs/zellij-backend.md); version-gates at spawn
 bin/fm-spawn.sh <id> projects/<repo> --backend orca   # experimental Orca backend (docs/orca-backend.md); Orca owns worktree + terminal; Escape unsupported
 bin/fm-spawn.sh <id> projects/<repo> --backend cmux   # experimental cmux backend (docs/cmux-backend.md); GUI-first macOS-only, treehouse still owns worktree; requires a one-time socket-access setup (docs/cmux-backend.md "Setup")
-# backend=codex-app is not accepted yet; docs/codex-app-backend.md records the blocked Codex Desktop/OpenAI shell bridge contract
+# backend=codex-app is not accepted yet; docs/codex-app-backend.md records the required Codex Desktop/OpenAI shell-callable API or CLI bridge
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
