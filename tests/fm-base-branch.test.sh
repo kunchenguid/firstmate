@@ -13,14 +13,16 @@
 #             branch and points local-only landing text at it; no flag keeps the
 #             plain default-branch step; --scout/--secondmate + --base refuse.
 #   review:   base= diffs against the local base branch (no origin) or
-#             origin/<base> (remote-backed); no base= keeps the default branch.
+#             origin/<base> (remote-backed); no base= keeps the default branch;
+#             a base branch missing from origin errors naming the branch.
 #   merge:    base= fast-forwards the base branch (default branch untouched),
 #             refuses a checkout not on the base branch, refuses divergence with
 #             the same rebase advice, refuses a missing base branch.
 #   teardown: local-only work merged into the recorded base branch is landed;
 #             work merged nowhere (or only into the default branch) still
-#             refuses; the content-landed fallback checks origin/<base>, not
-#             origin/<default>.
+#             refuses; a recorded base branch that no longer exists refuses
+#             instead of passing unlanded work; the content-landed fallback
+#             checks origin/<base>, not origin/<default>.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -290,6 +292,31 @@ EOF
   pass "fm-review-diff fetches and diffs against origin/<base> for remote-backed projects"
 }
 
+test_review_diff_errors_on_base_missing_from_origin() {
+  local rec case_dir default out status
+  rec=$(make_base_project_case review-missing-origin-base)
+  IFS='|' read -r case_dir default <<EOF
+$rec
+EOF
+  # Remote-backed project whose origin lacks the base branch: the fetch of
+  # origin/<base> must fail with an explicit error naming the branch, not die
+  # on git's raw fatal message. The bare clone starts with every branch, so
+  # drop feature from it.
+  fm_git_add_origin "$case_dir/project" "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature
+  git -C "$case_dir/origin.git" symbolic-ref HEAD "refs/heads/$default"
+  write_task_meta "$case_dir" no-mistakes feature
+
+  set +e
+  out=$(run_with_state "$case_dir" "$REVIEW" task-x1 --stat 2>&1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "review-diff should error when the base branch is missing from origin"
+  assert_contains "$out" "recorded base branch 'feature' does not exist on origin" \
+    "missing-origin-base error did not name the base branch"
+  pass "fm-review-diff errors explicitly when the recorded base branch is missing from origin"
+}
+
 test_review_diff_without_base_keeps_default_branch() {
   local rec case_dir default out
   rec=$(make_base_project_case review-default)
@@ -461,6 +488,32 @@ EOF
   pass "teardown still refuses base-branch work merged only into the default branch"
 }
 
+test_teardown_refuses_missing_base_branch() {
+  local rec case_dir default fakebin rc
+  rec=$(make_base_project_case td-missing-base)
+  IFS='|' read -r case_dir default <<EOF
+$rec
+EOF
+  fakebin=$(add_teardown_mocks "$case_dir")
+  # The recorded base branch does not exist: `git log --not <missing>` errors
+  # (swallowed), so without an existence check the unmerged work would read as
+  # merged and teardown would destroy it. It must refuse instead.
+  write_task_meta "$case_dir" local-only nonexistent-base
+
+  set +e
+  run_teardown "$case_dir" "$fakebin" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "teardown should refuse when the recorded base branch does not exist"
+  grep -q REFUSED "$case_dir/stderr" || fail "td-missing-base: no REFUSED line in stderr"
+  grep -q "recorded base branch 'nonexistent-base' does not exist" "$case_dir/stderr" \
+    || fail "td-missing-base: refusal did not name the missing base branch"
+  [ -d "$case_dir/wt" ] || fail "td-missing-base: worktree was removed despite the refusal"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "td-missing-base: task branch was deleted despite the refusal"
+  pass "teardown refuses a recorded base branch missing from the project instead of passing unlanded work"
+}
+
 # Land <file>=<content> as a squash-style commit on origin's <branch> via a
 # separate clone, so the task branch's own commits stay unreachable.
 land_on_origin_branch() {
@@ -524,6 +577,7 @@ test_brief_without_base_keeps_default_step
 test_brief_refuses_base_for_scout_and_secondmate
 test_review_diff_uses_recorded_base_locally
 test_review_diff_uses_origin_base_when_remote_backed
+test_review_diff_errors_on_base_missing_from_origin
 test_review_diff_without_base_keeps_default_branch
 test_merge_local_fast_forwards_base_branch
 test_merge_local_refuses_checkout_not_on_base
@@ -531,4 +585,5 @@ test_merge_local_refuses_diverged_base
 test_merge_local_refuses_missing_base_branch
 test_teardown_accepts_local_only_work_merged_into_base
 test_teardown_refuses_local_only_work_not_merged_into_base
+test_teardown_refuses_missing_base_branch
 test_teardown_content_fallback_checks_base_not_default

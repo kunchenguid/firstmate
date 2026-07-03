@@ -17,6 +17,11 @@
 #   secondmate home has no task branch), so a base nothing would honor is never
 #   recorded. Absent flag writes no base= line, keeping today's default-branch
 #   behavior byte-identical.
+#   no-mistakes-mode limitation: --base governs the branch starting point, the
+#   review diff, and teardown's landed-work checks, but the no-mistakes pipeline
+#   owns PR creation and still opens the PR against its configured push target
+#   (typically the default branch) - the PR's landing target is NOT redirected.
+#   The end-to-end --base flows are local-only and direct-PR.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -

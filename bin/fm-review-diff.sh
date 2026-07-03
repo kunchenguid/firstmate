@@ -83,7 +83,14 @@ fi
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet
+  if ! git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet; then
+    if [ -n "$BASE_BRANCH" ]; then
+      echo "error: recorded base branch '$TARGET' does not exist on origin for $PROJ (or the fetch failed)" >&2
+    else
+      echo "error: cannot fetch origin/$TARGET for $PROJ" >&2
+    fi
+    exit 1
+  fi
   BASE="origin/$TARGET"
 else
   BASE="$TARGET"

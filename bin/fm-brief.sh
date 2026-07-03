@@ -15,6 +15,11 @@
 #   landing wording at it. Pair it with fm-spawn.sh --base so the task's meta
 #   records the same branch. Refused for --scout and --secondmate. Without the
 #   flag the output stays byte-identical to the default-branch scaffold.
+#   no-mistakes-mode limitation: --base shapes only the branch starting point
+#   in the scaffold; the no-mistakes pipeline owns PR creation and opens the PR
+#   against its configured push target (typically the default branch), so the
+#   PR's landing target is NOT redirected. The end-to-end --base flows are
+#   local-only and direct-PR.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -208,11 +213,14 @@ if [ -n "$BASE" ]; then
   LOCAL_TARGET=$BASE
   FF_ONTO="the base branch"
   PR_BASE_NOTE=" targeting base branch \`$BASE\`, not the default branch"
+  NM_BASE_NOTE="
+Note: your branch starts from the base branch \`$BASE\`, but the pipeline opens its PR against the repo's configured push target (typically the default branch) - it does not retarget the PR at \`$BASE\`."
 else
   BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
   LOCAL_TARGET=main
   FF_ONTO="the current default branch"
   PR_BASE_NOTE=""
+  NM_BASE_NOTE=""
 fi
 
 case "$MODE" in
@@ -249,7 +257,7 @@ EOF
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.$NM_BASE_NOTE
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
