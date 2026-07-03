@@ -75,7 +75,13 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  # The trailing colon forces <ses> to parse as a session name: without it, an
+  # all-digit session name (fm_backend_tmux_container_ensure reuses the current
+  # session's name, which can be numeric) is read as a window index in the
+  # *current* session, landing the task window in the wrong session or failing
+  # with "index in use". list-windows above takes a target-session, so its bare
+  # "$ses" is unaffected.
+  tmux new-window -d -t "$ses:" -n "$wname" -c "$proj_abs"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

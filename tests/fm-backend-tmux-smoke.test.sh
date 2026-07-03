@@ -60,6 +60,27 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- all-digit session names ---------------------------------------------------
+# fm_backend_tmux_container_ensure reuses the CURRENT session's name when
+# firstmate itself runs inside tmux, and that name can be all digits. Without
+# the trailing colon in create_task's `-t "$ses:"`, tmux reads a bare numeric
+# target as a window INDEX - forcing the window to that index in the named
+# session, or landing it in a different "current" session entirely. Regression
+# for the fm-spawn numeric-session fix.
+NUMSES="204"
+NUMWIN="fm-numeric1"
+tmux new-session -d -s "$NUMSES" -x 200 -y 50 \
+  || fail "real tmux: all-digit new-session failed"
+fm_backend_tmux_create_task "$NUMSES" "$NUMWIN" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed for an all-digit session name"
+placed=$(tmux list-windows -a -F '#{session_name}:#{window_index}:#{window_name}' | grep ":$NUMWIN\$")
+case "$placed" in
+  "$NUMSES:$NUMSES:"*) fail "all-digit session: window was forced to index $NUMSES instead of the next free index ($placed)" ;;
+  "$NUMSES:"*) : ;;
+  *) fail "all-digit session: task window landed in the wrong session ('$placed')" ;;
+esac
+pass "real tmux: fm_backend_tmux_create_task targets an all-digit session by name, not window index"
+
 # --- send text + Enter -------------------------------------------------------
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
