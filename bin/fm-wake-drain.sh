@@ -39,6 +39,26 @@ mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 : > "$FM_WAKE_QUEUE" || exit 1
 
 fm_wake_print_deduped "$DRAIN_TMP" || exit "$?"
+
+# Loop observability (spec: docs/specs/2026-07-03-loop-conformance.md):
+# append one run-log JSON line and stamp STATE.md's Last run. Best-effort and
+# fully guarded - a failed log write must NEVER perturb the drain contract
+# (locking, dedup output, exit codes). Disable with FM_LOOP_LOG=0.
+if [ "${FM_LOOP_LOG:-1}" != 0 ]; then
+  {
+    items=$(grep -c . "$DRAIN_TMP") || items=0
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '{"run_id":"drain-%s","pattern":"firstmate-watch","duration_s":0,"items_found":%s,"actions_taken":0,"escalations":0,"tokens_estimate":0,"outcome":"report-only","ts":"%s"}\n' \
+      "$(fm_current_pid)" "$items" "$ts" >> "$FM_HOME/loop-run-log.md"
+    if [ -f "$FM_HOME/STATE.md" ]; then
+      stamp_tmp="$FM_HOME/.state-md.stamp.$(fm_current_pid)"
+      sed "s/^Last run:.*/Last run: $ts/" "$FM_HOME/STATE.md" > "$stamp_tmp" \
+        && mv "$stamp_tmp" "$FM_HOME/STATE.md"
+      rm -f "$stamp_tmp"
+    fi
+  } 2>/dev/null || true
+fi
+
 rm -f "$DRAIN_TMP"
 DRAIN_TMP=
 exit 0
