@@ -2,6 +2,8 @@
 name: fmx-respond
 description: Agent-only playbook for handling an X mention in X mode. Use on an "x-mention <request_id>" check: wake - read the stashed mention (with any in_reply_to conversation context); the direct author is the firstmate's own owner (captain) under owner-only routing, so classify it as an actionable request to act on through the normal lifecycle, a question to answer from live fleet state, or a pure acknowledgment to dismiss without replying; act autonomously (escalating only destructive/irreversible/security-sensitive work). For a request that spawns real work, acknowledge first, act, link the task with bin/fm-x-link.sh, and let the completion follow-up post on the done wake; for a question or completed action, post or preview a short public-safe reply with bin/fm-x-reply.sh; for a pure acknowledgment, call bin/fm-x-dismiss.sh. Clear the inbox file only after a successful reply or dismiss. Loaded only when X mode is enabled.
 user-invocable: false
+metadata:
+  internal: true
 ---
 
 # fmx-respond
