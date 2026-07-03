@@ -270,8 +270,9 @@ EOF
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   next_line=$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | head -1 | cut -d: -f1)
 
-  [ -n "$lock_line" ] && [ -n "$boot_line" ] && [ -n "$wake_line" ] && [ -n "$context_line" ] && [ -n "$fleet_line" ] && [ -n "$next_line" ] \
-    || fail "one or more section headers missing from digest: $out"
+  if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] || [ -z "$next_line" ]; then
+    fail "one or more section headers missing from digest: $out"
+  fi
 
   [ "$lock_line" -lt "$boot_line" ] || fail "LOCK did not precede BOOTSTRAP"
   [ "$boot_line" -lt "$wake_line" ] || fail "BOOTSTRAP did not precede WAKE QUEUE"
