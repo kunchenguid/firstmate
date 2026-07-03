@@ -19,10 +19,13 @@
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
-#   auto-detected herdr or cmux spawns print a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected
-#   (always explicit). Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   auto-detected herdr or cmux spawn prints a loud stderr notice;
+#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   codex-app is not a known backend yet; it stays blocked until Codex
+#   Desktop/OpenAI provides a supported shell-callable API or CLI bridge to
+#   create, send to, read, and archive visible Desktop threads. Default tmux
+#   spawns do not write backend= to meta; absent backend= means tmux. cmux does
+#   not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
