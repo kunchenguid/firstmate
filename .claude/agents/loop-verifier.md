@@ -20,3 +20,7 @@ Contract (identical to the fm-verify prompt):
 
 The maker never grades its own homework; you never write code. Your verdict
 lands in `state/<id>.verdict` and gates fm-merge-local / fm-pr-check.
+
+Do NOT invoke this agent directly for ad-hoc verification - only
+`bin/fm-verify.sh` provides the lens review, verdict recording, attempt cap,
+and reject relay; a direct invocation bypasses all of them.

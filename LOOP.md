@@ -53,6 +53,10 @@ per-wake accounting is `loop-run-log.md`. Binding operational rules:
 
 ## Readiness
 
-Scored by `loop-audit` (globally installed; gate-l2 pins level ≥ L2). L3 is
-claimed only when `loopActivity` is earned by real instrumented wake drains —
-never asserted.
+Scored by `loop-audit` (global install: `npm i -g @cobusgreyling/loop-audit` —
+gate-l2 exits 2 with this hint when it is missing, the same fail-closed
+pattern as the `ledger` CLI). gate-l2 pins level ≥ L2. L3 is claimed only when
+`loopActivity` is earned by real instrumented wake drains — never asserted.
+Loop observability is main-home-only: secondmate homes (marked
+`.fm-secondmate-home`) skip run-log/STATE writes, keeping their churn out of
+fleet fast-forward syncs.

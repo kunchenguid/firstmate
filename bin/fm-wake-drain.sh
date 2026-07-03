@@ -44,16 +44,21 @@ fm_wake_print_deduped "$DRAIN_TMP" || exit "$?"
 # append one run-log JSON line and stamp STATE.md's Last run. Best-effort and
 # fully guarded - a failed log write must NEVER perturb the drain contract
 # (locking, dedup output, exit codes). Disable with FM_LOOP_LOG=0.
-if [ "${FM_LOOP_LOG:-1}" != 0 ]; then
+# Anchored to the DRAINED QUEUE's home (dirname of $STATE), never a different
+# FM_HOME - so a test draining a temp state dir logs into that temp home, not
+# the repo. Secondmate homes (.fm-secondmate-home marker) skip logging: loop
+# observability belongs to the main firstmate home only.
+LOOP_HOME=$(dirname "$STATE")
+if [ "${FM_LOOP_LOG:-1}" != 0 ] && [ ! -e "$LOOP_HOME/.fm-secondmate-home" ]; then
   {
     items=$(grep -c . "$DRAIN_TMP") || items=0
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     printf '{"run_id":"drain-%s","pattern":"firstmate-watch","duration_s":0,"items_found":%s,"actions_taken":0,"escalations":0,"tokens_estimate":0,"outcome":"report-only","ts":"%s"}\n' \
-      "$(fm_current_pid)" "$items" "$ts" >> "$FM_HOME/loop-run-log.md"
-    if [ -f "$FM_HOME/STATE.md" ]; then
-      stamp_tmp="$FM_HOME/.state-md.stamp.$(fm_current_pid)"
-      sed "s/^Last run:.*/Last run: $ts/" "$FM_HOME/STATE.md" > "$stamp_tmp" \
-        && mv "$stamp_tmp" "$FM_HOME/STATE.md"
+      "$(fm_current_pid)" "$items" "$ts" >> "$LOOP_HOME/loop-run-log.md"
+    if [ -f "$LOOP_HOME/STATE.md" ]; then
+      stamp_tmp="$LOOP_HOME/.state-md.stamp.$(fm_current_pid)"
+      sed "s/^Last run:.*/Last run: $ts/" "$LOOP_HOME/STATE.md" > "$stamp_tmp" \
+        && mv "$stamp_tmp" "$LOOP_HOME/STATE.md"
       rm -f "$stamp_tmp"
     fi
   } 2>/dev/null || true

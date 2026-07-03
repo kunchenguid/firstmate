@@ -60,4 +60,28 @@ out=$(drain); code=$?
 expect_code 0 "$code" "drain must survive an unwritable log target"
 assert_contains "$out" "fm-delta" "drain output intact despite log failure"
 
+# 4. observability anchors to the DRAINED QUEUE's home, never a foreign FM_HOME
+# (regression: the wake-queue suite drains a temp state dir without FM_HOME and
+# must not leak run-log churn into the repo)
+OTHER="$TMP/other-home"; mkdir -p "$OTHER/state"
+printf '# s\nLast run: never\n' > "$OTHER/STATE.md"; : > "$OTHER/loop-run-log.md"
+printf '1700000004\t5\tsignal\tfm-echo\tstatus\n' > "$OTHER/state/.wake-queue"
+out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$OTHER/state" \
+  "$ROOT/bin/fm-wake-drain.sh"); code=$?
+expect_code 0 "$code" "cross-home drain must exit 0"
+assert_grep '"run_id"' "$OTHER/loop-run-log.md" "log lands in the drained queue's home"
+assert_no_grep "Last run: never" "$OTHER/STATE.md" "stamp lands in the drained queue's home"
+
+# 5. secondmate homes skip loop observability entirely
+SM="$TMP/sm-home"; mkdir -p "$SM/state"
+touch "$SM/.fm-secondmate-home"
+printf '# s\nLast run: never\n' > "$SM/STATE.md"; : > "$SM/loop-run-log.md"
+printf '1700000005\t6\tsignal\tfm-foxtrot\tstatus\n' > "$SM/state/.wake-queue"
+out=$(FM_ROOT_OVERRIDE='' FM_HOME="$SM" FM_STATE_OVERRIDE="$SM/state" \
+  "$ROOT/bin/fm-wake-drain.sh"); code=$?
+expect_code 0 "$code" "secondmate drain must exit 0"
+assert_contains "$out" "fm-foxtrot" "secondmate drain output intact"
+[ ! -s "$SM/loop-run-log.md" ] || fail "secondmate home must not accrue run-log entries"
+assert_grep "Last run: never" "$SM/STATE.md" "secondmate STATE.md must not be stamped"
+
 pass "L1 drain instrumentation"

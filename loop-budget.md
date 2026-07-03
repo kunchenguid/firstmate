@@ -2,8 +2,11 @@
 
 The watcher spends zero tokens; budget = wake discipline + council spend.
 
-- Max unprompted wakes handled autonomously per day: 48 (heartbeat cadence
-  bound; more than that means a runaway status channel — investigate).
+- Wake volume alarm threshold (a chosen operational alarm, NOT a code-enforced
+  cap): investigate if autonomous wake handling exceeds ~50/day. For scale:
+  the heartbeat base is 600s (144/day ceiling, and it backs off exponentially
+  when idle, so real heartbeat traffic is far lower); signal/stale/check wakes
+  are event-driven and uncapped by design.
 - Council calls per task (bounded by design): intake ≤ 3 runs (2 revises then
   escalate), verify ≤ 3 attempts (then escalate). No unbounded retry anywhere.
 - Foreign lens spend: Fugu is prepaid-credit-capped at the account level;
