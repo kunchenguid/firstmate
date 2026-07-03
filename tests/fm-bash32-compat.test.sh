@@ -60,6 +60,7 @@ for script in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
     fail "bash -n ($SYSBASH): ${script#"$ROOT"/}: $err"
   fi
 done
+# shellcheck disable=SC2016  # single quotes are deliberate: $BASH_VERSION expands in the system bash, not here
 pass "all bin/ scripts parse under $SYSBASH ($("$SYSBASH" -c 'echo "$BASH_VERSION"'))"
 
 # --- 2. bash 3.2 heredoc-in-$( ) quote lexer ---------------------------------
