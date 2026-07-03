@@ -54,9 +54,16 @@ test_ship_modes_generate_clean_briefs() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "# UI evidence" "$brief" "$id: brief missing UI evidence section"
+    assert_grep "If your change affects UI, capture rendered evidence before done/PR-ready" "$brief" \
+      "$id: brief missing conditional rendered-evidence requirement"
+    assert_grep "Include the artifact path/link in your \`done\` or PR-ready status." "$brief" \
+      "$id: brief missing status artifact path/link requirement"
+    assert_grep "If no rendered evidence was practical, explicitly say why in that status." "$brief" \
+      "$id: brief missing no-evidence explanation requirement"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly with UI evidence guidance"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes

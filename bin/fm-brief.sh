@@ -257,6 +257,11 @@ If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durab
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+# UI evidence
+If your change affects UI, capture rendered evidence before done/PR-ready: a Storybook/browser screenshot, Playwright screenshot, short video/GIF, or rendered artifact.
+Include the artifact path/link in your \`done\` or PR-ready status.
+If no rendered evidence was practical, explicitly say why in that status.
+
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
