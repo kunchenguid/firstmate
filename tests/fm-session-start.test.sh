@@ -307,6 +307,8 @@ EOF
   assert_contains "$out" "working: step 3" "default status tail (5 lines) missing an expected recent line"
   assert_not_contains "$out" "working: step 1" "default status tail (5 lines) leaked an older line"
   assert_contains "$out" "$home/state/task-a.status" "digest did not print the full status log path for a deeper read"
+  assert_contains "$out" "Do NOT bulk-read state/*.status now either: their bounded tails were just" "closing reminder does not distinguish bounded status tails"
+  assert_not_contains "$out" "state/*.status now - they were just" "closing reminder still describes status logs as fully printed"
 
   out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"

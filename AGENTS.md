@@ -134,8 +134,9 @@ It composes today's `fm-lock.sh`, `fm-bootstrap.sh`, and `fm-wake-drain.sh` - ca
    The script itself never arms the watcher, because a fire-and-forget arm from inside a script that then exits would be reaped immediately, silently dropping supervision.
 
 **Everything in this digest is read exactly once, at session start.**
-Do not separately run `bin/fm-bootstrap.sh`, `bin/fm-lock.sh`, or `bin/fm-wake-drain.sh`, and do not separately read `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/learnings.md`, `data/backlog.md`, any `state/*.meta`, or any `state/*.status` afterward - they were just printed in full, and re-reading them defeats the entire point of collapsing session start into one command.
-Re-read a file only if the digest flagged it `ABSENT` (then rebuild or create it per the guidance in this section and section 6) or its contents looked unparseable or corrupt.
+Do not separately run `bin/fm-bootstrap.sh`, `bin/fm-lock.sh`, or `bin/fm-wake-drain.sh`, and do not separately read `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/learnings.md`, `data/backlog.md`, or any `state/*.meta` afterward - they were just printed in full, and re-reading them defeats the entire point of collapsing session start into one command.
+Do not bulk-read `state/*.status` afterward either: the digest printed bounded tails with full log paths for targeted follow-up when older wake-event history is actually needed.
+Re-read a file only if the digest flagged it `ABSENT` (then rebuild or create it per the guidance in this section and section 6), its contents looked unparseable or corrupt, or an individual full status log is needed for older wake-event history.
 Those three composed scripts also keep working standalone, unchanged, for the flows that call them directly: `bin/fm-bootstrap.sh install <tools>` after consent, `/updatefirstmate`, the afk daemon, and existing tests.
 
 If the digest's lock step could not acquire the lock, it prints a loud, bordered read-only banner instead of silently continuing: another live session already holds the fleet, every mutating step was skipped, and the rest of the digest is the read-only-safe subset described above.
@@ -299,12 +300,13 @@ Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harne
 ## 5. Recovery (run at every session start, after the session-start digest)
 
 You may have been restarted mid-flight.
-Reconcile reality with your records before doing anything else, working entirely from the `bin/fm-session-start.sh` digest section 3 already produced - its lock step, wake-queue drain, and fleet-state digest ARE recovery's data-gathering; do not re-run or re-read any of it here:
+Reconcile reality with your records before doing anything else, working from the `bin/fm-session-start.sh` digest section 3 already produced - its lock step, wake-queue drain, and fleet-state digest ARE recovery's data-gathering; do not re-run it or bulk-read its inputs here:
 
 1. The digest's lock section already tells you whether this session acquired the lock or is operating read-only; act on that exactly as section 3 describes.
 2. The digest's wake-queue section already printed the drained records; keep them as the first work queue for this recovery turn.
 3. The digest's fleet-state section already printed `data/backlog.md`, `data/secondmates.md` (from the context section), every `state/*.meta`, and a bounded tail of every `state/*.status`.
    Treat those status tails as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
+   If older wake-event history matters, read the individual full status log named in the digest instead of bulk-reading every status file.
 4. Use the `window=` values from the digest's `state/*.meta` entries as the live direct-report set, and read the digest's per-task `endpoint: alive|dead` line for each - that cheap check is already done; do not re-probe it yourself.
    Do not sweep every `fm-*` tmux window or herdr tab across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
 5. If the digest reports a recorded direct-report's endpoint as `dead` (or a meta has no `window=`), reconcile it through its meta as described below.
