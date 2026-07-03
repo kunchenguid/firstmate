@@ -45,6 +45,10 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` must pass, and CI enforces it.
+  Scripts must also parse and run under macOS system bash 3.2 (`/bin/bash`), which is what `#!/usr/bin/env bash` resolves to on a stock Mac.
+  Two sharp edges: bash 3.2 lexes quote characters inside heredoc bodies within `$( )` command substitution, so an unmatched `'`, `"`, or `` ` `` there (e.g. a possessive apostrophe in prose) aborts the whole parse; keep such quotes matched, escaped, or reworded.
+  And under `set -u`, bash 3.2 treats an empty array's `"${arr[@]}"` expansion as an unbound variable (fixed in bash 4.4); when an array can be empty at the expansion site, use `${arr[@]+"${arr[@]}"}` or guard on `${#arr[@]}`.
+  `tests/fm-bash32-compat.test.sh` guards the parse-level pattern on every platform; the runtime pattern surfaces when the suite runs on macOS.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant backend guide: `docs/tmux-backend.md`, `docs/herdr-backend.md`, `docs/zellij-backend.md`, `docs/orca-backend.md`, or `docs/cmux-backend.md`.
 - In Markdown, put each full sentence on its own line.

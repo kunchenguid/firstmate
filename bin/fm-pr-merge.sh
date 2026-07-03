@@ -87,4 +87,7 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
+# ${arr[@]+...} guard: macOS bash 3.2 treats an empty array's [@] expansion as
+# unbound under set -u (fixed in bash 4.4), and merge_args is empty whenever the
+# caller passed an explicit merge method.
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"

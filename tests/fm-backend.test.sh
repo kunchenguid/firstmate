@@ -81,16 +81,22 @@ SH
 
 # The commit this branch started from - the P1 "current main" baseline.
 resolve_base_ref() {
-  local ref base
+  # Take the NEWEST merge-base across all candidate refs, not the first ref
+  # that exists: pooled treehouse clones keep their local default refs frozen
+  # at clone time, so a stale local `main` can lag origin/main by many commits
+  # and would pin the baseline to a genuinely older bin/, failing conformance
+  # on differences that are real upstream changes rather than refactor drift.
+  local ref base best=
   for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
-    if git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null; then
-      base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
-      [ -n "$base" ] || continue
-      printf '%s\n' "$base"
-      return 0
+    git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null || continue
+    base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
+    [ -n "$base" ] || continue
+    if [ -z "$best" ] || git -C "$ROOT" merge-base --is-ancestor "$best" "$base" 2>/dev/null; then
+      best=$base
     fi
   done
-  return 1
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
 }
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
