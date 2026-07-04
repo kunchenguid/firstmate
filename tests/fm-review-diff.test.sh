@@ -54,7 +54,6 @@ stale_and_pr_commits() {
   printf 'stale-local\n' > "$case_dir/wt/feature.txt"
   git -C "$case_dir/wt" add feature.txt
   git -C "$case_dir/wt" commit -qm "stale local branch"
-  STALE_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
 
   git -C "$case_dir/wt" checkout -q -b pr-head-tmp
   printf 'pr-fixed\n' > "$case_dir/wt/feature.txt"
