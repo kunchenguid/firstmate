@@ -362,6 +362,25 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+# A recorded worktree is safe to act on (branch cleanup + `treehouse return`)
+# only when it is a real, registered worktree of the task's project AND is not
+# the firstmate repo root or the active firstmate home. The second guard matters
+# for firstmate-on-itself tasks whose meta was written before the worktree-path
+# fix: such a meta can record the runtime home (a genuine worktree of the
+# firstmate repo, so registered) as the "worktree", and teardown must never
+# detach/branch-delete or hand that runtime home to `treehouse return`.
+safe_task_worktree() {  # <project> <wt>
+  local project=$1 wt=$2 wt_abs root_abs home_abs
+  worktree_registered_for_project "$project" "$wt" || return 1
+  wt_abs=$(canonical_existing_dir "$wt") || return 1
+  root_abs=$(cd "$FM_ROOT" && pwd -P) || return 1
+  [ "$wt_abs" != "$root_abs" ] || return 1
+  if home_abs=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
+    [ "$wt_abs" != "$home_abs" ] || return 1
+  fi
+  return 0
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -782,19 +801,30 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+elif [ "$KIND" != secondmate ]; then
+  # Return the leased worktree to the pool. Degrade gracefully rather than
+  # aborting: a missing, stale, or non-treehouse WT (e.g. a meta written before
+  # the worktree-path fix, which recorded the launch cwd instead of the leased
+  # worktree) must not brick teardown - warn and fall through so the window is
+  # still killed and volatile state cleared.
+  if [ -n "$WT" ] && [ -d "$WT" ] && safe_task_worktree "$PROJ" "$WT"; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
+    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    # Kills remaining processes in the worktree (including the agent), resets, returns
+    # to pool. treehouse resolves the pool from the working directory, so run it from
+    # the project. Non-fatal: a failed return warns rather than aborting teardown.
+    if ! ( cd "$PROJ" && treehouse return --force "$WT" ); then
+      echo "warning: treehouse return failed for worktree '$WT'; the pool slot may still be leased - inspect with 'treehouse status'. Continuing teardown." >&2
+    fi
+  else
+    echo "warning: recorded worktree '${WT:-<empty>}' for $ID is missing, not a directory, or not a treehouse-managed worktree of $PROJ; skipping worktree return and continuing teardown (window will be killed and volatile state cleared)." >&2
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project.
-  ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
 if [ "$BACKEND" != orca ]; then

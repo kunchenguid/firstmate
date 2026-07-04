@@ -42,7 +42,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # fm-spawn leases the worktree with `treehouse get --lease`, whose stdout is
+  # the leased path. Echo the same worktree run_spawn advertises via
+  # FM_FAKE_PANE_PATH so WT resolves to the real isolated git worktree.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 

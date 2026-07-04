@@ -709,7 +709,17 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  # fm-spawn leases the worktree out-of-band with `treehouse get --lease` and
+  # reads the path from stdout; echo the fake worktree so WT resolves to it.
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+{ printf 'treehouse'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+if [ "\${1:-}" = get ]; then
+  printf '%s\\n' "$wt"
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -725,43 +735,49 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 }
 
 test_spawn_conformance_old_vs_new() {
-  local old_bin fb proj wt data id log_old log_new out_old out_new
-  local state_old state_new config_old config_new
-  old_bin=$(build_old_bin spawn-old)
+  # NOTE: fm-spawn's worktree resolution intentionally changed after the P1
+  # backend extraction: it no longer sends `treehouse get` into the pane and
+  # polls pane_current_path (which could latch onto a spurious cwd like the
+  # firstmate home). It now leases the worktree out-of-band with
+  # `treehouse get --lease` - whose stdout is the authoritative leased path -
+  # and sends `cd <worktree>` into the pane. So this is no longer a byte-
+  # identical old-vs-new comparison for spawn; it asserts the new mechanism
+  # records the leased worktree and drives the pane correctly.
+  local fb proj wt data id log_new out_new state_new config_new
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
   id="spawnconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake" "$wt")
   mkdir -p "$data/$id"
   printf 'test brief content\n' > "$data/$id/brief.md"
-  state_old="$TMP_ROOT/spawn-state-old"; state_new="$TMP_ROOT/spawn-state-new"
-  config_old="$TMP_ROOT/spawn-config-old"; config_new="$TMP_ROOT/spawn-config-new"
-  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
-  log_old="$TMP_ROOT/spawn-old.log"; log_new="$TMP_ROOT/spawn-new.log"
+  state_new="$TMP_ROOT/spawn-state-new"; config_new="$TMP_ROOT/spawn-config-new"
+  mkdir -p "$state_new" "$config_new"
+  log_new="$TMP_ROOT/spawn-new.log"
 
-  out_old=$(run_spawn_case "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$proj" -- "$id" "$proj" claude 2>&1)
-  local rc_old=$?
   out_new=$(run_spawn_case "$ROOT" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$proj" -- "$id" "$proj" claude 2>&1)
   local rc_new=$?
 
-  expect_code 0 "$rc_old" "old fm-spawn.sh should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-spawn.sh should succeed"$'\n'"$out_new"
-  [ "$out_old" = "$out_new" ] || fail "fm-spawn.sh stdout differs old vs new"$'\n'"--- old ---"$'\n'"$out_old"$'\n'"--- new ---"$'\n'"$out_new"
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
-    "spawn output missing the expected summary line"
+    "spawn output missing the expected summary line (should record the leased worktree)"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
-    || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
+  # The leased worktree is recorded in the task meta verbatim.
+  assert_grep "worktree=$wt" "$state_new/$id.meta" "spawn meta did not record the leased worktree path"
+  # The worktree was leased out-of-band (get --lease), not sent into the pane.
+  assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''get'$'\x1f''--lease' \
+    "spawn did not lease the worktree with treehouse get --lease"
+  # The pane is moved into the leased worktree with a cd send.
+  assert_contains "$(cat "$log_new")" $'\x1f'"cd '$wt'" \
+    "spawn did not send 'cd <worktree>' into the pane"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
-  assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
   assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
     "spawn tmux log missing the literal launch-command send"
 
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new for a ship-task claude spawn"
+  pass "fm-spawn.sh: leases the worktree with treehouse get --lease, records it in meta, and drives the pane (cd + launch)"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------

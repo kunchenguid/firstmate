@@ -786,23 +786,40 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$T" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  # Authoritatively LEASE the worktree instead of scraping the pane's cwd.
+  #
+  # The prior approach sent `treehouse get` into the pane and then polled
+  # `pane_current_path` until it differed from PROJ_ABS, taking that first
+  # differing path as the worktree. That heuristic is unreliable: the pane can
+  # momentarily report a directory that is neither PROJ_ABS nor the worktree -
+  # most commonly the session's default working directory, which is the
+  # firstmate home where fm-spawn runs - before `treehouse get` has entered its
+  # subshell. WT then latched onto that spurious path (observed: every crew's
+  # meta recorded worktree=<firstmate home> instead of the real leased
+  # worktree), which broke fm-teardown (`treehouse return` on a non-pool path),
+  # merge detection, and branch resolution.
+  #
+  # `treehouse get --lease` reserves a pool worktree durably and prints ONLY
+  # its absolute path to stdout (all banners go to stderr), so WT is exactly
+  # the leased worktree path. treehouse resolves the pool from the working
+  # directory, so run it from the project, mirroring fm-teardown's
+  # `treehouse return`. A leased worktree is protected from `treehouse prune`
+  # for the task's lifetime; teardown's `treehouse return --force "$WT"`
+  # releases it, exactly as it did for an interactively-acquired worktree.
+  set +e
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID" 2>/dev/null)
+  TH_STATUS=$?
+  set -e
+  if [ "$TH_STATUS" -ne 0 ] || [ -z "$WT" ]; then
+    echo "error: treehouse get --lease did not yield a worktree for $PROJ_ABS; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "treehouse get --lease" "$T"
+
+  # Move the task pane into the leased worktree so the agent runs there; the
+  # GOTMPDIR export and launch command below are sent into this same shell.
+  spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

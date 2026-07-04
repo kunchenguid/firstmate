@@ -655,6 +655,78 @@ test_gh_error_and_content_absent_refuses() {
   pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
+# Override the treehouse mock so `treehouse return` fails, simulating treehouse
+# refusing a worktree it does not manage (the "is not managed by treehouse"
+# choke the robustness fix must survive).
+add_treehouse_return_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  echo "error: worktree is not managed by treehouse" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# A meta that records a directory which is NOT a registered worktree of the
+# project (reproduces a pre-fix meta that recorded the launch cwd / firstmate
+# home instead of the leased worktree) must not brick teardown: it should skip
+# the worktree return, warn, and still kill the window and clear volatile state.
+test_stale_nontreehouse_worktree_degrades_gracefully() {
+  local case_dir rc other
+  case_dir=$(make_case stale-nontreehouse)
+  # Standalone clone of origin: HEAD is on origin/main (landed, so the
+  # landed-work check passes to the worktree-return step) but the clone is not a
+  # worktree registered in the project's `git worktree list`.
+  other="$case_dir/not-a-pool-worktree"
+  git clone -q "$case_dir/origin.git" "$other"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$other" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  add_treehouse_return_failure "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-nontreehouse: teardown must not abort on a non-treehouse worktree"
+  grep -q "not a treehouse-managed worktree" "$case_dir/stderr" \
+    || fail "stale-nontreehouse: expected a graceful warning about the non-treehouse worktree"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "stale-nontreehouse: meta should be cleared after teardown"
+  pass "teardown degrades gracefully when the recorded worktree is not a treehouse worktree"
+}
+
+# When the recorded worktree IS a registered worktree but `treehouse return`
+# itself fails (e.g. already returned, or a transient treehouse error), teardown
+# must warn and continue rather than aborting mid-cleanup.
+test_registered_worktree_return_failure_is_nonfatal() {
+  local case_dir rc
+  case_dir=$(make_case return-failure-nonfatal)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_treehouse_return_failure "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "return-failure-nonfatal: a failed treehouse return must not abort teardown"
+  grep -q "treehouse return failed" "$case_dir/stderr" \
+    || fail "return-failure-nonfatal: expected a non-fatal warning about the failed return"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "return-failure-nonfatal: meta should be cleared after teardown"
+  pass "a failed treehouse return warns but does not abort teardown"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -690,3 +762,5 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_stale_nontreehouse_worktree_degrades_gracefully
+test_registered_worktree_return_failure_is_nonfatal
