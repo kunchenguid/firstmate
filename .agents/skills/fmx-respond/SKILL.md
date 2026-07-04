@@ -159,7 +159,8 @@ Your procedure does not change: compose as usual and call `bin/fm-x-reply.sh ...
 Because the call still succeeds, the loop completes normally (clear the inbox file as in step 2f); the only difference is nothing reaches X.
 This is the mode for end-to-end testing the poll -> compose -> would-post loop without a public tweet.
 Inspect `state/x-outbox/` to see exactly what would have been posted.
-The completion follow-up honors `FMX_DRY_RUN` the same way (it flows through `bin/fm-x-reply.sh --followup`): the would-be follow-up is recorded to `state/x-outbox/` and the link is cleared exactly as a live post would clear it, so the whole acknowledge -> act -> follow-up loop is testable without a public tweet.
+The completion follow-up honors `FMX_DRY_RUN` the same way (it flows through `bin/fm-x-reply.sh --followup`): the would-be follow-up is recorded to `state/x-outbox/`, and the local counter and link mutate exactly as a live post would.
+A non-final dry-run follow-up increments `x_followups` and keeps the link while under the cap; `--final`, the cap, or an expired window clears it, so the whole acknowledge -> act -> follow-up loop is testable without a public tweet.
 
 ## Completion follow-up (posted on milestone and done wakes, not this turn)
 
