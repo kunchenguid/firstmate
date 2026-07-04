@@ -19,7 +19,8 @@ Prerequisites:
 
 Select zellij explicitly with `fm-spawn.sh --backend zellij`, `FM_BACKEND=zellij`, or a local `config/backend` file containing `zellij`.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires one of those three explicit settings.
-A zellij spawn refuses loudly, before touching any repo state, if `zellij` or `jq` is missing or the installed zellij is older than 0.44.
+A zellij spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `zellij` or `jq` is missing or the installed zellij is older than 0.44.
+For `--secondmate` launches, secondmate home sync and inherited-config propagation happen before this spawn-time backend gate.
 
 No first-run provisioning is needed beyond having `zellij` and `jq` on `PATH`; firstmate creates the session and tab it needs on first spawn.
 

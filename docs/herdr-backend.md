@@ -21,7 +21,8 @@ Prerequisites:
 
 Select herdr explicitly with `fm-spawn.sh --backend herdr`, `FM_BACKEND=herdr`, or a local `config/backend` file containing `herdr`.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
-A herdr spawn refuses loudly, before touching any repo state, if `herdr` or `jq` is missing or the installed herdr's protocol is older than verified.
+A herdr spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `herdr` or `jq` is missing or the installed herdr's protocol is older than verified.
+For `--secondmate` launches, secondmate home sync and inherited-config propagation happen before this spawn-time backend gate.
 
 No first-run provisioning is needed beyond having `herdr` and `jq` on `PATH`; firstmate creates the workspace and tab it needs on first spawn.
 

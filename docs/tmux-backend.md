@@ -33,6 +33,8 @@ The first crewmate spawn creates whatever tmux session and window it needs.
 
 Launch your harness from inside a tmux session (`tmux new -s firstmate` or similar, then start your agent).
 Every crewmate window then lands in that same session, where you can watch the crew work in real time or type into any window to intervene.
+When following the commands below, use that session's actual name.
+Inside tmux, `tmux display-message -p '#S'` prints it.
 
 ## Outside tmux: the detached `firstmate` session
 
@@ -48,10 +50,11 @@ tmux attach -t firstmate
 Once attached, each crewmate is its own window named `fm-<id>`:
 
 ```sh
-tmux list-windows -t firstmate          # see every crew window
-tmux select-window -t firstmate:fm-<id> # jump to one, or use ctrl-b <n>
+tmux list-windows -t <session-name>          # see every crew window
+tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
+Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
 You do not need to attach at all for routine supervision: the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `bin/fm-send.sh fm-<id> "<text>"` when it needs to intervene.
 
@@ -60,9 +63,10 @@ You do not need to attach at all for routine supervision: the first mate reads c
 Ask the first mate for any small piece of work, or spawn a trivial scout task, and confirm a new window shows up:
 
 ```sh
-tmux list-windows -t firstmate
+tmux list-windows -t <session-name>
 ```
 
+Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
 ## Limitations
