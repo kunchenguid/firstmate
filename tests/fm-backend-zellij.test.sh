@@ -86,6 +86,65 @@ zellij_assert_call_order() {
   [ "$before_line" -lt "$after_line" ] || fail "$msg"
 }
 
+# zellij_multi_tab_response: a list-tabs --json canned response holding
+# several tabs at once (tab_id/name pairs), for ambiguity/foreign-tag tests.
+zellij_multi_tab_response() {  # <dir> <n> <tab1> <name1> [<tab2> <name2> ...]
+  local dir=$1 n=$2 json first=1
+  shift 2
+  json='['
+  while [ $# -ge 2 ]; do
+    [ "$first" -eq 1 ] || json="$json,"
+    json="$json{\"tab_id\":$1,\"name\":\"$2\"}"
+    first=0
+    shift 2
+  done
+  json="$json]"
+  printf '%s' "$json" > "$dir/responses/$n.out"
+}
+
+# zellij_expected_home_label / zellij_expected_scoped_title: bash-only
+# reimplementations of fm_backend_zellij_home_label/scoped_title (mirroring
+# tests/fm-backend-cmux.test.sh's identical cmux_expected_* helpers), used to
+# build canned fixtures for the home-scoped tab titles this adapter now
+# creates and matches.
+zellij_expected_root_hash() {  # <root>
+  local root real
+  root=$1
+  real=$(cd "$root" && pwd -P) || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
+  else
+    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
+  fi
+}
+
+zellij_expected_home_label() {  # [home] [root]
+  local home=${1:-$ROOT} root=${2:-$ROOT} marker id prefix
+  marker="$home/.fm-secondmate-home"
+  if [ -f "$marker" ]; then
+    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+    if [ -n "$id" ]; then
+      prefix="2ndmate-$id"
+    else
+      prefix="firstmate"
+    fi
+  else
+    prefix="firstmate"
+  fi
+  printf '%s-%s' "$prefix" "$(zellij_expected_root_hash "$root")"
+}
+
+zellij_expected_scoped_title() {  # <fm-task-label> [home] [root]
+  local label=$1 home=${2:-$ROOT} root=${3:-$ROOT} rest
+  case "$label" in
+    fm-*) rest=${label#fm-} ;;
+    *) rest=$label ;;
+  esac
+  printf 'fm-%s-%s' "$(zellij_expected_home_label "$home" "$root")" "$rest"
+}
+
 # --- version_check / tool_check ----------------------------------------------
 
 test_version_check_accepts_current_version() {
@@ -171,6 +230,135 @@ test_normalize_key() {
   pass "fm_backend_zellij_normalize_key: Enter/Escape/C-c map to zellij's verified Enter/Esc/'Ctrl c'"
 }
 
+# --- home-scoped tab titles (cross-home collision fix) ------------------------
+
+test_scoped_title_uses_primary_home_label() {
+  local dir out expected
+  dir="$TMP_ROOT/scoped-title-primary"; mkdir -p "$dir"
+  expected=$(zellij_expected_scoped_title fm-task1 "$dir")
+  out=$( FM_HOME="$dir" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_scoped_title fm-task1' "$ROOT" )
+  [ "$out" = "$expected" ] || fail "primary scoped title should be $expected, got '$out'"
+  pass "fm_backend_zellij_scoped_title: scopes a primary task title with firstmate plus root hash"
+}
+
+test_scoped_title_uses_secondmate_home_label() {
+  local dir out expected
+  dir="$TMP_ROOT/scoped-title-secondmate"; mkdir -p "$dir"
+  printf 'sm-one\n' > "$dir/.fm-secondmate-home"
+  expected=$(zellij_expected_scoped_title fm-task1 "$dir")
+  out=$( FM_HOME="$dir" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_scoped_title fm-task1' "$ROOT" )
+  [ "$out" = "$expected" ] || fail "secondmate scoped title should be $expected, got '$out'"
+  pass "fm_backend_zellij_scoped_title: scopes a secondmate task title with the home marker plus root hash"
+}
+
+test_scoped_title_changes_with_root_path() {
+  local dir home root_one root_two out_one out_two expected_one expected_two
+  dir="$TMP_ROOT/scoped-title-root-hash"; home="$dir/home"; root_one="$dir/root-one"; root_two="$dir/root-two"
+  mkdir -p "$home" "$root_one" "$root_two"
+  expected_one=$(zellij_expected_scoped_title fm-task1 "$home" "$root_one")
+  expected_two=$(zellij_expected_scoped_title fm-task1 "$home" "$root_two")
+  out_one=$( FM_HOME="$home" FM_ROOT_OVERRIDE="$root_one" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_scoped_title fm-task1' "$ROOT" )
+  out_two=$( FM_HOME="$home" FM_ROOT_OVERRIDE="$root_two" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_scoped_title fm-task1' "$ROOT" )
+  [ "$out_one" = "$expected_one" ] || fail "scoped title should include root-one hash as $expected_one, got '$out_one'"
+  [ "$out_two" = "$expected_two" ] || fail "scoped title should include root-two hash as $expected_two, got '$out_two'"
+  [ "$out_one" != "$out_two" ] || fail "scoped titles should differ for distinct FM_ROOT paths"
+  pass "fm_backend_zellij_scoped_title: includes the resolved FM_ROOT hash in the home label"
+}
+
+test_expected_label_accepts_unambiguous_untagged_legacy_tab() {
+  local dir fb
+  dir="$TMP_ROOT/label-legacy-unambiguous"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # 2: list-tabs --json -> exactly ONE live tab, still carrying its
+  # pre-migration untagged bare title (never re-tagged) - unambiguous, so
+  # the legacy fallback in fm_backend_zellij_tab_matches_label trusts it.
+  zellij_tab_response "$dir" 2 3 fm-legacy
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-legacy' "$ROOT"
+  expect_code 0 $? "send_key should still reach a task tab spawned before home-scoping shipped, when its untagged title is unambiguous"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''Esc' \
+    "send_key did not send after accepting the unambiguous legacy label"
+  pass "fm_backend_zellij_tab_matches_label: accepts an untagged legacy fm-<id> title when it is the only live tab carrying it"
+}
+
+test_expected_label_refuses_ambiguous_untagged_tab() {
+  local dir fb status
+  dir="$TMP_ROOT/label-ambiguous-untagged"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # 2: list-tabs --json -> TWO different tabs sharing the exact same bare,
+  # untagged legacy title "fm-shared" (our pane's owning tab_id=3 is one of
+  # them, but so is an unrelated tab_id=9) - the migration posture requires
+  # an untagged bare match to be UNIQUE across the whole session before it
+  # is trusted; ambiguity here must refuse loudly rather than assume ours.
+  zellij_multi_tab_response "$dir" 2 3 fm-shared 9 fm-shared
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-shared' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "send_key should refuse an ambiguous untagged legacy label shared by 2+ live tabs"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_key should not send after an ambiguous untagged-label match refuses"
+  pass "fm_backend_zellij_tab_matches_label: refuses an untagged legacy label match when 2+ live tabs share it (migration ambiguity guard)"
+}
+
+test_list_live_scopes_to_own_home_tag() {
+  local dir fb out own_title foreign_title other_root
+  dir="$TMP_ROOT/list-live-scope"; mkdir -p "$dir/responses"
+  other_root="$dir/other-root"; mkdir -p "$other_root"
+  own_title=$(zellij_expected_scoped_title fm-task1)
+  foreign_title=$(zellij_expected_scoped_title fm-task2 "$ROOT" "$other_root")
+  # 1: list-tabs --json -> our own home-scoped tab, a DIFFERENT installation's
+  # home-scoped tab (same prefix shape, different FM_ROOT hash), and an
+  # unrelated non-firstmate tab.
+  zellij_multi_tab_response "$dir" 1 \
+    3 "$own_title" \
+    4 "$foreign_title" \
+    5 "zsh"
+  # 2: list-panes for our own home's task1 tab only
+  zellij_pane_response "$dir" 2 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_list_live firstmate' "$ROOT" )
+  [ "$out" = $'firstmate:7\tfm-task1' ] \
+    || fail "list_live should list only this home's own tagged tab with its plain fm-<id> label, got '$out'"
+  pass "fm_backend_zellij_list_live: scopes to this home's own tag - excludes a different installation's tagged tab and unrelated tabs"
+}
+
+test_resolve_bare_selector_prefers_scoped_title() {
+  local dir fb out title
+  dir="$TMP_ROOT/resolve-scoped"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-resolve1)
+  # 1: list-tabs --json -> the home-scoped tagged tab
+  printf '[{"tab_id":6,"name":"%s"}]\n' "$title" > "$dir/responses/1.out"
+  # 2: list-panes for tab 6
+  zellij_pane_response "$dir" 2 12 6
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_resolve_bare_selector fm-resolve1' "$ROOT" )
+  [ "$out" = "firstmate:12" ] || fail "resolve_bare_selector should resolve the home-scoped tagged tab, got '$out'"
+  pass "fm_backend_zellij_resolve_bare_selector: matches the home-scoped tagged title first"
+}
+
+test_resolve_bare_selector_refuses_ambiguous_untagged() {
+  local dir fb out status
+  dir="$TMP_ROOT/resolve-ambiguous"; mkdir -p "$dir/responses"
+  # 1: list-tabs --json -> two DIFFERENT tabs sharing the same untagged bare name
+  zellij_multi_tab_response "$dir" 1 3 fm-resolve2 9 fm-resolve2
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_resolve_bare_selector fm-resolve2' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolve_bare_selector should refuse an ambiguous untagged label shared by 2+ live tabs"
+  assert_contains "$out" "no zellij tab named" "resolve_bare_selector's refusal did not report the expected not-found error"
+  pass "fm_backend_zellij_resolve_bare_selector: refuses an ambiguous untagged legacy label shared by 2+ live tabs"
+}
+
 # --- session_exists / server_ensure -------------------------------------------
 
 test_session_exists_true_when_listed() {
@@ -226,10 +414,11 @@ test_dispatch_busy_state_unknown_for_zellij() {
 # --- create_task: duplicate refusal, id parsing, focus-restore mitigation ----
 
 test_create_task_refuses_duplicate_label() {
-  local dir fb out status
+  local dir fb out status title
   dir="$TMP_ROOT/dup-task"; mkdir -p "$dir/responses"
-  # 1: list-tabs --json -> existing tab named fm-dup1
-  printf '[{"tab_id":2,"name":"fm-dup1","active":false}]\n' > "$dir/responses/1.out"
+  title=$(zellij_expected_scoped_title fm-dup1)
+  # 1: list-tabs --json -> existing tab already carrying the home-scoped title
+  printf '[{"tab_id":2,"name":"%s","active":false}]\n' "$title" > "$dir/responses/1.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -237,12 +426,14 @@ test_create_task_refuses_duplicate_label() {
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing tab name (zellij itself does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate name"
-  pass "fm_backend_zellij_create_task: refuses a duplicate tab name (zellij's own new-tab has no uniqueness check)"
+  assert_contains "$out" "$title" "create_task's duplicate error did not name the home-scoped title"
+  pass "fm_backend_zellij_create_task: refuses a duplicate home-scoped tab title (zellij's own new-tab has no uniqueness check)"
 }
 
 test_create_task_creates_and_parses_ids() {
-  local dir fb out
+  local dir fb out title
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-newtask)
   # 1: list-tabs --json -> no existing tabs, none active
   printf '[]\n' > "$dir/responses/1.out"
   # 2: new-tab --cwd --name -> bare tab id on stdout
@@ -254,9 +445,9 @@ test_create_task_creates_and_parses_ids() {
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-newtask /tmp/proj' "$ROOT" )
   [ "$out" = "3 7" ] || fail "create_task should echo '<tab_id> <pane_id>', got '$out'"
-  assert_contains "$(cat "$dir/log")" $'\x1f''new-tab'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--name'$'\x1f''fm-newtask' \
-    "create_task did not call new-tab with the right cwd/name"
-  pass "fm_backend_zellij_create_task: creates a tab and parses tab_id/pane_id from the response"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-tab'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--name'$'\x1f'"$title" \
+    "create_task did not call new-tab with the right cwd/home-scoped name"
+  pass "fm_backend_zellij_create_task: creates a home-scoped tab and parses tab_id/pane_id from the response"
 }
 
 test_create_task_restores_previously_active_tab() {
@@ -759,6 +950,14 @@ test_session_defaults_to_firstmate
 test_session_honors_override
 test_parse_target
 test_normalize_key
+test_scoped_title_uses_primary_home_label
+test_scoped_title_uses_secondmate_home_label
+test_scoped_title_changes_with_root_path
+test_expected_label_accepts_unambiguous_untagged_legacy_tab
+test_expected_label_refuses_ambiguous_untagged_tab
+test_list_live_scopes_to_own_home_tag
+test_resolve_bare_selector_prefers_scoped_title
+test_resolve_bare_selector_refuses_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists

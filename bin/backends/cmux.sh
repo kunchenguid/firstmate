@@ -102,10 +102,12 @@ FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"
+
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
 FM_BACKEND_CMUX_MIN_MAJOR=0
 FM_BACKEND_CMUX_MIN_MINOR=64
-FM_BACKEND_CMUX_SECONDMATE_MARKER=".fm-secondmate-home"
 
 # fm_backend_cmux_bin: resolve the cmux CLI binary. cmux does not reliably
 # land on PATH after a plain app install - it ships an OPTIONAL "install CLI"
@@ -265,28 +267,12 @@ fm_backend_cmux_container_ensure() {
 # path hash distinguishes every firstmate installation, including multiple
 # primary homes. Moving an installation changes this tag and old cmux titles
 # stop matching; task meta already records absolute worktree paths, so repo
-# relocation is already outside the supported recovery contract.
+# relocation is already outside the supported recovery contract. Derivation
+# itself lives in bin/fm-backend-hometag-lib.sh, shared with zellij's
+# identical shared-namespace collision fix (docs/zellij-backend.md
+# "Home-scoped tab titles").
 fm_backend_cmux_home_label() {
-  local marker="$FM_HOME/$FM_BACKEND_CMUX_SECONDMATE_MARKER" id prefix root hash
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      prefix="2ndmate-$id"
-    else
-      prefix="firstmate"
-    fi
-  else
-    prefix="firstmate"
-  fi
-  root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root=$FM_ROOT
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
-  else
-    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
-  fi
-  printf '%s-%s' "$prefix" "$hash"
+  fm_backend_hometag
 }
 
 fm_backend_cmux_scoped_title() {  # <fm-task-label>
