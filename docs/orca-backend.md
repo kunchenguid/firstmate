@@ -17,7 +17,7 @@ Prerequisites:
 
 Select Orca explicitly with `fm-spawn.sh --backend orca`, `FM_BACKEND=orca`, or a local `config/backend` file containing `orca`.
 It is never auto-detected.
-When `config/backend=orca`, bootstrap checks for `orca` and `node` instead of `tmux` and `treehouse`.
+When bootstrap resolves Orca from `FM_BACKEND=orca` or `config/backend=orca`, it checks for `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 
 First run: before spawn mutates any repo or worktree state, firstmate runs `orca status --json` and requires the app to report `reachable=true` and `state="ready"` - start the Orca app and wait for it to finish loading before spawning.
 Spawn fails closed if the runtime is not ready.

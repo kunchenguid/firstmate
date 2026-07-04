@@ -29,7 +29,7 @@ Any value other than `tmux`, `herdr`, `zellij`, or `orca` is rejected until anot
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, and `orca` for ship and scout tasks; `backend=orca` still refuses `--secondmate` until Orca secondmate semantics are designed.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
-When `config/backend=orca`, bootstrap checks for `orca` instead of the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -120,7 +120,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-When `backend=orca` is selected, bootstrap requires `orca` instead of `tmux` and `treehouse`.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.

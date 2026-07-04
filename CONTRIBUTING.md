@@ -39,14 +39,14 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
   A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
-  A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` and experimental `herdr` and `zellij`, while `orca` is accepted only for existing-terminal capture, text send, Enter/Ctrl-C keys, and close until its spawn lifecycle is wired.
+  A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, and `orca`.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` must pass, and CI enforces it.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
-- Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant docs, following `docs/herdr-backend.md` or `docs/zellij-backend.md` for implemented non-tmux spawn backends or `docs/orca-backend.md` for the primitive Orca adapter and remaining proposed spawn/worktree contract.
+- Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) need empirical adapter notes in the relevant backend guide: `docs/tmux-backend.md`, `docs/herdr-backend.md`, `docs/zellij-backend.md`, or `docs/orca-backend.md`.
 - In Markdown, put each full sentence on its own line.
 - `README.md` stays a concise overview plus pointers: it never carries a wall of inline detail.
   Route detail to the most specific `docs/` file (architecture, configuration, or a backend guide) and link to it instead.

@@ -17,7 +17,7 @@ Prerequisites:
 
 - `herdr` itself, protocol 14 or newer (installed 0.7.1 verified) - see [herdr.dev](https://herdr.dev) for install instructions.
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth); treehouse still provides the worktree, herdr only provides the session.
+- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, and lavish-axi); treehouse still provides the worktree, herdr only provides the session.
 
 Select herdr explicitly with `fm-spawn.sh --backend herdr`, `FM_BACKEND=herdr`, or a local `config/backend` file containing `herdr`.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
