@@ -346,6 +346,22 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
+test_settings_hook_uses_claude_project_dir() {
+  local settings command
+  settings="$ROOT/.claude/settings.json"
+  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .claude/settings.json"
+  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Stop hook must resolve via CLAUDE_PROJECT_DIR, not a cwd-relative path"
+  assert_contains "$command" 'fm-turnend-guard.sh' "Stop hook must still invoke fm-turnend-guard.sh"
+  case "$command" in
+    bin/fm-turnend-guard.sh|./bin/fm-turnend-guard.sh)
+      fail "Stop hook must not use a bare relative path (cwd-dependent): $command"
+      ;;
+  esac
+  pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored command"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -366,3 +382,4 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_settings_hook_uses_claude_project_dir

@@ -22,6 +22,7 @@ Confirmed empirically with a scratch project and a real `claude -p` invocation (
 - **Loop safety.** Claude Code itself caps consecutive blocks (documented default: 8) regardless of hook behavior, so even a buggy hook cannot wedge a session forever. This guard does not rely on that cap: it checks `stop_hook_active` itself and always allows the stop on the second consecutive fire, so it blocks at most once per turn.
 - **Works in headless mode.** The block mechanism was verified both interactively and via `claude -p ... --output-format json` (print/headless mode) - no mode-specific bypass exists.
 - **Settings scope.** A project-level `.claude/settings.json` at a repo's root applies once Claude Code's project root is that directory. It does not walk up from a subdirectory looking for one - launching from inside a subdirectory of the project did not trigger the hook in testing. This matches firstmate's own convention of running the primary session with its cwd at the repo root (`FM_ROOT`).
+- **`CLAUDE_PROJECT_DIR` on Stop hooks (verified 2026-07-04, Claude Code 2.1.201).** Claude Code sets `CLAUDE_PROJECT_DIR` to the project directory whose settings were loaded (the repo root where `.claude/settings.json` lives) when it invokes hook commands. Verified empirically with a scratch `.claude/settings.json` and `claude -p` from that directory: a Stop hook that wrote `$CLAUDE_PROJECT_DIR` to a file recorded the expected absolute path. Hook commands themselves are executed via `/bin/sh` against the session's **current working directory**, which may differ from the project root if the operator has `cd`'d during the session - a bare relative command such as `bin/fm-turnend-guard.sh` then fails every turn end with `/bin/sh: bin/fm-turnend-guard.sh: No such file or directory`. The tracked hook command therefore uses the documented word-splitting-safe form `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh` so resolution is anchored to the settings-loaded project root regardless of cwd. `bin/fm-turnend-guard.sh` itself already resolves `FM_ROOT` and state paths from `BASH_SOURCE`, not cwd.
 
 Smoke test transcript (trimmed), corrected hook:
 
@@ -70,6 +71,7 @@ This design is deliberately different from the per-task `.claude/settings.local.
 ## Installation path
 
 Tracked, not local: `.claude/settings.json` ships in the repo, so every user of this repo gets the guard after a normal `git clone` and a primary session run from the repo root - no bootstrap step, no per-user local file, no manual setup.
+The Stop hook command is `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh` (not a bare relative path) so Claude Code's `/bin/sh` invocation still finds the script when the session cwd is not the repo root.
 This is possible (unlike the crewmate per-task hook) because the guard script is fully generic: it resolves its own root from its own location and re-derives the predicate at runtime, with no per-task specifics to bake in.
 
 ## Harness coverage
