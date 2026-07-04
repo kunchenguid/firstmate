@@ -1,6 +1,9 @@
 ---
 name: secondmate-provisioning
-description: Agent-only reference for persistent secondmate setup and retirement. Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, or when editing data/secondmates.md. Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited config push, idle charter, handoff helper, and teardown safety.
+description: >-
+  Agent-only reference for persistent secondmate setup and retirement.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited config push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
