@@ -199,9 +199,16 @@ case "$post_rc" in
   0)
     NEWCOUNT=$((COUNT + 1))
     if [ "$FINAL" = 1 ] || [ "$NEWCOUNT" -ge "$MAX_COUNT" ]; then
-      fmx_meta_link_clear "$META" || echo "fm-x-followup: warning: posted but could not clear the link in state/$ID.meta" >&2
-    else
-      fmx_meta_followups_set "$META" "$NEWCOUNT" || echo "fm-x-followup: warning: posted but could not record the follow-up count in state/$ID.meta" >&2
+      if ! fmx_meta_link_clear "$META"; then
+        echo "fm-x-followup: error: posted but could not clear the link in state/$ID.meta" >&2
+        exit 1
+      fi
+    elif ! fmx_meta_followups_set "$META" "$NEWCOUNT"; then
+      if ! fmx_meta_link_clear "$META"; then
+        echo "fm-x-followup: error: posted but could not record the follow-up count or clear the link in state/$ID.meta" >&2
+        exit 1
+      fi
+      echo "fm-x-followup: warning: posted but could not record the follow-up count in state/$ID.meta; cleared the link to avoid duplicate follow-ups" >&2
     fi
     printf '%s\n' "$RID"
     exit 0
