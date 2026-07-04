@@ -1,6 +1,9 @@
 ---
 name: firstmate-coding-guidelines
-description: Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1. Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task. Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+description: >-
+  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
+  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -41,7 +44,8 @@ When you touch a contract, grep the repo for its other mentions and update the c
 When content moves out of `AGENTS.md` into a skill, decide what stays behind by asking one question: what must survive with no skill loaded?
 That is the trigger condition for loading the skill, plus any safety-critical fact that fires on a wake the skill itself is not loaded for.
 Everything else - the procedure, the mechanism, the surrounding detail - moves out completely.
-Do not leave a partial restatement behind "just in case"; a partial copy is exactly the duplication the one-owner rule forbids.
+Do not leave a partial restatement behind "just in case".
+A partial copy is exactly the duplication the one-owner rule forbids.
 The model to copy is `AGENTS.md` section 8's "Away-mode stub": it keeps only the marker format, the ownership-transfer rule, and the exit condition inline, and points everything else at the `/afk` skill.
 
 ## Size discipline
@@ -59,13 +63,18 @@ Every new skill needs its load trigger declared inline: section 13 for agent-onl
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
-Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead; `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
+Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
+`CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
 ## Repo style rules
 
-- One full sentence per line in tracked Markdown; never wrap multiple sentences onto one physical line.
+- Put one full sentence per line in tracked Markdown.
+- Never wrap multiple sentences onto one physical line.
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
-- `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`; run it before treating a script change as done.
+- `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
-- A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions: date, version, exact commands run, exact output; write incidents the same way, as evidence, not narrative alone.
+- A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
+- Include the date, version, exact commands run, and exact output.
+- Write incidents the same way, as evidence, not narrative alone.
