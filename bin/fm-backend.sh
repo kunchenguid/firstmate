@@ -57,7 +57,9 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_BACKEND_KNOWN="tmux herdr zellij orca"
 FM_BACKEND_SPAWN="tmux herdr zellij orca"
 
-# fm_backend_is_known: 0 iff <name> has a verified adapter.
+# fm_backend_list_contains: whitespace-delimited membership without relying on
+# shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
+# zsh diagnostics can source it too, so backend-name matching must stay portable.
 fm_backend_list_contains() {  # <list> <name>
   local list=$1 name=$2
   case "$name" in
