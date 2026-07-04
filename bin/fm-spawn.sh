@@ -22,6 +22,9 @@
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected
 #   (always explicit). Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   A backend spawn refusal (missing dependency, version gate, unauthenticated
+#   socket, or unsupported secondmate mode) is terminal for that selected backend;
+#   callers must surface it instead of silently retrying another backend.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
