@@ -389,8 +389,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live and unknown both refuse (1), so an inconclusive read never
-# licenses closing anything - see acceptance criterion 1's fail-safe-toward-
-# refusal requirement.
+# licenses closing anything. Restored-layout recovery depends on this
+# fail-safe-toward-refusal behavior.
 fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
     dead|no-agent) return 0 ;;

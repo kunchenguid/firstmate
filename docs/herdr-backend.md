@@ -268,7 +268,8 @@ It never closes the husk first, because closing a workspace's last remaining tab
 This is the identical create-before-close safety argument `fm_backend_herdr_workspace_prune_seeded_default_tab` already established for the seeded default tab.
 
 Verified against the real binary (`tests/fm-backend-herdr-respawn-idem-e2e.test.sh`, an isolated non-default session): a real `session stop` + fresh `herdr server` restart, followed by a same-labeled `fm_backend_herdr_create_task` call, closes and replaces the restored no-agent husk for both a crewmate/scout-shaped and a `--secondmate`-shaped task (the same function serves both spawn paths), while a pane carrying a genuinely registered agent (via herdr's own `pane report-agent`) still refuses.
-The `dead` (`pane_not_found`) classification is covered at the unit level (`tests/fm-backend-herdr.test.sh`, canned-response fake) but not end-to-end against the real binary: killing a pane's underlying process on a live server was observed to make herdr immediately reap both the pane AND its tab together (so the tab never lingers in `tab list` for the duplicate check to even find), and a session restart was never observed to produce a structurally-dead-but-still-listed pane either - only a live, agent-less one. The `dead` branch remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) that has not been reproduced against the real binary.
+The `dead` (`pane_not_found`) classification is covered at the unit level (`tests/fm-backend-herdr.test.sh`, canned-response fake) but not end-to-end against the real binary: killing a pane's underlying process on a live server was observed to make herdr immediately reap both the pane AND its tab together (so the tab never lingers in `tab list` for the duplicate check to even find), and a session restart was never observed to produce a structurally-dead-but-still-listed pane either - only a live, agent-less one.
+The `dead` branch remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) that has not been reproduced against the real binary.
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
@@ -305,7 +306,7 @@ This exercises the fm-spawn.sh-level behavior the adapter-primitive smoke test c
 All ten assertions passed on the real binary on the first run.
 As with every other real-herdr test in this document, the default session's own workspace state (label, tab count) was confirmed byte-identical immediately before and immediately after the run.
 
-## Known gaps left for a follow-up
+## Known gaps and follow-up notes
 
 - **No `events.subscribe` native push.** The busy-state semantic read (`agent.get`) is consumed through the EXISTING `fm-watch.sh` poll loop (same 15-second cadence as every other window), not a persistent async subscriber pushing events directly into the wake queue.
   This satisfies the adopted design's "polling remains as the reconciliation backstop" language without a separate watcher rewrite; herdr tasks already get materially better busy-state accuracy than tmux's regex guessing from this alone.
