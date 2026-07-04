@@ -310,6 +310,19 @@ test_dispatch_busy_state_unknown_for_cmux() {
   pass "fm_backend_busy_state: cmux (no native primitive) always reports unknown, same as tmux/zellij/orca"
 }
 
+test_dispatch_composer_state_routes_cmux() {
+  local dir fb out target
+  dir="$TMP_ROOT/dispatch-composer"; mkdir -p "$dir/responses"
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯ hello captain         │\n  ╰──────── Composer ─────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state cmux "$1"' "$ROOT" "$target" )
+  [ "$out" = pending ] || fail "fm_backend_composer_state should route cmux to its classifier, got '$out'"
+  pass "fm_backend_composer_state: routes cmux to the cmux composer classifier"
+}
+
 # --- ping_state / ensure_running ---------------------------------------------
 
 test_ping_state_ok() {
@@ -884,6 +897,7 @@ test_scoped_title_uses_secondmate_home_label
 test_scoped_title_changes_with_root_path
 test_dispatch_routes_cmux_backend
 test_dispatch_busy_state_unknown_for_cmux
+test_dispatch_composer_state_routes_cmux
 test_ping_state_ok
 test_ping_state_denied
 test_ping_state_unauth

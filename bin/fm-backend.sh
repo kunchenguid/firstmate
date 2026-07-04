@@ -424,11 +424,11 @@ fm_backend_busy_state() {  # <backend> <target>
 # pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
 # without duplicating per-backend composer-reading logic. tmux and herdr both
 # expose a named classifier already (fm_tmux_composer_state,
-# fm_backend_herdr_composer_state), as does orca
-# (fm_backend_orca_composer_state); zellij's submit path uses an internal
-# content-diff approach with no separately named classifier, so it reports
-# unknown here - callers fall back to their own policy, exactly as an unknown
-# fm_backend_busy_state already does.
+# fm_backend_herdr_composer_state), as do orca and cmux
+# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
+# submit path uses an internal content-diff approach with no separately named
+# classifier, so it reports unknown here - callers fall back to their own
+# policy, exactly as an unknown fm_backend_busy_state already does.
 fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
   local backend=$1
   shift
@@ -437,6 +437,7 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca) fm_backend_orca_composer_state "$@" ;;
+    cmux) fm_backend_cmux_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }

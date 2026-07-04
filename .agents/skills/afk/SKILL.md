@@ -82,10 +82,7 @@ The daemon never injects into an in-use pane. Two checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
 backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
-- **`pane_is_busy`** - the harness shows a busy footer (agent mid-turn) on
-  tmux (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`); on herdr, tries the
-  native `agent.get`-backed busy state first and falls back to the same
-  regex-over-capture reader when that reports unknown.
+- **`pane_is_busy`** - the harness shows a busy footer (agent mid-turn) on tmux (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`); on herdr, tries the native `agent.get`-backed busy state first, trusts only `busy` outright, and corroborates every non-`busy` verdict with the same regex-over-capture reader.
 - **`pane_input_pending`** - the composer holds real unsubmitted text (a
   human's half-typed line, or a previous injection whose Enter was swallowed).
   On tmux, the cursor-line detector **strips the harness's composer box
