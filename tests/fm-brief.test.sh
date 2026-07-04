@@ -32,12 +32,15 @@ test_script_parses() {
 
 # Structural guard for issue #166: heredocs nested inside \$(cat <<...) are a
 # bash-3.2 parse trap that Linux CI's modern bash cannot detect via `bash -n`,
-# so refuse the construct itself anywhere in fm-brief.sh.
+# so refuse the construct itself anywhere in bin/ (including bin/backends/).
 test_no_heredoc_in_command_substitution() {
-  if grep -n '^[^#]*\$(cat <<' "$ROOT/bin/fm-brief.sh"; then
-    fail "fm-brief.sh reintroduced \$(cat <<...) - breaks bash 3.2 parsing if the body ever gains an apostrophe; assign with read -r -d '' instead"
-  fi
-  pass "fm-brief.sh: no heredoc-in-command-substitution construct"
+  local script
+  for script in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
+    if grep -n '^[^#]*\$(cat <<' "$script"; then
+      fail "${script#"$ROOT"/} uses \$(cat <<...) - breaks bash 3.2 parsing if the body ever gains an apostrophe; assign with read -r -d '' instead"
+    fi
+  done
+  pass "bin/*.sh, bin/backends/*.sh: no heredoc-in-command-substitution construct"
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
