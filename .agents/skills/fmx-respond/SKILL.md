@@ -14,6 +14,8 @@ The full mention is stashed locally; this skill acts on any request it carries a
 
 This runs only when X mode is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; see AGENTS.md "X mode").
 If you ever see an `x-mention` wake without X mode configured, do nothing.
+A `check:` wake can also carry `x-mode-error ...` instead of `x-mention <request_id>` - that is a poll or relay configuration problem, not a mention to answer.
+Report it directly to the captain as an X-mode configuration blocker and do not load this skill for it.
 
 ## The asker is your own captain - answer autonomously
 
@@ -46,7 +48,7 @@ How the reply lands depends on whether the work finishes during this turn:
   3. **Link it for the follow-up.** Associate the spawned task with this mention so completion follow-ups can be posted later: `bin/fm-x-link.sh <task-id> <request_id>` (records the request id, a timestamp, and a follow-up counter in the task's state).
      Do this right after the task is spawned.
      If a recovery respawns the same relay request onto a successor task, relink with the paired `--carry-count <n> --carry-ts <epoch>` flags from the prior task so the successor keeps the consumed follow-up count and original 7-day window.
-  4. **Follow up on genuine milestones, sparingly.** Firstmate gets up to **three** follow-ups per mention, within a 7-day window, chained in the same thread - spend them only on changes the captain would actually want to hear about (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn. The task's final outcome - shipped / reported / merged / failed - is always posted with `--final`, which clears the link regardless of how many follow-ups remain. That posting happens on the task's milestone and completion wakes, driven by AGENTS.md section 14, not this turn.
+  4. **Follow up on genuine milestones, sparingly.** Firstmate gets up to **three** follow-ups per mention, within a 7-day window, chained in the same thread - spend them only on changes the captain would actually want to hear about (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn. The task's final outcome - shipped / reported / merged / failed - is always posted with `--final`, which clears the link regardless of how many follow-ups remain. That posting happens on the task's milestone and completion wakes (see "Completion follow-up" below), not this turn.
 
 So every drained mention sorts into one of three cases (the worthiness judgment, widened):
 
@@ -101,6 +103,9 @@ You do not hand-format threads or add "(1/n)" numbering yourself.
 Compose the reply as one piece of prose; if it is genuinely too long for one tweet, `bin/fm-x-reply.sh` automatically splits it into a numbered thread on word boundaries.
 Conciseness is still your job - lean on the auto-split only when the answer truly needs the length, not as license to ramble.
 
+Do not attach an image for prose.
+Images are only for actual visual artifacts - a generated illustration, a screenshot, a diagram - never a substitute for writing the answer.
+
 ## Procedure
 
 This is a drain over the inbox, not a single reply.
@@ -123,7 +128,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       When in doubt between an instruction and a question, do the smallest safe lifecycle step the request implies; when in doubt between a question and bare politeness, lean toward skipping - a needless reply is noise on a public bot.
    c. **Act on an actionable request through the normal lifecycle.** Treat it exactly as a captain prompt typed in session: run ordinary intake (resolve the project), then file the backlog item, dispatch a crewmate, start a scout, or ship through the gate - whatever the request calls for.
       **Destructive, irreversible, or security-sensitive work is the exception** (X is a public, relayed channel and does not carry full in-session trust): do not execute it from the mention. Flag it to the captain through the normal trusted channel first - the same carve-out as `yolo` (AGENTS.md §1, §7) - act only on the captain's word, and in step 2d say only that it has been flagged for the captain.
-      **If the request spawned a real, longer-running task** (you ran `bin/fm-spawn.sh`), link that task to this mention so milestone and completion follow-ups can be posted: `bin/fm-x-link.sh <task-id> <request_id>`. Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (AGENTS.md §14), with the terminal one posted using `--final`. If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
+      **If the request spawned a real, longer-running task** (you ran `bin/fm-spawn.sh`), link that task to this mention so milestone and completion follow-ups can be posted: `bin/fm-x-link.sh <task-id> <request_id>`. Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final`. If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
    d. **Compose the reply.** For a **question**, answer `.text` from the fleet state gathered in step 1. For an **actionable request that completed now**, report the outcome of step 2c (what was done, or - for escalated work - that it has been flagged for the captain). For an **actionable request that spawned a linked task**, acknowledge that you have the order and are on it - milestone updates and the final outcome follow later as completion follow-ups, so do not promise a result you do not yet have. Either way keep it short, in firstmate's voice, and public-safe.
       Conversation continuity: when `in_reply_to` is present this is a conversation reply - read `in_reply_to.text` (what `in_reply_to.author_handle` said just before) as **context** and continue that thread, resolving "it", "that", "and then?" against the parent; for a fresh mention (`in_reply_to` is null) answer on its own.
       If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Calm seas just now - nothing underway, standing by for the captain's next orders.").
@@ -136,6 +141,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       ```
 
       (`bin/fm-x-reply.sh <request_id> -`, reading the reply on stdin, is equally fine.) It echoes the `request_id` and exits 0 on success; non-zero on a failed live post or failed dry-run record.
+      When the reply carries one real visual artifact, add `--image <path>`: the helper reads one local PNG, JPEG, GIF, WebP, BMP, or TIFF, detects the media type, base64-encodes it, and sends it in the relay's optional `image` object without ever inlining image bytes into the shell command. If the reply auto-splits into a thread, the image rides the first/opener tweet only.
    e-skip. **For a skip, dismiss it at the relay instead of replying.** A pure acknowledgment gets no reply, but clearing only the local inbox file is not enough: the relay keeps re-offering that request on every poll until it times out to a polite "offline" auto-reply. So before clearing the file, tell the relay to drop the request:
 
       ```sh
@@ -156,6 +162,7 @@ When `FMX_DRY_RUN` is set (truthy, in the environment or `.env`), `bin/fm-x-repl
 The reply client records the full would-be reply payload to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 The dismiss client records `{request_id, endpoint:"dismiss"}` to the same outbox path, prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
+When an image was attached, the dry-run record keeps only compact `{media_type, bytes, source_path}` metadata instead of the base64 bytes, so a preview never writes a multi-MB blob.
 Dry-run needs `jq` to build the JSON payload, but it needs neither `FMX_PAIRING_TOKEN` nor the relay because it runs before token and network checks.
 Your procedure does not change: compose as usual and call `bin/fm-x-reply.sh ... --text-file <path>`, or call `bin/fm-x-dismiss.sh <request_id>` for a skip.
 Because the call still succeeds, the loop completes normally (clear the inbox file as in step 2f); the only difference is nothing reaches X.
@@ -167,13 +174,14 @@ A non-final dry-run follow-up increments `x_followups` and keeps the link while 
 ## Completion follow-up (posted on milestone and done wakes, not this turn)
 
 When an actionable request spawned a task and you linked it (step 2c), progress and the **outcome** are delivered later as follow-up replies, not in this turn.
-Those posts are firstmate's job on the task's milestone and completion wakes and are governed by AGENTS.md §14; this skill's only follow-up responsibility is linking the task in step 2c.
-For context, the completion path is:
+This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §8's wake-handling step is the one place that still triggers it - a task reaching a terminal state posts its final follow-up there before teardown, on whatever generic wake surfaces that state, not on a mention wake.
+This skill's own responsibility during the mention-handling turn is linking the task in step 2c; the full completion path is:
 
 - Firstmate has **up to three** follow-ups per mention, within a 7-day window, chained in the same thread - it spends them only on genuine milestones the captain would want surfaced (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn.
 - If a linked task is replaced by a successor for the same relay request, carry the prior `x_followups=` value and `x_request_ts=` with `bin/fm-x-link.sh <new-task-id> <request_id> --carry-count <n> --carry-ts <epoch>` so recovery preserves the consumed budget and original window.
 - On each such milestone, firstmate checks whether a follow-up is still due with `bin/fm-x-followup.sh --check <task-id>` (prints the `request_id` when the link exists, the count is under the cap, and the window has not lapsed; silent otherwise, pruning an exhausted or expired link).
 - If due, it composes a short, public-safe update and posts it with `bin/fm-x-followup.sh <task-id> --text-file <path>` (or stdin), which posts via the relay's follow-up endpoint; a successful non-final post increments the counter and keeps the link so a later milestone can still post against it.
+  When the update carries one real visual artifact, add `--image <path>`; the helper forwards it to `bin/fm-x-reply.sh --followup` so the same image contract used for ordinary replies applies here too.
 - On a terminal wake (PR merged / scout report / local merge / failed), firstmate posts the task's **final** outcome ("done, here's the result"; for a failure, an honest "this one didn't pan out") with `bin/fm-x-followup.sh <task-id> --final --text-file <path>`, which always clears the link after that post regardless of how many follow-ups remain under the cap.
 - Every follow-up is held to the exact same public-safety bar as every reply here: outcomes only, no task ids, internals, captain-private material, or secrets. Past the window, past the cap, or on the relay's own rejection of an exhausted binding, a follow-up attempt is skipped silently and the link is cleared - never treated as a failure worth retrying.
 

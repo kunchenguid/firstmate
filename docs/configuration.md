@@ -160,6 +160,8 @@ The locked session-start bootstrap step turns the token into local generated sta
 It writes `state/x-watch.check.sh`, a check shim that runs `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher arms in that home.
 When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
 Steady-state off is silent and writes nothing.
+X mode is purely additive: no edit is made to `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-wake-lib.sh`, or the afk daemon (`bin/fm-supervise-daemon.sh` and the `afk` skill).
+It lives entirely in X-specific `bin/` scripts, the `fmx-respond` skill, and the generated local artifacts above.
 
 `bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
 HTTP 204 is silent.
