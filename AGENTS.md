@@ -546,9 +546,11 @@ When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
 When the task meta records `pr=`, the helper also compares that base against the authoritative PR head (`pr_head=` when reachable, otherwise a fresh `refs/pull/<n>/head` fetch) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
 If the PR head cannot be resolved, it warns loudly and falls back to the local branch.
-Commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
+In target project repos shipped through that project's own no-mistakes pipeline, commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
 Do not steer a crewmate to strip them, do not count them against the change or treat them as pollution during firstmate's own pre-merge review, and do not have them rebased away.
 Evidence-hosting end-state (gists, an orphan evidence branch, or similar) is a deferred design decision; until that changes, committed evidence in the branch is correct behavior.
+Firstmate's own repo is the exception: its `.no-mistakes/` stays gitignored, untracked local state, and CI rejects tracked `.no-mistakes` paths.
+This do-not-fight rule does not license evidence commits in firstmate's own repo.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
 With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
