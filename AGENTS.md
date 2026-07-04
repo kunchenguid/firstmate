@@ -109,7 +109,7 @@ state/               volatile runtime signals; gitignored
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
-The shell working directory persists between commands, so after any `cd` away from the home, invoke `bin/` scripts by absolute `$FM_ROOT` path; the scripts self-locate internally, so only invocation is cwd-fragile.
+The shell working directory persists between commands, so after any `cd` away from the home, invoke `bin/` scripts by the absolute path to this repo's `bin/` directory; the scripts self-locate internally, so only invocation is cwd-fragile.
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
 For the tmux backend, the task window is always named `fm-<id>`; per-backend window/tab naming and workspace scoping for herdr, zellij, orca, and cmux live in `docs/configuration.md` ("Runtime backend") and each backend's own doc.
