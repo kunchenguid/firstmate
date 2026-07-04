@@ -11,6 +11,10 @@
 # 2 with a reason on stderr. That mechanism, the stdin payload schema, and the
 # stop_hook_active loop-guard field are all verified empirically - see
 # docs/turnend-guard.md.
+# The tracked settings command invokes this script as
+# "$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh because Claude Code runs hook
+# commands via /bin/sh from the session's current cwd, not necessarily the repo
+# root.
 #
 # Ships as the TRACKED .claude/settings.json at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, any
