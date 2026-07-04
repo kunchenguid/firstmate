@@ -19,10 +19,11 @@
 # with no embedded colon, so splitting on the FIRST colon is trivially
 # correct (mirrors herdr's/zellij's target-string convention).
 #
-# GUI-first, macOS-only (docs/cmux-backend.md "Setup"): explicit-only
-# selection, never auto-detected, exactly like Orca. Unlike Orca, cmux is a
-# pure session provider (treehouse still owns the worktree) and Escape IS
-# natively supported.
+# GUI-first, macOS-only (docs/cmux-backend.md "Setup"): explicit selection or
+# runtime auto-detection when firstmate itself is already running inside a
+# cmux-spawned terminal (CMUX_WORKSPACE_ID). Unlike Orca, cmux is a pure
+# session provider (treehouse still owns the worktree) and Escape IS natively
+# supported.
 #
 # Empirical findings from the live verification pass (docs/cmux-backend.md has
 # the full evidence log) that shaped this adapter, several of which diverge

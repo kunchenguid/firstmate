@@ -12,15 +12,16 @@
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
-#   $TMUX or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then tmux.
+#   $TMUX, HERDR_ENV=1, or CMUX_WORKSPACE_ID; bin/fm-backend.sh's
+#   fm_backend_detect), then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
-#   auto-detected herdr spawn prints a loud stderr notice; auto-detected tmux
-#   stays silent; zellij, orca, and cmux are never auto-detected (always
-#   explicit). Default tmux spawns do not write backend= to meta; absent
-#   backend= means tmux. cmux does not support --secondmate spawns yet.
+#   auto-detected herdr or cmux spawns print a loud stderr notice;
+#   auto-detected tmux stays silent; zellij and orca are never auto-detected
+#   (always explicit). Default tmux spawns do not write backend= to meta;
+#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch

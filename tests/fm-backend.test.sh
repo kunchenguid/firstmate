@@ -92,21 +92,22 @@ test_backend_name_precedence() {
   dir="$TMP_ROOT/name-precedence"; cfg="$dir/config"
   mkdir -p "$cfg"
 
-  # TMUX/HERDR_ENV explicitly unset in a subshell so this stays deterministic
-  # regardless of the runtime this test suite itself happens to execute inside
-  # (e.g. a real tmux pane, which is the normal case for a captain's session).
+  # TMUX/HERDR_ENV/CMUX_WORKSPACE_ID explicitly unset in a subshell so this
+  # stays deterministic regardless of the runtime this test suite itself
+  # happens to execute inside (e.g. a real tmux pane, which is the normal case
+  # for a captain's session).
   # fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at fm-backend.sh
   # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
   # on the function call itself does not re-bind it, so these calls set
   # FM_BACKEND_CONFIG_DIR directly.
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should default to tmux with no env/config/detection markers"
 
   printf 'tmux\n' > "$cfg/backend"
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should read config/backend"
 
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
   pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
