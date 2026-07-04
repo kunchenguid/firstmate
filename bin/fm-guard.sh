@@ -57,9 +57,8 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared predicate
-# (bin/fm-supervision-lib.sh) so this banner and bin/fm-turnend-guard.sh's Stop
-# hook can never drift on what "unhealthy" means. Only act with tasks in
+# Compute in-flight count and watcher-beacon freshness via the shared
+# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
 # flight; count them so the banner can say how much is riding on an absent
 # watcher.
 fm_supervision_status "$STATE" "$GRACE"

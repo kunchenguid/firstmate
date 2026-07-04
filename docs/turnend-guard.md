@@ -45,8 +45,14 @@ result: "BANANA"
 
 ## Detection predicate
 
-`bin/fm-supervision-lib.sh` factors the exact "in-flight work exists, but no watcher has a fresh beacon" computation out of `bin/fm-guard.sh` into a shared function, `fm_supervision_unhealthy <state-dir> [grace-seconds]`, so the pull-based banner and the push-based Stop hook can never drift on what "unhealthy" means.
-It also exposes `fm_supervision_status` for callers (like `fm-guard.sh`) that need the individual fields (in-flight count, beacon freshness/age, queued-wake pending) rather than just the boolean.
+`bin/fm-supervision-lib.sh` factors the exact "in-flight work exists, but no watcher has a fresh beacon" computation out of `bin/fm-guard.sh` into a shared function, `fm_supervision_unhealthy <state-dir> [grace-seconds]`.
+That remains the right predicate for the pull-based guard, where a brief gap after a wake fires should stay silent inside the grace window.
+It also exposes `fm_supervision_status` for callers that need the individual fields (in-flight count, beacon freshness/age, queued-wake pending) rather than just the boolean.
+
+`bin/fm-turnend-guard.sh` deliberately uses a sharper end-of-turn predicate.
+It first uses `fm_supervision_status` to count in-flight tasks, then requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
+That shared live-watcher check is the same one used by `bin/fm-watch-arm.sh`: the recorded `state/.watch.lock/pid` must name a live process, the lock's recorded home/path/pid-identity must match the current live pid, and `state/.last-watcher-beat` must still be within `FM_GUARD_GRACE`.
+This means a just-exited watcher with a fresh leftover beacon still blocks the Stop hook immediately, while a live but wedged watcher with an ancient beacon also blocks.
 
 ## Scoping to the PRIMARY only
 

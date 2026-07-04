@@ -4,12 +4,10 @@
 #
 # True exactly when a firstmate home has in-flight work (a state/<id>.meta
 # exists) but no watcher has a fresh liveness beacon (state/.last-watcher-beat,
-# touched every poll cycle, within the grace window). bin/fm-guard.sh (pull-based:
-# warns whenever some other supervision script happens to run) and
-# bin/fm-turnend-guard.sh (push-based: a Claude Code Stop hook for the firstmate
-# PRIMARY session) both need this exact same computation, so it is factored here
-# once rather than duplicated - the two must never drift on what "unhealthy"
-# means.
+# touched every poll cycle, within the grace window). bin/fm-guard.sh uses this
+# grace-based warning predicate directly; bin/fm-turnend-guard.sh uses the status
+# fields here for its banner but performs its end-of-turn block decision with the
+# live watcher lock check in bin/fm-wake-lib.sh.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {

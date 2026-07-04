@@ -2,12 +2,11 @@
 # Behavior tests for the primary turn-end supervision guard (docs/turnend-guard.md).
 #
 # Two layers:
-#   PREDICATE  - bin/fm-supervision-lib.sh, the shared "in-flight work exists but
-#                no watcher has a fresh beacon" computation shared with fm-guard.sh.
+#   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
+#                used by fm-guard.sh and by the hook's banner details.
 #   HOOK       - bin/fm-turnend-guard.sh, the Claude Code Stop hook that scopes
-#                that predicate to the PRIMARY checkout only and turns it into a
-#                block-with-reason (exit 2) with a Claude-verified loop-guard
-#                (stop_hook_active).
+#                in-flight work to the PRIMARY checkout only and requires a live,
+#                identity-matched watcher lock plus a fresh beacon.
 # All hermetic over temp dirs; no real Claude Code session is invoked.
 set -u
 
@@ -89,6 +88,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   chmod +x "$dir/bin/fm-turnend-guard.sh"
 }
 
@@ -130,6 +130,30 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+nonexistent_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
+watcher_identity() {
+  local dir=$1 pid=$2
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+record_watcher_lock() {
+  local dir=$1 pid=$2 identity=$3 root bin_dir
+  root=$(cd "$dir" && pwd)
+  bin_dir=$(cd "$dir/bin" && pwd)
+  mkdir -p "$dir/state/.watch.lock"
+  printf '%s\n' "$pid" > "$dir/state/.watch.lock/pid"
+  printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
+  printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -139,15 +163,70 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-test_hook_silent_with_fresh_beacon() {
+test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
   local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-fresh")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-fresh-no-lock")
   : > "$dir/state/task1.meta"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 0 "$status" "hook must exit 0 when the watcher beacon is fresh"
-  [ -z "$out" ] || fail "hook produced output despite a fresh watcher beacon: $out"
-  pass "fm-turnend-guard: silent no-op when supervision is healthy"
+  expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+}
+
+test_hook_blocks_when_dead_lock_has_fresh_beacon() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-fresh")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the watcher lock pid is dead despite a fresh beacon"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
+}
+
+test_hook_silent_with_live_lock_and_fresh_beacon() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-fresh")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
+  [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
+  pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
+}
+
+test_hook_blocks_with_live_lock_and_stale_beacon() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must block when a live watcher lock has an ancient beacon"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks on a live watcher lock with an ancient beacon"
 }
 
 test_hook_blocks_when_unhealthy_in_primary() {
@@ -274,7 +353,10 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
-test_hook_silent_with_fresh_beacon
+test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_ignores_repo_state_when_fm_home_set
