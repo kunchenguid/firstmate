@@ -21,10 +21,11 @@
 # task worktree and the terminal endpoint. P5 adds bin/backends/cmux.sh, also
 # EXPERIMENTAL and spawn-capable, behind `--backend cmux`/`FM_BACKEND=cmux`/
 # `config/backend`, and behind runtime auto-detection when firstmate itself is
-# running inside a cmux-spawned terminal (CMUX_WORKSPACE_ID) with no explicit
-# backend setting - unlike Orca, which stays never-auto-detected because it
-# also owns the task worktree; see docs/cmux-backend.md for its empirical
-# basis.
+# running inside a cmux-spawned terminal (primary CMUX_WORKSPACE_ID marker, or
+# the documented macOS fallback signals when cmux's claude wrapper strips that
+# marker) with no explicit backend setting - unlike Orca, which stays
+# never-auto-detected because it also owns the task worktree; see
+# docs/cmux-backend.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
