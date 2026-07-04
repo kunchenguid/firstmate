@@ -89,7 +89,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy= ALL_PROXY= all_proxy= NO_PROXY= no_proxy= \
+    HTTP_PROXY='' http_proxy='' HTTPS_PROXY='' https_proxy='' ALL_PROXY='' all_proxy='' NO_PROXY='' no_proxy='' \
     "$SPAWN" "$@" 2>&1
 }
 
