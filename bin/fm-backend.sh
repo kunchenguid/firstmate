@@ -417,6 +417,30 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_composer_state: classify the composer/input row of <target> as
+# empty|pending|unknown - the SUBMIT-side classifier each adapter already uses
+# internally to verify fm_backend_send_text_submit, exposed generically so a
+# caller other than the send path (the away-mode daemon's supervisor-pane
+# pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
+# without duplicating per-backend composer-reading logic. tmux and herdr both
+# expose a named classifier already (fm_tmux_composer_state,
+# fm_backend_herdr_composer_state), as does orca
+# (fm_backend_orca_composer_state); zellij's submit path uses an internal
+# content-diff approach with no separately named classifier, so it reports
+# unknown here - callers fall back to their own policy, exactly as an unknown
+# fm_backend_busy_state already does.
+fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux) fm_tmux_composer_state "$@" ;;
+    herdr) fm_backend_herdr_composer_state "$@" ;;
+    orca) fm_backend_orca_composer_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of
@@ -440,7 +464,15 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       session=${target%%:*}
       pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
-      HERDR_SESSION="$session" herdr pane get "$pane" >/dev/null 2>&1
+      # fm_backend_herdr_cli (not a raw HERDR_SESSION-only call): verified
+      # empirically (docs/herdr-backend.md "Session targeting") that the bare
+      # env var alone is NOT reliably honored once another herdr server is
+      # already bound on the machine - it silently queries whatever server IS
+      # running instead. fm_backend_herdr_cli appends the required --session
+      # flag on top, so this check is correctly scoped even when the caller's
+      # own ambient session (e.g. the primary firstmate's default session) is
+      # a DIFFERENT one than the target's.
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     zellij)
       fm_backend_source zellij || return 1

@@ -19,6 +19,11 @@
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
 # and the test pane (FM_SUPERVISOR_TARGET). Nothing touches the live fleet.
+# FM_SUPERVISOR_BACKEND=tmux is passed explicitly (not left to auto-detection):
+# this test's own process may itself be running inside herdr (HERDR_ENV=1 is
+# inherited by every process herdr manages a pane for), which would otherwise
+# leak into the spawned daemon subprocess and misdetect backend=herdr against
+# what is actually a tmux pane on the private socket.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance — terminal line-wrapping looks like newlines but isn't.
@@ -154,6 +159,7 @@ start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
+  FM_SUPERVISOR_BACKEND=tmux \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
