@@ -258,13 +258,7 @@ If a dispatch rule or default names an unverified harness, ignore that profile, 
 The shell scripts never parse or match the natural-language rules; firstmate does the matching and passes only concrete flags to `fm-spawn`.
 `fm-spawn` only checks whether the file exists so it can enforce the explicit-harness backstop for crewmate and scout dispatches.
 
-The verified profile axes are:
-
-- `claude`: model via `--model <name>`, effort via `--effort <low|medium|high|xhigh|max>`.
-- `codex`: model via `--model <name>`, effort via `-c 'model_reasoning_effort="<low|medium|high|xhigh>"'`; `max` is not passed because the installed Codex model catalog advertises only `low`, `medium`, `high`, and `xhigh`.
-- `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high|xhigh>`; `max` is not passed because Grok rejects it for `--reasoning-effort`.
-- `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh>`; `max` is not passed because the installed Pi CLI warns that it is invalid.
-- `opencode`: model via `--model <provider/model>`; no verified effort flag for firstmate's interactive `opencode --prompt` launch, so effort is not passed.
+Per-harness model/effort flags: `harness-adapters` (loaded before every spawn per section 4's closing trigger).
 
 If the selected profile asks for an effort value the selected harness does not accept, `fm-spawn` records the requested `effort=` in meta for traceability but omits the launch flag so the harness starts successfully.
 Bootstrap reports this as a `CREW_DISPATCH` diagnostic when it can see the invalid harness/effort pair in `config/crew-dispatch.json`.
@@ -275,14 +269,7 @@ So an absent or `default` `config/secondmate-harness` behaves exactly as before 
 `bin/fm-spawn.sh` resolves a `--secondmate` launch through `secondmate` mode and a crewmate/scout launch through `crew` mode; an explicit per-spawn `--harness` flag or positional harness arg still overrides either kind.
 The split is durable: every secondmate respawn (recovery, `/updatefirstmate`, restart) re-resolves from `config/secondmate-harness`, so it survives restarts without being recorded per-task.
 
-`config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
-A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
-`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
-For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
-An explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
-When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
-Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
-This is secondmate-only: crewmate/scout model resolution is untouched by this file.
+`config/secondmate-harness` can also pin a model/effort for the secondmate agent in one line (`<harness> [<model>] [<effort>]`); format, accessors, and inheritance exceptions live in `secondmate-provisioning` (load before creating/seeding/recovering a secondmate).
 
 `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited; `config/secondmate-harness` is not.
 The primary pushes its declared inheritable config down into each secondmate home's `config/` - at secondmate spawn, on the locked session-start bootstrap secondmate sweep, and through `bin/fm-config-push.sh` (section 3) - so a secondmate's OWN crewmates, dispatch profiles, and backlog backend use the primary's settings (primary `config/crew-harness=codex` makes a secondmate's crewmates spawn on codex too).
