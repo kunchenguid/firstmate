@@ -357,6 +357,17 @@ test_ping_state_unauth() {
   pass "fm_backend_cmux_ping_state: reports 'unauth' when password mode rejects a missing/wrong password"
 }
 
+test_ping_state_invalid_password() {
+  local dir fb out
+  dir="$TMP_ROOT/ping-invalid-pw"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_FAKE_PING_EXIT=1 \
+    FM_CMUX_FAKE_PING="Error: ERROR: Invalid password" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_ping_state' "$ROOT" )
+  [ "$out" = unauth ] || fail "ping_state should report unauth on the wrong-password rejection text, got '$out'"
+  pass "fm_backend_cmux_ping_state: reports 'unauth' when password mode rejects a wrong password (Invalid password)"
+}
+
 test_ping_state_down() {
   local dir fb out
   dir="$TMP_ROOT/ping-down"; mkdir -p "$dir/responses"
@@ -403,7 +414,33 @@ SH
   [ "$status" -ne 0 ] || fail "ensure_running should refuse when the socket is denied (relaunching cannot fix a config problem)"
   [ ! -f "$dir/launched" ] || fail "ensure_running should not attempt to launch cmux on a denied socket"
   assert_contains "$out" "docs/cmux-backend.md" "ensure_running's denied error did not point at the setup docs"
-  pass "fm_backend_cmux_ensure_running: fails fast on a denied socket without attempting to launch"
+  assert_contains "$out" "Automation mode" "ensure_running's denied error did not name the recommended Automation mode"
+  assert_contains "$out" "Password mode" "ensure_running's denied error did not name the Password mode alternative"
+  assert_contains "$out" "Full open access" "ensure_running's denied error did not name (and caveat) Full open access"
+  pass "fm_backend_cmux_ensure_running: fails fast on a denied socket without attempting to launch, naming every viable mode"
+}
+
+test_ensure_running_fails_fast_on_unauth_without_launching() {
+  local dir fb out status
+  dir="$TMP_ROOT/ensure-unauth"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  cat > "$fb/open" <<'SH'
+#!/usr/bin/env bash
+echo "LAUNCHED" >> "${FM_CMUX_LAUNCH_MARKER:?}"
+exit 0
+SH
+  chmod +x "$fb/open"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_FAKE_PING_EXIT=1 \
+    FM_CMUX_FAKE_PING="Error: ERROR: Authentication required - send auth <password> first" \
+    FM_CMUX_LAUNCH_MARKER="$dir/launched" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_ensure_running' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "ensure_running should refuse when the socket is unauthenticated (relaunching cannot fix a password problem)"
+  [ ! -f "$dir/launched" ] || fail "ensure_running should not attempt to launch cmux on an unauthenticated socket"
+  assert_contains "$out" "config/cmux-socket-password" "ensure_running's unauth error did not name the password config file"
+  assert_contains "$out" "Automation mode" "ensure_running's unauth error did not name the recommended no-password Automation mode"
+  assert_contains "$out" "docs/cmux-backend.md" "ensure_running's unauth error did not point at the setup docs"
+  pass "fm_backend_cmux_ensure_running: fails fast on an unauthenticated socket, naming the password config and the Automation mode alternative"
 }
 
 # --- create_task: duplicate refusal, id resolution ---------------------------
@@ -901,9 +938,11 @@ test_dispatch_composer_state_routes_cmux
 test_ping_state_ok
 test_ping_state_denied
 test_ping_state_unauth
+test_ping_state_invalid_password
 test_ping_state_down
 test_ensure_running_returns_immediately_when_already_ok
 test_ensure_running_fails_fast_on_denied_without_launching
+test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent

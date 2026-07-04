@@ -109,19 +109,117 @@ fm_backend_is_known() {  # <name>
 # shell, but cmux cannot run nested inside either of them, so a tmux or herdr
 # marker set alongside CMUX_WORKSPACE_ID always means that multiplexer is the
 # innermost, currently-executing layer and must win.
+#
+# cmux FALLBACK signals (docs/cmux-backend.md "Runtime auto-detection" owns
+# the empirical record): cmux's bundled `claude` PATH shim routes through
+# cmux-claude-wrapper, whose passthrough path unsets every CMUX_* variable
+# before exec'ing the real binary - so a claude-harness firstmate launched in
+# a cmux tab can have NO CMUX_WORKSPACE_ID at all. When that primary marker is
+# absent (and only then), two macOS-only fallback signals are consulted:
+#   1. __CFBundleIdentifier == com.cmuxterm.app - LaunchServices' app-identity
+#      env var, inherited by every process a cmux tab spawns and NOT stripped
+#      by the wrapper (it only unsets CMUX_*, TERMINFO, and CLAUDECODE).
+#      Authoritative in the common wrapper-strip case, but also inherited into
+#      every pane of a tmux server started from a cmux tab - the $TMUX check
+#      winning FIRST is what keeps that false positive absorbed.
+#   2. Process ancestry reaching the running cmux app (resolved by bundle id
+#      via lsappinfo, plus a bundle-shaped `ps` comm match so the install
+#      location is never hardcoded). Authoritative when the environment was
+#      scrubbed entirely (no bundle id to inherit); NOT usable from inside
+#      tmux, where the tmux server reparents to launchd and the chain never
+#      reaches cmux - which is fine, because $TMUX already won there.
+# Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
+# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
+# FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
+FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
+
 fm_backend_detect() {
+  FM_BACKEND_DETECTED=""
+  FM_BACKEND_DETECT_SIGNAL=""
   if [ -n "${TMUX:-}" ]; then
+    FM_BACKEND_DETECTED=tmux
+    FM_BACKEND_DETECT_SIGNAL=TMUX
     printf 'tmux'
     return 0
   fi
   if [ "${HERDR_ENV:-}" = "1" ]; then
+    FM_BACKEND_DETECTED=herdr
+    FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
     printf 'herdr'
     return 0
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    FM_BACKEND_DETECTED=cmux
+    FM_BACKEND_DETECT_SIGNAL=CMUX_WORKSPACE_ID
     printf 'cmux'
     return 0
   fi
+  if fm_backend_detect_cmux_fallback; then
+    FM_BACKEND_DETECTED=cmux
+    printf 'cmux'
+    return 0
+  fi
+  return 1
+}
+
+# fm_backend_detect_cmux_fallback: the two macOS-only cmux fallback signals
+# (see fm_backend_detect's header comment). Sets FM_BACKEND_DETECT_SIGNAL to
+# bundle-id or ancestry on success. Cheap-first: the bundle-id check is a pure
+# env read; the ancestry walk (subprocess-per-hop) runs only when it misses.
+fm_backend_detect_cmux_fallback() {
+  [ "$(uname 2>/dev/null)" = Darwin ] || return 1
+  if [ "${__CFBundleIdentifier:-}" = "$FM_BACKEND_CMUX_BUNDLE_ID" ]; then
+    FM_BACKEND_DETECT_SIGNAL=bundle-id
+    return 0
+  fi
+  if fm_backend_detect_cmux_app_is_ancestor; then
+    FM_BACKEND_DETECT_SIGNAL=ancestry
+    return 0
+  fi
+  return 1
+}
+
+# fm_backend_detect_cmux_app_pid: the running cmux app's pid, resolved by
+# bundle id via lsappinfo (`"pid"=<n>`), or failure when lsappinfo is missing,
+# errors, or the app is not running (lsappinfo prints nothing, exit 0).
+fm_backend_detect_cmux_app_pid() {
+  command -v lsappinfo >/dev/null 2>&1 || return 1
+  local out pid
+  out=$(lsappinfo info -only pid -app "$FM_BACKEND_CMUX_BUNDLE_ID" 2>/dev/null) || return 1
+  pid=${out##*=}
+  pid=$(printf '%s' "$pid" | tr -d '[:space:]"')
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$pid"
+}
+
+# fm_backend_detect_cmux_app_is_ancestor: walk this process's parent chain and
+# report whether it reaches the cmux app - matching either the lsappinfo-
+# resolved pid (bundle id, no path assumption) or a bundle-shaped comm path
+# (`*/cmux.app/Contents/MacOS/cmux`, any install location) when lsappinfo
+# could not resolve one. Stops at launchd (ppid 1), where a tmux server that
+# was started from a cmux tab has already reparented - ancestry can never
+# false-positive from inside tmux.
+fm_backend_detect_cmux_app_is_ancestor() {
+  local cmux_pid pid ppid comm hops=0
+  cmux_pid=$(fm_backend_detect_cmux_app_pid) || cmux_pid=""
+  pid=$$
+  while [ "$hops" -lt 32 ]; do
+    if [ -n "$cmux_pid" ] && [ "$pid" = "$cmux_pid" ]; then
+      return 0
+    fi
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=""
+    comm="${comm#"${comm%%[![:space:]]*}"}"
+    comm="${comm%"${comm##*[![:space:]]}"}"
+    [ -n "$comm" ] || return 1
+    case "$comm" in
+      */cmux.app/Contents/MacOS/cmux) return 0 ;;
+    esac
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" -gt 1 ] || return 1
+    pid=$ppid
+    hops=$((hops + 1))
+  done
   return 1
 }
 
@@ -134,9 +232,12 @@ fm_backend_detect() {
 # fires only when nothing was explicitly configured, so an explicit setting
 # always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
 # notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change.
+# today's default-path behavior and callers must see zero change. The cmux
+# notice names the winning signal, so a fallback-detected cmux (bundle id or
+# ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
+# distinct from the primary-marker case.
 fm_backend_name() {
-  local line v detected
+  local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
     return 0
@@ -150,12 +251,20 @@ fm_backend_name() {
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
   fi
-  if detected=$(fm_backend_detect); then
+  # Called directly (not in a command substitution) so the detect signal
+  # globals survive into the notice below.
+  if fm_backend_detect >/dev/null; then
+    detected=$FM_BACKEND_DETECTED
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     if [ "$detected" = cmux ]; then
-      echo "NOTICE: auto-detected cmux runtime (CMUX_WORKSPACE_ID) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
+      case "$FM_BACKEND_DETECT_SIGNAL" in
+        bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
+        ancestry) marker="FALLBACK signal process-ancestry reaching the running cmux app; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
+        *) marker="CMUX_WORKSPACE_ID" ;;
+      esac
+      echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0

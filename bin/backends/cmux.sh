@@ -85,10 +85,16 @@
 #   defaults to `socketControlMode=cmuxOnly`, which REJECTS any CLI process
 #   not spawned inside cmux itself ("Access denied - only processes started
 #   inside cmux can connect"). Since firstmate always drives cmux from an
-#   external shell, `automation.socketControlMode` must be set to `password`
-#   (or laxer) with a socket password configured, and firstmate must supply
-#   that same password on every invocation. See docs/cmux-backend.md "Setup"
-#   for the one-time configuration steps this requires.
+#   external shell, `automation.socketControlMode` must be one of the three
+#   externally-viable modes (docs/cmux-backend.md "Setup" owns the full
+#   matrix, verified from cmux source): `automation` (RECOMMENDED - same-user
+#   external clients, no shared secret), `password` (works, needs
+#   config/cmux-socket-password or CMUX_SOCKET_PASSWORD supplied on every
+#   invocation), or `allowAll` (works, but opens the socket to every local
+#   user - not recommended). `off` and `cmuxOnly` can never work externally.
+#   A configured password is harmless under non-password modes: cmux's own
+#   CLI sends `auth` preemptively and tolerates the server's "Unknown
+#   command 'auth'" reply (cli/cmux.swift, authenticateSocketClientIfNeeded).
 #
 # Requires: cmux (CLI, bundled inside cmux.app - not guaranteed to be on PATH;
 # see fm_backend_cmux_bin), jq (JSON parsing). Both are gated behind selecting
@@ -195,6 +201,13 @@ fm_backend_cmux_version_check() {
 # fm_backend_cmux_ping_state: classify socket reachability/auth from `cmux
 # ping`'s own text, since a missing/rejected connection is a normal, expected
 # outcome here (never treated as a scripting bug) - ok|denied|unauth|down|error.
+# The three auth-shaped server replies (verified from cmux source,
+# Sources/TerminalController.swift): "Authentication required" (password mode,
+# no password presented), "Password mode is enabled but no socket password"
+# (password mode, app side has no password configured), and "Invalid password"
+# (password mode, wrong password presented) all classify as unauth - each is a
+# password-configuration problem on one side or the other, never fixable by
+# relaunching the app.
 fm_backend_cmux_ping_state() {
   local out
   out=$(fm_backend_cmux_cli ping 2>&1)
@@ -204,28 +217,46 @@ fm_backend_cmux_ping_state() {
   fi
   case "$out" in
     *'only processes started inside cmux can connect'*) printf 'denied' ;;
-    *'Password mode is enabled but no socket password'*|*'Authentication required'*) printf 'unauth' ;;
+    *'Password mode is enabled but no socket password'*|*'Authentication required'*|*'Invalid password'*) printf 'unauth' ;;
     *'Socket not found'*) printf 'down' ;;
     *) printf 'error' ;;
   esac
+}
+
+# fm_backend_cmux_refuse_denied / fm_backend_cmux_refuse_unauth: the two
+# fail-fast auth refusals, factored so the pre-launch and post-launch checks
+# cannot drift. Each names every externally-viable socket mode (automation
+# RECOMMENDED, password, allowAll - docs/cmux-backend.md "Setup" owns the
+# matrix) plus the config/backend opt-out for a caller who only landed on
+# cmux via auto-detection.
+fm_backend_cmux_refuse_denied() {
+  echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default, which never admits an external CLI like firstmate). In cmux Settings > Automation set Socket Control Mode to 'Automation mode' (recommended - same-user external clients, no password), or 'Password mode' plus config/cmux-socket-password/CMUX_SOCKET_PASSWORD, or 'Full open access' (NOT recommended - admits every local user) - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+}
+
+fm_backend_cmux_refuse_unauth() {
+  echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller, or the configured one was rejected. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD to the password from cmux Settings > Automation, or switch Socket Control Mode to 'Automation mode' (recommended - no password needed) - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
 }
 
 # fm_backend_cmux_ensure_running: launch cmux (mirrors the CLI's own
 # `connectClient`/`launchApp` `open -a cmux` fallback) only when the socket is
 # simply not up yet (`down`); an auth failure (`denied`/`unauth`) is a
 # configuration problem a relaunch cannot fix, so it fails fast with an
-# actionable pointer to docs/cmux-backend.md instead of retry-looping.
+# actionable pointer to docs/cmux-backend.md instead of retry-looping. A
+# launch that never becomes reachable also names the `off` mode (socket
+# listener disabled entirely - no listener ever comes up, no matter how long
+# the app has been running), since that is indistinguishable from a slow
+# launch on the wire.
 fm_backend_cmux_ensure_running() {
   local state i
   state=$(fm_backend_cmux_ping_state)
   case "$state" in
     ok) return 0 ;;
     denied)
-      echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access, or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+      fm_backend_cmux_refuse_denied
       return 1
       ;;
     unauth)
-      echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+      fm_backend_cmux_refuse_unauth
       return 1
       ;;
   esac
@@ -235,17 +266,17 @@ fm_backend_cmux_ensure_running() {
     case "$state" in
       ok) return 0 ;;
       denied)
-        echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access, or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+        fm_backend_cmux_refuse_denied
         return 1
         ;;
       unauth)
-        echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+        fm_backend_cmux_refuse_unauth
         return 1
         ;;
     esac
     sleep 0.5
   done
-  echo "error: cmux did not become reachable within 10s of launch" >&2
+  echo "error: cmux did not become reachable within 10s of launch. If the app is already running, its Socket Control Mode may be 'Off' (no control socket at all) - set it to 'Automation mode' (recommended) in Settings > Automation, see docs/cmux-backend.md 'Setup'." >&2
   return 1
 }
 

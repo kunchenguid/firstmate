@@ -20,17 +20,37 @@ Prerequisites:
 - The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, and lavish-axi); treehouse still provides the worktree, cmux only provides the session.
 - The cmux CLI binary is not guaranteed to be on `PATH` after a plain app install (see "CLI is not on PATH by default" below) - the adapter falls back to the well-known bundle path automatically, so this is not a blocker, just something to be aware of if you want to run `cmux` yourself from a shell.
 
-**One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all (see "Socket access defaults to cmuxOnly" below for the full finding). To set it up:
+**One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all.
+Settings > Automation offers five Socket Control Mode values; their exact semantics were verified from cmux source (see "Socket control modes: the full matrix" below for the enforcement points and evidence):
 
-1. Open cmux's Settings > Automation (or edit `~/.config/cmux/cmux.json`'s `automation` block directly - back up the file first).
-2. Set **Socket Control Mode** to **Password**, and set a password there.
-3. Make that same password available to firstmate: either put it as the first line of a local, gitignored `config/cmux-socket-password` file under the effective config directory, or export `CMUX_SOCKET_PASSWORD` in the environment firstmate runs in.
+| Settings label | JSON value | Works for firstmate? | What gates an external client |
+|---|---|---|---|
+| Off | `off` | no | The socket listener is never started at all. |
+| cmux processes only | `cmuxOnly` (the default) | no | A connect-time check that the peer process is a descendant of the cmux app - an external shell never is. |
+| Automation mode | `automation` | **yes - recommended** | Only the socket file's owner-only (0600) permissions: any process of YOUR macOS user connects, with no password and no ancestry check. |
+| Password mode | `password` | yes, with a password | An `auth <password>` handshake required before any command; socket file owner-only (0600). |
+| Full open access | `allowAll` | yes, **not recommended** | Nothing: no auth, and the socket file is world-writable (0666), so EVERY local user can drive cmux. |
+
+**Recommendation: Automation mode.**
+It is the least-friction viable mode, and on a single-user machine it is not materially weaker than Password mode: both expose the socket only to processes of your own macOS user (0600 socket file), and the password's one extra defense - same-user processes that do not know the secret - is largely illusory, because the password itself must sit in a same-user-readable file (`config/cmux-socket-password`, or cmux's own state-dir password file that its CLI auto-reads) for automation to use it at all.
+Password mode buys real friction (a secret to set, distribute to firstmate, and rotate) for that marginal defense; pick it if your threat model includes untrusted same-user processes that cannot read your config files.
+Full open access hands the socket - which can open workspaces and run arbitrary commands in them - to every local user on a multi-user machine; cmux's own settings UI calls it unsafe, and it buys firstmate nothing over Automation mode (firstmate always runs as your own user), so choose it only as a deliberate, understood trade-off, never as a default.
+
+To set it up:
+
+1. Open cmux's Settings > Automation.
+2. Set **Socket Control Mode** to **Automation mode** (recommended).
+3. There is no step 3 - no password to configure or distribute.
+
+If you prefer **Password mode** instead: set the mode and a password in Settings > Automation, then make that same password available to firstmate - either as the first line of a local, gitignored `config/cmux-socket-password` file under the effective config directory, or exported as `CMUX_SOCKET_PASSWORD` in the environment firstmate runs in.
 `config/cmux-socket-password` is the durable choice; the adapter reads it fresh on every call from `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}` and passes it through without ever overriding an operator's own ambient `CMUX_SOCKET_PASSWORD` when the file is absent.
+A configured password is harmless if you later switch to Automation mode: cmux's CLI sends the `auth` handshake preemptively and tolerates the server's "Unknown command 'auth'" reply in non-password modes (verified from source, `cli/cmux.swift` `authenticateSocketClientIfNeeded`).
+Do not edit `~/.config/cmux/cmux.json` by hand for any of this: the mode change cannot be applied over the socket that is itself still rejecting connections, and the app's config writer drops a hand-added `socketPassword` key entirely (see "Socket control modes" below for that finding).
 
 Ask the firstmate crew to select cmux by putting `cmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=cmux` for a one-off session; telling the first mate in chat to use cmux also works.
-cmux is also selected by **runtime auto-detection**: a firstmate process itself running inside a cmux-spawned terminal (`CMUX_WORKSPACE_ID` set, checked after `$TMUX`/`HERDR_ENV=1` since cmux is the outermost terminal application, not a nestable multiplexer) spawns new tasks into cmux by default, with no config needed, exactly like herdr's own auto-detection - see "Runtime auto-detection" below.
+cmux is also selected by **runtime auto-detection**: a firstmate process itself running inside a cmux-spawned terminal (`CMUX_WORKSPACE_ID` set - or, when cmux's bundled claude wrapper stripped that marker, the bundle-id/ancestry fallback signals - checked after `$TMUX`/`HERDR_ENV=1` since cmux is the outermost terminal application, not a nestable multiplexer) spawns new tasks into cmux by default, with no config needed, exactly like herdr's own auto-detection - see "Runtime auto-detection" below.
 Auto-detection only ever picks a SESSION provider; it never touches the one-time socket-access setup above, which stays required regardless of how cmux was selected.
-A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured; that refusal message also names the `config/backend`/`--backend tmux` opt-out for a caller who ended up on cmux only because auto-detection picked it.
+A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured or was rejected; the refusal names every viable mode with Automation mode as the recommendation, plus the `config/backend`/`--backend tmux` opt-out for a caller who ended up on cmux only because auto-detection picked it.
 
 No first-run provisioning beyond the socket-access setup above and having `jq` installed; firstmate creates the workspace it needs on first spawn, launching the app itself (`open -a cmux`) if it is not already running.
 
@@ -56,20 +76,59 @@ A cmux spawn refuses loudly if the `cmux` CLI cannot be found, the installed ver
 Verified from the shipped app source (`Packages/macOS/CmuxTerminal/Sources/CmuxTerminal/Spawn/TerminalSurface+StartupEnvironment.swift`'s `applyManagedCmuxContextEnvironment`, cloned read-only from `github.com/manaflow-ai/cmux` at the commit current on 2026-07-04): every terminal surface cmux spawns gets `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, and `CMUX_SOCKET_PATH` (plus the legacy `CMUX_TAB_ID`/`CMUX_PANEL_ID` aliases) injected into its environment, and all five keys are marked `protectedKeys` - non-overridable by anything the spawned shell or its own env config does afterward.
 cmux's own CLI corroborates this is a legitimate ambient-identity marker, not incidental: `cmux_open.swift` reads `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` from the environment as its own fallback target when a caller does not pass `--workspace`/`--surface`, exactly how `$TMUX` and `HERDR_ENV`/`HERDR_PANE_ID` work for their own backends.
 
-`fm_backend_detect` (`bin/fm-backend.sh`) checks `CMUX_WORKSPACE_ID` (non-empty) as the cmux marker, not `CMUX_SOCKET_PATH`: the latter is separately documented as a user-settable override for pointing the CLI at a non-default socket path, so its mere presence would not reliably mean "running inside a cmux-spawned terminal" the way `CMUX_WORKSPACE_ID` does.
-Nesting still resolves innermost-first, exactly as it does for herdr: `$TMUX` is checked first, then `HERDR_ENV=1`, then `CMUX_WORKSPACE_ID` last.
+`fm_backend_detect` (`bin/fm-backend.sh`) checks `CMUX_WORKSPACE_ID` (non-empty) as the PRIMARY cmux marker, not `CMUX_SOCKET_PATH`: the latter is separately documented as a user-settable override for pointing the CLI at a non-default socket path, so its mere presence would not reliably mean "running inside a cmux-spawned terminal" the way `CMUX_WORKSPACE_ID` does.
+Nesting still resolves innermost-first, exactly as it does for herdr: `$TMUX` is checked first, then `HERDR_ENV=1`, then the cmux checks last.
 cmux is checked last deliberately, not because it is a "lesser" backend, but because it is a terminal application - the outermost layer, like iTerm2/Terminal.app - not a session multiplexer.
-Both tmux and herdr can run nested inside a cmux-provided shell (someone starts a tmux or herdr session from within a cmux terminal), but cmux itself cannot run nested inside either of them, so whenever a multiplexer marker is present alongside `CMUX_WORKSPACE_ID`, that multiplexer really is the innermost, currently-executing layer and must win.
-An auto-detected cmux spawn prints the same loud stderr `NOTICE` herdr's auto-detection prints, naming the marker and the `config/backend`/`--backend tmux` opt-out.
+Both tmux and herdr can run nested inside a cmux-provided shell (someone starts a tmux or herdr session from within a cmux terminal), but cmux itself cannot run nested inside either of them, so whenever a multiplexer marker is present alongside a cmux signal, that multiplexer really is the innermost, currently-executing layer and must win.
+An auto-detected cmux spawn prints the same loud stderr `NOTICE` herdr's auto-detection prints, naming the winning signal and the `config/backend`/`--backend tmux` opt-out; a fallback-signal detection (below) says so explicitly in that notice, so it is visibly distinct from the primary-marker case.
 
 Auto-detection selects the SESSION provider only.
-It has no bearing on the one-time socket-access setup ("Setup" above): `config/cmux-socket-password`/`CMUX_SOCKET_PASSWORD` are still required for the very first cmux-backed spawn to succeed, auto-detected or explicit, and the existing loud spawn refusal (`fm_backend_cmux_ensure_running`) still fires when that is missing.
-That refusal message itself now also names the `config/backend`/`--backend tmux` opt-out, so a captain who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: set the password to actually use cmux, or opt out back to tmux.
+It has no bearing on the one-time socket-access setup ("Setup" above): a viable `automation.socketControlMode` is still required for the very first cmux-backed spawn to succeed, auto-detected or explicit, and the existing loud spawn refusal (`fm_backend_cmux_ensure_running`) still fires when it is missing.
+That refusal message names the viable modes and the `config/backend`/`--backend tmux` opt-out, so a captain who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: finish the socket setup to actually use cmux, or opt out back to tmux.
 
-This auto-detection was NOT empirically verified with a live `env` dump inside a real cmux terminal surface, unlike this document's other live findings.
-The reference dev machine's only cmux instance is the captain's own shared, live GUI session; a single attempt to inspect it hit exactly the risk this document's own "Screenshot request" section already warned about - a full-screen capture landed an unrelated, sensitive foreground window instead of cmux (the cmux window turned out to be off-canvas on a background Space) and was deleted immediately, unread, without a second attempt.
-Reliably capturing cmux's own surface would have required either forcibly stealing focus from whatever the captain is actively using or risking another accidental capture of unrelated content; both were judged too disruptive/risky for a routine verification pass on a live, shared machine.
-This finding instead rests entirely on the source read above - the same "verified from source, not live" posture this document already uses for "Workspace ids do not survive a relaunch" - which is unambiguous: the environment-injection code path is unconditional and non-overridable for every surface a real cmux instance spawns, regardless of how that surface is invoked.
+The original build's env-injection finding rested on the source read above alone; it has since been corroborated live (2026-07-04, cmux 0.64.17 build 97): the inherited environment of a tmux server started from a cmux tab on the reference machine carries `CMUX_WORKSPACE_ID`, `CMUX_TAB_ID`, `CMUX_SOCKET_PATH`, `CMUX_BUNDLE_ID`, and `__CFBundleIdentifier=com.cmuxterm.app` into every pane, and firstmate separately confirmed the full injected set on a live tab shell via `ps eww`.
+
+### The bundled claude wrapper strips `CMUX_*` (unanticipated, load-bearing finding)
+
+Verified live 2026-07-04 against the installed cmux 0.64.17 (build 97), macOS aarch64; the captain's app was not modified, relaunched, or reconfigured for any of this.
+
+`claude` typed in a cmux tab does not run the real binary: cmux prepends a per-surface shim directory (`$CMUX_CLAUDE_WRAPPER_SHIM_ROOT`) to `PATH`, resolving `claude` to `/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper`, a readable bash script.
+Read from that shipped script, the wrapper has three exec paths:
+
+1. The hooks-injecting main path (in cmux, socket reachable): KEEPS every `CMUX_*` var and adds more (`CMUX_CLAUDE_PID`, launch metadata).
+2. The hooks-disabled path (`CMUX_CLAUDE_HOOKS_DISABLED=1`): KEEPS `CMUX_*`, unsets only `CLAUDECODE`.
+3. The passthrough path (not in cmux, OR the socket probe fails): when in cmux, runs `for cmux_key in "${!CMUX_@}"; do unset "$cmux_key"; done` plus `unset TERMINFO` (and `CLAUDECODE`) before `exec`'ing the real claude.
+
+The wrapper's socket probe is `CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 cmux --socket "$CMUX_SOCKET_PATH" ping`, with NO password.
+Reproduced verbatim on this machine's live password-mode socket: `Error: ERROR: Authentication required - send auth <password> first`, exit 1.
+So under Password mode - exactly the setup this document used to require - the probe always fails and the wrapper always takes the stripping passthrough path.
+
+The strip itself was reproduced end to end with a fake `claude` on `PATH` that dumps its environment, invoking the real wrapper with `CMUX_SURFACE_ID`, `CMUX_WORKSPACE_ID`, `CMUX_SOCKET_PATH` (the live socket), `__CFBundleIdentifier=com.cmuxterm.app`, `TERMINFO`, and `CLAUDECODE` set: the fake claude saw ONLY `__CFBundleIdentifier=com.cmuxterm.app` - every `CMUX_*` var, `TERMINFO`, and `CLAUDECODE` were gone.
+The counterfactual run with `CMUX_CLAUDE_HOOKS_DISABLED=1` added preserved every `CMUX_*` var (only `CLAUDECODE` was unset), confirming the strip is specific to the passthrough path.
+
+Consequence: a claude-harness firstmate launched inside a cmux tab can have zero `CMUX_*` env, so `CMUX_WORKSPACE_ID` alone cannot be the whole detection contract.
+Other harnesses launched from a cmux tab are unaffected (cmux ships no wrapper shims for them).
+
+### Fallback signals: bundle id first, then process ancestry
+
+When (and only when) `CMUX_WORKSPACE_ID` is absent - and `$TMUX`/`HERDR_ENV` did not already win - `fm_backend_detect` consults two macOS-only fallback signals, in order (`fm_backend_detect_cmux_fallback`, guarded on `uname` = `Darwin` since cmux itself is macOS-only):
+
+1. **Bundle id:** `__CFBundleIdentifier` equal to `com.cmuxterm.app`.
+   LaunchServices sets this app-identity variable for every process an app bundle launches, it is inherited down the process tree, and the wrapper does not strip it (verified in the fake-claude repro above).
+2. **Process ancestry:** the parent chain from the current process reaches the running cmux app (`fm_backend_detect_cmux_app_is_ancestor`).
+   The app is resolved by bundle id, never a hardcoded install path: `lsappinfo info -only pid -app com.cmuxterm.app` printed `"pid"=44127` for the live app (and prints nothing, exit 0, for a non-running bundle id), with a bundle-shaped `ps` comm match (`*/cmux.app/Contents/MacOS/cmux`, any install location) as the fallback when lsappinfo cannot resolve a pid.
+   Live process-table facts recorded 2026-07-04: the cmux app runs as `/Applications/cmux.app/Contents/MacOS/cmux` (pid 44127, ppid 1), and its tab shells are parented through `/usr/bin/login` (e.g. `44204 44127 /usr/bin/login`), so a claude-under-cmux's chain is claude <- tab shell <- login <- cmux app.
+
+Which signal is authoritative when:
+
+- **Wrapper-stripped claude directly in a cmux tab** (the common case): both signals are present; the bundle id is checked first because it is a pure env read, and it is authoritative.
+- **Environment-scrubbed launch under cmux** (an `env -i`-style invocation with no inherited `__CFBundleIdentifier`): ancestry is the only signal left, and it is authoritative.
+- **Inside a tmux server that was started from a cmux tab**: ancestry is structurally UNUSABLE - the tmux server reparents to launchd (verified live: the reference machine's own cmux-started tmux server has ppid 1), so the walk can never reach cmux - while the bundle id IS inherited into every pane and WOULD false-positive.
+  `$TMUX` winning first is what keeps that correct; the fallbacks are never consulted when a multiplexer marker is present.
+  `tests/fm-backend.test.sh` pins this exact case (`test_backend_detect_cmux_fallback_tmux_nested_false_positive`), alongside the bundle-id, ancestry (pid and comm), non-Darwin-guard, and launchd-stop paths.
+- **SSH sessions, cron, launchd agents**: neither signal fires - sshd/cron reset the environment (no bundle id) and their ancestry ends at launchd.
+
+The positive ancestry walk itself is exercised by fake `ps`/`lsappinfo` unit tests rather than live (running a probe process genuinely parented under the captain's live cmux tabs was judged too intrusive, the same posture as this document's screenshot note); every negative live fact above - the strip, the wrapper ping failure, the tmux reparenting, the bundle-id inheritance, the lsappinfo resolution shapes - was verified against the real machine on 2026-07-04.
 
 ## Worktree provider stays treehouse
 
@@ -123,19 +182,32 @@ No session field is needed - unlike herdr/zellij there is no session layer to re
 | Kill | `cmux close-workspace --workspace <id>` | See "Closing the last surface: a third shape" below. The backend owns the whole task workspace, so kill closes the whole workspace directly, best-effort (`\|\| true`), matching every other backend's `kill` contract. |
 | Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and `FM_ROOT` hash. |
 
-## Socket access defaults to `cmuxOnly` (unanticipated, load-bearing finding)
+## Socket control modes: the full matrix (default `cmuxOnly` rejects external CLIs)
 
 Not anticipated by the feasibility report (which verified the CLI surface from source only, without a live socket connection): cmux's control socket, by default, **rejects any client process that was not itself spawned inside cmux**.
-Verified live: running any socket-backed CLI command (`cmux ping`, `cmux workspace list`, etc.) from an ordinary external shell - exactly how firstmate always drives cmux - returned `Error: ERROR: Access denied - only processes started inside cmux can connect`.
+Verified live (2026-07-03 pass): running any socket-backed CLI command (`cmux ping`, `cmux workspace list`, etc.) from an ordinary external shell - exactly how firstmate always drives cmux - returned `Error: ERROR: Access denied - only processes started inside cmux can connect`.
 
 The setting is `automation.socketControlMode` in cmux's settings (`~/.config/cmux/cmux.json` or Settings > Automation), with values `off`, `cmuxOnly` (the default), `automation`, `password`, and `allowAll` (three more legacy aliases - `openAccess`, `fullOpenAccess`, `full` - normalize onto `allowAll`; `notifications` normalizes onto `automation`).
-`password` mode was chosen for this adapter: it is the minimum change that unblocks external CLI access without going all the way to `allowAll`'s unrestricted, world-writable-socket posture.
 
-A real wrinkle found during setup: **`automation.socketPassword` cannot be set durably through `cmux.json`** - the app's own config writer normalizes the file on reload/restart and drops the `socketPassword` key entirely (it is kept only in a dedicated password store/Settings, not the plaintext JSON), so editing the file to include a password has no lasting effect and cmux's own `cmux reload-config` cannot apply the `socketControlMode` change either, because reload-config is itself a socket call, and the socket is what needs the mode change to accept it in the first place.
-The practical path (and what "Setup" above describes) is: set the mode and password once through Settings > Automation (a GUI action - the socket-access chicken-and-egg problem does not exist there), then supply that same password to firstmate via `config/cmux-socket-password` or `CMUX_SOCKET_PASSWORD`.
+The per-mode enforcement was traced through the shipped source on 2026-07-04 (`github.com/manaflow-ai/cmux` at commit `9c91710e3f58`, cloned read-only as scratch; verified from source, not live, except where noted - the reference machine's live app is the captain's own, in Password mode, and was not reconfigured to exercise the other modes).
+There are exactly four enforcement points, and NO per-command/verb restrictions by mode - a mode either admits a client fully or not at all:
+
+- **Listener start** (`Sources/AppDelegate.swift`, `socketListenerConfigurationIfEnabled`): `off` means the listener is never started; every other mode starts it.
+- **Socket file permissions** (`SocketControlMode+SocketControl.swift`, `socketFilePermissions`): `allowAll` chmods the socket 0666 (every local user); all other modes 0600 (owner only).
+- **Connect-time ancestry check** (`Sources/TerminalController.swift`, `handleClient`): applied ONLY when the mode is `cmuxOnly` - the peer pid must be a process-tree descendant of the cmux app, which an external shell never is (the live 2026-07-03 rejection above is this check firing).
+- **Password handshake** (`Sources/TerminalController.swift`, `authResponseIfNeeded`, gated on `requiresPasswordAuth`, true ONLY for `password`): every command line before a successful `auth <password>` gets an auth error; the three auth-failure texts are "Authentication required - send auth <password> first" (no password presented; also reproduced live on this machine's password-mode socket, 2026-07-04), "Password mode is enabled but no socket password is configured in Settings." (app side has no password), and "Invalid password" (wrong password presented).
+
+So for an external, same-user CLI client like firstmate: `automation` admits it with no credential (its only gate is the 0600 socket file), `password` admits it after the handshake, `allowAll` admits it and every other local user too, and `off`/`cmuxOnly` never admit it.
+`automation` is the recommended mode for firstmate, with `password` and `allowAll` as supported alternatives - the "Setup" section above carries the decision rationale.
+This build's earlier pass (2026-07-03) chose `password` as "the minimum change that unblocks external CLI access"; the matrix trace above superseded that with `automation`, which reaches the same same-user boundary without the shared-secret friction.
+
+A real wrinkle found during the 2026-07-03 password-mode setup, still true and worth keeping: **`automation.socketPassword` cannot be set durably through `cmux.json`** - the app's own config writer normalizes the file on reload/restart and drops the `socketPassword` key entirely (it is kept only in a dedicated password store/Settings, not the plaintext JSON), so editing the file to include a password has no lasting effect and cmux's own `cmux reload-config` cannot apply the `socketControlMode` change either, because reload-config is itself a socket call, and the socket is what needs the mode change to accept it in the first place.
+The practical path (and what "Setup" above describes) is: set the mode (and password, if choosing Password mode) once through Settings > Automation (a GUI action - the socket-access chicken-and-egg problem does not exist there), then, for Password mode, supply that same password to firstmate via `config/cmux-socket-password` or `CMUX_SOCKET_PASSWORD`.
 `CMUX_SOCKET_PASSWORD` in the CLI **client's** own environment is confirmed sufficient (per cmux's own CLI contract, it is the documented fallback when `--password` is absent) - `fm_backend_cmux_cli` exports it only when a value is actually configured, so an operator's own ambient `CMUX_SOCKET_PASSWORD` is never clobbered with an empty value.
+cmux's CLI also auto-reads the app's own password file (`socket-control-password` in the cmux state directory) when neither `--password` nor the env var is set, but do not rely on that for firstmate: on the reference machine the app's password lives only in the password store (no state-dir file exists), so the explicit `config/cmux-socket-password`/`CMUX_SOCKET_PASSWORD` supply is the dependable path.
 
-`fm_backend_cmux_ping_state` classifies the resulting failure text into `denied` (`cmuxOnly` still active) or `unauth` (password mode active but no/wrong password presented), and `fm_backend_cmux_ensure_running`/`fm_backend_cmux_version_check`'s callers surface an actionable message pointing back to this document for either state - never a generic "is cmux installed?" message, and never a retry-via-relaunch (relaunching the app cannot fix a socket-mode/password configuration problem).
+`fm_backend_cmux_ping_state` classifies the resulting failure text into `denied` (`cmuxOnly` still active) or `unauth` (password mode active but no/wrong password presented, covering all three auth-failure texts above), and `fm_backend_cmux_ensure_running`/`fm_backend_cmux_version_check`'s callers surface an actionable message naming the viable modes and pointing back to this document for either state - never a generic "is cmux installed?" message, and never a retry-via-relaunch (relaunching the app cannot fix a socket-mode/password configuration problem).
+`off` is indistinguishable on the wire from "app not running" (`Socket not found`, classified `down`), so the launch-and-wait path's timeout message names the possibility that the app is running with its socket off.
 
 ## `read-screen` fails on a genuinely fresh surface (unanticipated, load-bearing finding)
 
@@ -178,7 +250,7 @@ No `Workspace(...)` construction anywhere in the source passes a persisted id ba
 Conclusion: workspace ids should be treated as NOT surviving an app relaunch or session restore, the same posture as herdr's/zellij's own id-instability caveats (for different underlying reasons in each case).
 `fm_backend_cmux_list_live` therefore does recovery/orphan discovery strictly by **title**, never by trusting a stored uuid, mirroring both prior adapters' recovery posture.
 Because cmux has one shared app namespace, the title lookup is scoped to this firstmate installation's `fm-<home-label>-` prefix and reported back to firstmate as the plain `fm-<id>` label.
-No live app restart was performed to empirically confirm this beyond the source read - the two live app restarts that did occur during this build (documented in the "Socket access" section above) were solely to apply the one-time `socketControlMode`/password configuration change, not to test id persistence, and the app held no captain-owned workspaces at either restart (verified: it had just been freshly launched moments before, with only the default auto-created workspace present).
+No live app restart was performed to empirically confirm this beyond the source read - the two live app restarts that did occur during this build (documented in the "Socket control modes" section above) were solely to apply the one-time `socketControlMode`/password configuration change, not to test id persistence, and the app held no captain-owned workspaces at either restart (verified: it had just been freshly launched moments before, with only the default auto-created workspace present).
 
 ## CLI is not on PATH by default (unanticipated finding)
 
@@ -231,6 +303,6 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 - **No event push at all**, not even herdr's semantic busy-state: cmux has agent-awareness elsewhere (Claude Code hooks, session-resume) but nothing exposed over the socket API for generic busy/idle classification, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux/zellij/Orca path.
 - **GUI-first, macOS-only, requires the app running** - identical posture to Orca. Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (`CMUX_WORKSPACE_ID`; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place. The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.
 - **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no per-home container design (a herdr-style workspace-per-home split, or similar) has been designed or verified for cmux yet.
-- **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default and configuring a password will see every spawn fail with an actionable error pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
+- **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
 - **`bin/fm-bootstrap.sh`'s required-tools list is unchanged** - it does not conditionally add `cmux`/`jq` when a backend selection resolves to cmux, mirroring the same accepted gap already documented for herdr/zellij; the version/tool/reachability gate happens at spawn time instead and refuses loudly.
 - **A surface can still die in the brief window between `target_ready` succeeding and the operation's own call running.** That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out, `fm_backend_cmux_send_text_submit`'s retry loop (which reports `send-failed`/`pending`/`unknown` rather than a false "sent"), or the watcher's stale-pane detection.
