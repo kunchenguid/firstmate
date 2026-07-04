@@ -57,10 +57,10 @@ FM_BACKEND_SPAWN="tmux herdr zellij orca"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
 fm_backend_is_known() {  # <name>
-  local name=$1 known
-  for known in $FM_BACKEND_KNOWN; do
-    [ "$name" = "$known" ] && return 0
-  done
+  local name=$1
+  case " $FM_BACKEND_KNOWN " in
+    *" $name "*) return 0 ;;
+  esac
   return 1
 }
 
@@ -132,11 +132,11 @@ fm_backend_validate() {  # <name>
 }
 
 fm_backend_validate_spawn() {  # <name>
-  local name=$1 backend
+  local name=$1
   fm_backend_validate "$name" || return 1
-  for backend in $FM_BACKEND_SPAWN; do
-    [ "$name" = "$backend" ] && return 0
-  done
+  case " $FM_BACKEND_SPAWN " in
+    *" $name "*) return 0 ;;
+  esac
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
   return 1
 }
