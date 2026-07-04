@@ -127,7 +127,7 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/dewolfe/no-mistakes/main/docs/install.sh | sh)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -177,6 +177,30 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
+}
+
+test_cmux_backend_gates_cmux_tool_only_when_selected() {
+  local case_dir fakebin out missing_cmux
+  missing_cmux="MISSING: cmux (install: brew install --cask cmux  # or download from https://cmux.com)"
+
+  case_dir="$TMP_ROOT/cmux-backend-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' cmux > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_cmux" ] || fail "backend=cmux should require only the cmux-specific missing tool, got: $out"
+
+  case_dir="$TMP_ROOT/cmux-backend-not-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: cmux" "bootstrap should not require cmux unless backend=cmux is selected"
+  pass "bootstrap: backend=cmux gates the cmux CLI without requiring it on the default backend"
 }
 
 test_crew_dispatch_active_rules_are_surfaced() {
@@ -229,5 +253,6 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_cmux_backend_gates_cmux_tool_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

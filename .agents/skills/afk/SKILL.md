@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate only captain-relevant events as one batched digest, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate only user-relevant events as one batched digest, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -9,9 +9,9 @@ metadata:
 # afk
 
 Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
+tradeoff **consented** and **explicit**: the user is stepping away, so the
 sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
+LLM for each one. Escalations still reach the user, but as one pre-read,
 batched digest rather than per-wake injections.
 
 ## What it does
@@ -38,16 +38,16 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** to the captain that away-mode is active: the daemon will
-   self-handle routine wakes, escalate only captain-relevant events, and the
-   captain can exit by sending any real message.
+4. **Acknowledge** to the user that away-mode is active: the daemon will
+   self-handle routine wakes, escalate only user-relevant events, and the
+   user can exit by sending any real message.
 
 ## How to exit afk
 
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk`
-  -> the captain is back. Clear `state/.afk`, stop the daemon, flush one
+  -> the user is back. Clear `state/.afk`, stop the daemon, flush one
   distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
   any pending escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake
@@ -57,14 +57,14 @@ No `/back` is needed. The first genuine message is the return signal:
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
-Bias ambiguous cases toward exit: a present captain beats token savings, and
-a false exit is self-correcting (the captain re-runs `/afk`).
+Bias ambiguous cases toward exit: a present user beats token savings, and
+a false exit is self-correcting (the user re-runs `/afk`).
 
 ## Orthogonal to approval authority
 
 afk changes how aggressively firstmate surfaces things, **not who approves
 what**. "Away" never means "approves more." A PR ready for merge, a
-needs-decision finding, or anything destructive still waits for the captain's
+needs-decision finding, or anything destructive still waits for the user's
 explicit word - the daemon just batches the notification.
 
 ## Sentinel marker contract
@@ -94,7 +94,7 @@ injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
 Either condition defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
 afk mode the composer guard is belt-and-suspenders (no human is typing), but it
-protects against the race window between the captain returning and their
+protects against the race window between the user returning and their
 message landing, and against the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
@@ -124,9 +124,9 @@ did not land instead of leaving it unsubmitted.
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
-Only captain-relevant events escalate to firstmate's context, and even then as
+Only user-relevant events escalate to firstmate's context, and even then as
 one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, the signal/stale
+The classification predicates (the user-relevant verb set, the signal/stale
 tests, and the fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same
 library the always-on watcher uses for its own triage when afk is off, so the two
 modes apply one identical policy. While `state/.afk` exists the daemon owns the
@@ -135,9 +135,9 @@ the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
+- `signal` whose status content has no user-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
-  -> self-handle. Captain-relevant verb -> escalate.
+  -> self-handle. User-relevant verb -> escalate.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
@@ -147,14 +147,14 @@ Classify each wake this way:
   on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
-  captain-relevant status line the per-wake classifier might miss.
+  user-relevant status line the per-wake classifier might miss.
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
 immediate) and flushed as one single-line digest prefixed with the sentinel
 marker, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
-the marker lets firstmate distinguish it from a real captain message.
+the marker lets firstmate distinguish it from a real user message.
 
 ## Injection hardening
 
@@ -166,7 +166,7 @@ the marker lets firstmate distinguish it from a real captain message.
   `pane_input_pending` (real unsubmitted text on the cursor line means human
   mid-typing or previous injection with swallowed Enter). Either condition
   defers injection and preserves the buffer for retry. The daemon never merges
-  its digest into the captain's half-typed line.
+  its digest into the user's half-typed line.
 - The composer detector, shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`, drops
   dim/faint ghost text, then strips harness composer box borders, so a ghost-only
   or idle bordered composer such as claude's `│ > ... │` reads as empty, not

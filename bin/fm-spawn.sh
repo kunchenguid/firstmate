@@ -14,10 +14,10 @@
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
 #   $TMUX or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, and orca. Orca owns both the task worktree and terminal,
+#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and terminal,
 #   so ship/scout Orca spawns do not run treehouse get. An auto-detected herdr
-#   spawn prints a loud stderr notice; auto-detected tmux stays silent; zellij
-#   and orca are never auto-detected (always explicit). Default tmux
+#   spawn prints a loud stderr notice; auto-detected tmux stays silent; zellij,
+#   orca, and cmux are never auto-detected (always explicit). Default tmux
 #   spawns do not write backend= to meta; absent backend= means tmux.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
@@ -621,9 +621,10 @@ fi
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
-# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
-# that every downstream operation (send/capture/kill) already treats as opaque
-# per-backend routing (fm_backend_resolve_selector).
+# herdr-sm-spaces-k4). zellij and cmux use their own tab/workspace-per-task
+# adapters. All branches converge on the same $T ("target") string that every
+# downstream operation (send/capture/kill) already treats as opaque per-backend
+# routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
@@ -701,6 +702,18 @@ EOF
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
+  cmux)
+    CMUX_CONTAINER=$(fm_backend_cmux_container_ensure) || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    read -r CMUX_WORKSPACE_REF CMUX_SURFACE_REF <<EOF
+$CMUX_TASK_IDS
+EOF
+    if [ -z "$CMUX_WORKSPACE_REF" ] || [ -z "$CMUX_SURFACE_REF" ]; then
+      echo "error: cmux did not return a workspace/surface ref for $W" >&2
+      exit 1
+    fi
+    T="$CMUX_WORKSPACE_REF/$CMUX_SURFACE_REF"
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -732,6 +745,7 @@ spawn_send_text_line() {  # <target> <text>
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
+    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   esac
 }
@@ -740,6 +754,7 @@ spawn_current_path() {  # <target>
     tmux) fm_backend_tmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
+    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
@@ -747,6 +762,7 @@ spawn_send_literal() {  # <target> <text>
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
     herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
+    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
   esac
 }
@@ -755,6 +771,7 @@ spawn_send_key() {  # <target> <key>
     tmux) fm_backend_tmux_send_key "$1" "$2" ;;
     herdr) fm_backend_herdr_send_key "$1" "$2" ;;
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
+    cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
   esac
 }
@@ -932,6 +949,10 @@ META_WINDOW=$T
     echo "zellij_session=$ZELLIJ_SES"
     echo "zellij_tab_id=$ZELLIJ_TAB_ID"
     echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+  fi
+  if [ "$BACKEND" = cmux ]; then
+    echo "cmux_workspace=$CMUX_WORKSPACE_REF"
+    echo "cmux_surface=$CMUX_SURFACE_REF"
   fi
   if [ "$BACKEND" = orca ]; then
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"

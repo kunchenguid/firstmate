@@ -4,8 +4,8 @@
 #   <target> may be a bare firstmate task name (fm-xyz), resolved through
 #   this home's state/<id>.meta, or an explicit backend target.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# Key support is backend-specific: tmux/herdr/zellij/cmux support Escape,
+# Enter, and C-c; Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend reports a
