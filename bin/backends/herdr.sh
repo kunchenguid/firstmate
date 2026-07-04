@@ -442,18 +442,27 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup dup_pane out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_panes out tab_id pane_id
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup=$(printf '%s' "$list" | jq -r --arg want "$label" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
-  dup_pane=""
-  if [ -n "$dup" ]; then
-    dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
-    if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
-      echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
-      return 1
-    fi
+  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+    echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+    return 1
+  }
+  dup_panes=""
+  if [ -n "$dup_tabs" ]; then
+    while IFS= read -r dup; do
+      [ -n "$dup" ] || continue
+      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+        return 1
+      fi
+      dup_panes="${dup_panes}${dup_pane}"$'\n'
+    done <<EOF
+$dup_tabs
+EOF
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
@@ -463,8 +472,13 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
-  if [ -n "$dup_pane" ]; then
-    fm_backend_herdr_cli "$session" pane close "$dup_pane" >/dev/null 2>&1 || true
+  if [ -n "$dup_panes" ]; then
+    while IFS= read -r dup_pane; do
+      [ -n "$dup_pane" ] || continue
+      fm_backend_herdr_cli "$session" pane close "$dup_pane" >/dev/null 2>&1 || true
+    done <<EOF
+$dup_panes
+EOF
   fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
