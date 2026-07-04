@@ -550,9 +550,9 @@ test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-idle
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" "backend=herdr"
-  # No run attributable (mirrors a no-mistakes run-step lookup that missed
-  # attribution, e.g. the crew's own run fell outside the CLI's recent-runs
-  # window): the pane fallback is the only remaining signal.
+  # No run attributable (mirrors a no-mistakes run-step lookup that found no
+  # matching row within the configured runs-list window): the pane fallback is
+  # the only remaining signal.
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_LIST=""
   FM_FAKE_TMUX_MISSING=1

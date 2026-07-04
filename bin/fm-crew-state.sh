@@ -19,7 +19,8 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal?
+#   2. Matching no-mistakes run for this crew's branch, active or terminal
+#      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed.
@@ -155,7 +156,7 @@ pane_readable() {  # <target>
 # tmux's regex-only reader would correctly report. Trusting herdr's `idle`
 # outright (skipping that corroboration) is what let a still-working crew read
 # as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_run_id_for_branch) - as not provably working in
+# missed attribution (see nm_runs_status_for_branch) - as not provably working in
 # fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
 # the absorb-then-escalate path. A genuinely human-blocked agent (a permission
 # dialog, not mid-tool-call) does not render the busy banner, so this

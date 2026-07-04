@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
-# and keeps blocking; it queues and exits only for actionable wakes. The no-verb
-# turn-end / non-terminal-stale path is absorb-only-when-provably-working: a wake
+# and keeps blocking; it queues and exits only for actionable wakes.
+# The no-verb signal and stale path is absorb-only-when-provably-working: a wake
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a
-# captain-relevant status is never silently swallowed. While state/.afk exists,
-# the daemon owns triage and
-# this watcher queues and exits on every wake. Printed reason lines:
+# otherwise, so a crew that finishes (or stops and waits) without a current
+# working signal is never silently swallowed. While state/.afk exists, the daemon
+# owns triage and this watcher queues and exits on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
@@ -117,21 +116,21 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
-# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb turn-end
-# / non-terminal-stale path is absorb-only-when-provably-working: such a wake is
-# absorbed ONLY while the crew shows positive evidence it is still working (an
-# actively-running no-mistakes step, or a busy pane, via crew_is_provably_working
-# over fm-crew-state.sh); a crew that stopped its turn with no running pipeline and
-# no busy pane is SURFACED, so a finish reported only through interactive pane menus
+# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
+# / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
+# while the crew shows positive evidence it is still working (an actively-running
+# no-mistakes step, or a busy pane, via crew_is_provably_working over
+# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
+# busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a
-# terminal stale, a not-provably-working stale, a provably-working stale past the
+# signal, a no-verb signal whose crew is not provably working, any check, a stale
+# pane whose crew is not provably working, a provably-working stale past the
 # threshold, or anything unknown) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a non-terminal stale escalates as a possible wedge
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 
@@ -552,7 +551,7 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # non-terminal-stale escalation timer.
+        # stale escalation timer.
         rm -f "$ssf"
       fi
     else

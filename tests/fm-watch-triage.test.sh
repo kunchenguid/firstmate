@@ -7,9 +7,10 @@
 # a real fm-watch.sh subprocess to assert the behavioral contract:
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
-# provably-working non-terminal-stale absorbed-then-escalated past the threshold,
-# the heartbeat backstop fail-safe, and afk coherence (no double-triage while the
-# away-mode daemon owns supervision).
+# provably-working stale panes absorbed-then-escalated past the threshold,
+# terminal-looking stale status lines overridden by an active run, the heartbeat
+# backstop fail-safe, and afk coherence (no double-triage while the away-mode
+# daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
 # tests and, for the always-on watcher, the provably-working predicate that makes
-# no-verb wakes safe to absorb. Sourced by BOTH the always-on watcher
+# no-verb signal and stale-pane wakes safe to absorb.
+# Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
 # drift apart.
@@ -15,9 +16,10 @@
 # The one exception is the "provably working" predicate (crew_is_provably_working
 # and its signal-path wrapper). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn shows positive evidence it is still
-# working. Callers run it ONLY on the no-verb (turn-end / non-terminal stale)
-# path, never on every wake, so the per-wake triage stays cheap.
+# whether a crew that just stopped its turn or went stale shows positive evidence
+# it is still working. Callers run it ONLY on no-verb signal handling and first
+# sighting of a stale hash, never on every wake, so the per-wake triage stays
+# cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -89,8 +91,10 @@ signal_reason_is_actionable() {  # <file> ...
 
 # 0 if crew <id> shows POSITIVE evidence it is still working; 1 otherwise. This is
 # the "provably working" predicate at the heart of absorb-only-when-provably-working:
-# a no-verb turn-end or non-terminal stale wake is absorbed ONLY when this returns
-# 0, and SURFACED otherwise (the crew may be done, waiting on a decision, or wedged).
+# a no-verb turn-end or stale wake is absorbed ONLY when this returns 0, and
+# SURFACED otherwise (the crew may be done, waiting on a decision, or wedged).
+# For stale panes, this verdict is checked before trusting the status log so a
+# pre-validation captain-relevant line does not override an active run.
 #
 # It reuses bin/fm-crew-state.sh rather than duplicating its run-step logic, and
 # treats the crew as provably working in exactly two cases, both read straight from
@@ -104,7 +108,8 @@ signal_reason_is_actionable() {  # <file> ...
 # stale "working:" status-log line (source status-log), a torn-down or unknown
 # crew, or an unreadable verdict - is NOT provably working, so the wake surfaces.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so this
-# runs only on the no-verb path. FM_CREW_STATE_BIN lets tests stub the verdict.
+# runs only on no-verb signal and first-sighting stale paths. FM_CREW_STATE_BIN
+# lets tests stub the verdict.
 crew_is_provably_working() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || return 1
