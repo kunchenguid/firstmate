@@ -321,10 +321,113 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
   printf '%s:%s\t%s' "$session" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"
 }
 
+# fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
+# dead|no-agent|live|unknown, purely from the JSON body of two read-only
+# calls - never from process exit status, since a business-logic "not found"
+# response is a normal, expected outcome here, not a call failure (real herdr
+# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
+# the JSON keeps this function correct against either).
+#
+#   dead     - `pane get` responds with error code pane_not_found: the pane
+#              itself is gone (closed, or its process died and herdr already
+#              reaped it - verified empirically: killing a pane's shell pid
+#              on a live server makes herdr immediately drop both the pane
+#              and its tab from `pane get`/`tab list`).
+#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
+#              get` responds with error code agent_not_found: nothing is
+#              registered in it - exactly what a herdr session-layout restore
+#              produces (verified empirically: `session stop` + fresh `herdr
+#              server` restart leaves the pane alive, agent_status "unknown",
+#              agent get -> agent_not_found - docs/herdr-backend.md "ID
+#              stability across a server restart"), and what a future
+#              `resume_agents_on_restore = false` restore would produce too
+#              (a plain shell, never an agent).
+#   live     - `agent get` succeeds and reports a real agent_status (working,
+#              idle, done, or blocked - any registered value). An idle or
+#              blocked agent is still a genuine, still-registered agent, not
+#              a restored husk, so it is never a close-and-replace candidate.
+#   unknown  - anything else: an unparseable/unexpected response from either
+#              call, or a `pane get` success whose own echoed pane_id does not
+#              round-trip (guards against misreading a herdr response shape
+#              change as "the pane exists"). The caller must fail safe toward
+#              refusal here, never toward closing - this is the conservative
+#              backstop the husk check depends on.
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code pid status
+  # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
+  # an error response's JSON body to STDERR (success bodies go to stdout), so
+  # discarding stderr here would blind this function to exactly the
+  # error.code values (pane_not_found, agent_not_found) it exists to read -
+  # every OTHER call site in this file discards stderr safely only because
+  # its caller collapses both the error and the not-an-error paths to the
+  # same final answer, which this function's dead/no-agent/live/unknown
+  # distinction cannot afford to do.
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  if [ "$pid" != "$pane_id" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    return 0
+  fi
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$status" in
+    working|idle|done|blocked) printf 'live' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
+# states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
+# confirm; live and unknown both refuse (1), so an inconclusive read never
+# licenses closing anything - see acceptance criterion 1's fail-safe-toward-
+# refusal requirement.
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
+  case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
+    dead|no-agent) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
-# <container> ("session:workspace_id"), refusing an existing <label>. Herdr
-# does NOT enforce label uniqueness itself (verified: two tabs can share a
-# label), so the duplicate check is ours, mirroring tmux's manual check.
+# <container> ("session:workspace_id"). Herdr does NOT enforce label
+# uniqueness itself (verified: two tabs can share a label), so the duplicate
+# check is ours, mirroring tmux's manual check.
+#
+# A same-labeled tab already existing no longer means an automatic refusal:
+# herdr persists and restores its whole session layout (workspaces/tabs/
+# panes) across a server restart, including a reboot, and a restored fm-<id>
+# task tab comes back a HUSK - a dead pane, or (today, and unconditionally
+# once a future `resume_agents_on_restore = false` config ships) a plain
+# agent-less shell sitting in the saved cwd, never the crewmate that used to
+# be there. Before this fix, every fleet respawn after such a restart needed
+# the operator to manually close each husk pane first before firstmate could
+# spawn into it again. fm_backend_herdr_tab_is_husk classifies the existing
+# tab's pane conservatively (dead or no-agent only; anything live or
+# ambiguous refuses exactly as before) and, when it is a confirmed husk,
+# this function CLOSES AND REPLACES it instead of refusing.
+#
+# Ordering is deliberate: the REPLACEMENT tab is created FIRST, and the husk
+# is closed only AFTER that succeeds - never the reverse. Closing a
+# workspace's LAST remaining tab deletes the whole workspace on real herdr
+# (docs/herdr-backend.md "Workspace lifecycle"), and a session-restore husk
+# can legitimately be that workspace's only tab (e.g. its own seeded default
+# tab was already pruned, long before the restart, by a prior real task tab
+# existing alongside it). Herdr's lack of label-uniqueness enforcement is
+# exactly what makes this safe: the new and the husk tab can briefly share
+# the same label with no error, so the workspace never drops to zero tabs.
+# This mirrors fm_backend_herdr_workspace_prune_seeded_default_tab's own
+# create-before-close safety argument.
+#
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
 # <seeded_default_tab_id> (4th arg, may be empty) is exactly the value
@@ -339,14 +442,18 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup dup_pane out tab_id pane_id
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   dup=$(printf '%s' "$list" | jq -r --arg want "$label" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
+  dup_pane=""
   if [ -n "$dup" ]; then
-    echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
-    return 1
+    dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+    if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+      echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+      return 1
+    fi
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
@@ -356,6 +463,9 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
+  if [ -n "$dup_pane" ]; then
+    fm_backend_herdr_cli "$session" pane close "$dup_pane" >/dev/null 2>&1 || true
+  fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
