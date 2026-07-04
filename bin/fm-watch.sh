@@ -12,9 +12,15 @@
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
-#   stale: <window>        terminal stale endpoint, a non-terminal stale whose crew is
-#                          not provably working (surfaced at once), or a provably-
-#                          working stale past the wedge threshold, unless afk active
+#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
+#                          timer) regardless of what the status log says - an active
+#                          run-step or busy pane outranks even a captain-relevant log
+#                          line, since the crew's own log gets no new entry once
+#                          firstmate hands it to a no-mistakes validation. Only when
+#                          NOT provably working does the log's last line decide:
+#                          terminal (captain-relevant) or non-terminal (no verb),
+#                          both surfaced at once. A provably-working stale past the
+#                          wedge threshold also surfaces. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -230,6 +236,33 @@ wake() {
   esac
   echo "$1"
   exit 0
+}
+
+# Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
+# absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
+# watcher restart between recording the hash and recording the timer), or
+# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
+# state (the costly check already ran once, at classification time). Shared by
+# both places a hash can be absorbed this way: the plain non-terminal path,
+# and the stale_is_terminal-overridden path (a captain-relevant status-log
+# line that an active run/busy pane outranked).
+wedge_timer_check() {  # <window> <since-file> <triage-label>
+  local win=$1 since_file=$2 label=$3 since age
+  since=$(cat "$since_file" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*)
+      date +%s > "$since_file"
+      triage_log "absorbed $label timer reset: $win"
+      ;;
+    *)
+      age=$(( $(date +%s) - since ))
+      if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        fm_wake_append stale "$win" "stale: $win (idle ${age}s, possible wedge)" || exit 1
+        rm -f "$since_file"
+        wake "stale: $win (idle ${age}s, possible wedge)"
+      fi
+      ;;
+  esac
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -454,14 +487,42 @@ EOF
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
-          # Terminal status under a stale pane: actionable -> enqueue + exit.
+          # The log's last line is captain-relevant - but that alone is not
+          # proof the crew is actually done: a crew's own status log gets no
+          # new entry once firstmate hands it to a no-mistakes validation
+          # (AGENTS.md's sparse status-reporting contract), so the log can
+          # keep showing a "done:"/needs-decision/blocked leftover from
+          # BEFORE that validation started for the run's entire (possibly
+          # many-minutes) duration, while stale_is_terminal - which has no
+          # run-step awareness - keeps reporting it as still-current on every
+          # poll. Root cause of the 2026-07 herdr false-surface incidents: a
+          # validating crew was surfaced as stale every few minutes despite an
+          # actively-running pipeline, purely because of this stale leftover
+          # line. On a NEW hash, give an active run/busy pane (the same
+          # authoritative source fm-crew-state.sh itself already prioritizes
+          # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            rm -f "$ssf"
-            mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-            wake "stale: $w"
+            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+              printf '%s' "$h" > "$sf"
+              date +%s > "$ssf"
+              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            else
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              wake "stale: $w"
+            fi
+          elif [ -e "$ssf" ]; then
+            # This exact hash was already overridden as provably-working (a
+            # wedge timer is running for it) - keep treating it that way
+            # without re-reading the crew state every poll, and without
+            # letting the still-captain-relevant log line re-surface it.
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)"
           fi
+          # else: already surfaced as genuinely terminal on a prior poll of
+          # this same hash - nothing left to do (matches the original,
+          # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Absorb-only-when-provably-working, decided once per distinct stale hash
@@ -486,21 +547,7 @@ EOF
               wake "stale: $w"
             fi
           else
-            since=$(cat "$ssf" 2>/dev/null || true)
-            case "$since" in
-              ''|*[!0-9]*)
-                date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale timer reset: $w"
-                ;;
-              *)
-                age=$(( $(date +%s) - since ))
-                if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-                  fm_wake_append stale "$w" "stale: $w (idle ${age}s, possible wedge)" || exit 1
-                  rm -f "$ssf"
-                  wake "stale: $w (idle ${age}s, possible wedge)"
-                fi
-                ;;
-            esac
+            wedge_timer_check "$w" "$ssf" "non-terminal stale"
           fi
         fi
       else
