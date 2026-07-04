@@ -875,7 +875,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
-- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 ## 14. X mode
@@ -908,7 +908,7 @@ X mode is also a reason to keep the watcher armed even with no fleet work, so an
 Cadence under away-mode (the supervise daemon owns the watcher then) is a separate follow-up and out of scope here; while afk is active the daemon's default cadence applies.
 
 **Answering.**
-On an `x-mention <request_id>` `check:` wake, load `fmx-respond` (section 13).
+On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-respond` (section 13).
 It owns mention classification, acting on the request, reply composition, voice, thread-splitting, image attachments, dry-run preview, and the completion-follow-up procedure in full, including what an `x-mode-error` wake means instead.
 `docs/configuration.md` "X mode (.env)" has the wire-protocol reference.
 The one fact that must survive here because it fires on a generic terminal wake, not the mention wake itself: when an X-linked task reaches a terminal state, post its final completion follow-up per section 8's wake-handling step before tearing down.

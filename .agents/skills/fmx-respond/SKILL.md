@@ -3,6 +3,7 @@ name: fmx-respond
 description: >-
   Agent-only playbook for handling X mode mentions and follow-ups.
   Use on an "x-mention <request_id>" check wake to read the stashed mention, classify it, act autonomously on eligible requests, reply or dismiss, and link spawned work.
+  Also use on an "x-mode-error ..." check wake to report the X-mode configuration blocker instead of answering a mention.
   Also use on milestone and terminal wakes for an X-linked task before posting completion follow-ups, ending terminal outcomes with --final.
   Loaded only when X mode is enabled.
 user-invocable: false
@@ -19,7 +20,7 @@ The full mention is stashed locally; this skill acts on any request it carries a
 This runs only when X mode is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; see AGENTS.md "X mode").
 If you ever see an `x-mention` wake without X mode configured, do nothing.
 A `check:` wake can also carry `x-mode-error ...` instead of `x-mention <request_id>` - that is a poll or relay configuration problem, not a mention to answer.
-Report it directly to the captain as an X-mode configuration blocker and do not load this skill for it.
+Report it directly to the captain as an X-mode configuration blocker and do not treat it as a mention to answer.
 
 ## The asker is your own captain - answer autonomously
 
