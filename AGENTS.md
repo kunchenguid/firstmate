@@ -135,6 +135,7 @@ state/               runtime records and signals; gitignored
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
+`state/<id>.meta` records `kind=adopted` for a task registered by `bin/fm-adopt.sh` instead of spawned (section 7); see that script's header for its exact fields.
 
 ## 3. Session start (run once at every session start)
 
@@ -377,6 +378,14 @@ Before treating the investigation or any visual review as complete, load `captai
 When a scout's deliverable is a visual artifact the captain will iterate on, prefer keeping that scout alive to host its own Lavish loop rather than tearing it down and mediating from firstmate, so the scout keeps its investigation context and the captain iterates in one continuous session.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+
+### Adopt (existing session)
+
+Adopt registers an already-running cmux workspace - one a human started, not a firstmate spawn - as a supervised task, so peek, send, current-state reads, and the watcher work on it without a firstmate worktree or branch.
+Run `bin/fm-adopt.sh <id> --workspace <ws-uuid> [--surface <surf-uuid>]`; it is cmux-only and experimental, and the task is supervise-only, with no delivery mode, no validation, and no PR.
+Teardown un-registers the task without ever closing the human's workspace, and the watcher exempts it from stale-pane wakes.
+As with a spawn, the orchestrator adds the `data/backlog.md` In flight line, so record the task there after adopting.
+See the script's header comment for the full mechanics.
 
 ## 8. Supervision protocol
 

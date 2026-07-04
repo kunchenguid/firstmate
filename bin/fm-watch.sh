@@ -1130,6 +1130,13 @@ EOF
   # remembers the hash already classified).
   while IFS= read -r w; do
     kind=$(window_kind "$w")
+    # An adopted human-driven or idle session being quiet is healthy - it is
+    # not a stuck crewmate. Its parent supervises through status writes and
+    # heartbeats, not pane-idle staleness, and it has no declared-pause
+    # concept, so it is exempt unconditionally.
+    if [ "$kind" = adopted ]; then
+      continue
+    fi
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
