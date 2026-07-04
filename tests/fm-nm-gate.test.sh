@@ -16,7 +16,8 @@
 #   (e) git repo + origin + no-mistakes installed    -> refreshed (init invoked)
 #   (f) no-mistakes not on PATH                       -> skip, exit 0
 #   (g) `no-mistakes init` fails                      -> warning, exit 0 (non-fatal)
-#   (h) fm-spawn gate refresh stalls                  -> timeout warning, spawn continues
+#   (h) fm-spawn gate refresh returns quickly         -> no job-control noise
+#   (i) fm-spawn gate refresh stalls                  -> timeout warning, spawn continues
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -95,6 +96,21 @@ SH
   printf '%s\n' "$root"
 }
 
+make_fast_gate_root() {  # <dir> -> echoes fake firstmate root
+  local root="$1/fm-root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-project-mode.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "no-mistakes off"
+SH
+  cat > "$root/bin/fm-nm-gate.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "nm-gate: refreshed"
+SH
+  chmod +x "$root/bin/fm-project-mode.sh" "$root/bin/fm-nm-gate.sh"
+  printf '%s\n' "$root"
+}
+
 run_with_timeout() {  # <seconds> <command> [args...]
   # shellcheck disable=SC2016  # Single quotes are deliberate: Perl expands its own variables.
   perl -e '
@@ -160,7 +176,37 @@ out=$(PATH="$FB:$PATH" FM_FAKE_NM_INIT_RC=1 "$NM_GATE" "$WITHORIGIN" 2>&1); rc=$
 expect_code 0 "$rc" "init failure must stay non-fatal (exit 0)"
 assert_contains "$out" "warning" "init failure should warn"
 
-# (h) fm-spawn's gate refresh timeout kills a stalled helper and still spawns
+# (h) fm-spawn's gate refresh returns quickly without job-control noise
+SPAWN_CASE="$TMP_ROOT/spawn-fast"
+SPAWN_HOME="$SPAWN_CASE/home"
+SPAWN_PROJ="$SPAWN_CASE/project"
+SPAWN_WT="$SPAWN_CASE/wt"
+SPAWN_ID="nm-gate-fast-z1"
+mkdir -p "$SPAWN_HOME/data/$SPAWN_ID" "$SPAWN_HOME/state" "$SPAWN_HOME/config" "$SPAWN_HOME/projects"
+printf 'brief\n' > "$SPAWN_HOME/data/$SPAWN_ID/brief.md"
+fm_git_worktree "$SPAWN_PROJ" "$SPAWN_WT" "wt-$SPAWN_ID"
+SPAWN_FAKEBIN=$(make_spawn_fakebin "$SPAWN_CASE/fake")
+FAST_ROOT=$(make_fast_gate_root "$SPAWN_CASE")
+out=$(
+  export PATH="$SPAWN_FAKEBIN:$PATH"
+  export FM_ROOT_OVERRIDE="$FAST_ROOT"
+  export FM_HOME="$SPAWN_HOME"
+  export FM_STATE_OVERRIDE="$SPAWN_HOME/state"
+  export FM_DATA_OVERRIDE="$SPAWN_HOME/data"
+  export FM_PROJECTS_OVERRIDE="$SPAWN_HOME/projects"
+  export FM_CONFIG_OVERRIDE="$SPAWN_HOME/config"
+  export FM_SPAWN_NO_GUARD=1
+  export TMUX="fake,1,0"
+  export FM_FAKE_PANE_PATH="$SPAWN_WT"
+  run_with_timeout 5 "$ROOT/bin/fm-spawn.sh" "$SPAWN_ID" "$SPAWN_PROJ" codex 2>&1
+); rc=$?
+expect_code 0 "$rc" "spawn fast gate refresh should not fail"$'\n'"$out"
+assert_contains "$out" "spawned $SPAWN_ID harness=codex kind=ship mode=no-mistakes" \
+  "spawn should continue after fast gate refresh"
+assert_not_contains "$out" "[1]+" "spawn output must not include bash job notifications"
+rm -rf "/tmp/fm-$SPAWN_ID"
+
+# (i) fm-spawn's gate refresh timeout kills a stalled helper and still spawns
 SPAWN_CASE="$TMP_ROOT/spawn-timeout"
 SPAWN_HOME="$SPAWN_CASE/home"
 SPAWN_PROJ="$SPAWN_CASE/project"
@@ -194,4 +240,4 @@ assert_present "$SPAWN_HOME/state/$SPAWN_ID.meta" "spawn should write meta after
 assert_no_grep "jobs -r -p" "$ROOT/bin/fm-spawn.sh" "gate timeout must not depend on running job state"
 rm -rf "/tmp/fm-$SPAWN_ID"
 
-pass "fm-nm-gate.sh: usage, skip, refresh, non-fatal failure, and spawn timeout paths hold"
+pass "fm-nm-gate.sh: usage, skip, refresh, non-fatal failure, and spawn paths hold"

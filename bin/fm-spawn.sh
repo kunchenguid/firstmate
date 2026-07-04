@@ -923,24 +923,12 @@ META_WINDOW=$T
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   NM_GATE_TIMEOUT=${FM_NM_GATE_TIMEOUT:-10}
   case "$NM_GATE_TIMEOUT" in ''|*[!0-9]*) NM_GATE_TIMEOUT=10 ;; esac
-  NM_GATE_MONITOR_WAS_ON=0
-  case $- in *m*) NM_GATE_MONITOR_WAS_ON=1 ;; esac
-  set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null &
-  NM_GATE_PID=$!
-  NM_GATE_START=$SECONDS
-  while kill -0 "$NM_GATE_PID" 2>/dev/null; do
-    if [ $((SECONDS - NM_GATE_START)) -ge "$NM_GATE_TIMEOUT" ]; then
-      kill -TERM "-$NM_GATE_PID" 2>/dev/null || kill "$NM_GATE_PID" 2>/dev/null || true
-      sleep 0.2
-      kill -KILL "-$NM_GATE_PID" 2>/dev/null || kill -KILL "$NM_GATE_PID" 2>/dev/null || true
-      echo "warning: no-mistakes gate refresh timed out after ${NM_GATE_TIMEOUT}s; gate may be stale" >&2
-      break
-    fi
-    sleep 1
-  done
-  wait "$NM_GATE_PID" 2>/dev/null || true
-  [ "$NM_GATE_MONITOR_WAS_ON" -eq 1 ] || set +m 2>/dev/null || true
+  [ "$NM_GATE_TIMEOUT" -gt 0 ] || NM_GATE_TIMEOUT=1
+  NM_GATE_RC=0
+  perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; die "exec failed: $!" } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_GATE_TIMEOUT" "$FM_ROOT/bin/fm-nm-gate.sh" "$PROJ_ABS" >/dev/null || NM_GATE_RC=$?
+  if [ "$NM_GATE_RC" -eq 124 ]; then
+    echo "warning: no-mistakes gate refresh timed out after ${NM_GATE_TIMEOUT}s; gate may be stale" >&2
+  fi
 fi
 
 {
