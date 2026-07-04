@@ -507,7 +507,7 @@ test_no_run_busy_pane() {
   fm_write_meta "$d/state/feat-h.meta" "window=fm:fm-feat-h" "worktree=$d/wt" "kind=ship"
   # No matching run anywhere.
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_LIST=""
+  FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   local out; out=$(run_crew_state "$d" feat-h)
   assert_contains "$out" "state: working" "busy pane -> working"
@@ -523,7 +523,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" "backend=herdr"
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_LIST=""
+  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_BUSY=1
   FM_FAKE_HERDR_AGENT_STATUS=""
@@ -554,7 +554,7 @@ test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane() {
   # matching row within the configured runs-list window): the pane fallback is
   # the only remaining signal.
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_LIST=""
+  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=1
@@ -575,7 +575,7 @@ test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle() {
   fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" "backend=herdr"
   printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_LIST=""
+  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=0
@@ -609,7 +609,7 @@ test_dead_window_ignores_stale_status_log() {
   fm_write_meta "$d/state/feat-dead.meta" "window=fm:fm-feat-dead" "worktree=$d/wt" "kind=ship"
   printf 'done: old completion event\n' > "$d/state/feat-dead.status"
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_LIST=""
+  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
