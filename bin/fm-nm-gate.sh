@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Ensure a no-mistakes-mode project's gate is initialized and its post-receive
-# hook is current, so a crewmate pushing from a treehouse-pooled worktree
+# hook is current, so a crewmate pushing from its task worktree
 # (git push no-mistakes <branch>) actually creates a pipeline run instead of
 # failing the push with "invalid gate path".
 #
 # Why this exists: no-mistakes keys ONE gate per repo identity (the origin URL),
-# shared by the main clone and every linked/treehouse worktree of it - there is
+# shared by the main clone and every linked task worktree of it - there is
 # no per-worktree gate, and `no-mistakes init` run inside a worktree just
 # refreshes that one shared gate. The gate's post-receive hook is installed by
 # `no-mistakes init`. An older no-mistakes installed a hook that passed a

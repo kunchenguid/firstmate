@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-nm-gate.sh - the no-mistakes gate refresh helper.
 #
-# The gate is shared by a project's main clone and every treehouse worktree of
+# The gate is shared by a project's main clone and every linked task worktree of
 # it (no-mistakes keys one gate per origin URL). An older no-mistakes installed a
 # post-receive hook with a RELATIVE gate path, so a worktree push failed with
 # "invalid gate path: ." and no run was created. The fix is to re-run the
