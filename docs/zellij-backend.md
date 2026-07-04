@@ -17,8 +17,8 @@ Prerequisites:
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
 - The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, and lavish-axi); treehouse still provides the worktree, zellij only provides the session.
 
-Select zellij explicitly with `fm-spawn.sh --backend zellij`, `FM_BACKEND=zellij`, or a local `config/backend` file containing `zellij`.
-Unlike tmux and herdr, zellij is **never** auto-detected - it always requires one of those three explicit settings.
+Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
+Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
 A zellij spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `zellij` or `jq` is missing or the installed zellij is older than 0.44.
 For `--secondmate` launches, secondmate home sync and inherited-config propagation happen before this spawn-time backend gate.
 
@@ -35,7 +35,7 @@ Limitations: zellij is experimental, has no per-home workspace split (all tasks 
 ## Status: experimental
 
 Zellij is experimental, exactly like every non-tmux backend in this design.
-Select it explicitly with `--backend zellij`, `FM_BACKEND=zellij`, or `config/backend` containing `zellij`.
+Select it by putting `zellij` in a local `config/backend` file, by exporting `FM_BACKEND=zellij`, or by telling the first mate in chat to use zellij.
 Unlike tmux and herdr, zellij is **never** selected by runtime auto-detection: the design report's Open Question #2 recommends starting with a dedicated background session for predictability rather than reusing whatever zellij session firstmate itself might be running inside, and empirical verification below (see "Focus-steal on new-tab") confirms that recommendation was correct - reusing an ambient session a human might be attached to would risk yanking their view on every spawn.
 Absent `backend=` in a task's meta always means `tmux`; only a zellij task ever carries an explicit `backend=zellij` line.
 A zellij spawn refuses loudly if `zellij` or `jq` is missing, or if the installed zellij's version is older than the verified minimum, 0.44 (`fm_backend_zellij_version_check`).

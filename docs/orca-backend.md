@@ -15,7 +15,7 @@ Prerequisites:
 - `node`, used by firstmate's adapter to parse Orca's JSON output and to gate spawns on runtime readiness.
 - `git` with GitHub auth, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` - the same universal requirements as tmux, minus `tmux` and `treehouse` (Orca replaces both).
 
-Select Orca explicitly with `fm-spawn.sh --backend orca`, `FM_BACKEND=orca`, or a local `config/backend` file containing `orca`.
+Select Orca by putting `orca` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=orca` when you launch your harness for a one-off session; telling the first mate in chat to use Orca also works.
 It is never auto-detected.
 When bootstrap resolves Orca from `FM_BACKEND=orca` or `config/backend=orca`, it checks for `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 
@@ -36,7 +36,7 @@ PR #210 landed the primitive Orca terminal adapter: bounded capture, text send, 
 This follow-up adds full ship/scout task lifecycle support for `backend=orca`: spawn, metadata, send/peek/watch/crew-state routing from metadata, and guarded teardown through Orca.
 
 Orca remains explicit-only.
-Select it with `fm-spawn.sh --backend orca`, `FM_BACKEND=orca`, or local `config/backend`.
+Select it by putting `orca` in a local `config/backend` file, by exporting `FM_BACKEND=orca`, or by telling the first mate in chat to use Orca.
 It is not auto-detected from the current process environment.
 Before spawn mutates any repo/worktree state, firstmate runs `orca status --json` and requires the Orca runtime to report reachable/ready.
 

@@ -22,8 +22,9 @@ The first mate detects missing tools at session start and offers to install them
 ## Selecting it
 
 tmux is the hard default: it needs no explicit selection.
-It is also what firstmate falls back to when `--backend`, `FM_BACKEND`, `config/backend`, and runtime auto-detection (see below) all resolve to nothing.
-You can still select it explicitly with `fm-spawn.sh --backend tmux`, `FM_BACKEND=tmux`, or a local `config/backend` file containing `tmux` - useful mainly to opt out of herdr's runtime auto-detection (see [`docs/herdr-backend.md`](herdr-backend.md)).
+It is also what firstmate falls back to when nothing else is set - no local `config/backend` file, no `FM_BACKEND`, no explicit `--backend` flag firstmate passes internally when it spawns a task - and runtime auto-detection (see below) does not pick anything either.
+You can still select it explicitly by putting `tmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=tmux` when you launch your harness for a one-off session; telling the first mate in chat to use tmux also works.
+This mainly matters as an opt-out of herdr's runtime auto-detection (see [`docs/herdr-backend.md`](herdr-backend.md)).
 
 ## First run
 
