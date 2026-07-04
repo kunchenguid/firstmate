@@ -12,12 +12,13 @@
 # Session shape (report "Zellij implementation choices" #1, unchanged by
 # empirical verification): ONE zellij session (default name "firstmate",
 # overridable via FM_ZELLIJ_SESSION for test isolation - mirrors herdr's
-# HERDR_SESSION), ONE tab per task named "fm-<id>". No per-home workspace
-# split (unlike herdr's later P3 refinement): zellij has no workspace concept,
-# only sessions/tabs/panes, so this stays exactly the report's original
-# choice. Target string shape: "<zellij-session>:<pane-id>" (pane id is a bare
-# non-negative integer with no embedded colon, so splitting on the FIRST colon
-# is trivially correct and mirrors herdr's target-string convention).
+# HERDR_SESSION), ONE tab per task, with caller-facing label "fm-<id>" and a
+# home-scoped actual title. No per-home workspace split (unlike herdr's later
+# P3 refinement): zellij has no workspace concept, only sessions/tabs/panes,
+# so this stays exactly the report's original choice. Target string shape:
+# "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
+# embedded colon, so splitting on the FIRST colon is trivially correct and
+# mirrors herdr's target-string convention).
 #
 # Home-scoped tab titles (closes a cross-home collision gap): because every
 # task in every firstmate home - primary or secondmate - shares this ONE
@@ -31,12 +32,12 @@
 # title tagged with this installation's home label (fm_backend_zellij_scoped_title,
 # "fm-<hometag>-<id>"); every list/find/recover/kill path is scoped to this
 # home's own tag. A tab created before this change carries the old untagged
-# "fm-<id>" title; recovery still matches it, but ONLY when that bare title
-# is unambiguous (exactly one live tab in the session carries it) - see
-# fm_backend_zellij_tab_matches_label and docs/zellij-backend.md "Home-scoped
-# tab titles" for the full migration posture. Moving/relocating a firstmate
-# installation changes its tag (acceptable - recorded worktree paths do not
-# survive a move either).
+# "fm-<id>" title; target_ready, kill, and ad hoc selector fallback still
+# match it, but ONLY when that bare title is unambiguous (exactly one live tab
+# in the session carries it) - see fm_backend_zellij_tab_matches_label and
+# docs/zellij-backend.md "Home-scoped tab titles" for the full migration
+# posture. Moving/relocating a firstmate installation changes its tag
+# (acceptable - recorded worktree paths do not survive a move either).
 #
 # Empirical verification (real zellij 0.44.0, macOS aarch64, 2026-07-02;
 # docs/zellij-backend.md has the full evidence log) resolved every "gaps to
@@ -83,8 +84,9 @@
 #     (fm_backend_zellij_session_exists, a passive list-sessions query, never
 #     auto-creating), verify the specific pane still appears in list-panes JSON,
 #     and, for metadata-routed fm-<id> operations, verify the pane's tab still
-#     has the expected task label before use. Kill verifies the session and,
-#     when teardown supplies an expected tab label, verifies a tab id still has
+#     matches the expected caller-facing task label through the home-scoped or
+#     unambiguous legacy title before use. Kill verifies the session and, when
+#     teardown supplies an expected tab label, verifies a tab id still matches
 #     that label before closing it. Output-SHAPE validation (a bare integer tab
 #     id, JSON that parses) rejects the "session not found" text fallback. A
 #     pane can still die between the preflight check and the operation call;
