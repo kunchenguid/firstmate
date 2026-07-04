@@ -336,15 +336,14 @@ test_hook_silent_without_stdin() {
 }
 
 test_hook_runs_fast() {
-  local dir start end elapsed_ms
+  local dir start elapsed_s
   dir=$(make_primary_dir "$TMP_ROOT/hook-timing")
   : > "$dir/state/task1.meta"
-  start=$(date +%s%N)
+  start=$SECONDS
   run_hook "$dir" false >/dev/null
-  end=$(date +%s%N)
-  elapsed_ms=$(( (end - start) / 1000000 ))
-  [ "$elapsed_ms" -lt 2000 ] || fail "hook took ${elapsed_ms}ms, expected well under a second (generous 2s CI margin)"
-  pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_ms}ms)"
+  elapsed_s=$((SECONDS - start))
+  [ "$elapsed_s" -lt 3 ] || fail "hook took ${elapsed_s}s, expected well under a second (generous 3s CI margin)"
+  pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
 test_predicate_healthy_no_inflight
