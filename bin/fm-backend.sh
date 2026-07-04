@@ -37,7 +37,9 @@
 # does not change the loop's behavior. The pull primitives also stay available
 # on their own for on-demand reads (fm-peek.sh, fm-crew-state.sh).
 
-FM_BACKEND_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
+FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
+unset FM_BACKEND_SCRIPT
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -56,12 +58,19 @@ FM_BACKEND_KNOWN="tmux herdr zellij orca"
 FM_BACKEND_SPAWN="tmux herdr zellij orca"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
-fm_backend_is_known() {  # <name>
-  local name=$1
-  case " $FM_BACKEND_KNOWN " in
+fm_backend_list_contains() {  # <list> <name>
+  local list=$1 name=$2
+  case "$name" in
+    *[[:space:]]*) return 1 ;;
+  esac
+  case " $list " in
     *" $name "*) return 0 ;;
   esac
   return 1
+}
+
+fm_backend_is_known() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
 }
 
 # fm_backend_detect: detect the runtime firstmate itself is CURRENTLY executing
@@ -134,9 +143,7 @@ fm_backend_validate() {  # <name>
 fm_backend_validate_spawn() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
-  case " $FM_BACKEND_SPAWN " in
-    *" $name "*) return 0 ;;
-  esac
+  fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
   return 1
 }
@@ -215,28 +222,28 @@ fm_backend_source() {  # <name>
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
         # shellcheck source=bin/backends/tmux.sh
-        . "$FM_BACKEND_LIB_DIR/backends/tmux.sh"
+        . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
         # shellcheck source=bin/backends/herdr.sh
-        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh"
+        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
         # shellcheck source=bin/backends/zellij.sh
-        . "$FM_BACKEND_LIB_DIR/backends/zellij.sh"
+        . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
       fi
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
         # shellcheck source=bin/backends/orca.sh
-        . "$FM_BACKEND_LIB_DIR/backends/orca.sh"
+        . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
       fi
       ;;

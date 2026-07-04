@@ -206,6 +206,8 @@ test_backend_validate_refuses_unknown() {
   # orca are all known adapters, and all four are spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
+  out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
+  assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
   pass "fm_backend_validate: implemented adapters accepted, an unknown backend refused loudly"
 }
 
@@ -214,8 +216,8 @@ test_backend_source_shell_portable() {
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
   # an interactive zsh session must still recognize known backend names.
   if command -v zsh >/dev/null 2>&1; then
-    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr" 2>/dev/null \
-      || fail "zsh: fm_backend_source herdr should succeed when sourced"
+    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && whence -w fm_backend_herdr_capture >/dev/null" 2>/dev/null \
+      || fail "zsh: fm_backend_source herdr should load the adapter when sourced"
     out=$(zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
       && fail "zsh: fm_backend_source bogus should fail"
     assert_contains "$out" "unknown backend 'bogus'" \
@@ -225,8 +227,8 @@ test_backend_source_shell_portable() {
     pass "zsh: shell-portable backend matching skipped (zsh not found)"
   fi
 
-  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr" 2>/dev/null \
-    || fail "bash: fm_backend_source herdr should succeed when sourced"
+  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && declare -F fm_backend_herdr_capture >/dev/null" 2>/dev/null \
+    || fail "bash: fm_backend_source herdr should load the adapter when sourced"
   out=$(bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
     && fail "bash: fm_backend_source bogus should fail"
   assert_contains "$out" "unknown backend 'bogus'" \
@@ -242,6 +244,8 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
+  out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
+  assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
 }
 
