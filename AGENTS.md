@@ -870,6 +870,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to classify the mention, act on actionable requests through the normal lifecycle, post or preview a public-safe outcome reply for work that completes immediately, dismiss pure acknowledgments at the relay without replying, or acknowledge and link spawned work so up to three completion follow-ups can post over time, ending with a final one (section 14); relevant only when X mode is on.
+- `firstmate-coding-guidelines` - load before changing firstmate's own tracked material (`AGENTS.md`, `bin/`, `.agents/skills/`, `docs/`, public `skills/`), whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 ## 14. X mode
 
