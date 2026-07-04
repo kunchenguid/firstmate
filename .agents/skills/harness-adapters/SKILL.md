@@ -93,6 +93,8 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Primary-session Stop hook (verified 2026-07-04, Claude Code 2.1.201).** This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`). The firstmate PRIMARY's own `.claude/settings.json` (tracked at the repo root) registers a second, structural Stop hook, `bin/fm-turnend-guard.sh` (docs/turnend-guard.md), that can genuinely block a turn from ending: exiting the hook command with status 2 and a reason on stderr reliably forces the model to continue and act on that reason - verified live with `claude -p`, both interactively and headless. Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` exactly when the current stop attempt is itself a forced continuation from an earlier block this turn; a hook can and should use that as its own loop-guard (always allow the stop when it is already `true`) rather than tracking state itself. A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so the primary session's cwd needs to be the repo root, which is firstmate's normal convention anyway.
+
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
 | Fact | Value |

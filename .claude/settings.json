@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bin/fm-turnend-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
