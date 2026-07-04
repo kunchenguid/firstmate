@@ -18,7 +18,8 @@
 #                                - build the answer/followup POST body
 #   fmx_reply_outbox_json <request_id> <chunks> <n> <followup-0|1> [image-preview-json]
 #                                - build the dry-run record without image bytes
-#   fmx_post_json <endpoint> <payload-file> - POST JSON to the relay, printing HTTP code
+#   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
+#                                printing HTTP code and writing response body
 #   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
 #   fmx_meta_link_set <meta> <request_id> <epoch> [followups] - (re)write the
 #                                X-request link, defaulting followups to 0
@@ -273,13 +274,13 @@ fmx_reply_outbox_json() {
 }
 
 fmx_post_json() (
-  local endpoint=$1 payload_file=$2 auth_header_file code rc
+  local endpoint=$1 payload_file=$2 body_file=${3:-/dev/null} auth_header_file code rc
   command -v curl >/dev/null 2>&1 || return 127
   [ -r "$payload_file" ] || return 2
   auth_header_file=$(fmx_auth_header_file) || return 3
   trap 'rm -f "$auth_header_file"' EXIT
   trap 'rm -f "$auth_header_file"; exit 143' HUP INT TERM
-  code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
+  code=$(curl -m 10 -s -o "$body_file" -w '%{http_code}' \
     -X POST \
     -H "@$auth_header_file" \
     -H 'Content-Type: application/json' \

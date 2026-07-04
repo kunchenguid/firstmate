@@ -67,9 +67,11 @@ case "$url" in
     printf '%s' "${FAKE_POLL_CODE:-204}"
     ;;
   */connector/answer)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_ANSWER_BODY:-}" > "$ofile"
     printf '%s' "${FAKE_ANSWER_CODE:-200}"
     ;;
   */connector/followup)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_FOLLOWUP_BODY:-${FAKE_ANSWER_BODY:-}}" > "$ofile"
     printf '%s' "${FAKE_FOLLOWUP_CODE:-${FAKE_ANSWER_CODE:-200}}"
     ;;
   */connector/dismiss)
@@ -904,6 +906,59 @@ test_reply_followup_live_posts_to_followup_endpoint() {
   pass "fm-x-reply --followup posts to /connector/followup with the same request-bound body"
 }
 
+test_reply_followup_409_marker_exits_distinctly() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-followup-409-marker"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"followup_unavailable"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-marker" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup 409 marker exit"
+  [ -z "$out" ] || fail "followup 409 marker must not echo the request_id (got: $out)"
+  assert_grep "confirmed followup_unavailable marker" "$err" \
+    "followup 409 marker must be reflected in diagnostics"
+  pass "fm-x-reply maps a followup_unavailable follow-up 409 to exit 9"
+}
+
+test_reply_followup_409_without_marker_still_exits_distinctly() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-followup-409-fallback"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-bare" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup bare 409 exit"
+  [ -z "$out" ] || fail "followup bare 409 must not echo the request_id (got: $out)"
+  assert_grep "marker absent" "$err" "bare followup 409 must use the fallback diagnostic"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"some_other_conflict"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-other" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup unrelated-body 409 exit"
+  [ -z "$out" ] || fail "followup unrelated-body 409 must not echo the request_id (got: $out)"
+  assert_grep "marker absent" "$err" \
+    "unrelated followup 409 body must still use the fallback diagnostic"
+  pass "fm-x-reply maps every follow-up 409 to exit 9 even without the marker"
+}
+
+test_reply_answer_409_is_generic_failure() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-answer-409"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-answer\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_ANSWER_CODE=409 FAKE_ANSWER_BODY='{"error":"followup_unavailable"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-answer-409" "Normal answer." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "answer 409 exit"
+  [ -z "$out" ] || fail "answer 409 must not echo the request_id (got: $out)"
+  assert_grep "relay returned HTTP 409" "$err" "answer 409 must stay on the generic failure path"
+  pass "fm-x-reply treats answer-endpoint 409 as a generic failure"
+}
+
 test_reply_followup_image_live_posts_image_object() {
   local home fakebin log out rc data img expected
   home="$TMP_ROOT/reply-followup-image-live"; mkdir -p "$home"
@@ -1152,17 +1207,18 @@ test_link_records_request_and_timestamp() {
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
 }
 
-test_link_carry_count_preserves_followups() {
+test_link_carry_count_and_ts_preserve_followup_binding() {
   local home meta rc
   home="$TMP_ROOT/link-carry"; mkdir -p "$home/state"
   meta="$home/state/successor-task.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
-  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" successor-task req-carry --carry-count 2 >/dev/null; rc=$?
-  expect_code 0 "$rc" "link --carry-count exit"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
+    "$ROOT/bin/fm-x-link.sh" successor-task req-carry --carry-count 2 --carry-ts 1700000000 >/dev/null; rc=$?
+  expect_code 0 "$rc" "link paired carry flags exit"
   assert_grep "x_request=req-carry" "$meta" "carried link must record the request_id"
+  assert_grep "x_request_ts=1700000000" "$meta" "--carry-ts must preserve the original timestamp, not the current time"
   assert_grep "x_followups=2" "$meta" "--carry-count must seed the follow-up counter, not reset it"
-  pass "fm-x-link --carry-count preserves a prior task's follow-up count onto a successor"
+  pass "fm-x-link paired carry flags preserve a prior task's follow-up binding onto a successor"
 }
 
 test_link_carry_count_validation() {
@@ -1175,9 +1231,21 @@ test_link_carry_count_validation() {
   expect_code 2 "$rc" "link --carry-count non-numeric exit"
   assert_grep "non-negative integer" "$err" "link must explain a bad --carry-count value"
   PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts abc >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-ts non-numeric exit"
+  assert_grep "non-negative epoch integer" "$err" "link must explain a bad --carry-ts value"
+  PATH="$BASE_PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "link --carry-count missing value exit"
-  pass "fm-x-link rejects a malformed --carry-count"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-count without --carry-ts exit"
+  assert_grep "--carry-count requires --carry-ts" "$err" "link must require --carry-ts when carrying count"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-ts without --carry-count exit"
+  assert_grep "--carry-ts requires --carry-count" "$err" "link must require --carry-count when carrying timestamp"
+  pass "fm-x-link rejects malformed or unpaired carry flags"
 }
 
 test_meta_rewrites_do_not_depend_on_tmpdir() {
@@ -1229,7 +1297,7 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
   if [ -n "$count" ]; then
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" --carry-count "$count" >/dev/null
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" --carry-count "$count" --carry-ts "$ts" >/dev/null
   else
     FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
   fi
@@ -1530,6 +1598,9 @@ test_reply_image_thread_dry_run_records_compact_marker
 test_reply_image_dry_run_cleans_payload_temp_files
 test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
+test_reply_followup_409_marker_exits_distinctly
+test_reply_followup_409_without_marker_still_exits_distinctly
+test_reply_answer_409_is_generic_failure
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
@@ -1543,7 +1614,7 @@ test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
-test_link_carry_count_preserves_followups
+test_link_carry_count_and_ts_preserve_followup_binding
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
