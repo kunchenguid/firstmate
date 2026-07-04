@@ -442,7 +442,7 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_panes out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -450,7 +450,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
-  dup_panes=""
+  dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
@@ -459,7 +459,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
         echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
         return 1
       fi
-      dup_panes="${dup_panes}${dup_pane}"$'\n'
+      dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
     done <<EOF
 $dup_tabs
 EOF
@@ -472,13 +472,28 @@ EOF
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
-  if [ -n "$dup_panes" ]; then
-    while IFS= read -r dup_pane; do
-      [ -n "$dup_pane" ] || continue
-      fm_backend_herdr_cli "$session" pane close "$dup_pane" >/dev/null 2>&1 || true
+  if [ -n "$dup_tab_ids" ]; then
+    while IFS= read -r dup; do
+      [ -n "$dup" ] || continue
+      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
     done <<EOF
-$dup_panes
+$dup_tab_ids
 EOF
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+      echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+      return 1
+    }
+    if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+      return 1
+    fi
+    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
+      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+    remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
+    if [ -n "$remaining_dup_tabs" ]; then
+      echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+      return 1
+    fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
