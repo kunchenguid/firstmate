@@ -20,15 +20,18 @@
 # for its empirical basis. P4 makes Orca spawn-capable: Orca owns both the
 # task worktree and the terminal endpoint. P5 adds bin/backends/cmux.sh, also
 # EXPERIMENTAL and spawn-capable, behind `--backend cmux`/`FM_BACKEND=cmux`/
-# `config/backend` - NOT behind runtime auto-detection (GUI-first, macOS-only,
-# same posture as Orca); see docs/cmux-backend.md for its empirical basis.
+# `config/backend`, and behind runtime auto-detection when firstmate itself is
+# running inside a cmux-spawned terminal (CMUX_WORKSPACE_ID) with no explicit
+# backend setting - unlike Orca, which stays never-auto-detected because it
+# also owns the task worktree; see docs/cmux-backend.md for its empirical
+# basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, or orca, carries
-# an explicit `backend=` line.
+# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
+# carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -88,8 +91,24 @@ fm_backend_is_known() {  # <name>
 # tmux started inside a herdr pane, so $TMUX is checked first and wins over
 # HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
 # HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process it manages a pane for;
-# HERDR_ENV=1 alone (no $TMUX) selects herdr. Both markers empirically verified
-# on the reference dev machine.
+# HERDR_ENV=1 alone (no $TMUX) selects herdr. cmux injects CMUX_WORKSPACE_ID
+# (plus CMUX_SURFACE_ID/CMUX_SOCKET_PATH and the legacy CMUX_TAB_ID/
+# CMUX_PANEL_ID aliases) into every terminal surface it spawns - verified from
+# the shipped source (`TerminalSurface+StartupEnvironment.swift`'s
+# `applyManagedCmuxContextEnvironment`, which marks all five keys
+# `protectedKeys`, i.e. non-overridable) and corroborated by cmux's own CLI
+# (`cmux_open.swift`) reading `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` as its own
+# ambient-target fallback, exactly how `$TMUX` and `HERDR_ENV` work for their
+# backends. CMUX_WORKSPACE_ID, not CMUX_SOCKET_PATH, is the chosen marker:
+# CMUX_SOCKET_PATH is independently documented as a user-settable override for
+# pointing the CLI at a non-default socket, so its mere presence would not
+# reliably mean "running inside a cmux-spawned terminal" the way
+# CMUX_WORKSPACE_ID does. cmux is checked LAST because it is a terminal
+# application (the outermost layer, like iTerm2/Terminal.app), not a session
+# multiplexer - both tmux and herdr can run nested inside a cmux-provided
+# shell, but cmux cannot run nested inside either of them, so a tmux or herdr
+# marker set alongside CMUX_WORKSPACE_ID always means that multiplexer is the
+# innermost, currently-executing layer and must win.
 fm_backend_detect() {
   if [ -n "${TMUX:-}" ]; then
     printf 'tmux'
@@ -97,6 +116,10 @@ fm_backend_detect() {
   fi
   if [ "${HERDR_ENV:-}" = "1" ]; then
     printf 'herdr'
+    return 0
+  fi
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    printf 'cmux'
     return 0
   fi
   return 1
@@ -109,9 +132,9 @@ fm_backend_detect() {
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr via auto-detect prints one loud stderr notice
-# (it is experimental); auto-detecting tmux stays silent - it is today's
-# default-path behavior and callers must see zero change.
+# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
+# notice (both are experimental); auto-detecting tmux stays silent - it is
+# today's default-path behavior and callers must see zero change.
 fm_backend_name() {
   local line v detected
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -130,6 +153,9 @@ fm_backend_name() {
   if detected=$(fm_backend_detect); then
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
+    if [ "$detected" = cmux ]; then
+      echo "NOTICE: auto-detected cmux runtime (CMUX_WORKSPACE_ID) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0

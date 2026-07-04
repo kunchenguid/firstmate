@@ -220,11 +220,11 @@ fm_backend_cmux_ensure_running() {
   case "$state" in
     ok) return 0 ;;
     denied)
-      echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access." >&2
+      echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access, or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
       return 1
       ;;
     unauth)
-      echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD. See docs/cmux-backend.md 'Setup'." >&2
+      echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
       return 1
       ;;
   esac
@@ -234,11 +234,11 @@ fm_backend_cmux_ensure_running() {
     case "$state" in
       ok) return 0 ;;
       denied)
-        echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access." >&2
+        echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default). See docs/cmux-backend.md 'Setup' to switch to password mode for external CLI access, or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
         return 1
         ;;
       unauth)
-        echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD. See docs/cmux-backend.md 'Setup'." >&2
+        echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
         return 1
         ;;
     esac

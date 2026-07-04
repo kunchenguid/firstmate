@@ -113,37 +113,60 @@ test_backend_name_precedence() {
 }
 
 # fm_backend_detect: environment-marker runtime auto-detection (mirrors
-# fm-harness.sh's detect_own layer). Every case explicitly controls both TMUX
-# and HERDR_ENV so results never depend on the ambient shell this suite runs
-# inside.
+# fm-harness.sh's detect_own layer). Every case explicitly controls TMUX,
+# HERDR_ENV, and CMUX_WORKSPACE_ID so results never depend on the ambient
+# shell this suite runs inside.
 test_backend_detect_precedence() {
   local out
 
-  if out=$(unset TMUX HERDR_ENV; fm_backend_detect); then
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; fm_backend_detect); then
     fail "fm_backend_detect should return 1 (undetected) with no markers set, got '$out'"
   fi
 
-  out=$(unset TMUX; HERDR_ENV=1 fm_backend_detect) \
+  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed when HERDR_ENV=1"
   [ "$out" = herdr ] || fail "fm_backend_detect should report herdr for HERDR_ENV=1 alone, got '$out'"
 
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' fm_backend_detect) \
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' fm_backend_detect) \
     || fail "fm_backend_detect should succeed when \$TMUX is set"
   [ "$out" = tmux ] || fail "fm_backend_detect should report tmux for \$TMUX alone, got '$out'"
 
+  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed when CMUX_WORKSPACE_ID is set"
+  [ "$out" = cmux ] || fail "fm_backend_detect should report cmux for CMUX_WORKSPACE_ID alone, got '$out'"
+
   # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
   # (tmux) must win, since that is the surface firstmate is actually running on.
-  out=$(TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
+  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed with both markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
 
-  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, both (tmux nested in herdr) -> tmux wins"
+  # Nesting: tmux started inside a cmux-provided shell carries BOTH markers.
+  # cmux is a terminal application, not a nestable multiplexer, so the
+  # innermost multiplexer (tmux) must still win.
+  out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with tmux and cmux markers present"
+  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over cmux), got '$out'"
+
+  # Nesting: herdr started inside a cmux-provided shell carries BOTH markers.
+  # Same reasoning: herdr (the innermost multiplexer) must win over cmux.
+  out=$(unset TMUX; HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with herdr and cmux markers present"
+  [ "$out" = herdr ] || fail "fm_backend_detect should resolve nesting innermost-first (herdr over cmux), got '$out'"
+
+  # Pathological: all three markers present. tmux still wins (innermost of all).
+  out=$(TMUX='fake,1,0' HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with all three markers present"
+  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first with all three markers (tmux wins), got '$out'"
+
+  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first"
 }
 
 # fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
-# are both absent, selects between the two markers exactly as fm_backend_detect
-# does, and is loud only when it selects herdr - never when it selects tmux
-# (today's default-path behavior must stay byte-for-byte silent).
+# are both absent, selects between the three markers exactly as
+# fm_backend_detect does, and is loud only when it selects herdr or cmux -
+# never when it selects tmux (today's default-path behavior must stay
+# byte-for-byte silent).
 test_backend_name_autodetect_notice() {
   local dir cfg out errfile
 
@@ -151,12 +174,12 @@ test_backend_name_autodetect_notice() {
   errfile="$dir/err.txt"
 
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
   [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
-  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
   assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
     "fm_backend_name did not print a loud notice when auto-detecting herdr"
@@ -164,16 +187,31 @@ test_backend_name_autodetect_notice() {
     "fm_backend_name's auto-detect notice did not name the opt-out"
 
   : > "$errfile"
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should auto-detect tmux from \$TMUX, got '$out'"
   [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (today's unchanged default-path behavior)"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
-  out=$(TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = cmux ] || fail "fm_backend_name should auto-detect cmux from CMUX_WORKSPACE_ID, got '$out'"
+  assert_contains "$(cat "$errfile")" "EXPERIMENTAL cmux backend" \
+    "fm_backend_name did not print a loud notice when auto-detecting cmux"
+  assert_contains "$(cat "$errfile")" "config/backend" \
+    "fm_backend_name's cmux auto-detect notice did not name the opt-out"
+  assert_contains "$(cat "$errfile")" "--backend tmux" \
+    "fm_backend_name's cmux auto-detect notice did not name the --backend tmux opt-out"
+
+  : > "$errfile"
+  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "nested tmux-in-herdr should auto-detect tmux (innermost first), got '$out'"
   [ -s "$errfile" ] && fail "nested tmux-in-herdr auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
 
-  pass "fm_backend_name: auto-detect selects herdr (loud notice) or tmux (silent, including nested tmux-in-herdr)"
+  : > "$errfile"
+  out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "nested tmux-in-cmux should auto-detect tmux (innermost first), got '$out'"
+  [ -s "$errfile" ] && fail "nested tmux-in-cmux auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
+
+  pass "fm_backend_name: auto-detect selects herdr or cmux (loud notice) or tmux (silent, including nested tmux-in-herdr/tmux-in-cmux)"
 }
 
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
@@ -195,7 +233,16 @@ test_backend_name_explicit_beats_detection() {
   out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
   [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient HERDR_ENV=1 auto-detect marker, got '$out'"
 
-  pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection"
+  # The same opt-out must work for an ambient cmux auto-detect marker: a
+  # captain who is running firstmate inside a cmux terminal but explicitly
+  # wants tmux is never overridden by CMUX_WORKSPACE_ID.
+  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND=tmux should win over an ambient CMUX_WORKSPACE_ID auto-detect marker, got '$out'"
+
+  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient CMUX_WORKSPACE_ID auto-detect marker, got '$out'"
+
+  pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection, including an ambient cmux marker"
 }
 
 test_backend_validate_refuses_unknown() {

@@ -28,8 +28,9 @@ Prerequisites:
 `config/cmux-socket-password` is the durable choice; the adapter reads it fresh on every call from `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}` and passes it through without ever overriding an operator's own ambient `CMUX_SOCKET_PASSWORD` when the file is absent.
 
 Ask the firstmate crew to select cmux by putting `cmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=cmux` for a one-off session; telling the first mate in chat to use cmux also works.
-cmux is **never** auto-detected, exactly like Orca - it always requires an explicit choice.
-A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured.
+cmux is also selected by **runtime auto-detection**: a firstmate process itself running inside a cmux-spawned terminal (`CMUX_WORKSPACE_ID` set, checked after `$TMUX`/`HERDR_ENV=1` since cmux is the outermost terminal application, not a nestable multiplexer) spawns new tasks into cmux by default, with no config needed, exactly like herdr's own auto-detection - see "Runtime auto-detection" below.
+Auto-detection only ever picks a SESSION provider; it never touches the one-time socket-access setup above, which stays required regardless of how cmux was selected.
+A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured; that refusal message also names the `config/backend`/`--backend tmux` opt-out for a caller who ended up on cmux only because auto-detection picked it.
 
 No first-run provisioning beyond the socket-access setup above and having `jq` installed; firstmate creates the workspace it needs on first spawn, launching the app itself (`open -a cmux`) if it is not already running.
 
@@ -45,10 +46,30 @@ Limitations: cmux is experimental, macOS-only, GUI-first (never viable for a hea
 ## Status: experimental
 
 cmux is experimental, exactly like every non-tmux backend in this design.
-Select it by putting `cmux` in a local `config/backend` file, by exporting `FM_BACKEND=cmux`, or by telling the first mate in chat to use cmux.
-cmux is **never** selected by runtime auto-detection - the same posture as Orca, for the same reason (GUI-first, macOS-only, never a candidate for a headless instance).
+Select it by putting `cmux` in a local `config/backend` file, by exporting `FM_BACKEND=cmux`, by telling the first mate in chat to use cmux, or implicitly by runtime auto-detection when firstmate itself is already running inside a cmux-spawned terminal - see "Runtime auto-detection" below.
+GUI-first and macOS-only stay unchanged by that: cmux is never a candidate for a headless/CI/SSH-only instance, because auto-detection can only fire from inside a live cmux terminal in the first place, which such an instance never is.
 Absent `backend=` in a task's meta always means `tmux`; only a cmux task ever carries an explicit `backend=cmux` line.
 A cmux spawn refuses loudly if the `cmux` CLI cannot be found, the installed version is older than the verified minimum (0.64), or the control socket is unreachable/unauthenticated (`fm_backend_cmux_version_check`, `fm_backend_cmux_ensure_running`).
+
+## Runtime auto-detection
+
+Verified from the shipped app source (`Packages/macOS/CmuxTerminal/Sources/CmuxTerminal/Spawn/TerminalSurface+StartupEnvironment.swift`'s `applyManagedCmuxContextEnvironment`, cloned read-only from `github.com/manaflow-ai/cmux` at the commit current on 2026-07-04): every terminal surface cmux spawns gets `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, and `CMUX_SOCKET_PATH` (plus the legacy `CMUX_TAB_ID`/`CMUX_PANEL_ID` aliases) injected into its environment, and all five keys are marked `protectedKeys` - non-overridable by anything the spawned shell or its own env config does afterward.
+cmux's own CLI corroborates this is a legitimate ambient-identity marker, not incidental: `cmux_open.swift` reads `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` from the environment as its own fallback target when a caller does not pass `--workspace`/`--surface`, exactly how `$TMUX` and `HERDR_ENV`/`HERDR_PANE_ID` work for their own backends.
+
+`fm_backend_detect` (`bin/fm-backend.sh`) checks `CMUX_WORKSPACE_ID` (non-empty) as the cmux marker, not `CMUX_SOCKET_PATH`: the latter is separately documented as a user-settable override for pointing the CLI at a non-default socket path, so its mere presence would not reliably mean "running inside a cmux-spawned terminal" the way `CMUX_WORKSPACE_ID` does.
+Nesting still resolves innermost-first, exactly as it does for herdr: `$TMUX` is checked first, then `HERDR_ENV=1`, then `CMUX_WORKSPACE_ID` last.
+cmux is checked last deliberately, not because it is a "lesser" backend, but because it is a terminal application - the outermost layer, like iTerm2/Terminal.app - not a session multiplexer.
+Both tmux and herdr can run nested inside a cmux-provided shell (someone starts a tmux or herdr session from within a cmux terminal), but cmux itself cannot run nested inside either of them, so whenever a multiplexer marker is present alongside `CMUX_WORKSPACE_ID`, that multiplexer really is the innermost, currently-executing layer and must win.
+An auto-detected cmux spawn prints the same loud stderr `NOTICE` herdr's auto-detection prints, naming the marker and the `config/backend`/`--backend tmux` opt-out.
+
+Auto-detection selects the SESSION provider only.
+It has no bearing on the one-time socket-access setup ("Setup" above): `config/cmux-socket-password`/`CMUX_SOCKET_PASSWORD` are still required for the very first cmux-backed spawn to succeed, auto-detected or explicit, and the existing loud spawn refusal (`fm_backend_cmux_ensure_running`) still fires when that is missing.
+That refusal message itself now also names the `config/backend`/`--backend tmux` opt-out, so a captain who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: set the password to actually use cmux, or opt out back to tmux.
+
+This auto-detection was NOT empirically verified with a live `env` dump inside a real cmux terminal surface, unlike this document's other live findings.
+The reference dev machine's only cmux instance is the captain's own shared, live GUI session; a single attempt to inspect it hit exactly the risk this document's own "Screenshot request" section already warned about - a full-screen capture landed an unrelated, sensitive foreground window instead of cmux (the cmux window turned out to be off-canvas on a background Space) and was deleted immediately, unread, without a second attempt.
+Reliably capturing cmux's own surface would have required either forcibly stealing focus from whatever the captain is actively using or risking another accidental capture of unrelated content; both were judged too disruptive/risky for a routine verification pass on a live, shared machine.
+This finding instead rests entirely on the source read above - the same "verified from source, not live" posture this document already uses for "Workspace ids do not survive a relaunch" - which is unambiguous: the environment-injection code path is unconditional and non-overridable for every surface a real cmux instance spawns, regardless of how that surface is invoked.
 
 ## Worktree provider stays treehouse
 
@@ -208,7 +229,7 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 ## Known gaps left for a follow-up
 
 - **No event push at all**, not even herdr's semantic busy-state: cmux has agent-awareness elsewhere (Claude Code hooks, session-resume) but nothing exposed over the socket API for generic busy/idle classification, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux/zellij/Orca path.
-- **GUI-first, macOS-only, requires the app running** - identical posture to Orca. Never auto-detected, never a candidate for a headless/CI firstmate instance, even though an undocumented auto-detection env marker exists (`CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`/`CMUX_SOCKET_PATH`, injected into every cmux-spawned terminal - found only by reading source) - deliberately not wired into `fm_backend_detect`, per this task's explicit instruction to note but not wire it, pending a future decision.
+- **GUI-first, macOS-only, requires the app running** - identical posture to Orca. Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (`CMUX_WORKSPACE_ID`; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place. The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.
 - **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no per-home container design (a herdr-style workspace-per-home split, or similar) has been designed or verified for cmux yet.
 - **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default and configuring a password will see every spawn fail with an actionable error pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
 - **`bin/fm-bootstrap.sh`'s required-tools list is unchanged** - it does not conditionally add `cmux`/`jq` when a backend selection resolves to cmux, mirroring the same accepted gap already documented for herdr/zellij; the version/tool/reachability gate happens at spawn time instead and refuses loudly.
