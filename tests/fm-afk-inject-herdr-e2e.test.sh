@@ -184,7 +184,29 @@ exec "$REAL_HERDR" "\$@"
 SHIM
 chmod +x "$HERDR_SHIM_DIR/herdr"
 
+wait_daemon_started() {
+  local label=${1:-daemon} start_line=${2:-0} i=0 new_log
+  while [ "$i" -lt 30 ]; do
+    new_log=$(tail -n +"$((start_line + 1))" "$STATE_DIR/.supervise-daemon.log" 2>/dev/null || true)
+    if printf '%s\n' "$new_log" | grep -q 'backend=herdr'; then
+      [ -f "$STATE_DIR/.supervise-daemon.pid" ] || fail "$label startup log recorded backend=herdr but no pid file was written"
+      kill -0 "$DAEMON_PID" 2>/dev/null || fail "$label exited after recording backend=herdr"
+      return 0
+    fi
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      echo "daemon stderr:" >&2; cat "$STATE_DIR/daemon.err" >&2
+      fail "$label exited before recording backend=herdr: $(cat "$STATE_DIR/.supervise-daemon.log" 2>/dev/null)"
+    fi
+    sleep 0.2
+    i=$((i + 1))
+  done
+  echo "daemon stderr:" >&2; cat "$STATE_DIR/daemon.err" >&2
+  fail "$label did not record backend=herdr after 6s: $new_log"
+}
+
 start_daemon() {
+  local log_start=0
+  [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
   PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
@@ -201,18 +223,7 @@ start_daemon() {
   FM_STALE_ESCALATE_SECS=999999 \
   nohup "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
   DAEMON_PID=$!
-  local i=0
-  while [ "$i" -lt 30 ]; do
-    [ -f "$STATE_DIR/.supervise-daemon.pid" ] && break
-    sleep 0.2
-    i=$((i + 1))
-  done
-  [ -f "$STATE_DIR/.supervise-daemon.pid" ] || {
-    echo "daemon stderr:" >&2; cat "$STATE_DIR/daemon.err" >&2
-    fail "daemon did not start (no pid file after 6s)"
-  }
-  grep -q 'backend=herdr' "$STATE_DIR/.supervise-daemon.log" 2>/dev/null \
-    || fail "daemon startup log did not record backend=herdr: $(cat "$STATE_DIR/.supervise-daemon.log" 2>/dev/null)"
+  wait_daemon_started daemon "$log_start"
 }
 
 stop_daemon() {
@@ -407,6 +418,8 @@ test_scenario_c() {
 test_scenario_d_max_defer() {
   reset_state
   afk_enter "$STATE_DIR"
+  local log_start=0
+  [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
   # Persistent-pending composer: type real text and never submit it, so every
   # composer read is genuinely "pending" against the real herdr binary.
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "stuck-in-the-box"
@@ -429,13 +442,7 @@ test_scenario_d_max_defer() {
   FM_STALE_ESCALATE_SECS=999999 \
   nohup "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
   DAEMON_PID=$!
-  local i=0
-  while [ "$i" -lt 30 ]; do
-    [ -f "$STATE_DIR/.supervise-daemon.pid" ] && break
-    sleep 0.2
-    i=$((i + 1))
-  done
-  [ -f "$STATE_DIR/.supervise-daemon.pid" ] || fail "Scenario D: daemon did not start"
+  wait_daemon_started "Scenario D daemon" "$log_start"
 
   echo "needs-decision: pick A or B" > "$STATE_DIR/fake-c1.status"
 
