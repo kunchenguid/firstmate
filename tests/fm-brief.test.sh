@@ -2,13 +2,17 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166): the ship-mode branches used to build their Definition-of-done text
+# with `VAR=$(cat <<EOF ... EOF)`. Bash 3.2 (macOS /bin/bash) tracks quote
+# state through the heredoc body while it scans for the matching `)` of the
+# command substitution, so a single unescaped apostrophe anywhere in that body
+# breaks parsing of the *entire rest of the script* - `bash -n` fails, not
+# just the generated brief. Modern bash (4+) parses it fine, so Linux CI never
+# sees the failure. The branches now assign via `read -r -d '' VAR <<EOF`,
+# which is immune; the structural test below keeps the fragile construct from
+# coming back, since `bash -n` alone only catches it on a bash-3.2 machine.
+# A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected,
+# so the secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,11 +21,23 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
 # The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# issue #166; on macOS it runs under the affected /bin/bash 3.2 itself.
 test_script_parses() {
   bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
+  if [ -x /bin/bash ]; then
+    /bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails /bin/bash -n (bash 3.2 heredoc/quote regression)"
+  fi
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Structural guard for issue #166: heredocs nested inside \$(cat <<...) are a
+# bash-3.2 parse trap that Linux CI's modern bash cannot detect via `bash -n`,
+# so refuse the construct itself anywhere in fm-brief.sh.
+test_no_heredoc_in_command_substitution() {
+  if grep -n '^[^#]*\$(cat <<' "$ROOT/bin/fm-brief.sh"; then
+    fail "fm-brief.sh reintroduced \$(cat <<...) - breaks bash 3.2 parsing if the body ever gains an apostrophe; assign with read -r -d '' instead"
+  fi
+  pass "fm-brief.sh: no heredoc-in-command-substitution construct"
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
@@ -77,5 +93,6 @@ test_no_mistakes_dod_wording() {
 }
 
 test_script_parses
+test_no_heredoc_in_command_substitution
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
