@@ -785,6 +785,41 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label"
 }
 
+test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
+  local dir state data config home project fb out status child_title
+  dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
+  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
+  printf 'smz\n' > "$home/.fm-secondmate-home"
+  fm_write_meta "$state/smz.meta" \
+    "window=firstmate:99" \
+    "backend=zellij" \
+    "worktree=$home" \
+    "project=$home" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home"
+  fm_write_meta "$home/state/childz.meta" \
+    "window=firstmate:7" \
+    "backend=zellij" \
+    "zellij_tab_id=4" \
+    "worktree=$dir/missing-child-worktree" \
+    "project=$project" \
+    "kind=scout"
+  child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
+  zellij_pane_response "$dir" 1 7 4
+  zellij_tab_response "$dir" 2 4 "$child_title"
+  printf '[]\n' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
+    "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
+  status=$?
+  expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a zellij child: $out"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''4' \
+    "forced secondmate teardown did not close a child zellij tab scoped to the child home"
+  pass "fm-teardown.sh: force cleanup kills zellij children using the child home tag"
+}
+
 # --- send_text_submit: delta-based verify-and-retry --------------------------
 
 test_send_text_submit_detects_landed_send() {
@@ -983,6 +1018,7 @@ test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_teardown_passes_recorded_tab_id_to_zellij_kill
+test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_send_failed_when_session_absent
