@@ -2,6 +2,8 @@
 # Shared durable wake queue and portable lock helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-ps-portable.sh
+. "$FM_WAKE_LIB_DIR/fm-ps-portable.sh"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -28,7 +30,7 @@ fm_pid_identity() {
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  out=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  out=$(fm_ps_field identity "$pid") || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }

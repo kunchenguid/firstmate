@@ -8,6 +8,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-ps-portable.sh
+. "$SCRIPT_DIR/fm-ps-portable.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -20,8 +22,8 @@ HARNESS_RE='claude|codex|opencode|grok|^pi$'
 harness_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(fm_ps_field comm "$pid") || return 1
+    args=$(fm_ps_field args "$pid")
     if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
       echo "$pid"; return 0
     fi
@@ -29,7 +31,7 @@ harness_pid() {
     case "$comm" in
       *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
     esac
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$(fm_ps_field ppid "$pid")
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
   return 1
@@ -38,8 +40,8 @@ harness_pid() {
 holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  comm=$(fm_ps_field comm "$pid") || return 1
+  printf '%s' "$(basename "$comm") $(fm_ps_field args "$pid")" | grep -qE "$HARNESS_RE"
 }
 
 if [ "${1:-}" = "status" ]; then
