@@ -37,7 +37,7 @@ Each file also starts with a short header comment.
 | `fm-config-inherit-lib.sh` | Shared primary->secondmate inheritable-config propagation (a declared, extensible item list - currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`) sourced by spawn, bootstrap, and config push |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe sourced by bootstrap and teardown              |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work, then run the watcher-liveness guard         |
-| `fm-wake-lib.sh`         | Shared durable wake queue and portable lock helpers sourced by the watcher, drain, arm, guard, and daemon          |
+| `fm-wake-lib.sh`         | Shared durable wake queue, portable lock helpers, and watcher identity/health helpers sourced by the watcher, drain, arm, guard, turn-end guard, and daemon |
 | `fm-classify-lib.sh`     | Shared captain-relevant wake classifier sourced by the watcher and daemon, plus the watcher's provably-working predicate |
 | `fm-send.sh`             | Send one verified literal line or backend-supported `--key` through the target's recorded runtime backend; exits non-zero on confirmed swallowed Enter; bare `kind=secondmate` targets are marked as from-firstmate; slash commands and codex `$...` skill invocations get popup-settle before backend-specific submit verification; text sends pause `FM_SEND_SETTLE` seconds after success |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, and verified submit retry |

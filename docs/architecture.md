@@ -28,6 +28,8 @@ Its `--restart` mode signals only the watcher recorded in the current home's `st
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
+On the `claude` harness, a tracked project Stop hook (`bin/fm-turnend-guard.sh`) gives the primary session a push-based backstop: when work is in flight and no identity-matched watcher lock with a fresh beacon is live, Claude Code receives the hook's exit-2 reason and must continue the turn before it can stop.
+The hook is scoped out of secondmate homes and crewmate/scout worktrees, allows Claude's own `stop_hook_active` retry, and is documented in [turnend-guard.md](turnend-guard.md).
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
