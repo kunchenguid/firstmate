@@ -1,6 +1,10 @@
 ---
 name: fmx-respond
-description: Agent-only playbook for handling an X mention in X mode. Use on an "x-mention <request_id>" check: wake - read the stashed mention (with any in_reply_to conversation context); the direct author is the firstmate's own owner (captain) under owner-only routing, so classify it as an actionable request to act on through the normal lifecycle, a question to answer from live fleet state, or a pure acknowledgment to dismiss without replying; act autonomously (escalating only destructive/irreversible/security-sensitive work). For a request that spawns real work, acknowledge first, act, link the task with bin/fm-x-link.sh, and let up to three completion follow-ups post on genuine milestone and done wakes, the last one with --final; for a question or completed action, post or preview a short public-safe reply with bin/fm-x-reply.sh; for a pure acknowledgment, call bin/fm-x-dismiss.sh. Clear the inbox file only after a successful reply or dismiss. Loaded only when X mode is enabled.
+description: >-
+  Agent-only playbook for handling X mode mentions and follow-ups.
+  Use on an "x-mention <request_id>" check wake to read the stashed mention, classify it, act autonomously on eligible requests, reply or dismiss, and link spawned work.
+  Also use on milestone and terminal wakes for an X-linked task before posting completion follow-ups, ending terminal outcomes with --final.
+  Loaded only when X mode is enabled.
 user-invocable: false
 metadata:
   internal: true
@@ -174,7 +178,7 @@ A non-final dry-run follow-up increments `x_followups` and keeps the link while 
 ## Completion follow-up (posted on milestone and done wakes, not this turn)
 
 When an actionable request spawned a task and you linked it (step 2c), progress and the **outcome** are delivered later as follow-up replies, not in this turn.
-This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §8's wake-handling step is the one place that still triggers it - a task reaching a terminal state posts its final follow-up there before teardown, on whatever generic wake surfaces that state, not on a mention wake.
+This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §13 declares the load trigger for X-linked milestone or terminal wakes, and AGENTS.md §8 reinforces the terminal final-follow-up step before teardown.
 This skill's own responsibility during the mention-handling turn is linking the task in step 2c; the full completion path is:
 
 - Firstmate has **up to three** follow-ups per mention, within a 7-day window, chained in the same thread - it spends them only on genuine milestones the captain would want surfaced (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn.
