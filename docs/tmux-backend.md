@@ -1,13 +1,13 @@
 # tmux runtime backend (reference)
 
-tmux is firstmate's verified reference runtime backend: the session provider every other backend is compared against, and the only one that supports every firstmate feature, including secondmates.
+tmux is firstmate's verified reference runtime backend: the session provider every other backend is compared against, and the fully verified baseline for secondmate support.
 This is the setup guide; for the shared runtime-backend abstraction and selection order, see [`docs/architecture.md`](architecture.md) ("Runtime session backends") and [`docs/configuration.md`](configuration.md) ("Runtime backend").
 
 ## What it is and when to pick it
 
 tmux is a terminal multiplexer.
 Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
-Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, or Orca) - it is the only backend that is fully verified end to end, including secondmate homes.
+Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, or Orca) - it is the fully verified reference path for secondmate homes, while Orca is the backend that does not support secondmate spawns.
 
 ## Prerequisites
 
@@ -71,4 +71,4 @@ You should see a `fm-<id>` window for the task, live and updating as the crewmat
 
 ## Limitations
 
-None specific to tmux - it is the fully verified reference backend and the only one with end-to-end secondmate support.
+None specific to tmux - it is the fully verified reference backend, while Orca is the backend without secondmate support.
