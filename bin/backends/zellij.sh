@@ -595,19 +595,13 @@ fm_backend_zellij_list_live() {  # <session>
 # tmux-only by design, and zellij/herdr tasks are targeted via fm-<id> meta or
 # an explicit recorded target.
 fm_backend_zellij_resolve_bare_selector() {  # <name>
-  local name=$1 scoped sessions session tabs tab_id count pane_id
+  local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")
   sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
     tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$scoped" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1)
-    if [ -z "$tab_id" ]; then
-      count=$(printf '%s' "$tabs" | jq -r --arg want "$name" '[.[]? | select(.name == $want)] | length' 2>/dev/null)
-      if [ "$count" = "1" ]; then
-        tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$name" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1)
-      fi
-    fi
     [ -n "$tab_id" ] || continue
     pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
@@ -616,6 +610,29 @@ fm_backend_zellij_resolve_bare_selector() {  # <name>
   done <<EOF
 $sessions
 EOF
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+    while IFS= read -r tab_id; do
+      [ -n "$tab_id" ] || continue
+      count=$((count + 1))
+      if [ "$count" -eq 1 ]; then
+        bare_session=$session
+        bare_tab_id=$tab_id
+      fi
+    done <<EOF_MATCHES
+$(printf '%s' "$tabs" | jq -r --arg want "$name" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null)
+EOF_MATCHES
+  done <<EOF
+$sessions
+EOF
+  if [ "$count" -eq 1 ]; then
+    pane_id=$(fm_backend_zellij_pane_for_tab "$bare_session" "$bare_tab_id") || pane_id=
+    if [ -n "$pane_id" ]; then
+      printf '%s:%s' "$bare_session" "$pane_id"
+      return 0
+    fi
+  fi
   echo "error: no zellij tab named $name in any active session" >&2
   return 1
 }

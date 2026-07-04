@@ -349,6 +349,7 @@ test_resolve_bare_selector_refuses_ambiguous_untagged() {
   dir="$TMP_ROOT/resolve-ambiguous"; mkdir -p "$dir/responses"
   # 1: list-tabs --json -> two DIFFERENT tabs sharing the same untagged bare name
   zellij_multi_tab_response "$dir" 1 3 fm-resolve2 9 fm-resolve2
+  zellij_multi_tab_response "$dir" 2 3 fm-resolve2 9 fm-resolve2
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -357,6 +358,38 @@ test_resolve_bare_selector_refuses_ambiguous_untagged() {
   [ "$status" -ne 0 ] || fail "resolve_bare_selector should refuse an ambiguous untagged label shared by 2+ live tabs"
   assert_contains "$out" "no zellij tab named" "resolve_bare_selector's refusal did not report the expected not-found error"
   pass "fm_backend_zellij_resolve_bare_selector: refuses an ambiguous untagged legacy label shared by 2+ live tabs"
+}
+
+test_resolve_bare_selector_prefers_later_session_scoped_title_over_legacy() {
+  local dir fb out title
+  dir="$TMP_ROOT/resolve-later-scoped"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-resolve3)
+  zellij_tab_response "$dir" 1 3 fm-resolve3
+  zellij_tab_response "$dir" 2 6 "$title"
+  zellij_pane_response "$dir" 3 12 6
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'legacy-session\nscoped-session' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_resolve_bare_selector fm-resolve3' "$ROOT" )
+  [ "$out" = "scoped-session:12" ] || fail "resolve_bare_selector should prefer a later session's scoped title over an earlier legacy title, got '$out'"
+  pass "fm_backend_zellij_resolve_bare_selector: checks every session for the scoped title before legacy fallback"
+}
+
+test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged() {
+  local dir fb out status
+  dir="$TMP_ROOT/resolve-cross-session-ambiguous"; mkdir -p "$dir/responses"
+  zellij_tab_response "$dir" 1 3 fm-resolve4
+  zellij_tab_response "$dir" 2 9 fm-resolve4
+  zellij_tab_response "$dir" 3 3 fm-resolve4
+  zellij_tab_response "$dir" 4 9 fm-resolve4
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'one-session\ntwo-session' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_resolve_bare_selector fm-resolve4' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolve_bare_selector should refuse an untagged legacy label that appears once in each of two sessions"
+  assert_contains "$out" "no zellij tab named" "resolve_bare_selector's cross-session ambiguity refusal did not report the expected not-found error"
+  pass "fm_backend_zellij_resolve_bare_selector: requires untagged legacy labels to be globally unique across sessions"
 }
 
 # --- session_exists / server_ensure -------------------------------------------
@@ -811,6 +844,7 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   printf '[]\n' > "$dir/responses/3.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
   status=$?
@@ -993,6 +1027,8 @@ test_expected_label_refuses_ambiguous_untagged_tab
 test_list_live_scopes_to_own_home_tag
 test_resolve_bare_selector_prefers_scoped_title
 test_resolve_bare_selector_refuses_ambiguous_untagged
+test_resolve_bare_selector_prefers_later_session_scoped_title_over_legacy
+test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists
