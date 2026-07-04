@@ -168,17 +168,37 @@ done
 pass "no bin/ script has an unbalanced quote inside a \$( ) heredoc"
 
 # --- 4. fm-brief.sh scaffolds end to end under the system bash ---------------
+#
+# Every ship delivery mode plus scout, each run under $SYSBASH explicitly.
+# tests/fm-brief.test.sh covers the same mode matrix under the ambient bash;
+# this run pins it to the SYSTEM bash, because the historical failure (the
+# apostrophe in the no-mistakes DOD heredoc inside $(cat <<EOF)) parsed fine
+# on bash 4+ and killed every non-scout scaffold only on macOS /bin/bash 3.2.
 
 FM_HOME_SHIP="$TMP_ROOT/home-ship"
-mkdir -p "$FM_HOME_SHIP"
-if ! FM_HOME="$FM_HOME_SHIP" "$SYSBASH" "$ROOT/bin/fm-brief.sh" bash32-e2e some-repo >/dev/null 2>&1; then
-  fail "fm-brief.sh ship scaffold failed under $SYSBASH"
-fi
-SHIP_BRIEF="$FM_HOME_SHIP/data/bash32-e2e/brief.md"
-[ -f "$SHIP_BRIEF" ] || fail "ship brief not written at $SHIP_BRIEF"
-grep -q '{TASK}' "$SHIP_BRIEF" || fail "ship brief missing {TASK} placeholder"
-grep -q '# Definition of done' "$SHIP_BRIEF" || fail "ship brief missing definition of done"
-pass "fm-brief.sh scaffolds a ship brief under $SYSBASH"
+mkdir -p "$FM_HOME_SHIP/data"
+cat > "$FM_HOME_SHIP/data/projects.md" <<'EOF'
+- direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
+- local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+EOF
+
+scaffold_ship() {  # <id> <proj> <mode-marker>
+  local id=$1 proj=$2 marker=$3 brief
+  if ! FM_HOME="$FM_HOME_SHIP" "$SYSBASH" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; then
+    fail "fm-brief.sh $proj scaffold failed under $SYSBASH"
+  fi
+  brief="$FM_HOME_SHIP/data/$id/brief.md"
+  [ -f "$brief" ] || fail "$id: brief not written at $brief"
+  grep -q '{TASK}' "$brief" || fail "$id: brief missing {TASK} placeholder"
+  grep -q '# Definition of done' "$brief" || fail "$id: brief missing definition of done"
+  grep -qF "$marker" "$brief" || fail "$id: brief missing mode marker '$marker'"
+  ! grep -qx 'EOF' "$brief" || fail "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+}
+
+scaffold_ship bash32-e2e some-repo 'run /no-mistakes'
+scaffold_ship bash32-dpr direct-proj 'ships **direct-PR**'
+scaffold_ship bash32-lcl local-proj 'ships **local-only**'
+pass "fm-brief.sh scaffolds no-mistakes, direct-PR, and local-only ship briefs under $SYSBASH"
 
 FM_HOME_SCOUT="$TMP_ROOT/home-scout"
 mkdir -p "$FM_HOME_SCOUT"
