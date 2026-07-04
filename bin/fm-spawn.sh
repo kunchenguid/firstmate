@@ -335,10 +335,17 @@ if [ "$KIND" != secondmate ]; then
   # path component (treehouse always places worktrees under {root}/.treehouse/) rather
   # than "pane moved away from PROJ_ABS": at window startup the pane can briefly report
   # a transient cwd (e.g. the project's parent dir) that already differs from PROJ_ABS,
-  # which would record the wrong worktree path.
+  # which would record the wrong worktree path. Canonicalize each reported path and
+  # reject PROJ_ABS and anything under it before accepting a `.treehouse` match: when a
+  # firstmate or secondmate home lives under `.treehouse`, the project clone itself sits
+  # under a `.treehouse` component, so the bare `.treehouse` match would otherwise latch
+  # onto the clone instead of the real crewmate worktree.
   for _ in $(seq 1 60); do
     p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    [ -n "$p" ] || { sleep 1; continue; }
+    p=$(cd "$p" 2>/dev/null && pwd -P) || { sleep 1; continue; }
     case "$p" in
+      "$PROJ_ABS"|"$PROJ_ABS"/*) ;;
       */.treehouse/*) WT="$p"; break ;;
     esac
     sleep 1

@@ -94,6 +94,19 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
+    case "$*" in
+      *'#{pane_current_path}'*)
+        if [ -n "${FM_FAKE_TMUX_PATHS:-}" ] && [ -f "$FM_FAKE_TMUX_PATHS" ]; then
+          idx_file="${FM_FAKE_TMUX_PATHS}.idx"
+          idx=1
+          [ ! -f "$idx_file" ] || idx=$(cat "$idx_file")
+          sed -n "${idx}p" "$FM_FAKE_TMUX_PATHS"
+          idx=$((idx + 1))
+          printf '%s\n' "$idx" > "$idx_file"
+          exit 0
+        fi
+        ;;
+    esac
     printf 'firstmate\n'
     exit 0
     ;;
@@ -1087,6 +1100,35 @@ test_secondmate_spawn_records_home_meta() {
   grep -F 'notify=' "$log" >/dev/null && fail "secondmate codex launch should not install parent turn-end notify"
   grep -F 'turn-ended' "$log" >/dev/null && fail "secondmate launch should not reference parent turn-end marker"
   pass "kind=secondmate spawn launches in the home and records routing meta"
+}
+
+test_spawn_rejects_project_clone_when_home_is_treehouse_worktree() {
+  local home project wt fakebin log paths meta project_abs wt_abs
+  home="$TMP_ROOT/.treehouse/firstmate-test/1/firstmate"
+  project="$home/projects/alpha"
+  wt="$TMP_ROOT/.treehouse/alpha-task/1/alpha"
+  mkdir -p "$home/data/spawn-treehouse" "$home/state" "$(dirname "$wt")"
+  make_git_project "$project"
+  git -C "$project" worktree add --quiet -b spawn-treehouse "$wt"
+  project_abs=$(cd "$project" && pwd -P)
+  wt_abs=$(cd "$wt" && pwd -P)
+  printf 'spawn brief\n' > "$home/data/spawn-treehouse/brief.md"
+  printf '%s\n' '- alpha [local-only] - test project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-treehouse-fake")
+  log="$TMP_ROOT/spawn-treehouse-fake/tmux.log"
+  paths="$TMP_ROOT/spawn-treehouse-fake/pane-paths.txt"
+  printf '%s\n%s\n' "$project_abs" "$wt_abs" > "$paths"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SPAWN_NO_GUARD=1 FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-treehouse-fake/pane.txt" FM_FAKE_TMUX_PATHS="$paths" \
+    "$ROOT/bin/fm-spawn.sh" spawn-treehouse projects/alpha claude >/dev/null \
+    || fail "spawn failed when home and project clone live under .treehouse"
+
+  meta="$home/state/spawn-treehouse.meta"
+  grep -Fx "project=$project_abs" "$meta" >/dev/null || fail "meta did not record the project clone path"
+  grep -Fx "worktree=$wt_abs" "$meta" >/dev/null || fail "spawn latched onto the project clone instead of the crewmate worktree"
+  [ ! -e "$project/.claude/settings.local.json" ] || fail "spawn wrote the turn-end hook into the project clone"
+  [ -e "$wt/.claude/settings.local.json" ] || fail "spawn did not write the turn-end hook into the crewmate worktree"
+  pass "spawn rejects the project clone when a secondmate home sits under .treehouse"
 }
 
 test_secondmate_spawn_requires_seeded_matching_home() {
@@ -2145,6 +2187,7 @@ test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_records_home_meta
+test_spawn_rejects_project_clone_when_home_is_treehouse_worktree
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_resolves_bare_firstmate_window_from_home_meta
