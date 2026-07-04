@@ -17,19 +17,25 @@
 # attaches that image to the first/opener tweet only.
 #
 # Two endpoints, one client. By default the reply is the single answer to a
-# mention, POSTed to $RELAY/connector/answer. With --followup it is instead the
-# ONE later "done - here's the result" reply for a mention that spawned real
-# work, POSTed to $RELAY/connector/followup; the relay retains the
-# request->tweet binding for a 24h window after the initial answer and accepts a
-# single thread-bound follow-up. --followup may appear anywhere after the
-# request_id; everything else (thread-split, payload shape, dry-run, never-inline
-# safety) is identical, so only the endpoint and the dry-run marker differ.
+# mention, POSTed to $RELAY/connector/answer. With --followup it is instead one
+# of up to three later "here's where things stand" replies for a mention that
+# spawned real work, POSTed to $RELAY/connector/followup; the relay retains the
+# request->tweet binding for a 7-day window after the initial answer and accepts
+# up to three thread-bound follow-ups against it. --followup may appear
+# anywhere after the request_id; everything else (thread-split, payload shape,
+# dry-run, never-inline safety) is identical, so only the endpoint and the
+# dry-run marker differ.
 #
 # POSTs to $RELAY/connector/<answer|followup> with the bearer token. The relay
 # binds the reply to the exact tweet it recorded for that request_id, so this
 # client only ever echoes the relay-issued request_id and NEVER names a tweet id.
 # On success it echoes ONLY that request_id; on a non-2xx (or transport failure)
-# it exits non-zero so the caller knows the post did not land.
+# it exits non-zero so the caller knows the post did not land. A follow-up the
+# relay rejects as past its cap or window comes back as HTTP 409, which this
+# client surfaces as its own distinguishable exit code 9 (rather than the
+# generic exit 1) so fm-x-followup.sh can tell "exhausted binding" apart from a
+# transient post failure worth retrying; every other caller only needs to know
+# success (0) from failure (non-zero).
 #
 # Long replies auto-split into a numbered thread (premium-independent: each tweet
 # stays within FMX_X_REPLY_MAX_CHARS, default 280). A reply that fits in one tweet
@@ -257,5 +263,13 @@ esac
 
 case "$code" in
   2[0-9][0-9]) printf '%s\n' "$REQ" ;;
+  409)
+    if [ "$FOLLOWUP" = 1 ]; then
+      echo "fm-x-reply: relay rejected the follow-up (cap or window exceeded): HTTP 409" >&2
+      exit 9
+    fi
+    echo "fm-x-reply: relay returned HTTP $code" >&2
+    exit 1
+    ;;
   *) echo "fm-x-reply: relay returned HTTP $code" >&2; exit 1 ;;
 esac
