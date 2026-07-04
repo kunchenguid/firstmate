@@ -55,9 +55,6 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ## Quick Start
 
 **Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
-Experimental herdr spawns additionally require `herdr` and `jq`, checked at spawn time.
-Experimental zellij spawns additionally require `zellij` and `jq`, checked at spawn time.
-Experimental Orca spawns additionally require the `orca` CLI when `backend=orca` is selected; Orca owns both the task worktree and terminal endpoint, but Escape remains unsupported.
 The first mate detects and offers to install everything else.
 
 ```sh
@@ -82,14 +79,7 @@ Then just talk:
 > alright merge it
 ```
 
-With the default tmux backend, run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
-Outside tmux, default-backend crewmates land in a detached `firstmate` session you can attach to.
-When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
-With experimental herdr, attach to the selected `HERDR_SESSION` and switch between firstmate-home workspaces.
-The primary home uses `firstmate`; each secondmate home uses `2ndmate-<secondmate-id>`, with that home's task tabs inside its own space.
-With experimental zellij, select it explicitly with `--backend zellij`, `FM_BACKEND=zellij`, or `config/backend`; attach to the selected `FM_ZELLIJ_SESSION` or the default `firstmate` session.
-All zellij tasks share that one session's tab bar, with one `fm-<id>` tab per task.
-With experimental Orca, select it explicitly with `--backend orca`, `FM_BACKEND=orca`, or `config/backend`; Orca creates the task worktree and terminal and records the terminal handle in task metadata.
+Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca) are linked in [Documentation](#documentation) below.
 
 ## How It Works
 
@@ -118,27 +108,9 @@ With experimental Orca, select it explicitly with `--backend orca`, `FM_BACKEND=
 
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Persistent secondmate homes are linked firstmate worktrees; locked session start syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
-Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
-When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
-Secondmate launch can use a separate local `config/secondmate-harness`, whose first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]` to durably pin that secondmate's launch profile.
-The runtime session-provider backend is selected from explicit `--backend`, `FM_BACKEND`, local `config/backend`, runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then the hard `tmux` default.
-`tmux` is the verified reference backend.
-`herdr`, `zellij`, and `orca` are experimental task-spawn backends; herdr can also be auto-detected, while zellij and orca are selected only explicitly.
-Unlike tmux/herdr/zellij, Orca provides the task worktree as well as the terminal endpoint.
-Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, during the locked session-start bootstrap step, or during an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
-When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
-A presence-gated sub-supervisor (`/afk`) can self-handle routine events and batch only what matters while you step away.
-An opt-in X mode can also use the watcher check path to answer your public `@myfirstmate` mentions and act on normal reversible mention requests from the current fleet state, with `FMX_DRY_RUN` available to test the poll -> compose -> would-post loop without publishing.
-The relay routes only the owner's own mentions to that owner's firstmate home; parent-thread context may still include other public accounts.
-The token is standing authorization for those autonomous replies and eligible lifecycle actions; destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
-Requests that finish immediately get one public-safe outcome reply.
-Requests that spawn longer-running work get an acknowledgement first, a task link in local state, and one completion follow-up within the relay's 24h window when that task lands, reports, or fails.
-It preserves parent-tweet context for conversational replies and dismisses pure acknowledgments at the relay without posting.
-Replies can attach one local image with `--image <path>` when there is a visual artifact; long replies split into bounded numbered threads when needed, with the image attached only to the opener tweet.
-When firstmate works on itself, spawn-time isolation checks and a primary-checkout tangle alarm keep the operating checkout on its default branch and stop a crewmate that did not land in a separate worktree.
+Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 
-Full architecture - the supervision engine, worktree isolation, secondmates, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
 ## Built-in skills
 
@@ -167,9 +139,10 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
-- [docs/herdr-backend.md](docs/herdr-backend.md) - experimental herdr backend verification notes and known gaps.
-- [docs/zellij-backend.md](docs/zellij-backend.md) - experimental zellij backend verification notes and known gaps.
-- [docs/orca-backend.md](docs/orca-backend.md) - experimental Orca backend lifecycle notes and known gaps.
+- [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
+- [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.
+- [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.
+- [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.

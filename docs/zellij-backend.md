@@ -7,6 +7,30 @@ Zellij is [a terminal multiplexer](https://zellij.dev) with a CLI action interfa
 Verified against the real installed binary: zellij 0.44.0, macOS aarch64.
 All real-zellij verification in this document and in `tests/fm-backend-zellij-smoke.test.sh` uses isolated, uniquely-named sessions (via `FM_ZELLIJ_SESSION`) plus the guarded teardown helper in `tests/zellij-test-safety.sh` - never the real `firstmate` session name a live fleet would use, and never `kill-all-sessions`/`delete-all-sessions`.
 
+## Setup
+
+Pick zellij if you already use it as your terminal multiplexer and want firstmate crew windows there instead of tmux; it has no per-home container split, so it is simpler than herdr for a single-home fleet.
+
+Prerequisites:
+
+- `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
+- `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
+- The same universal requirements as tmux (a verified crew harness, git with GitHub auth); treehouse still provides the worktree, zellij only provides the session.
+
+Select zellij explicitly with `fm-spawn.sh --backend zellij`, `FM_BACKEND=zellij`, or a local `config/backend` file containing `zellij`.
+Unlike tmux and herdr, zellij is **never** auto-detected - it always requires one of those three explicit settings.
+A zellij spawn refuses loudly, before touching any repo state, if `zellij` or `jq` is missing or the installed zellij is older than 0.44.
+
+No first-run provisioning is needed beyond having `zellij` and `jq` on `PATH`; firstmate creates the session and tab it needs on first spawn.
+
+Watching and attaching: firstmate uses one shared session (default name `firstmate`, overridable with `FM_ZELLIJ_SESSION`) with one tab per task, named `fm-<id>`.
+Attach to the selected `FM_ZELLIJ_SESSION` (or the default `firstmate` session) with `zellij attach <name>` to see every task, primary or secondmate, as a tab in that one tab bar.
+You do not need to attach for routine supervision: `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `bin/fm-send.sh fm-<id> "<text>"` steers it.
+
+Verify it works by spawning a trivial task with `--backend zellij` and confirming the task's meta records `backend=zellij` plus `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`; attaching to the session should show the new `fm-<id>` tab.
+
+Limitations: zellij is experimental, has no per-home workspace split (all tasks share one tab bar, unlike herdr), is not yet used for `bin/fm-bootstrap.sh`'s required-tools list (the version/tool gate happens at spawn time instead), and carries the known gaps documented below (no native busy-state signal, and a narrow focus-steal race on tab creation) - see "Known gaps left for a follow-up" at the end of this document.
+
 ## Status: experimental
 
 Zellij is experimental, exactly like every non-tmux backend in this design.
