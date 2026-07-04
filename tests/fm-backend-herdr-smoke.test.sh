@@ -121,7 +121,9 @@ LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp)
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
 $LIVE_DUP_IDS
 EOF
-[ -n "$LIVE_DUP_TAB_ID" ] && [ -n "$LIVE_DUP_PANE_ID" ] || fail "live-duplicate scenario tab creation did not return ids"
+if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
+  fail "live-duplicate scenario tab creation did not return ids"
+fi
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
@@ -139,7 +141,9 @@ HUSK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) || fail
 read -r HUSK_TAB_ID HUSK_PANE_ID <<EOF
 $HUSK_IDS
 EOF
-[ -n "$HUSK_TAB_ID" ] && [ -n "$HUSK_PANE_ID" ] || fail "husk-simulation tab creation did not return ids"
+if [ -z "$HUSK_TAB_ID" ] || [ -z "$HUSK_PANE_ID" ]; then
+  fail "husk-simulation tab creation did not return ids"
+fi
 herdr agent get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   && fail "husk-simulation setup is wrong: this pane should have NO registered agent yet"
 REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) \
@@ -147,7 +151,9 @@ REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) \
 read -r NEW_HUSK_TAB_ID NEW_HUSK_PANE_ID <<EOF
 $REPLACED_IDS
 EOF
-[ -n "$NEW_HUSK_TAB_ID" ] && [ -n "$NEW_HUSK_PANE_ID" ] || fail "husk close-and-replace did not return new tab/pane ids"
+if [ -z "$NEW_HUSK_TAB_ID" ] || [ -z "$NEW_HUSK_PANE_ID" ]; then
+  fail "husk close-and-replace did not return new tab/pane ids"
+fi
 [ "$NEW_HUSK_PANE_ID" != "$HUSK_PANE_ID" ] || fail "husk close-and-replace returned the SAME pane id - it did not actually replace anything"
 if herdr pane get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION: the old husk pane should have been closed by close-and-replace, but it still exists"

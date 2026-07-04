@@ -409,7 +409,9 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   read -r tab pane <<EOF
 $out
 EOF
-  [ "$tab" = "w1:t3" ] && [ "$pane" = "w1:p3" ] || fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-husk1' \
     "create_task did not create the replacement tab"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the dead husk's tab"
@@ -435,7 +437,9 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   read -r tab pane <<EOF
 $out
 EOF
-  [ "$tab" = "w1:t3" ] && [ "$pane" = "w1:p3" ] || fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-husk2' \
     "create_task did not create the replacement tab"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the no-agent husk's tab"
@@ -461,15 +465,18 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   read -r tab pane <<EOF
 $out
 EOF
-  [ "$tab" = "w1:t4" ] && [ "$pane" = "w1:p4" ] || fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  if [ "$tab" != "w1:t4" ] || [ "$pane" != "w1:p4" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the first duplicate husk"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' "create_task did not close the second duplicate husk"
   create_line=$(grep -n $'\x1f''tab'$'\x1f''create' "$log" | head -1 | cut -d: -f1)
   close_p2_line=$(grep -n $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "$log" | head -1 | cut -d: -f1)
   close_p3_line=$(grep -n $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' "$log" | head -1 | cut -d: -f1)
   [ -n "$create_line" ] || fail "expected a 'tab create' call in the log"
-  [ "$create_line" -lt "$close_p2_line" ] && [ "$create_line" -lt "$close_p3_line" ] \
-    || fail "REGRESSION: duplicate husks were closed before the replacement tab was created"
+  if [ "$create_line" -ge "$close_p2_line" ] || [ "$create_line" -ge "$close_p3_line" ]; then
+    fail "REGRESSION: duplicate husks were closed before the replacement tab was created"
+  fi
   pass "fm_backend_herdr_create_task: closes every confirmed same-labeled husk only after creating the replacement"
 }
 

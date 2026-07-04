@@ -82,7 +82,9 @@ CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" "
 read -r CREW_TAB_ID CREW_PANE_ID <<EOF
 $CREW_IDS
 EOF
-[ -n "$CREW_TAB_ID" ] && [ -n "$CREW_PANE_ID" ] || fail "initial crewmate-shaped task did not return tab/pane ids"
+if [ -z "$CREW_TAB_ID" ] || [ -z "$CREW_PANE_ID" ]; then
+  fail "initial crewmate-shaped task did not return tab/pane ids"
+fi
 
 SM_LABEL="fm-respawn-sm1"
 SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CWD") \
@@ -90,7 +92,9 @@ SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CWD") \
 read -r SM_TAB_ID SM_PANE_ID <<EOF
 $SM_IDS
 EOF
-[ -n "$SM_TAB_ID" ] && [ -n "$SM_PANE_ID" ] || fail "initial secondmate-shaped task did not return tab/pane ids"
+if [ -z "$SM_TAB_ID" ] || [ -z "$SM_PANE_ID" ]; then
+  fail "initial secondmate-shaped task did not return tab/pane ids"
+fi
 
 pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondmate-shaped), neither with a registered agent"
 
@@ -121,7 +125,9 @@ RESPAWN_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PRO
 read -r NEW_CREW_TAB_ID NEW_CREW_PANE_ID <<EOF
 $RESPAWN_CREW_IDS
 EOF
-[ -n "$NEW_CREW_TAB_ID" ] && [ -n "$NEW_CREW_PANE_ID" ] || fail "husk respawn (crewmate-shaped) did not return new tab/pane ids"
+if [ -z "$NEW_CREW_TAB_ID" ] || [ -z "$NEW_CREW_PANE_ID" ]; then
+  fail "husk respawn (crewmate-shaped) did not return new tab/pane ids"
+fi
 [ "$NEW_CREW_PANE_ID" != "$CREW_PANE_ID" ] || fail "husk respawn (crewmate-shaped) returned the SAME pane id - nothing was actually replaced"
 if herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION: the old crewmate-shaped husk pane should have been closed by close-and-replace, but it still exists"
@@ -133,7 +139,9 @@ RESPAWN_SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CW
 read -r NEW_SM_TAB_ID NEW_SM_PANE_ID <<EOF
 $RESPAWN_SM_IDS
 EOF
-[ -n "$NEW_SM_TAB_ID" ] && [ -n "$NEW_SM_PANE_ID" ] || fail "husk respawn (secondmate-shaped) did not return new tab/pane ids"
+if [ -z "$NEW_SM_TAB_ID" ] || [ -z "$NEW_SM_PANE_ID" ]; then
+  fail "husk respawn (secondmate-shaped) did not return new tab/pane ids"
+fi
 [ "$NEW_SM_PANE_ID" != "$SM_PANE_ID" ] || fail "husk respawn (secondmate-shaped) returned the SAME pane id - nothing was actually replaced"
 if herdr pane get "$SM_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION: the old secondmate-shaped husk pane should have been closed by close-and-replace, but it still exists"
