@@ -164,6 +164,32 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
   pass "persistent herdr stale resolves the target from metadata and escalates"
 }
 
+test_housekeeping_herdr_idle_busy_footer_clears_stale() {
+  local dir state key
+  dir=$(make_supercase stale-herdr-idle-busy-footer)
+  state="$dir/state"
+  fm_write_meta "$state/herdr-footer.meta" "window=default:w1:p4" "backend=herdr"
+  printf 'working\n' > "$state/herdr-footer.status"
+  key=$(printf '%s' "herdr-footer" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() {
+      [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
+      [ "$2" = "default:w1:p4" ] || fail "expected herdr window target, got $2"
+      printf 'esc to interrupt\n'
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] || fail "expected herdr busy backend, got $1"
+      [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
+      printf 'idle'
+    }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "herdr idle busy-footer housekeeping failed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle+busy-footer herdr stale marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "idle+busy-footer herdr stale was escalated"
+  pass "herdr idle busy-footer stale clears through capture corroboration"
+}
+
 test_housekeeping_herdr_resumed_stale_cleared() {
   local dir state key
   dir=$(make_supercase stale-herdr-resumed)
@@ -836,6 +862,15 @@ test_pane_is_busy_herdr_falls_back_to_capture_regex() {
   pass "pane_is_busy: herdr falls back to the shared regex-over-capture reader when native busy_state is unknown"
 }
 
+test_pane_is_busy_herdr_idle_falls_back_to_capture_regex() {
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected capture args: $1 $2"; printf 'esc to interrupt\n'; }
+    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should fall back to the regex-over-capture reader when busy_state is idle"
+  ) || fail "herdr idle capture-fallback pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr corroborates native idle with the shared regex-over-capture reader"
+}
+
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
   dir=$(make_supercase busy-default-backend)
@@ -886,6 +921,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   (
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -919,6 +955,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   (
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -940,6 +977,7 @@ test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_herdr_persistent_stale_resolves_meta
+test_housekeeping_herdr_idle_busy_footer_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
@@ -979,6 +1017,7 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_pane_is_busy_herdr_falls_back_to_capture_regex
+test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

@@ -483,7 +483,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # case statement here, mirroring the same fallback pattern
 # stale_window_is_busy already uses for per-task panes: try the backend's
 # native busy-state first, and fall back to the shared regex-over-capture
-# reader when the backend reports "unknown" (tmux has no native busy-state
+# reader whenever it does not report "busy" (tmux has no native busy-state
 # primitive, so it always takes this fallback path - byte-identical to the
 # pre-existing fm_pane_is_busy, since fm_backend_capture's tmux arm runs the
 # exact same `tmux capture-pane -p -t <target> -S -40`).
@@ -492,7 +492,6 @@ pane_is_busy() {  # <target> [backend]
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
-    idle) return 1 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
@@ -522,12 +521,9 @@ stale_window_is_busy() {  # <window> <state>
   bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
-    idle) return 1 ;;
-    *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-        | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
-      ;;
   esac
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
 escalate_add() {  # <state> <distilled-item>
