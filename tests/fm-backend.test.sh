@@ -750,14 +750,20 @@ test_spawn_conformance_old_vs_new() {
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+  # The claude launch template intentionally gained "CLAUDE_JOB_DIR= " and
+  # "-n 'fm-<id>'" after the baseline (agent-view session naming); rewrite the
+  # old log's launch line to the new form so the conformance diff still fails
+  # on any UNINTENDED drift while tolerating that one known delta.
+  sed "s|CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions|CLAUDE_JOB_DIR= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n 'fm-$id' --dangerously-skip-permissions|" \
+    "$log_old" > "$TMP_ROOT/spawn-old-adjusted.log"
+  diff -u "$TMP_ROOT/spawn-old-adjusted.log" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
     || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
   assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
-  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
+  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_JOB_DIR= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n 'fm-$id' --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
     "spawn tmux log missing the literal launch-command send"
 
   rm -rf "/tmp/fm-$id"

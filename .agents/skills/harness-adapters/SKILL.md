@@ -82,6 +82,9 @@ Natural language is acceptable if uncertain.
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
+fm-spawn names every claude session `fm-<id>` (the window name) via `-n`, so crewmates are readable in Claude Code's agent view (`claude agents`).
+The launch template also clears `CLAUDE_JOB_DIR`, which otherwise leaks from a captain-side `claude --bg` job through the tmux server environment and silently overrides `-n` with the parent job's name (verified empirically on 2.1.201).
+
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, and verify the brief started processing.
