@@ -67,9 +67,12 @@ case "$url" in
     printf '%s' "${FAKE_POLL_CODE:-204}"
     ;;
   */connector/answer)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_ANSWER_BODY:-}" > "$ofile"
     printf '%s' "${FAKE_ANSWER_CODE:-200}"
     ;;
   */connector/followup)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_FOLLOWUP_BODY:-${FAKE_ANSWER_BODY:-}}" > "$ofile"
+    [ -n "${FAKE_CURL_TOUCH_AFTER_POST:-}" ] && : > "$FAKE_CURL_TOUCH_AFTER_POST"
     printf '%s' "${FAKE_FOLLOWUP_CODE:-${FAKE_ANSWER_CODE:-200}}"
     ;;
   */connector/dismiss)
@@ -904,6 +907,59 @@ test_reply_followup_live_posts_to_followup_endpoint() {
   pass "fm-x-reply --followup posts to /connector/followup with the same request-bound body"
 }
 
+test_reply_followup_409_marker_exits_distinctly() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-followup-409-marker"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"followup_unavailable"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-marker" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup 409 marker exit"
+  [ -z "$out" ] || fail "followup 409 marker must not echo the request_id (got: $out)"
+  assert_grep "confirmed followup_unavailable marker" "$err" \
+    "followup 409 marker must be reflected in diagnostics"
+  pass "fm-x-reply maps a followup_unavailable follow-up 409 to exit 9"
+}
+
+test_reply_followup_409_without_marker_still_exits_distinctly() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-followup-409-fallback"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-bare" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup bare 409 exit"
+  [ -z "$out" ] || fail "followup bare 409 must not echo the request_id (got: $out)"
+  assert_grep "marker absent" "$err" "bare followup 409 must use the fallback diagnostic"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"some_other_conflict"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-409-other" --followup "Late follow-up." 2>"$err"); rc=$?
+  expect_code 9 "$rc" "followup unrelated-body 409 exit"
+  [ -z "$out" ] || fail "followup unrelated-body 409 must not echo the request_id (got: $out)"
+  assert_grep "marker absent" "$err" \
+    "unrelated followup 409 body must still use the fallback diagnostic"
+  pass "fm-x-reply maps every follow-up 409 to exit 9 even without the marker"
+}
+
+test_reply_answer_409_is_generic_failure() {
+  local home fakebin out rc err
+  home="$TMP_ROOT/reply-answer-409"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-answer\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_ANSWER_CODE=409 FAKE_ANSWER_BODY='{"error":"followup_unavailable"}' \
+    "$ROOT/bin/fm-x-reply.sh" "req-answer-409" "Normal answer." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "answer 409 exit"
+  [ -z "$out" ] || fail "answer 409 must not echo the request_id (got: $out)"
+  assert_grep "relay returned HTTP 409" "$err" "answer 409 must stay on the generic failure path"
+  pass "fm-x-reply treats answer-endpoint 409 as a generic failure"
+}
+
 test_reply_followup_image_live_posts_image_object() {
   local home fakebin log out rc data img expected
   home="$TMP_ROOT/reply-followup-image-live"; mkdir -p "$home"
@@ -1138,15 +1194,59 @@ test_link_records_request_and_timestamp() {
   expect_code 0 "$rc" "link exit"
   assert_grep "x_request=req-42" "$meta" "link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "link must record the timestamp"
+  assert_grep "x_followups=0" "$meta" "a fresh link must start the follow-up counter at 0"
   assert_grep "kind=ship" "$meta" "link must preserve other meta lines"
   assert_grep "yolo=off" "$meta" "link must preserve other meta lines"
   # Re-linking replaces the prior link rather than appending a duplicate.
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700009999 "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-99 >/dev/null
   [ "$(grep -c '^x_request=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request"
   [ "$(grep -c '^x_request_ts=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request_ts"
+  [ "$(grep -c '^x_followups=' "$meta")" = "1" ] || fail "re-link must not duplicate x_followups"
   assert_grep "x_request=req-99" "$meta" "re-link must replace the request_id"
   assert_grep "x_request_ts=1700009999" "$meta" "re-link must refresh the timestamp"
+  assert_grep "x_followups=0" "$meta" "a plain re-link must reset the follow-up counter to 0"
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
+}
+
+test_link_carry_count_and_ts_preserve_followup_binding() {
+  local home meta rc
+  home="$TMP_ROOT/link-carry"; mkdir -p "$home/state"
+  meta="$home/state/successor-task.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
+    "$ROOT/bin/fm-x-link.sh" successor-task req-carry --carry-count 2 --carry-ts 1700000000 >/dev/null; rc=$?
+  expect_code 0 "$rc" "link paired carry flags exit"
+  assert_grep "x_request=req-carry" "$meta" "carried link must record the request_id"
+  assert_grep "x_request_ts=1700000000" "$meta" "--carry-ts must preserve the original timestamp, not the current time"
+  assert_grep "x_followups=2" "$meta" "--carry-count must seed the follow-up counter, not reset it"
+  pass "fm-x-link paired carry flags preserve a prior task's follow-up binding onto a successor"
+}
+
+test_link_carry_count_validation() {
+  local home rc err
+  home="$TMP_ROOT/link-carry-bad"; mkdir -p "$home/state"
+  err="$home/err.txt"
+  printf 'window=w\nkind=ship\n' > "$home/state/ok.meta"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count abc >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-count non-numeric exit"
+  assert_grep "non-negative integer" "$err" "link must explain a bad --carry-count value"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts abc >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-ts non-numeric exit"
+  assert_grep "non-negative epoch integer" "$err" "link must explain a bad --carry-ts value"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "link --carry-count missing value exit"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-count without --carry-ts exit"
+  assert_grep "--carry-count requires --carry-ts" "$err" "link must require --carry-ts when carrying count"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-ts without --carry-count exit"
+  assert_grep "--carry-ts requires --carry-count" "$err" "link must require --carry-count when carrying timestamp"
+  pass "fm-x-link rejects malformed or unpaired carry flags"
 }
 
 test_meta_rewrites_do_not_depend_on_tmpdir() {
@@ -1166,6 +1266,7 @@ test_meta_rewrites_do_not_depend_on_tmpdir() {
   expect_code 1 "$rc" "expired check with unusable TMPDIR exit"
   [ -z "$out" ] || fail "expired check must stay silent (got: $out)"
   assert_no_grep "x_request=" "$meta" "clear must remove request with an unusable TMPDIR"
+  assert_no_grep "x_followups=" "$meta" "clear must remove the follow-up counter with an unusable TMPDIR"
   assert_grep "kind=ship" "$meta" "clear must preserve other meta lines"
   pass "meta rewrites are independent of TMPDIR"
 }
@@ -1189,14 +1290,18 @@ test_link_rejects_unsafe_and_missing() {
   pass "fm-x-link rejects unsafe ids, missing meta, and missing arguments"
 }
 
-# --- fm-x-followup: detect, post one follow-up, clear the link ---------------
+# --- fm-x-followup: detect, post up to 3 follow-ups, manage the link --------
 
-mk_linked_task() { # <home> <id> <request_id> <link-epoch>
-  local home=$1 id=$2 rid=$3 ts=$4 meta
+mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
+  local home=$1 id=$2 rid=$3 ts=$4 count=${5:-} meta
   mkdir -p "$home/state"
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
-  FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
+  if [ -n "$count" ]; then
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" --carry-count "$count" --carry-ts "$ts" >/dev/null
+  else
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
+  fi
 }
 
 test_followup_check_states() {
@@ -1224,17 +1329,32 @@ test_followup_check_expired_prunes_link() {
   home="$TMP_ROOT/fu-check-exp"; mkdir -p "$home/state"
   mk_linked_task "$home" task-e req-e 1700000000
   meta="$home/state/task-e.meta"
-  # 25h later: past the 24h window -> exit 1, link pruned, other lines intact.
-  out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=$((1700000000 + 25*3600)) \
+  # 8 days later: past the 7-day window -> exit 1, link pruned, other lines intact.
+  out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=$((1700000000 + 8*86400)) \
     "$ROOT/bin/fm-x-followup.sh" --check task-e 2>/dev/null); rc=$?
   expect_code 1 "$rc" "check expired exit"
   [ -z "$out" ] || fail "check on an expired link must be silent (got: $out)"
   assert_no_grep "x_request=" "$meta" "expired check must prune the link"
   assert_grep "kind=ship" "$meta" "expired check must preserve other meta lines"
-  pass "fm-x-followup --check prunes a link past the 24h window"
+  pass "fm-x-followup --check prunes a link past the 7-day window"
 }
 
-test_followup_post_within_window_posts_and_clears() {
+test_followup_check_cap_reached_prunes_link() {
+  local home out rc meta
+  home="$TMP_ROOT/fu-check-cap"; mkdir -p "$home/state"
+  # Already at the cap (3 posted) even though well within the window.
+  mk_linked_task "$home" task-cap req-cap 1700000000 3
+  meta="$home/state/task-cap.meta"
+  out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" --check task-cap 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "check cap-reached exit"
+  [ -z "$out" ] || fail "check at the cap must be silent (got: $out)"
+  assert_no_grep "x_request=" "$meta" "a cap-reached check must prune the link"
+  assert_grep "kind=ship" "$meta" "cap-reached check must preserve other meta lines"
+  pass "fm-x-followup --check prunes a link that already reached the follow-up cap"
+}
+
+test_followup_post_increments_counter_keeps_link() {
   local home fakebin log out rc meta data
   home="$TMP_ROOT/fu-post"; mkdir -p "$home/state"
   fakebin=$(make_fake_curl "$home")
@@ -1242,7 +1362,7 @@ test_followup_post_within_window_posts_and_clears() {
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
   mk_linked_task "$home" task-p req-p 1700000000
   meta="$home/state/task-p.meta"
-  printf 'Done, captain - shipped and green.' > "$home/reply.txt"
+  printf 'Done, captain - build has started.' > "$home/reply.txt"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
     "$ROOT/bin/fm-x-followup.sh" task-p --text-file "$home/reply.txt"); rc=$?
@@ -1250,11 +1370,48 @@ test_followup_post_within_window_posts_and_clears() {
   [ "$out" = "req-p" ] || fail "followup post must echo the request_id (got: $out)"
   assert_grep "url=https://relay.test/connector/followup" "$log" "post must hit the followup endpoint"
   data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
-  [ "$(printf '%s' "$data" | jq -r .text)" = "Done, captain - shipped and green." ] \
+  [ "$(printf '%s' "$data" | jq -r .text)" = "Done, captain - build has started." ] \
     || fail "post must send the composed follow-up text"
-  assert_no_grep "x_request=" "$meta" "a successful post must clear the link"
+  # One post under the cap must NOT clear the link - it increments the counter
+  # so up to two more follow-ups can still land against the same binding.
+  assert_grep "x_request=req-p" "$meta" "a post under the cap must keep the link"
+  assert_grep "x_followups=1" "$meta" "a successful post must increment the follow-up counter"
+  assert_grep "kind=ship" "$meta" "posting must preserve other meta lines"
+  pass "fm-x-followup posts a follow-up, increments the counter, and keeps the link under the cap"
+}
+
+test_followup_post_final_clears_link_immediately() {
+  local home fakebin out rc meta
+  home="$TMP_ROOT/fu-post-final"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  mk_linked_task "$home" task-final req-final 1700000000
+  meta="$home/state/task-final.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-followup.sh" task-final --final - <<<"Shipped - all green."); rc=$?
+  expect_code 0 "$rc" "followup --final post exit"
+  [ "$out" = "req-final" ] || fail "followup --final post must echo the request_id (got: $out)"
+  assert_no_grep "x_request=" "$meta" "--final must clear the link even with follow-ups remaining under the cap"
   assert_grep "kind=ship" "$meta" "clearing the link must preserve other meta lines"
-  pass "fm-x-followup posts the follow-up and clears the link on success"
+  pass "fm-x-followup --final clears the link after one post regardless of the remaining count"
+}
+
+test_followup_post_cap_reached_clears_link() {
+  local home fakebin out rc meta
+  home="$TMP_ROOT/fu-post-cap"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  # Two follow-ups already posted; this third one reaches the cap.
+  mk_linked_task "$home" task-cap3 req-cap3 1700000000 2
+  meta="$home/state/task-cap3.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-followup.sh" task-cap3 - <<<"Third and final update."); rc=$?
+  expect_code 0 "$rc" "followup cap-reaching post exit"
+  [ "$out" = "req-cap3" ] || fail "followup cap-reaching post must echo the request_id (got: $out)"
+  assert_no_grep "x_request=" "$meta" "reaching the cap must clear the link even without --final"
+  pass "fm-x-followup clears the link once the third follow-up reaches the cap"
 }
 
 test_followup_post_forwards_image_to_reply_client() {
@@ -1269,9 +1426,10 @@ test_followup_post_forwards_image_to_reply_client() {
   mk_linked_task "$home" task-img req-img 1700000000
   meta="$home/state/task-img.meta"
   printf 'Done - generated image attached.' > "$home/reply.txt"
+  # --final keeps this test focused on image forwarding, not counter bookkeeping.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
-    "$ROOT/bin/fm-x-followup.sh" task-img --image "$img" --text-file "$home/reply.txt"); rc=$?
+    "$ROOT/bin/fm-x-followup.sh" task-img --image "$img" --final --text-file "$home/reply.txt"); rc=$?
   expect_code 0 "$rc" "followup wrapper image post exit"
   [ "$out" = "req-img" ] || fail "followup wrapper image post must echo the request_id (got: $out)"
   data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
@@ -1279,7 +1437,7 @@ test_followup_post_forwards_image_to_reply_client() {
     || fail "followup wrapper must forward image media_type"
   [ "$(printf '%s' "$data" | jq -r '.image.data_base64')" = "$expected" ] \
     || fail "followup wrapper must forward image base64"
-  assert_no_grep "x_request=" "$meta" "a successful image followup must clear the link"
+  assert_no_grep "x_request=" "$meta" "a --final image followup must clear the link"
   pass "fm-x-followup --image forwards the attachment through fm-x-reply --followup"
 }
 
@@ -1296,7 +1454,64 @@ test_followup_post_failure_keeps_link() {
   [ "$rc" -ne 0 ] || fail "a failed follow-up post must exit non-zero"
   [ -z "$out" ] || fail "a failed post must not echo the request_id (got: $out)"
   assert_grep "x_request=req-f" "$meta" "a failed post must leave the link for a retry"
-  pass "fm-x-followup keeps the link when the post fails"
+  assert_grep "x_followups=0" "$meta" "a failed post must not increment the follow-up counter"
+  pass "fm-x-followup keeps the link and counter when the post fails"
+}
+
+test_followup_post_record_failure_clears_link() {
+  local home fakebin out rc meta err flag mvflag
+  home="$TMP_ROOT/fu-post-record-fail"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  flag="$home/fail-followups-write"
+  mvflag="$home/mv-failed-once"
+  err="$home/err.txt"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
+  && [ -f "$FAKE_MV_FAIL_AFTER_FLAG" ] \
+  && [ -n "${FAKE_MV_FAILED_ONCE:-}" ] \
+  && [ ! -f "$FAKE_MV_FAILED_ONCE" ]; then
+  : > "$FAKE_MV_FAILED_ONCE"
+  exit 2
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  mk_linked_task "$home" task-rf req-rf 1700000000
+  meta="$home/state/task-rf.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 FAKE_CURL_TOUCH_AFTER_POST="$flag" \
+    FAKE_MV_FAIL_AFTER_FLAG="$flag" FAKE_MV_FAILED_ONCE="$mvflag" \
+    "$ROOT/bin/fm-x-followup.sh" task-rf - <<<"posted but local state write fails" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "followup post state-record failure exit"
+  [ "$out" = "req-rf" ] || fail "posted followup with tombstoned state must echo the request_id (got: $out)"
+  assert_no_grep "x_request=" "$meta" "a failed counter write must tombstone the link"
+  assert_no_grep "x_followups=" "$meta" "a failed counter write must remove the stale counter"
+  assert_grep "cleared the link to avoid duplicate follow-ups" "$err" "state-record failure must explain the tombstone"
+  pass "fm-x-followup tombstones the link when a post-success counter write fails"
+}
+
+test_followup_post_relay_rejection_degrades_gracefully() {
+  local home fakebin out rc meta err
+  home="$TMP_ROOT/fu-post-409"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
+  mk_linked_task "$home" task-409 req-409 1700000000
+  meta="$home/state/task-409.meta"
+  # The relay's own cap/window rejection (HTTP 409) must be treated exactly like
+  # a locally-detected expiry - not a transient failure worth retrying - so an
+  # old single-follow-up relay or an already-exhausted binding degrades
+  # gracefully instead of leaving a link nothing will ever clear.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=409 \
+    "$ROOT/bin/fm-x-followup.sh" task-409 - <<<"rejected by relay" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "relay-rejected post exit"
+  [ -z "$out" ] || fail "a relay-rejected post must echo nothing (got: $out)"
+  assert_no_grep "x_request=" "$meta" "a relay rejection must clear the link"
+  assert_grep "cap or window" "$err" "a relay rejection must explain itself distinctly from a generic failure"
+  pass "fm-x-followup treats a relay cap/window rejection as an already-exhausted link, not a retry"
 }
 
 test_followup_post_expired_skips_and_clears() {
@@ -1307,13 +1522,13 @@ test_followup_post_expired_skips_and_clears() {
   mk_linked_task "$home" task-x req-x 1700000000
   meta="$home/state/task-x.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
-    FMX_NOW_OVERRIDE=$((1700000000 + 90000)) FAKE_FOLLOWUP_CODE=200 \
+    FMX_NOW_OVERRIDE=$((1700000000 + 8*86400)) FAKE_FOLLOWUP_CODE=200 \
     "$ROOT/bin/fm-x-followup.sh" task-x - <<<"too late" 2>/dev/null); rc=$?
   expect_code 0 "$rc" "expired post exit"
   [ -z "$out" ] || fail "an expired post must post nothing and echo nothing (got: $out)"
   assert_no_grep "x_request=" "$meta" "an expired post must clear the link"
   assert_absent "$home/state/x-outbox/req-x.json" "an expired post must not record any reply"
-  pass "fm-x-followup skips silently and clears the link past the 24h window"
+  pass "fm-x-followup skips silently and clears the link past the 7-day window"
 }
 
 test_followup_post_not_linked_is_noop() {
@@ -1327,7 +1542,7 @@ test_followup_post_not_linked_is_noop() {
   pass "fm-x-followup is a no-op for a task with no X link"
 }
 
-test_followup_post_dry_run_records_and_clears() {
+test_followup_post_dry_run_increments_counter_keeps_link() {
   local home out rc meta
   home="$TMP_ROOT/fu-dry"; mkdir -p "$home/state"
   mk_linked_task "$home" task-d req-d 1700000000
@@ -1339,8 +1554,24 @@ test_followup_post_dry_run_records_and_clears() {
   assert_present "$home/state/x-outbox/req-d.json" "dry-run post must record the would-be follow-up"
   [ "$(jq -r '.endpoint' "$home/state/x-outbox/req-d.json")" = "followup" ] \
     || fail "dry-run post preview must carry the followup endpoint marker"
-  assert_no_grep "x_request=" "$meta" "dry-run post must clear the link just as a live post would"
-  pass "fm-x-followup dry-run records the follow-up and clears the link"
+  # Dry-run must mutate the counter/link exactly as a live post would: keep the
+  # link and increment the counter when under the cap and --final is absent.
+  assert_grep "x_request=req-d" "$meta" "dry-run under the cap must keep the link just as a live post would"
+  assert_grep "x_followups=1" "$meta" "dry-run must increment the follow-up counter just as a live post would"
+  pass "fm-x-followup dry-run records the follow-up and increments the counter, keeping the link"
+}
+
+test_followup_post_dry_run_final_clears_link() {
+  local home out rc meta
+  home="$TMP_ROOT/fu-dry-final"; mkdir -p "$home/state"
+  mk_linked_task "$home" task-df req-df 1700000000
+  meta="$home/state/task-df.meta"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" task-df --final - <<<"Shipped in dry run, for real this time." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "dry-run --final post exit"
+  [ "$out" = "req-df" ] || fail "dry-run --final post must echo the request_id (got: $out)"
+  assert_no_grep "x_request=" "$meta" "dry-run --final must clear the link just as a live --final post would"
+  pass "fm-x-followup dry-run --final clears the link just as a live post would"
 }
 
 test_followup_usage_errors() {
@@ -1350,6 +1581,7 @@ test_followup_usage_errors() {
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "followup no-args exit"
   assert_grep "--image <path>" "$err" "followup usage must mention --image"
+  assert_grep "--final" "$err" "followup usage must mention --final"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --check >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "followup --check no-id exit"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" some-task >/dev/null 2>&1; rc=$?
@@ -1359,6 +1591,7 @@ test_followup_usage_errors() {
   assert_contains "$out" "--image <path>" "followup help must mention --image"
   assert_contains "$out" "threaded replies attach it to the opener tweet" \
     "followup help must document thread image placement"
+  assert_contains "$out" "--final" "followup help must mention --final"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" "../evil" --text-file /dev/null >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "followup unsafe-id exit"
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" some-task --image >/dev/null 2>"$err"; rc=$?
@@ -1400,6 +1633,9 @@ test_reply_image_thread_dry_run_records_compact_marker
 test_reply_image_dry_run_cleans_payload_temp_files
 test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
+test_reply_followup_409_marker_exits_distinctly
+test_reply_followup_409_without_marker_still_exits_distinctly
+test_reply_answer_409_is_generic_failure
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
@@ -1413,16 +1649,24 @@ test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
+test_link_carry_count_and_ts_preserve_followup_binding
+test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
 test_followup_check_states
 test_followup_check_expired_prunes_link
-test_followup_post_within_window_posts_and_clears
+test_followup_check_cap_reached_prunes_link
+test_followup_post_increments_counter_keeps_link
+test_followup_post_final_clears_link_immediately
+test_followup_post_cap_reached_clears_link
 test_followup_post_forwards_image_to_reply_client
 test_followup_post_failure_keeps_link
+test_followup_post_record_failure_clears_link
+test_followup_post_relay_rejection_degrades_gracefully
 test_followup_post_expired_skips_and_clears
 test_followup_post_not_linked_is_noop
-test_followup_post_dry_run_records_and_clears
+test_followup_post_dry_run_increments_counter_keeps_link
+test_followup_post_dry_run_final_clears_link
 test_followup_usage_errors
 test_bootstrap_activates_on_env_token
 test_bootstrap_reports_missing_x_dependency

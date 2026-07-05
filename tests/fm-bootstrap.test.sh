@@ -156,6 +156,29 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
+test_orca_backend_gates_orca_tool_only_when_selected() {
+  local case_dir fakebin out missing_orca
+  missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
+
+  case_dir="$TMP_ROOT/orca-backend-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
+
+  case_dir="$TMP_ROOT/orca-backend-not-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
+  pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
+}
+
 test_crew_dispatch_active_rules_are_surfaced() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -205,5 +228,6 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_orca_backend_gates_orca_tool_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

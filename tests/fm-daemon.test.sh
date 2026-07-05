@@ -164,6 +164,32 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
   pass "persistent herdr stale resolves the target from metadata and escalates"
 }
 
+test_housekeeping_herdr_idle_busy_footer_clears_stale() {
+  local dir state key
+  dir=$(make_supercase stale-herdr-idle-busy-footer)
+  state="$dir/state"
+  fm_write_meta "$state/herdr-footer.meta" "window=default:w1:p4" "backend=herdr"
+  printf 'working\n' > "$state/herdr-footer.status"
+  key=$(printf '%s' "herdr-footer" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() {
+      [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
+      [ "$2" = "default:w1:p4" ] || fail "expected herdr window target, got $2"
+      printf 'esc to interrupt\n'
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] || fail "expected herdr busy backend, got $1"
+      [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
+      printf 'idle'
+    }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "herdr idle busy-footer housekeeping failed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle+busy-footer herdr stale marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "idle+busy-footer herdr stale was escalated"
+  pass "herdr idle busy-footer stale clears through capture corroboration"
+}
+
 test_housekeeping_herdr_resumed_stale_cleared() {
   local dir state key
   dir=$(make_supercase stale-herdr-resumed)
@@ -190,6 +216,32 @@ test_housekeeping_herdr_resumed_stale_cleared() {
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "busy herdr stale marker was not cleared"
   [ ! -s "$state/.subsuper-escalations" ] || fail "busy herdr stale was escalated"
   pass "resumed herdr stale clears through backend-aware busy state"
+}
+
+test_housekeeping_orca_persistent_stale_resolves_terminal() {
+  local dir state key
+  dir=$(make_supercase stale-orca-persistent)
+  state="$dir/state"
+  fm_write_meta "$state/orca-w8.meta" "window=fm-orca-w8" "terminal=term-orca-w8" "backend=orca"
+  printf 'working\n' > "$state/orca-w8.status"
+  key=$(printf '%s' "orca-w8" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() {
+      [ "$1" = orca ] || fail "expected orca capture backend, got $1"
+      [ "$2" = "term-orca-w8" ] || fail "expected Orca terminal target, got $2"
+      printf 'idle prompt\n'
+    }
+    fm_backend_busy_state() {
+      [ "$1" = orca ] || fail "expected orca busy backend, got $1"
+      [ "$2" = "term-orca-w8" ] || fail "expected Orca busy target, got $2"
+      printf 'idle'
+    }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "Orca persistent stale housekeeping failed"
+  [ -s "$state/.subsuper-escalations" ] || fail "persistent Orca stale was not escalated"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "Orca stale marker not cleared after escalation"
+  pass "persistent Orca stale resolves the terminal from metadata"
 }
 
 test_escalate_batches_into_one_digest() {
@@ -743,6 +795,179 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   pass "fm-send exits non-zero when initial text send fails"
 }
 
+# --- herdr backend-awareness (fm-turnend-guard-h6-adjacent transport fix) ----
+# Discovery, busy/pending dispatch, and the full inject_msg guard chain must
+# work through the herdr backend, not just tmux. Env-var prefix assignments
+# (e.g. `TMUX_PANE= HERDR_ENV=1 ... discover_supervisor_target`) neutralize
+# whatever ambient TMUX_PANE/HERDR_ENV the CURRENT dev/CI shell happens to carry
+# for the duration of that one call only, so these tests are deterministic
+# regardless of what runtime backend is running this test suite itself.
+
+test_discover_supervisor_backend_precedence() {
+  local out
+  out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND override was not honored: $out"
+
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "TMUX_PANE should win over HERDR_ENV (tmux nested in herdr resolves to tmux): $out"
+
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
+
+  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
+  fi
+  [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
+
+  pass "discover_supervisor_backend: override > TMUX_PANE > HERDR_ENV+HERDR_PANE_ID > tmux fallback"
+}
+
+test_discover_supervisor_target_herdr() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
+  [ "$out" = "explicit:target" ] || fail "explicit FM_SUPERVISOR_TARGET override was not honored: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
+  [ "$out" = '%3' ] || fail "TMUX_PANE should win over herdr markers: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
+  [ "$out" = "default:w1:p9" ] || fail "herdr target should default HERDR_SESSION to 'default': $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
+  [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
+
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+    fail "bare fallback should return non-zero"
+  fi
+  [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
+
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+test_pane_is_busy_herdr_native_busy_state() {
+  (
+    fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
+    fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
+    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should report busy from herdr's native busy_state"
+  ) || fail "herdr native-busy pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
+}
+
+test_pane_is_busy_herdr_falls_back_to_capture_regex() {
+  (
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_capture() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected capture args: $1 $2"; printf 'esc to interrupt\n'; }
+    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should fall back to the regex-over-capture reader when busy_state is unknown"
+  ) || fail "herdr capture-fallback pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr falls back to the shared regex-over-capture reader when native busy_state is unknown"
+}
+
+test_pane_is_busy_herdr_idle_falls_back_to_capture_regex() {
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected capture args: $1 $2"; printf 'esc to interrupt\n'; }
+    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should fall back to the regex-over-capture reader when busy_state is idle"
+  ) || fail "herdr idle capture-fallback pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr corroborates native idle with the shared regex-over-capture reader"
+}
+
+test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
+  local dir fakebin capture
+  dir=$(make_supercase busy-default-backend)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf 'esc to interrupt\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" pane_is_busy "fakepane" \
+    || fail "pane_is_busy with no backend arg should still default to tmux"
+  pass "pane_is_busy: omitted backend arg defaults to tmux (pre-existing callers unaffected)"
+}
+
+test_pane_input_pending_herdr_dispatch() {
+  (
+    fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
+    pane_input_pending "default:w1:p2" herdr || fail "pane_input_pending should report pending from herdr composer_state"
+  ) || fail "herdr pane_input_pending (pending case) subshell failed"
+  (
+    fm_backend_composer_state() { printf 'empty'; }
+    if pane_input_pending "default:w1:p2" herdr; then
+      fail "pane_input_pending should report not-pending for an empty herdr composer"
+    fi
+  ) || fail "herdr pane_input_pending (empty case) subshell failed"
+  pass "pane_input_pending: dispatches through fm_backend_composer_state for backend=herdr"
+}
+
+test_inject_msg_herdr_busy_guard_defers() {
+  local dir state
+  dir=$(make_supercase inject-herdr-busy)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { fail "capture should not run when busy_state is conclusive"; }
+    fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer (return non-zero) when the herdr supervisor pane is busy"
+    fi
+  ) || fail "herdr busy-guard inject_msg subshell failed"
+  pass "inject_msg: herdr busy-guard defers before ever attempting a submit"
+}
+
+test_inject_msg_herdr_composer_guard_defers() {
+  local dir state
+  dir=$(make_supercase inject-herdr-pending)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer when the herdr composer has pending input"
+    fi
+  ) || fail "herdr composer-guard inject_msg subshell failed"
+  pass "inject_msg: herdr composer-guard defers before ever attempting a submit"
+}
+
+test_inject_msg_herdr_pane_gone_defers() {
+  local dir state
+  dir=$(make_supercase inject-herdr-gone)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 1; }
+    fm_backend_busy_state() { fail "busy_state should not be consulted once the pane-exists check already failed"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer when the herdr target does not exist"
+    fi
+  ) || fail "herdr pane-gone inject_msg subshell failed"
+  pass "inject_msg: herdr pane-gone check defers before any busy/composer/submit call"
+}
+
+test_inject_msg_herdr_submits_through_backend_dispatch() {
+  local dir state
+  dir=$(make_supercase inject-herdr-submit)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
+      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when send_text_submit confirms empty"
+  ) || fail "herdr successful-submit inject_msg subshell failed"
+  pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
+}
+
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
@@ -752,7 +977,9 @@ test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_herdr_persistent_stale_resolves_meta
+test_housekeeping_herdr_idle_busy_footer_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
+test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
@@ -786,3 +1013,14 @@ test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
+test_discover_supervisor_backend_precedence
+test_discover_supervisor_target_herdr
+test_pane_is_busy_herdr_native_busy_state
+test_pane_is_busy_herdr_falls_back_to_capture_regex
+test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
+test_pane_is_busy_defaults_to_tmux_when_backend_omitted
+test_pane_input_pending_herdr_dispatch
+test_inject_msg_herdr_busy_guard_defers
+test_inject_msg_herdr_composer_guard_defers
+test_inject_msg_herdr_pane_gone_defers
+test_inject_msg_herdr_submits_through_backend_dispatch

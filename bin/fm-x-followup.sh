@@ -1,35 +1,55 @@
 #!/usr/bin/env bash
-# Post the single completion follow-up for an X-linked task and clear the link.
+# Post a completion follow-up for an X-linked task, up to three within a 7-day
+# window, and manage the link's counter.
 #
 # An X mention that spawned real work is linked to its task by fm-x-link.sh
-# (x_request/x_request_ts in state/<id>.meta). When that task reaches a terminal
-# state (PR merged / scout report / local merge / failed), firstmate composes a
-# public-safe outcome and posts it here as ONE follow-up, within a 24h window.
-# Past the window the relay would drop a late follow-up, so this skips silently
-# and clears the link. A failed task still warrants an honest follow-up.
+# (x_request/x_request_ts/x_followups in state/<id>.meta). When that task
+# reaches a genuine milestone (investigation done, build started, shipped,
+# failed), firstmate composes a public-safe outcome and posts it here as one of
+# up to three follow-ups, within the window. Past the window, past the cap, or
+# after --final, this clears the link so a later call is a clean no-op.
 #
 # Detection (no reply text needed - cheap pre-check before composing a reply):
 #   fm-x-followup.sh --check <task-id>
-#     exit 0, prints <request_id>  -> a follow-up is due (linked, within window)
-#     exit 1, silent               -> not linked, or window elapsed (link pruned)
+#     exit 0, prints <request_id>  -> a follow-up is due (linked, within window
+#                                      and cap)
+#     exit 1, silent               -> not linked, or window/cap exhausted (link
+#                                      pruned)
 #
 # Post (after composing the reply to a file or stdin):
-#   fm-x-followup.sh <task-id> [--image <path>] --text-file <path>
-#   fm-x-followup.sh <task-id> [--image <path>] -
-#     Linked and within window: posts ONE follow-up via fm-x-reply.sh
-#       --followup, clears the link on success, echoes <request_id>, exit 0.
-#     Window elapsed: clears the link, posts nothing, exit 0 (silent skip).
+#   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
+#   fm-x-followup.sh <task-id> [--image <path>] [--final] -
+#     Linked, within window, and under the cap: posts ONE follow-up via
+#       fm-x-reply.sh --followup.
+#       On success: increments the counter and KEEPS the link, unless --final
+#       was passed or the new count reaches the cap, in which case the link is
+#       cleared instead - this is the "we're done" signal.
+#       On a relay rejection distinguishing an exhausted cap/window (see
+#       fm-x-reply.sh): clears the link and skips quietly, exactly like a
+#       locally-detected expiry, so an old relay (which only ever supported one
+#       follow-up) or an already-exhausted binding degrades gracefully instead
+#       of retrying forever.
+#       On any other post failure: leaves the link in place so it can be
+#       retried, exit non-zero.
+#     Window or cap already exhausted: clears the link, posts nothing, exit 0
+#       (silent skip).
 #     Not linked: nothing to do, exit 0.
-#     Failed post: leaves the link in place, exit non-zero, so it can be retried.
+#
+# --final marks this as the outcome reply: it always clears the link after a
+# successful post, even if follow-ups remain under the cap. Use it for the
+# final milestone (shipped, failed) so a task never leaves a stale link lying
+# around waiting for a follow-up that will never come.
 #
 # Dry-run (FMX_DRY_RUN) flows through fm-x-reply.sh: the follow-up is recorded to
-# state/x-outbox/<request_id>.json instead of posted, and the link is cleared
-# exactly as a live post would, so the full loop runs end to end without a tweet.
-# With --image <path>, the follow-up carries one local image attachment; if the
-# reply text splits into a thread, the relay attaches the image to the opener.
+# state/x-outbox/<request_id>.json instead of posted, and the counter/link are
+# mutated exactly as a live post would (increment-and-keep, or clear on --final
+# / cap), so the full loop runs end to end without a tweet. With --image, the
+# follow-up carries one local image attachment; if the reply text splits into a
+# thread, the relay attaches the image to the opener.
 #
-# The 24h window is FMX_FOLLOWUP_MAX_AGE_SECS (default 86400). FMX_NOW_OVERRIDE
-# pins "now" for deterministic tests. Meta read/write lives in fm-x-lib.sh.
+# The window is FMX_FOLLOWUP_MAX_AGE_SECS (default 604800, 7 days). The cap is
+# FMX_FOLLOWUP_MAX_COUNT (default 3). FMX_NOW_OVERRIDE pins "now" for
+# deterministic tests. Meta read/write lives in fm-x-lib.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,20 +60,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
 usage() {
-  echo "usage: fm-x-followup.sh --check <task-id> | <task-id> [--image <path>] --text-file <path> | <task-id> [--image <path>] -" >&2
+  echo "usage: fm-x-followup.sh --check <task-id> | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
 }
 
 help() {
   cat <<'EOF'
 usage: fm-x-followup.sh --check <task-id>
-       fm-x-followup.sh <task-id> [--image <path>] --text-file <path>
-       fm-x-followup.sh <task-id> [--image <path>] -
+       fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
+       fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
-Post the single completion follow-up for an X-linked task and clear the link.
+Post a completion follow-up (up to 3 per link, within a 7-day window) for an
+X-linked task and manage the link's follow-up counter.
 
 Options:
   --check          Print the request_id when a follow-up is due.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet.
+  --final          Clear the link after this post regardless of the remaining count.
   --text-file <path>
                    Read follow-up text from a file.
   -                Read follow-up text from stdin.
@@ -61,19 +83,26 @@ Options:
 EOF
 }
 
-MAX_AGE=${FMX_FOLLOWUP_MAX_AGE_SECS:-86400}
+MAX_AGE=${FMX_FOLLOWUP_MAX_AGE_SECS:-604800}
 case "$MAX_AGE" in
-  ''|*[!0-9]*) MAX_AGE=86400 ;;
+  ''|*[!0-9]*) MAX_AGE=604800 ;;
 esac
 
+MAX_COUNT=${FMX_FOLLOWUP_MAX_COUNT:-3}
+case "$MAX_COUNT" in
+  ''|*[!0-9]*) MAX_COUNT=3 ;;
+esac
+[ "$MAX_COUNT" -ge 1 ] 2>/dev/null || MAX_COUNT=3
+
 # Parse mode: --check is detection-only; otherwise it is a post, with the text
-# source (--text-file <path> | -) deferred until after the link/window check so a
-# missing link never consumes stdin or posts.
+# source (--text-file <path> | -) deferred until after the link/window/cap
+# check so a missing or exhausted link never consumes stdin or posts.
 MODE=post
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
 esac
 
+FINAL=0
 if [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
@@ -85,6 +114,9 @@ else
   TS_ARGS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --final)
+        FINAL=1
+        ;;
       --image)
         TS_ARGS+=("$1")
         shift
@@ -109,6 +141,10 @@ esac
 META="$STATE/$ID.meta"
 RID=$(fmx_meta_get "$META" x_request)
 TS=$(fmx_meta_get "$META" x_request_ts)
+COUNT=$(fmx_meta_get "$META" x_followups)
+case "$COUNT" in
+  ''|*[!0-9]*) COUNT=0 ;;
+esac
 
 # Not linked: this task did not originate from an X mention. Detection fails;
 # a post is simply a no-op success (firstmate need not special-case it).
@@ -125,24 +161,30 @@ case "$NOW" in
   ''|*[!0-9]*) echo "fm-x-followup: could not read the current time" >&2; exit 1 ;;
 esac
 
-# A missing or malformed timestamp cannot prove the follow-up is still in window,
-# so treat it like an elapsed window: prune the link and skip.
+# A missing or malformed timestamp cannot prove the follow-up is still in
+# window, so treat it like an elapsed window: prune the link and skip. Being at
+# or past the cap is pruned the same way.
 EXPIRED=0
+REASON="follow-up window elapsed"
 case "$TS" in
   ''|*[!0-9]*) EXPIRED=1 ;;
   *) [ "$((NOW - TS))" -gt "$MAX_AGE" ] && EXPIRED=1 ;;
 esac
+if [ "$COUNT" -ge "$MAX_COUNT" ]; then
+  EXPIRED=1
+  REASON="follow-up cap reached"
+fi
 
 if [ "$EXPIRED" = 1 ]; then
   fmx_meta_link_clear "$META" || echo "fm-x-followup: warning: could not clear the elapsed link in state/$ID.meta" >&2
   if [ "$MODE" = check ]; then
     exit 1
   fi
-  echo "fm-x-followup: follow-up window elapsed for $ID; skipped and cleared the link" >&2
+  echo "fm-x-followup: $REASON for $ID; skipped and cleared the link" >&2
   exit 0
 fi
 
-# Linked and within window.
+# Linked, within window, and under the cap.
 if [ "$MODE" = check ]; then
   printf '%s\n' "$RID"
   exit 0
@@ -150,12 +192,42 @@ fi
 
 # Post the follow-up. fm-x-reply owns text reading, thread-split, dry-run, the
 # endpoint, and the never-inline safety; we only pass the text source through.
-if "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null; then
-  fmx_meta_link_clear "$META" || echo "fm-x-followup: warning: posted but could not clear the link in state/$ID.meta" >&2
-  printf '%s\n' "$RID"
-  exit 0
-fi
+"$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+post_rc=$?
 
-# Post failed: leave the link so firstmate can retry on a later pass.
-echo "fm-x-followup: follow-up post failed for $ID; left the link in place to retry" >&2
-exit 1
+case "$post_rc" in
+  0)
+    NEWCOUNT=$((COUNT + 1))
+    if [ "$FINAL" = 1 ] || [ "$NEWCOUNT" -ge "$MAX_COUNT" ]; then
+      if ! fmx_meta_link_clear "$META"; then
+        echo "fm-x-followup: error: posted but could not clear the link in state/$ID.meta" >&2
+        exit 1
+      fi
+    elif ! fmx_meta_followups_set "$META" "$NEWCOUNT"; then
+      if ! fmx_meta_link_clear "$META"; then
+        echo "fm-x-followup: error: posted but could not record the follow-up count or clear the link in state/$ID.meta" >&2
+        exit 1
+      fi
+      echo "fm-x-followup: warning: posted but could not record the follow-up count in state/$ID.meta; cleared the link to avoid duplicate follow-ups" >&2
+    fi
+    printf '%s\n' "$RID"
+    exit 0
+    ;;
+  9)
+    # fm-x-reply.sh distinguishes a relay rejection of this specific follow-up
+    # (cap or window exhausted relay-side) with exit 9. Treat it exactly like a
+    # locally-detected expiry: clear the link and skip quietly. This is also the
+    # graceful-degradation path against an old relay that only ever supported
+    # one follow-up, or a binding the relay already considers exhausted for any
+    # other reason - either way, retrying would never succeed.
+    fmx_meta_link_clear "$META" || echo "fm-x-followup: warning: could not clear the rejected link in state/$ID.meta" >&2
+    echo "fm-x-followup: relay rejected the follow-up for $ID (cap or window exhausted); skipped and cleared the link" >&2
+    exit 0
+    ;;
+  *)
+    # Post failed for another reason (network, auth, transport): leave the link
+    # so firstmate can retry on a later pass.
+    echo "fm-x-followup: follow-up post failed for $ID; left the link in place to retry" >&2
+    exit 1
+    ;;
+esac

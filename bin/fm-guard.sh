@@ -27,6 +27,8 @@ case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
@@ -55,39 +57,17 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Portable mtime; see fm-watch.sh for why the `stat -f || stat -c` fallback breaks on Linux.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
-
-# Only act with tasks in flight; count them so the banner can say how much is
-# riding on an absent watcher.
-in_flight=0
-for meta in "$STATE"/*.meta; do
-  [ -e "$meta" ] || continue
-  in_flight=$((in_flight + 1))
-done
+# Compute in-flight count and watcher-beacon freshness via the shared
+# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
+# flight; count them so the banner can say how much is riding on an absent
+# watcher.
+fm_supervision_status "$STATE" "$GRACE"
+in_flight=$FM_SUP_IN_FLIGHT
+watcher_fresh=$FM_SUP_WATCHER_FRESH
+beacon_desc=$FM_SUP_BEACON_DESC
 [ "$in_flight" -eq 0 ] && exit 0
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
-
-# Resolve the watcher's liveness from its beacon: fresh within GRACE means a
-# watcher is alive and we stay quiet about it.
-BEAT="$STATE/.last-watcher-beat"
-watcher_fresh=false
-beacon_desc=never
-if [ -e "$BEAT" ]; then
-  m=$(stat_mtime "$BEAT")
-  if [ -n "$m" ]; then
-    age=$(( $(date +%s) - m ))
-    beacon_desc="${age}s ago"
-    [ "$age" -lt "$GRACE" ] && watcher_fresh=true
-  else
-    beacon_desc=unknown
-  fi
-fi
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.

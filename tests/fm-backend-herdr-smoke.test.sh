@@ -96,10 +96,73 @@ printf '%s' "$POST_CREATE_TABS" | jq -e --arg t "$SEEDED_TAB_ID" '.result.tabs[]
   && fail "the seeded default tab ($SEEDED_TAB_ID) should have been pruned but is still present: $POST_CREATE_TABS"
 pass "real herdr: create_task prunes the freshly-created workspace's seeded default tab, leaving exactly one clean fm-<id> task tab"
 
-if fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp >/dev/null 2>&1; then
-  fail "create_task should refuse a duplicate label (herdr itself does not enforce uniqueness)"
+# NOTE: create_task no longer refuses EVERY same-labeled duplicate
+# unconditionally - a same-labeled tab whose pane hosts no registered agent is
+# now a close-and-replace candidate (the restored-layout husk fix below), so
+# testing "$LABEL"/$PANE_ID again here would actually succeed and silently
+# replace this suite's own primary task pane, which the rest of this file
+# still depends on ($TARGET, the restart-stability check, send/capture/kill).
+# The duplicate-refusal and husk-replacement behaviors are covered next,
+# each against its own independent throwaway tab.
+
+# --- restored-layout husk close-and-replace, against the REAL binary --------
+# (docs/herdr-backend.md "Known gaps" / "ID stability across a server
+# restart"). herdr persists and restores its whole session layout across a
+# server restart, and a restored fm-<id> task tab comes back a HUSK: a dead
+# pane, or (verified above and empirically in "ID stability") a plain
+# agent-less shell. Both throwaway tabs below are independent of $TAB_ID/
+# $PANE_ID/$TARGET (this suite's primary task, which the rest of the file
+# still depends on) so neither scenario disturbs it.
+
+# 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
+#    `pane report-agent`) must still refuse exactly as before.
+LIVE_DUP_LABEL="fm-smoke-livedup"
+LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
+read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
+$LIVE_DUP_IDS
+EOF
+if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
+  fail "live-duplicate scenario tab creation did not return ids"
 fi
-pass "real herdr: create_task creates a tab/pane and refuses a duplicate label"
+herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register a live agent on the live-duplicate scenario's pane"
+if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
+  fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
+fi
+herdr pane get "$LIVE_DUP_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "REGRESSION: the live-duplicate scenario's pane should have survived the refused create_task call untouched"
+pass "real herdr: create_task refuses a same-labeled tab whose pane hosts a genuinely live registered agent (unchanged behavior)"
+fm_backend_herdr_kill "$SESSION:$LIVE_DUP_PANE_ID"
+
+# 2. A husk (no registered agent at all - the restored-plain-shell shape)
+#    must be CLOSED AND REPLACED instead of refused.
+HUSK_LABEL="fm-smoke-husk1"
+HUSK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) || fail "could not create the husk-simulation tab"
+read -r HUSK_TAB_ID HUSK_PANE_ID <<EOF
+$HUSK_IDS
+EOF
+if [ -z "$HUSK_TAB_ID" ] || [ -z "$HUSK_PANE_ID" ]; then
+  fail "husk-simulation tab creation did not return ids"
+fi
+herdr agent get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  && fail "husk-simulation setup is wrong: this pane should have NO registered agent yet"
+REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) \
+  || fail "REGRESSION: create_task should close-and-replace a same-labeled tab whose pane hosts no registered agent, not refuse it"
+read -r NEW_HUSK_TAB_ID NEW_HUSK_PANE_ID <<EOF
+$REPLACED_IDS
+EOF
+if [ -z "$NEW_HUSK_TAB_ID" ] || [ -z "$NEW_HUSK_PANE_ID" ]; then
+  fail "husk close-and-replace did not return new tab/pane ids"
+fi
+[ "$NEW_HUSK_PANE_ID" != "$HUSK_PANE_ID" ] || fail "husk close-and-replace returned the SAME pane id - it did not actually replace anything"
+if herdr pane get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+  fail "REGRESSION: the old husk pane should have been closed by close-and-replace, but it still exists"
+fi
+HUSK_WS_TABS=$(herdr tab list --workspace "${CONTAINER#*:}" --session "$SESSION" 2>&1)
+printf '%s' "$HUSK_WS_TABS" | jq -e --arg t "$NEW_HUSK_TAB_ID" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
+  || fail "REGRESSION: the replacement tab is missing from the workspace's own tab list"
+pass "real herdr: create_task closes and replaces a same-labeled tab whose pane hosts no registered agent (the restored-husk shape), leaving the workspace intact"
+fm_backend_herdr_kill "$SESSION:$NEW_HUSK_PANE_ID"
 
 # --- workspace-per-home: a secondmate-shaped home gets its OWN space --------
 # (docs/herdr-backend.md "Task container shape", AGENTS.md task

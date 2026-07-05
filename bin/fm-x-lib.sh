@@ -18,7 +18,13 @@
 #                                - build the answer/followup POST body
 #   fmx_reply_outbox_json <request_id> <chunks> <n> <followup-0|1> [image-preview-json]
 #                                - build the dry-run record without image bytes
-#   fmx_post_json <endpoint> <payload-file> - POST JSON to the relay, printing HTTP code
+#   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
+#                                printing HTTP code and writing response body
+#   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
+#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] - (re)write the
+#                                X-request link, defaulting followups to 0
+#   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
+#   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
 
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
@@ -268,13 +274,13 @@ fmx_reply_outbox_json() {
 }
 
 fmx_post_json() (
-  local endpoint=$1 payload_file=$2 auth_header_file code rc
+  local endpoint=$1 payload_file=$2 body_file=${3:-/dev/null} auth_header_file code rc
   command -v curl >/dev/null 2>&1 || return 127
   [ -r "$payload_file" ] || return 2
   auth_header_file=$(fmx_auth_header_file) || return 3
   trap 'rm -f "$auth_header_file"' EXIT
   trap 'rm -f "$auth_header_file"; exit 143' HUP INT TERM
-  code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
+  code=$(curl -m 10 -s -o "$body_file" -w '%{http_code}' \
     -X POST \
     -H "@$auth_header_file" \
     -H 'Content-Type: application/json' \
@@ -290,13 +296,14 @@ fmx_post_json() (
 # --- task <-> X-request link (state/<id>.meta backed) -----------------------
 #
 # When an X mention spawns real work, the task is linked to its originating
-# mention by two lines in state/<id>.meta:
+# mention by three lines in state/<id>.meta:
 #   x_request=<request_id>     the relay-issued id the follow-up posts against
-#   x_request_ts=<epoch>       when the link was made, for the 24h follow-up window
-# On the task's terminal completion firstmate posts ONE follow-up reply to that
-# request (within the window) and clears the link. These helpers own the
-# read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit meta and
-# the rewrite stays atomic and preserves every other meta line.
+#   x_request_ts=<epoch>       when the link was made, for the 7-day follow-up window
+#   x_followups=<n>            follow-ups already posted against this binding (0..3)
+# fm-x-followup.sh posts against that link (within the window, up to the cap),
+# then either records the incremented count or clears the link. These helpers
+# own the read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit
+# meta and the rewrite stays atomic and preserves every other meta line.
 
 # fmx_meta_get <meta> <key>: print the value of the last "key=value" line in
 # <meta>, or nothing (and succeed) when the file or key is absent. Callers treat
@@ -318,29 +325,48 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch>: atomically (re)write the
-# x_request/x_request_ts lines, dropping any prior link and preserving every
-# other meta line. Returns non-zero if <meta> is missing or the rewrite fails.
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups]: atomically (re)write
+# the x_request/x_request_ts/x_followups lines, dropping any prior link and
+# preserving every other meta line. <followups> defaults to 0 (a fresh link);
+# pass the prior task's count to carry it forward onto a successor task instead
+# of granting a fresh follow-up budget against a binding the relay already knows
+# about. Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 tmp
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} tmp
   [ -f "$meta" ] || return 1
   tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
   printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
   printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
-# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts lines
-# while preserving every other meta line. Idempotent: succeeds whether or not a
-# link is present, and is a no-op when <meta> is missing.
+# fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
+# line, preserving every other meta line including x_request/x_request_ts.
+# Returns non-zero if <meta> is missing or the rewrite fails.
+fmx_meta_followups_set() {
+  local meta=$1 n=$2 tmp
+  [ -f "$meta" ] || return 1
+  tmp=$(fmx_meta_tmp "$meta") || return 1
+  if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}
+
+# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
+# x_followups lines while preserving every other meta line. Idempotent:
+# succeeds whether or not a link is present, and is a no-op when <meta> is
+# missing.
 fmx_meta_link_clear() {
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
   tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }

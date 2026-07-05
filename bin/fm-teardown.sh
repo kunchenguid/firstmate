@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the recorded runtime endpoint, clear volatile
-# state, refresh/prune the project's clone for PR-based ship tasks, then print a backlog-refresh
-# reminder.
-# REFUSES if the worktree holds work that has not LANDED, because treehouse return
-# hard-resets the worktree and kills its processes. Work has landed when it is
+# Tear down a finished task: return the treehouse worktree, release the Orca
+# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# clear volatile state, refresh/prune the project's clone for PR-based ship
+# tasks, then print a backlog-refresh reminder.
+# REFUSES if the worktree holds work that has not LANDED, because cleanup
+# hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
@@ -27,6 +27,9 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
+# Orca tasks use the same safety checks, then close the recorded terminal and
+# remove the recorded worktree through `orca worktree rm`; teardown never guesses
+# an Orca target from ambient CLI state.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -62,11 +65,17 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
+if [ "$BACKEND" = orca ]; then
+  T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$T_ORCA" ] && T=$T_ORCA
+fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
+ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -91,8 +100,34 @@ default_branch() {
 
 meta_value() {
   local meta=$1 key=$2
-  grep "^$key=" "$meta" | cut -d= -f2- || true
+  fm_meta_get "$meta" "$key"
 }
+
+require_orca_worktree_id() {
+  local meta=$1 id
+  id=$(meta_value "$meta" orca_worktree_id)
+  if [ -z "$id" ]; then
+    echo "error: missing orca_worktree_id in $meta; cannot remove Orca worktree" >&2
+    return 1
+  fi
+  printf '%s\n' "$id"
+}
+
+require_orca_terminal() {
+  local meta=$1 terminal
+  terminal=$(meta_value "$meta" terminal)
+  if [ -z "$terminal" ]; then
+    echo "error: missing terminal in $meta; cannot close Orca terminal" >&2
+    return 1
+  fi
+  printf '%s\n' "$terminal"
+}
+
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
+  T_ORCA=$(meta_value "$META" terminal)
+  [ -z "$T_ORCA" ] || T=$T_ORCA
+fi
 
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir
@@ -310,6 +345,50 @@ EOF
   return 1
 }
 
+inspectable_git_worktree() {
+  local target=$1 top
+  [ -n "$target" ] || return 1
+  [ -d "$target" ] || return 1
+  top=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$top" ] || return 1
+  [ -d "$top" ] || return 1
+  git -C "$top" rev-parse --git-dir >/dev/null 2>&1
+}
+
+canonical_existing_dir() {
+  local target=$1
+  [ -n "$target" ] || return 1
+  [ -d "$target" ] || return 1
+  ( cd "$target" && pwd -P )
+}
+
+require_orca_worktree_path_match() {
+  local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
+  resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
+    echo "REFUSED: cannot resolve Orca worktree id $worktree_id to a path; preserving metadata." >&2
+    return 1
+  }
+  inspected_abs=$(canonical_existing_dir "$inspected") || {
+    echo "REFUSED: cannot canonicalize inspected worktree ${inspected:-<missing>}; preserving metadata." >&2
+    return 1
+  }
+  resolved_abs=$(canonical_existing_dir "$resolved") || {
+    echo "REFUSED: Orca worktree id $worktree_id resolved to uninspectable path ${resolved:-<missing>}; preserving metadata." >&2
+    return 1
+  }
+  if [ "$resolved_abs" != "$inspected_abs" ]; then
+    echo "REFUSED: Orca worktree id $worktree_id resolves to $resolved_abs, not inspected worktree $inspected_abs." >&2
+    echo "Cannot verify dirty or unlanded work for the worktree Orca would remove; preserving metadata." >&2
+    return 1
+  fi
+}
+
+require_orca_worktree_path_match_if_present() {
+  local worktree_id=$1 inspected=$2
+  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
+  require_orca_worktree_path_match "$worktree_id" "$inspected"
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -491,7 +570,7 @@ remove_firstmate_home() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -500,12 +579,20 @@ validate_firstmate_home_children_removal() {
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    elif [ "$child_backend" = orca ]; then
+      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+        child_proj=$(meta_value "$child_meta" project)
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+      fi
+    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
@@ -513,19 +600,36 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    child_t=$(meta_value "$child_meta" window)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_backend=$(fm_backend_of_meta "$child_meta")
+    if [ "$child_backend" = orca ]; then
+      child_t=$(meta_value "$child_meta" terminal)
+    else
+      child_t=$(fm_backend_target_of_meta "$child_meta")
+    fi
+    if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
+      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      fi
+    fi
     if [ -n "$child_t" ]; then
-      fm_backend_kill "$(fm_backend_of_meta "$child_meta")" "$child_t" 2>/dev/null || true
+      if [ "$child_backend" = zellij ]; then
+        # Zellij titles are scoped by the owning home tag, so forced secondmate
+        # cleanup must verify child tabs as that child home, not the parent.
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+      else
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+      fi
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -534,6 +638,12 @@ cleanup_firstmate_home_children() {
         cleanup_firstmate_home_children "$child_home"
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
       fi
+    elif [ "$child_backend" = orca ]; then
+      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+      fi
+      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
@@ -580,17 +690,30 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
+if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
+  REPORT="$DATA/$ID/report.md"
+  if [ ! -f "$REPORT" ]; then
+    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+    exit 1
+  fi
+fi
+
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if ! inspectable_git_worktree "$WT"; then
+    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
+    exit 1
+  fi
+  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
+  ORCA_PATH_MATCH_VERIFIED=1
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
   elif [ "$KIND" = scout ]; then
-    # Scout worktrees are scratch by contract, but only once the deliverable exists.
-    REPORT="$DATA/$ID/report.md"
-    if [ ! -f "$REPORT" ]; then
-      echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-      echo "The report is the work product. Have the crewmate write it (or get the captain's explicit OK to discard, then --force)." >&2
-      exit 1
-    fi
+    :
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
@@ -643,7 +766,23 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  fi
+  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -658,7 +797,9 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+if [ "$BACKEND" != orca ]; then
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

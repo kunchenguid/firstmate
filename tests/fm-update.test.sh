@@ -12,7 +12,7 @@
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
 #   - The caller-action summary is correct: reread-firstmate flips to yes only
-#     when the instruction surface (AGENTS.md / bin / skills) changed, and
+#     when the instruction surface (AGENTS.md / bin / .agents/skills) changed, and
 #     nudge-secondmates lists exactly the live secondmates that advanced.
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
@@ -31,7 +31,7 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 
 # Build a fresh world: a bare origin seeded with one commit, a firstmate repo
 # clone checked out on main, and a home dir with state/ and data/. Echoes the
-# world dir. Files seeded: AGENTS.md, README.md, bin/tool.sh, a skill note.
+# world dir. Files seeded: AGENTS.md, README.md, bin/tool.sh, and an internal skill note.
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
@@ -72,7 +72,7 @@ add_sm() {
 }
 
 # Advance origin by one commit. mode=instr changes the instruction surface
-# (AGENTS.md, bin, skills) plus README; mode=readme changes only README.
+# (AGENTS.md, bin, .agents/skills) plus README; mode=readme changes only README.
 bump_origin() {
   local w=$1 mode=$2
   git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true

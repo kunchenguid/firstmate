@@ -191,9 +191,10 @@ for meta in "$STATE"/*.meta; do
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)
+  target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "$window"; then
+    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"

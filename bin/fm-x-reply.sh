@@ -17,19 +17,28 @@
 # attaches that image to the first/opener tweet only.
 #
 # Two endpoints, one client. By default the reply is the single answer to a
-# mention, POSTed to $RELAY/connector/answer. With --followup it is instead the
-# ONE later "done - here's the result" reply for a mention that spawned real
-# work, POSTed to $RELAY/connector/followup; the relay retains the
-# request->tweet binding for a 24h window after the initial answer and accepts a
-# single thread-bound follow-up. --followup may appear anywhere after the
-# request_id; everything else (thread-split, payload shape, dry-run, never-inline
-# safety) is identical, so only the endpoint and the dry-run marker differ.
+# mention, POSTed to $RELAY/connector/answer. With --followup it is instead one
+# of up to three later "here's where things stand" replies for a mention that
+# spawned real work, POSTed to $RELAY/connector/followup; the relay retains the
+# request->tweet binding for a 7-day window after the initial answer and accepts
+# up to three thread-bound follow-ups against it. --followup may appear
+# anywhere after the request_id; everything else (thread-split, payload shape,
+# dry-run, never-inline safety) is identical, so only the endpoint and the
+# dry-run marker differ.
 #
 # POSTs to $RELAY/connector/<answer|followup> with the bearer token. The relay
 # binds the reply to the exact tweet it recorded for that request_id, so this
 # client only ever echoes the relay-issued request_id and NEVER names a tweet id.
 # On success it echoes ONLY that request_id; on a non-2xx (or transport failure)
-# it exits non-zero so the caller knows the post did not land.
+# it exits non-zero so the caller knows the post did not land. The confirmed
+# relay contract for an exhausted follow-up binding is HTTP 409 from
+# /connector/followup, optionally with {"error":"followup_unavailable"} in the
+# response body. This client always maps a follow-up 409 to exit code 9 so
+# fm-x-followup.sh can tell "exhausted binding" apart from a transient post
+# failure worth retrying; the body marker only sharpens the diagnostic. That
+# relay-side 409 is secondary: after the relay's own cleanup sweep, a very-late
+# call can instead see a benign no-op 200, so fm-x-followup.sh's local
+# window/cap pruning remains the primary guard.
 #
 # Long replies auto-split into a numbered thread (premium-independent: each tweet
 # stays within FMX_X_REPLY_MAX_CHARS, default 280). A reply that fits in one tweet
@@ -180,6 +189,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; 
 IMAGE_PAYLOAD_FILE=
 IMAGE_PREVIEW=
 PAYLOAD_FILE=
+RESPONSE_BODY_FILE=
 if [ -n "$IMAGE_PATH" ]; then
   reply_make_tmp_file IMAGE_PAYLOAD_FILE || {
     echo "fm-x-reply: cannot create image payload temp file" >&2; exit 1; }
@@ -246,7 +256,9 @@ if [ -z "$FMX_TOKEN" ]; then
   echo "fm-x-reply: X mode not configured (no FMX_PAIRING_TOKEN)" >&2
   exit 1
 fi
-code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE")
+reply_make_tmp_file RESPONSE_BODY_FILE || {
+  echo "fm-x-reply: cannot create relay response temp file" >&2; exit 1; }
+code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE" "$RESPONSE_BODY_FILE")
 post_rc=$?
 case "$post_rc" in
   0) : ;;
@@ -257,5 +269,20 @@ esac
 
 case "$code" in
   2[0-9][0-9]) printf '%s\n' "$REQ" ;;
+  409)
+    if [ "$FOLLOWUP" = 1 ]; then
+      if [ -s "$RESPONSE_BODY_FILE" ] && {
+        jq -e '.error == "followup_unavailable"' "$RESPONSE_BODY_FILE" >/dev/null 2>&1 ||
+          grep -F 'followup_unavailable' "$RESPONSE_BODY_FILE" >/dev/null 2>&1
+      }; then
+        echo "fm-x-reply: relay rejected the follow-up (confirmed followup_unavailable marker): HTTP 409" >&2
+      else
+        echo "fm-x-reply: relay rejected the follow-up (HTTP 409 cap/window exhaustion; marker absent)" >&2
+      fi
+      exit 9
+    fi
+    echo "fm-x-reply: relay returned HTTP $code" >&2
+    exit 1
+    ;;
   *) echo "fm-x-reply: relay returned HTTP $code" >&2; exit 1 ;;
 esac

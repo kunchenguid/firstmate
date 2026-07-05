@@ -2,7 +2,11 @@
 name: stow
 description: Sweep the current session for uncaptured durable knowledge and file it to disk before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
 user-invocable: true
+metadata:
+  internal: true
 ---
+
+<!-- maintainers: this is the firstmate-internal skill. The public, installer-facing counterpart lives at skills/stow/SKILL.md - deliberately a separate file with no shared code or environment branching. Keep them independent. -->
 
 # stow
 
@@ -47,6 +51,6 @@ The goal is a session that is safe to reset or destroy because everything durabl
 
 `/stow` must **never** store, create, or edit a skill as a destination for any finding.
 There is no "graduate this to a skill" move in this skill's routing.
-This is a deliberate, standing exclusion, not an oversight: repo skills cannot yet distinguish knowledge that is fleet-local to this captain's home from knowledge generalizable to every firstmate user, so writing learnings into skills would silently leak fleet-local material into shared, tracked material (or vice versa).
-That namespace problem is unresolved and deliberately deferred.
-Until it is resolved, route generalizable knowledge to the shared `AGENTS.md` (or other shared, tracked material) via the pipeline, and fleet-local knowledge to `data/`, never to a skill.
+This is a deliberate, standing exclusion, not an oversight: even with the two-tier skill layout, a stow sweep is a memory-routing operation, not a way to author or mutate skills.
+Writing learnings into either `.agents/skills/` or public `skills/` would still risk mixing fleet-local material with shared firstmate behavior or standalone installer-facing behavior.
+Until a human deliberately scopes a skill change as firstmate repo work, route generalizable knowledge to the shared `AGENTS.md` (or other shared, tracked material) via the pipeline, and fleet-local knowledge to `data/`, never to a skill.

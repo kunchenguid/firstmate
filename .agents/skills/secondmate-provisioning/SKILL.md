@@ -1,12 +1,17 @@
 ---
 name: secondmate-provisioning
-description: Agent-only reference for persistent secondmate setup and retirement. Use when creating, seeding, validating, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, or when editing data/secondmates.md. Covers home leases, transactional seeding, project clone restrictions, inherited config push, idle charter, handoff helper, and teardown safety.
+description: >-
+  Agent-only reference for persistent secondmate setup and retirement.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited config into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited config push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
+metadata:
+  internal: true
 ---
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, handing backlog to, recovering, pushing inherited config into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -49,6 +54,16 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+
+`config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
+A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
+`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
+For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
+An explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
+When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
+Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
+This is secondmate-only: crewmate/scout model resolution is untouched by this file.
+
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The same launch also propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into the secondmate home's `config/`.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.

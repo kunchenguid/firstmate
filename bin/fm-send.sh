@@ -3,13 +3,16 @@
 # Usage: fm-send.sh <target> <text...>
 #   <target> may be a bare firstmate task name (fm-xyz), resolved through
 #   this home's state/<id>.meta, or an explicit backend target.
-# Special keys instead of text: fm-send.sh <target> --key Escape   (or Enter, C-c, ...)
+# Special keys instead of text: fm-send.sh <target> --key Enter
+# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
+# Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the composer clears. If a swallowed
-# Enter is positively confirmed (the text is still sitting in the composer after
-# all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
+# retried (Enter only, never retyped) until the target backend reports a
+# submitted/cleared composer or an inconclusive send. If a swallowed Enter is
+# positively confirmed (the text is still sitting in the composer after all
+# retries), fm-send exits NON-ZERO so the caller knows the steer did not land
+# instead of silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -69,6 +72,7 @@ esac
 # explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
 TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
+EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
@@ -79,7 +83,7 @@ case "$RAW_TARGET" in
 esac
 
 if [ "${1:-}" = "--key" ]; then
-  fm_backend_send_key "$TARGET_BACKEND" "$T" "$2"
+  fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"
 else
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -87,8 +91,8 @@ else
   # invocation, so a `$...` message to a codex target gets the same settle. That
   # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The retried Enter in
-  # fm_tmux_submit_core still backs the settle up either way.
+  # needlessly slow plain text to claude/opencode/pi. The target backend's
+  # verified submit retry still backs the settle up either way.
   case "$*" in
     /*) settle=1.2 ;;
     \$*)
@@ -100,14 +104,14 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
+  verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
   case "$verdict" in
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
       exit 1
       ;;
     send-failed)
-      echo "error: text not sent to $T (tmux send-keys failed)" >&2
+      echo "error: text not sent to $T ($TARGET_BACKEND send failed)" >&2
       exit 1
       ;;
   esac

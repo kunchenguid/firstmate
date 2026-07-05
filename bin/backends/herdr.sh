@@ -102,7 +102,7 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
 fm_backend_herdr_tool_check() {
-  command -v herdr >/dev/null 2>&1 || { echo "error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev)" >&2; return 1; }
+  command -v herdr >/dev/null 2>&1 || { echo "error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev) (dual-licensed AGPL-3.0-or-later/commercial)" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "error: backend=herdr selected but 'jq' is not installed (required to parse herdr's JSON output)" >&2; return 1; }
   return 0
 }
@@ -321,10 +321,113 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
   printf '%s:%s\t%s' "$session" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"
 }
 
+# fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
+# dead|no-agent|live|unknown, purely from the JSON body of two read-only
+# calls - never from process exit status, since a business-logic "not found"
+# response is a normal, expected outcome here, not a call failure (real herdr
+# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
+# the JSON keeps this function correct against either).
+#
+#   dead     - `pane get` responds with error code pane_not_found: the pane
+#              itself is gone (closed, or its process died and herdr already
+#              reaped it - verified empirically: killing a pane's shell pid
+#              on a live server makes herdr immediately drop both the pane
+#              and its tab from `pane get`/`tab list`).
+#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
+#              get` responds with error code agent_not_found: nothing is
+#              registered in it - exactly what a herdr session-layout restore
+#              produces (verified empirically: `session stop` + fresh `herdr
+#              server` restart leaves the pane alive, agent_status "unknown",
+#              agent get -> agent_not_found - docs/herdr-backend.md "ID
+#              stability across a server restart"), and what a future
+#              `resume_agents_on_restore = false` restore would produce too
+#              (a plain shell, never an agent).
+#   live     - `agent get` succeeds and reports a real agent_status (working,
+#              idle, done, or blocked - any registered value). An idle or
+#              blocked agent is still a genuine, still-registered agent, not
+#              a restored husk, so it is never a close-and-replace candidate.
+#   unknown  - anything else: an unparseable/unexpected response from either
+#              call, or a `pane get` success whose own echoed pane_id does not
+#              round-trip (guards against misreading a herdr response shape
+#              change as "the pane exists"). The caller must fail safe toward
+#              refusal here, never toward closing - this is the conservative
+#              backstop the husk check depends on.
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code pid status
+  # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
+  # an error response's JSON body to STDERR (success bodies go to stdout), so
+  # discarding stderr here would blind this function to exactly the
+  # error.code values (pane_not_found, agent_not_found) it exists to read -
+  # every OTHER call site in this file discards stderr safely only because
+  # its caller collapses both the error and the not-an-error paths to the
+  # same final answer, which this function's dead/no-agent/live/unknown
+  # distinction cannot afford to do.
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  if [ "$pid" != "$pane_id" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    return 0
+  fi
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$status" in
+    working|idle|done|blocked) printf 'live' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
+# states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
+# confirm; live and unknown both refuse (1), so an inconclusive read never
+# licenses closing anything. Restored-layout recovery depends on this
+# fail-safe-toward-refusal behavior.
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
+  case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
+    dead|no-agent) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
-# <container> ("session:workspace_id"), refusing an existing <label>. Herdr
-# does NOT enforce label uniqueness itself (verified: two tabs can share a
-# label), so the duplicate check is ours, mirroring tmux's manual check.
+# <container> ("session:workspace_id"). Herdr does NOT enforce label
+# uniqueness itself (verified: two tabs can share a label), so the duplicate
+# check is ours, mirroring tmux's manual check.
+#
+# A same-labeled tab already existing no longer means an automatic refusal:
+# herdr persists and restores its whole session layout (workspaces/tabs/
+# panes) across a server restart, including a reboot, and a restored fm-<id>
+# task tab comes back a HUSK - a dead pane, or (today, and unconditionally
+# once a future `resume_agents_on_restore = false` config ships) a plain
+# agent-less shell sitting in the saved cwd, never the crewmate that used to
+# be there. Before this fix, every fleet respawn after such a restart needed
+# the operator to manually close each husk pane first before firstmate could
+# spawn into it again. fm_backend_herdr_tab_is_husk classifies the existing
+# tab's pane conservatively (dead or no-agent only; anything live or
+# ambiguous refuses exactly as before) and, when it is a confirmed husk,
+# this function CLOSES AND REPLACES it instead of refusing.
+#
+# Ordering is deliberate: the REPLACEMENT tab is created FIRST, and the husk
+# is closed only AFTER that succeeds - never the reverse. Closing a
+# workspace's LAST remaining tab deletes the whole workspace on real herdr
+# (docs/herdr-backend.md "Workspace lifecycle"), and a session-restore husk
+# can legitimately be that workspace's only tab (e.g. its own seeded default
+# tab was already pruned, long before the restart, by a prior real task tab
+# existing alongside it). Herdr's lack of label-uniqueness enforcement is
+# exactly what makes this safe: the new and the husk tab can briefly share
+# the same label with no error, so the workspace never drops to zero tabs.
+# This mirrors fm_backend_herdr_workspace_prune_seeded_default_tab's own
+# create-before-close safety argument.
+#
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
 # <seeded_default_tab_id> (4th arg, may be empty) is exactly the value
@@ -339,14 +442,27 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup=$(printf '%s' "$list" | jq -r --arg want "$label" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
-  if [ -n "$dup" ]; then
-    echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+    echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
+  }
+  dup_tab_ids=""
+  if [ -n "$dup_tabs" ]; then
+    while IFS= read -r dup; do
+      [ -n "$dup" ] || continue
+      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+        return 1
+      fi
+      dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
+    done <<EOF
+$dup_tabs
+EOF
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
@@ -356,6 +472,29 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
+  if [ -n "$dup_tab_ids" ]; then
+    while IFS= read -r dup; do
+      [ -n "$dup" ] || continue
+      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
+    done <<EOF
+$dup_tab_ids
+EOF
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+      echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+      return 1
+    }
+    if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+      return 1
+    fi
+    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
+      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+    remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
+    if [ -n "$remaining_dup_tabs" ]; then
+      echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+      return 1
+    fi
+  fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
@@ -442,10 +581,10 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # is smaller than the pane's current viewport height (observed threshold ~23
 # rows for a default-sized pane), instead of clamping to the last N lines - it
 # does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (a 6-line
-# composer-verification read in send_text_submit). Workaround: always request
-# a generous fetch far above any realistic viewport height, then trim to the
-# caller's requested bound ourselves with `tail`.
+# broke exactly the small bounded reads this adapter relies on most (including
+# the composer-state verification read used by send_text_submit). Workaround:
+# always request a generous fetch far above any realistic viewport height, then
+# trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out
@@ -456,36 +595,111 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_herdr_composer_state: classify the composer's own row - the
+# interior line of its rounded-corner box - as empty|pending|unknown, scanning
+# a generous tail-window capture of <target>. herdr's CLI exposes no
+# cursor-row primitive (unlike tmux's #{cursor_y}), so this locates the
+# composer row structurally: it is the only captured line whose TRIMMED
+# content both STARTS and ENDS with the same border glyph (│, ┃, or a plain
+# ASCII |). The box's own top/bottom rows use rounded corners (╭─…─╮ / ╰─…─╯),
+# which never match; popup item rows and horizontal separator rows carry no
+# border glyph at all; the footer help line ("Enter:send │ … │ …", verified
+# grok 0.2.82) uses │ only as an INTERIOR separator and does not start with
+# one, so it never matches either. Scans forward and keeps the LAST match, so
+# a border-shaped line earlier in scrollback/a popup can never outrank the
+# real (bottom-anchored) composer row.
+#
+#   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
+#             ("Type a message...", verified grok 0.2.82's empty-composer
+#             placeholder). Safe to treat as submitted.
+#   pending - real, unsubmitted text sits in the composer. This deliberately
+#             also covers a slash-command popup that just closed but only
+#             auto-completed or filled an argument-hint placeholder into the
+#             composer (e.g. "/compact" -> "/compact compaction
+#             instructions", verified live against real grok 0.2.82) - that
+#             first Enter is a SELECTION, not a submission.
+#   unknown - the pane could not be read, or no composer row was found in the
+#             captured window.
+FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
+# Known ghost/placeholder composer text. Extend this if another
+# herdr-verified harness needs its own idle placeholder recognized.
+FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
+
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cap line trimmed stripped="" found=0
+  cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
+      *) continue ;;
+    esac
+    stripped=$trimmed
+    found=1
+  done < <(printf '%s\n' "$cap")
+  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # Strip the border glyphs, then trim again.
+  stripped=${stripped//│/}
+  stripped=${stripped//┃/}
+  stripped=${stripped//|/}
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  # A bare prompt glyph = empty composer.
+  case "$stripped" in
+    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+  esac
+  # Strip a leading prompt glyph before judging what remains.
+  case "$stripped" in
+    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+  esac
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  [ -n "$stripped" ] || { printf 'empty'; return 0; }
+  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
+    printf 'empty'; return 0
+  fi
+  printf 'pending'
+}
+
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until the pane visibly changes. Verified hazard
-# (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
-# `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
-# claude/codex popups, so the caller's <settle> before the first Enter matters
-# here the same way it does for tmux.
+# (Enter only, never retyped) until the composer's own row reads empty.
+# Verified hazard (herdr-verification-p2.md "slash/$ autocomplete popup"): a
+# `/`- or `$`-prefixed send opens a completion popup within ~0.1s, exactly
+# like tmux's claude/codex popups, so the caller's <settle> before the first
+# Enter matters here the same way it does for tmux.
 #
-# Verification strategy differs from tmux's ANSI-ghost-aware composer read
-# (herdr's CLI has no cursor-row/ANSI capture primitive exposed): capture the
-# pane right after typing (before any Enter) as the TYPED baseline, then after
-# each Enter attempt capture again - if the capture is UNCHANGED from the typed
-# baseline, nothing happened (Enter was swallowed) and we retry; the moment the
-# capture changes (output appeared, prompt cleared, a popup closed and text
-# resolved), the send is considered submitted. Echoes empty|pending|unknown|
-# send-failed, the SAME vocabulary fm-send.sh already branches on for tmux.
+# Verification strategy (incident 2026-07-03: two grok/herdr crewmates left a
+# fully-typed `/no-mistakes` sitting unsubmitted for minutes, footer still
+# reading "Enter:send", while fm-send exited 0): a prior version of this
+# function verified submission by diffing raw pane content before/after
+# Enter - ANY change counted as "submitted". Live-verified against real grok
+# 0.2.82: a slash command's first Enter closes the completion popup and, for
+# an argument-taking command, EXPANDS the composer text into an argument-hint
+# placeholder ("/compact" -> "/compact compaction instructions") rather than
+# submitting - the raw pane content visibly changes (popup gone, text
+# different) even though nothing was sent, so the old diff-based check
+# false-positived "empty" (submitted) after exactly one Enter, precisely
+# matching the incident. A genuine second Enter was required to actually
+# submit. fm_backend_herdr_composer_state avoids this by classifying the
+# composer's own row specifically: a popup-close-with-placeholder-fill still
+# reads as "pending" (real text remains), so the retry loop below correctly
+# sends the second Enter instead of stopping early. Echoes
+# empty|pending|unknown|send-failed, the SAME vocabulary fm-send.sh already
+# branches on for tmux.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 typed after i=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  typed=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     sleep "$sleep_s"
-    after=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
-    if [ "$after" != "$typed" ]; then
-      printf 'empty'
-      return 0
-    fi
+    state=$(fm_backend_herdr_composer_state "$target")
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done

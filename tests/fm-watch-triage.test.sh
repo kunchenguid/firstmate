@@ -7,9 +7,10 @@
 # a real fm-watch.sh subprocess to assert the behavioral contract:
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
-# provably-working non-terminal-stale absorbed-then-escalated past the threshold,
-# the heartbeat backstop fail-safe, and afk coherence (no double-triage while the
-# away-mode daemon owns supervision).
+# provably-working stale panes absorbed-then-escalated past the threshold,
+# terminal-looking stale status lines overridden by an active run, the heartbeat
+# backstop fail-safe, and afk coherence (no double-triage while the away-mode
+# daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -317,6 +318,65 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- stale pane, STALE terminal status overridden by an active run: absorbed ---
+# Regression for the 2026-07 herdr false-surface incidents: a crew's own status
+# log gets no new entry once firstmate hands it to a no-mistakes validation
+# (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
+# pre-validation "done:" line as the LAST line for the run's entire (possibly
+# many-minutes) duration. stale_is_terminal alone has no run-step awareness and
+# would treat that leftover as still-current every time the pane goes quiet,
+# immediately surfacing a crew that is actively validating. crew_is_provably_working
+# must get a chance to override a captain-relevant-but-stale status line, exactly
+# as it already does for a plain non-terminal one.
+test_stale_terminal_status_overridden_by_active_run() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale-overridden); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-validating"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
+  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
+  # this line never gets superseded by a newer status-log entry while the
+  # pipeline itself runs.
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Phase A: a high escalation threshold means the first sighting is absorbed,
+  # not surfaced, despite the captain-relevant "done:" status-log line.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
+  [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
+  [ ! -e "$state/.hb-surfaced-validating" ] || fail "an absorbed wake must not mark the status line as surfaced"
+  reap "$pid"
+
+  # Phase B: backdate the idle timer past the threshold; the run genuinely
+  # wedges and the next poll escalates exactly like the non-terminal case.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -595,6 +655,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
