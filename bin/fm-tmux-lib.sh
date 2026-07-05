@@ -103,8 +103,9 @@ fm_tmux_strip_ghost() {
 }
 
 # fm_tmux_composer_text: print the normalized cursor/composer line of <target>.
-# The result has dim/faint ghost text removed, composer borders stripped, and
-# surrounding whitespace trimmed. Returns non-zero if the pane cannot be read.
+# The result has dim/faint ghost text removed, composer borders stripped, NBSP and
+# narrow-NBSP prompt padding normalized to spaces, and surrounding whitespace
+# trimmed. Returns non-zero if the pane cannot be read.
 fm_tmux_composer_text() {  # <target>
   local target=$1 cy raw line stripped
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
@@ -115,6 +116,10 @@ fm_tmux_composer_text() {  # <target>
   stripped=${line//│/}      # U+2502 light vertical (claude)
   stripped=${stripped//┃/}  # U+2503 heavy vertical
   stripped=${stripped//|/}  # ASCII pipe
+  # Some TUIs pad a bare prompt with NBSP/narrow NBSP. Normalize them before the
+  # ASCII trim below so "❯ " is still an empty prompt, not pending input.
+  stripped=${stripped//$'\302\240'/ }
+  stripped=${stripped//$'\342\200\257'/ }
   # Trim surrounding whitespace.
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"

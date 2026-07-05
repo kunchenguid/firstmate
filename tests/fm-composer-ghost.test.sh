@@ -128,6 +128,21 @@ test_dim_ghost_only_composer_is_not_pending() {
   pass "fm_pane_input_pending: a dim ghost-only composer is NOT pending"
 }
 
+test_prompt_with_nbsp_padding_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/nbsp-prompt"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # Codex/Claude-style prompt padding can use NBSP, which POSIX [:space:] does
+  # not trim. A bare prompt plus NBSP is still idle, not human input.
+  printf '\xe2\x9d\xaf\xc2\xa0\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "bare prompt with NBSP padding falsely read as pending"
+  fi
+  pass "fm_pane_input_pending: a bare prompt with NBSP padding is NOT pending"
+}
+
 test_dim_ghost_inside_bordered_composer_is_not_pending() {
   local dir fb capture
   dir="$TMP_ROOT/ghost-bordered"; mkdir -p "$dir"
@@ -223,6 +238,7 @@ test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_dim_ghost_only_composer_is_not_pending
+test_prompt_with_nbsp_padding_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
