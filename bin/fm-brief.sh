@@ -198,8 +198,12 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
+# no-mistakes gate state is shared at the repo level, so pooled worktrees must
+# not re-run init/doctor here; those commands can rewrite the shared hook.
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Verify the no-mistakes CLI is present without touching repo gate state: \`command -v no-mistakes >/dev/null\`.
+   If it is missing, append \`blocked: no-mistakes CLI missing\` to the status file and stop.
+3. Do not run \`no-mistakes doctor\` or \`no-mistakes init\` in this pooled worktree; firstmate initializes and maintains the shared gate at the repo level."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
