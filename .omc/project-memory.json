@@ -1,0 +1,117 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1783289009027,
+  "projectRoot": "/Users/jamesww/.no-mistakes/worktrees/08e424258b59/01KWT4XHX8HB07F8NK3Y4PY5T8",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "bin",
+      "docs",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 1,
+      "lastAccessed": 1783289009009,
+      "keyFiles": [
+        "banner.png"
+      ]
+    },
+    "bin": {
+      "path": "bin",
+      "purpose": "Executable scripts",
+      "fileCount": 45,
+      "lastAccessed": 1783289009009,
+      "keyFiles": [
+        "fm-backend-hometag-lib.sh",
+        "fm-backend.sh",
+        "fm-backlog-handoff.sh",
+        "fm-bootstrap.sh",
+        "fm-brief.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 9,
+      "lastAccessed": 1783289009010,
+      "keyFiles": [
+        "architecture.md",
+        "cmux-backend.md",
+        "configuration.md",
+        "herdr-backend.md",
+        "orca-backend.md"
+      ]
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1783289009010,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 51,
+      "lastAccessed": 1783289009010,
+      "keyFiles": [
+        "cmux-test-safety.sh",
+        "fm-afk-inject-e2e.test.sh",
+        "fm-afk-inject-herdr-e2e.test.sh",
+        "fm-backend-autodetect-smoke.test.sh",
+        "fm-backend-cmux-smoke.test.sh"
+      ]
+    },
+    "docs/examples": {
+      "path": "docs/examples",
+      "purpose": "Example code",
+      "fileCount": 1,
+      "lastAccessed": 1783289009011,
+      "keyFiles": [
+        "crew-dispatch.json"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "docs/herdr-backend.md",
+      "accessCount": 6,
+      "lastAccessed": 1783368564276,
+      "type": "file"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "accessCount": 2,
+      "lastAccessed": 1783289630227,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
