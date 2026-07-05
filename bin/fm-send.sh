@@ -100,7 +100,7 @@ else
       ;;
     *)
       case "$TARGET_HARNESS" in
-        agy) settle=1.2 ;;
+        agy*) settle=1.2 ;;
         *) settle=0.3 ;;
       esac
       ;;
