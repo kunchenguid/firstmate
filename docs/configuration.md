@@ -274,6 +274,11 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+# oauth-token durability (bin/fm-oauth-token-load.sh / fm-oauth-token-install.sh; docs/oauth-token.md)
+FM_OAUTH_TOKEN_FILE=     # highest-precedence secure token source; overrides config/oauth-token-source and the default file for one invocation
+FM_LAUNCHCTL=launchctl   # launchctl binary name used for every launchctl call; lets tests exercise the no-launchctl refusal path
+FM_USER_LAUNCHAGENTS_DIR=  # LaunchAgents dir the installer renders into; defaults to ~/Library/LaunchAgents
+FM_OAUTH_TOKEN_LOG_DIR=  # LaunchAgent stdout/stderr log dir; defaults to ~/Library/Logs/firstmate
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
