@@ -221,6 +221,7 @@ Reconcile only this home's recorded direct reports and their recorded backend in
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
+For a dead `kind=adopted` direct report, there is no worktree or branch to reconcile; re-run `bin/fm-adopt.sh` against the workspace's new id to re-register it, or tear the task down to un-register it.
 
 If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
