@@ -15,7 +15,7 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|agy|^pi$'
+HARNESS_RE='(^|[^a-zA-Z0-9_-])(claude|codex|opencode|grok|agy|pi)([^a-zA-Z0-9_-]|$)'
 
 harness_pid() {
   local pid=$$ comm args

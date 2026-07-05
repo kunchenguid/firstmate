@@ -30,10 +30,10 @@ while [ "$i" -lt "${#args[@]}" ]; do
       schema="${args[$i]:-}"
       ;;
     --verbose|--dangerously-skip-permissions) ;;
-    --output-format)
+    --output-format|--permission-mode)
       i=$((i + 1))
       ;;
-    --output-format=*|--permission-mode|--permission-mode=*) ;;
+    --output-format=*|--permission-mode=*) ;;
     --model|--project|--sandbox|--add-dir)
       agy_args+=("$arg")
       i=$((i + 1))
@@ -65,21 +65,25 @@ ${schema}"
 fi
 
 stderr_file=$(mktemp)
-agy_output=""
+output_file=$(mktemp)
+cleanup() {
+  rm -f "$stderr_file" "$output_file"
+}
+trap cleanup EXIT
+
 agy_ec=0
 set +e
 if command -v timeout >/dev/null 2>&1; then
-  agy_output=$(timeout --signal=TERM "$AGY_TIMEOUT" \
-    "$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" 2>"$stderr_file")
+  timeout --signal=TERM "$AGY_TIMEOUT" \
+    "$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" >"$output_file" 2>"$stderr_file"
 else
-  agy_output=$("$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" 2>"$stderr_file")
+  "$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" >"$output_file" 2>"$stderr_file"
 fi
 agy_ec=$?
 set -e
 
 if [ "$agy_ec" -ne 0 ]; then
   err=$(tr '\n' ' ' <"$stderr_file" | sed 's/  */ /g')
-  rm -f "$stderr_file"
   printf '{"type":"result","subtype":"error","is_error":true}\n'
   if [ "$agy_ec" -eq 124 ]; then
     echo "agy timed out after ${AGY_TIMEOUT}s (set FM_AGY_SHIM_TIMEOUT to override)" >&2
@@ -88,17 +92,23 @@ if [ "$agy_ec" -ne 0 ]; then
   fi
   exit "$agy_ec"
 fi
-rm -f "$stderr_file"
 
-SCHEMA_JSON="$schema" AGY_TEXT="$agy_output" python3 - <<'PY'
+SCHEMA_JSON="$schema" AGY_OUTPUT_FILE="$output_file" python3 - <<'PY'
 import json
 import os
-import re
 import sys
 
-text = os.environ.get("AGY_TEXT", "")
+output_file = os.environ.get("AGY_OUTPUT_FILE", "")
 schema_raw = os.environ.get("SCHEMA_JSON", "")
 structured = None
+
+text = ""
+if output_file and os.path.exists(output_file):
+    try:
+        with open(output_file, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception as e:
+        sys.stderr.write(f"Error reading output file: {e}\n")
 
 if schema_raw:
     decoder = json.JSONDecoder()
@@ -125,6 +135,15 @@ assistant = {
 }
 print(json.dumps(assistant), flush=True)
 
+if schema_raw and structured is None:
+    result = {
+        "type": "result",
+        "subtype": "error",
+        "is_error": True,
+    }
+    print(json.dumps(result), flush=True)
+    sys.exit(1)
+
 result = {
     "type": "result",
     "subtype": "success",
@@ -133,7 +152,4 @@ result = {
 if structured is not None:
     result["structured_output"] = structured
 print(json.dumps(result), flush=True)
-
-if schema_raw and structured is None:
-    sys.exit(1)
 PY

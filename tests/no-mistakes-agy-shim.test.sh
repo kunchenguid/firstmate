@@ -68,3 +68,35 @@ out_stderr=$(cat "$stderr_file")
 assert_contains "$out_stdout" '{"type":"result","subtype":"error","is_error":true}' "JSON error event should be on stdout"
 assert_contains "$out_stderr" "agy exited: some stderr logs" "error message should be on stderr"
 pass "no-mistakes-agy-shim outputs JSON error event to stdout and log message to stderr"
+
+# Test schema extraction failure
+cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+echo "no json here"
+SH
+chmod +x "$fakebin/agy"
+
+stdout_file="$TMP_ROOT/stdout.log"
+stderr_file="$TMP_ROOT/stderr.log"
+
+status=0
+NO_MISTAKES_AGY_BIN="$fakebin/agy" PATH="$fakebin:$PATH" \
+  "$SHIM" --json-schema '{"type": "object"}' -p 'say hi' >"$stdout_file" 2>"$stderr_file" || status=$?
+expect_code 1 "$status" "shim should exit 1 on schema extraction failure"
+
+out_stdout=$(cat "$stdout_file")
+assert_contains "$out_stdout" '"content": [{"type": "text", "text": "no json here\n"}]' "assistant message on stdout missing"
+assert_contains "$out_stdout" '{"type": "result", "subtype": "error", "is_error": true}' "JSON error event on stdout missing"
+pass "no-mistakes-agy-shim outputs JSON error event and exits 1 when JSON extraction fails"
+
+# Test --permission-mode option parsing
+cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+echo "dummy output"
+SH
+chmod +x "$fakebin/agy"
+
+out=$(NO_MISTAKES_AGY_BIN="$fakebin/agy" PATH="$fakebin:$PATH" \
+  "$SHIM" --permission-mode yolo -p 'correct prompt')
+assert_contains "$out" '"text": "dummy output\n"' "permission mode parsing failed"
+pass "no-mistakes-agy-shim parses --permission-mode option and retains correct prompt"
