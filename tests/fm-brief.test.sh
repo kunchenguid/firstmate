@@ -36,6 +36,7 @@ test_script_parses() {
 test_no_heredoc_in_command_substitution() {
   local script
   for script in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
+    # shellcheck disable=SC2016  # literal grep pattern; expansion is not wanted
     if grep -n '^[^#]*\$(cat <<' "$script"; then
       fail "${script#"$ROOT"/} uses \$(cat <<...) - breaks bash 3.2 parsing if the body ever gains an apostrophe; assign with read -r -d '' instead"
     fi
