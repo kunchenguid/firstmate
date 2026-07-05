@@ -80,7 +80,7 @@ set -e
 if [ "$agy_ec" -ne 0 ]; then
   err=$(tr '\n' ' ' <"$stderr_file" | sed 's/  */ /g')
   rm -f "$stderr_file"
-  printf '{"type":"result","subtype":"error","is_error":true}\n' >&2
+  printf '{"type":"result","subtype":"error","is_error":true}\n'
   if [ "$agy_ec" -eq 124 ]; then
     echo "agy timed out after ${AGY_TIMEOUT}s (set FM_AGY_SHIM_TIMEOUT to override)" >&2
   else
@@ -101,15 +101,15 @@ schema_raw = os.environ.get("SCHEMA_JSON", "")
 structured = None
 
 if schema_raw:
-    candidate = text.strip()
-    candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
-    candidate = re.sub(r"\s*```$", "", candidate)
-    match = re.search(r"\{.*\}", candidate, re.DOTALL)
-    if match:
-        try:
-            structured = json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    decoder = json.JSONDecoder()
+    for i in range(len(text)):
+        if text[i] in ('{', '['):
+            try:
+                obj, end_idx = decoder.raw_decode(text[i:])
+                structured = obj
+                break
+            except json.JSONDecodeError:
+                pass
 
 assistant = {
     "type": "assistant",

@@ -1002,7 +1002,7 @@ spawn_send_key "$T" Enter
 
 # agy loads a positional brief into the session but does not auto-start the turn
 # (verified 2026-07-05, agy 1.0.16). Nudge after trust-dialog/TUI settle.
-if [ "$HARNESS" = agy ]; then
+if [[ "$HARNESS" == agy* ]]; then
   sleep "${FM_AGY_SPAWN_SETTLE:-10}"
   spawn_send_literal "$T" 'Begin now per brief: verify worktree isolation, create your task branch, and execute the full brief contract.'
   sleep 1.2
