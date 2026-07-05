@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Claude-compatible shim for no-mistakes: runs agy and emits stream-json events.
+# Install to PATH (e.g. ~/.local/bin/no-mistakes-agy-shim) and point
+# agent_path_override.claude at it in ~/.no-mistakes/config.yaml.
+set -euo pipefail
+
+AGY_BIN="${NO_MISTAKES_AGY_BIN:-agy}"
+AGY_TIMEOUT="${FM_AGY_SHIM_TIMEOUT:-600}"
+
+if ! command -v "$AGY_BIN" >/dev/null 2>&1; then
+  echo "no-mistakes-agy-shim: agy not found (set NO_MISTAKES_AGY_BIN)" >&2
+  exit 127
+fi
+
+prompt=""
+schema=""
+declare -a agy_args=()
+
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  arg="${args[$i]}"
+  case "$arg" in
+    -p|--print|--prompt)
+      i=$((i + 1))
+      prompt="${args[$i]:-}"
+      ;;
+    --json-schema)
+      i=$((i + 1))
+      schema="${args[$i]:-}"
+      ;;
+    --verbose|--dangerously-skip-permissions) ;;
+    --output-format)
+      i=$((i + 1))
+      ;;
+    --output-format=*|--permission-mode|--permission-mode=*) ;;
+    --model|--project|--sandbox|--add-dir)
+      agy_args+=("$arg")
+      i=$((i + 1))
+      agy_args+=("${args[$i]:-}")
+      ;;
+    --model=*|--project=*|--sandbox=*|--add-dir=*)
+      agy_args+=("$arg")
+      ;;
+    *)
+      if [ -z "$prompt" ] && [[ "$arg" != -* ]]; then
+        prompt="$arg"
+      fi
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+if [ -z "$prompt" ]; then
+  echo "no-mistakes-agy-shim: missing prompt" >&2
+  exit 2
+fi
+
+full_prompt="$prompt"
+if [ -n "$schema" ]; then
+  full_prompt="${prompt}
+
+Respond with one valid JSON object only (no markdown fences) matching this schema:
+${schema}"
+fi
+
+stderr_file=$(mktemp)
+agy_output=""
+agy_ec=0
+set +e
+if command -v timeout >/dev/null 2>&1; then
+  agy_output=$(timeout --signal=TERM "$AGY_TIMEOUT" \
+    "$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" 2>"$stderr_file")
+else
+  agy_output=$("$AGY_BIN" --dangerously-skip-permissions "${agy_args[@]}" -p "$full_prompt" 2>"$stderr_file")
+fi
+agy_ec=$?
+set -e
+
+if [ "$agy_ec" -ne 0 ]; then
+  err=$(tr '\n' ' ' <"$stderr_file" | sed 's/  */ /g')
+  rm -f "$stderr_file"
+  printf '{"type":"result","subtype":"error","is_error":true}\n' >&2
+  if [ "$agy_ec" -eq 124 ]; then
+    echo "agy timed out after ${AGY_TIMEOUT}s (set FM_AGY_SHIM_TIMEOUT to override)" >&2
+  else
+    echo "agy exited: ${err:-unknown error}" >&2
+  fi
+  exit "$agy_ec"
+fi
+rm -f "$stderr_file"
+
+SCHEMA_JSON="$schema" AGY_TEXT="$agy_output" python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+text = os.environ.get("AGY_TEXT", "")
+schema_raw = os.environ.get("SCHEMA_JSON", "")
+structured = None
+
+if schema_raw:
+    candidate = text.strip()
+    candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+    candidate = re.sub(r"\s*```$", "", candidate)
+    match = re.search(r"\{.*\}", candidate, re.DOTALL)
+    if match:
+        try:
+            structured = json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+assistant = {
+    "type": "assistant",
+    "message": {
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+        "content": [{"type": "text", "text": text}],
+    },
+}
+print(json.dumps(assistant), flush=True)
+
+result = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+}
+if structured is not None:
+    result["structured_output"] = structured
+print(json.dumps(result), flush=True)
+
+if schema_raw and structured is None:
+    sys.exit(1)
+PY

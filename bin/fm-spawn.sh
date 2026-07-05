@@ -32,7 +32,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -267,7 +267,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -328,6 +328,8 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # agy (Antigravity CLI): Claude-Code-compatible TUI; verified 2026-07-05, agy 1.0.16.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -415,7 +417,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -828,7 +830,7 @@ exclude_path() {
 }
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
-    claude*)
+    claude*|agy*)
       mkdir -p "$WT/.claude"
       cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
@@ -997,5 +999,16 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+
+# agy loads a positional brief into the session but does not auto-start the turn
+# (verified 2026-07-05, agy 1.0.16). Nudge after trust-dialog/TUI settle.
+if [ "$HARNESS" = agy ]; then
+  sleep "${FM_AGY_SPAWN_SETTLE:-10}"
+  spawn_send_literal "$T" 'Begin now per brief: verify worktree isolation, create your task branch, and execute the full brief contract.'
+  sleep 1.2
+  spawn_send_key "$T" Enter
+  sleep 1.2
+  spawn_send_key "$T" Enter
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

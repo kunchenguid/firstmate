@@ -98,7 +98,12 @@ else
     \$*)
       if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
       ;;
-    *) settle=0.3 ;;
+    *)
+      case "$TARGET_HARNESS" in
+        agy) settle=1.2 ;;
+        *) settle=0.3 ;;
+      esac
+      ;;
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}

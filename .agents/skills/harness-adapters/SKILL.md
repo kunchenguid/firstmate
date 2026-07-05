@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -58,6 +58,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| agy | `--model <model>` | none for firstmate's interactive launch | Verified on agy 1.0.16. The installed CLI exposes `--model` only; no verified effort or reasoning knob on the interactive launch path. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -72,6 +73,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- agy: `/<skill>` (e.g. `/no-mistakes`), same as claude; use natural language if uncertain.
 
 ## claude (VERIFIED)
 
@@ -181,6 +183,35 @@ Startup dialog: the "Run Grok Build in a project directory?" project picker appe
 Pin `[hints] project_picker_disabled = true` in `~/.grok/config.toml` if a non-project launch ever needs to skip it.
 
 **Known gap, unfixed (found 2026-07-03, not yet in scope of any fix):** a freshly-dismissed, never-typed-into grok composer shows a placeholder ("Type a message...") styled with a dark 24-bit TRUECOLOR foreground, not the SGR-2 dim/faint attribute `fm_tmux_strip_ghost` detects, so it is NOT stripped and reads as real pending text - `FM_COMPOSER_IDLE_RE` is NOT already set to cover it. Worse, live-verified: in that exact pristine placeholder-only state, tmux's own `#{cursor_y}` points at the composer box's BOTTOM BORDER row, one row below the actual text row (the box appears to render one row lower before any real typing starts); once real text is typed the cursor correctly aligns with the text row again. A correct fix needs a row-window read near `cursor_y` (or a structural scan like the herdr adapter's composer-row finder, `bin/backends/herdr.sh`), not just a wider idle regex. In practice `fm-spawn` launches grok with the brief as its initial prompt, so a live task's composer is never observed in this pristine pre-typing state - but this is unverified for every path (e.g. a steer sent before grok's first real turn settles) and needs dedicated investigation before relying on it.
+
+## agy (VERIFIED 2026-07-05, agy 1.0.16; spawn nudge 2026-07-05)
+
+Antigravity CLI (`agy`), a Claude-Code-compatible TUI from Google Cloud Code.
+Launch with a positional prompt: `agy --dangerously-skip-permissions "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to interrupt` (Claude-compatible footer; covered by the default `FM_BUSY_REGEX`) |
+| Exit command | `/exit` (slash popup; `fm-send`'s 1.2s `/` settle applies) |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` is rejected as unknown in agy 1.0.16; use natural language or shell `no-mistakes axi run` |
+| Autonomy | `--dangerously-skip-permissions` |
+| Resume | `agy --continue` or `agy --conversation <id>` |
+| `fm-send` settle | 1.2s on all plain-text steers (agy often leaves text in the composer on the first Enter) |
+| Post-spawn nudge | `fm-spawn` waits `FM_AGY_SPAWN_SETTLE` (default 10s), then sends a Begin-now steer with a second Enter backup |
+
+**Positional brief does not auto-start.**
+Verified: `agy ... "$(cat brief)"` opens the TUI with an empty composer; the brief is not processed until firstmate steers.
+`fm-spawn` now sends the standard Begin-now nudge automatically after launch settle.
+Without it, crewmates often search the filesystem instead of using the worktree cwd.
+
+**no-mistakes headless path.**
+Pipeline steps invoke `bin/no-mistakes-agy-shim` (or `~/.local/bin/no-mistakes-agy-shim`), which runs `agy -p` once and emits Claude stream-json.
+Headless `agy -p` can hang indefinitely; the shim honors `FM_AGY_SHIM_TIMEOUT` (default 600s) when `timeout` is on PATH.
+
+First launch on a machine may require Google sign-in.
+First launch per directory shows a directory-trust dialog ("Do you trust the contents of this project?"); accept with Enter on "Yes, I trust this folder".
+`fm-spawn` installs the same per-worktree `.claude/settings.local.json` Stop hook as claude so turn-end touches `state/<id>.turn-ended`.
 
 Turn-end hook: grok fires a `Stop` hook at every turn boundary, giving firstmate a precise per-turn wake instead of only stale-pane detection.
 grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/settings.local.json`) only after the folder is granted hook-trust in `~/.grok/trusted_folders.toml`, which is not automatic and which firstmate will not establish by editing grok's own managed trust store.

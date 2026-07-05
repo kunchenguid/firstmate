@@ -54,7 +54,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, grok, or agy), git with GitHub auth, and tmux for the reference session backend.
 The first mate detects and offers to install everything else.
 
 ```sh
