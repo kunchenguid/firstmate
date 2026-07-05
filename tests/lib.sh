@@ -25,6 +25,13 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
+# Hermetic isolation: a test may run inside a live firstmate session that exports
+# FM_HOME (and friends) to select that session's operational home. Left set, the
+# scripts under test would read the real fleet's state/, data/, and config/
+# instead of each test's hermetic fixture. Clear the operational-home selectors
+# up front; tests that need one set it explicitly per invocation.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

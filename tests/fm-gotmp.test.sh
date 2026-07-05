@@ -11,6 +11,12 @@
 # the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
 set -u
 
+# Hermetic isolation: this suite runs the real fm-teardown.sh against a fake
+# FM_ROOT built so the script resolves into it. A live firstmate session may
+# export FM_HOME (and friends), which would redirect teardown at the real
+# fleet's state/ instead of the fixture. Clear the operational-home selectors.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
