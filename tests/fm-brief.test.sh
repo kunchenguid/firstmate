@@ -2,13 +2,16 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166): bash's lexer tracks quote state through a heredoc body while scanning
+# for the matching `)` of an enclosing `$(...)`, so a single unescaped
+# apostrophe in that body breaks parsing of the *entire rest of the script* -
+# `bash -n` fails, not just the generated brief. The no-mistakes DOD was fixed
+# by moving it into a `_nm_dod_text()` helper that uses a QUOTED heredoc
+# (<<'_NMDEOF'), making all content literal; this safely allows the apostrophe
+# in "Follow no-mistakes' own guidance". direct-PR and local-only still use
+# `$(cat <<EOF ... EOF)` because their bodies contain no apostrophes. A plain
+# `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected, so the
+# secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,8 +20,10 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
 # The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# issue #166: a stray apostrophe inside a `$(cat <<EOF ... EOF)` body breaks
+# `bash -n` on the whole file; the no-mistakes DOD avoids this via a helper
+# function, but any future apostrophe in the direct-PR or local-only bodies
+# would trigger the same failure.
 test_script_parses() {
   bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
   pass "fm-brief.sh: bash -n succeeds"
@@ -59,8 +64,11 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
+# Pin the specific line the bug lived on: the no-mistakes DOD must render the
+# apostrophe form ("Follow no-mistakes' own guidance") correctly in the
+# generated brief.  The _nm_dod_text() helper uses a quoted heredoc
+# (<<'_NMDEOF') so the apostrophe is literal; this test confirms the helper
+# output reaches the brief intact.
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
@@ -69,11 +77,9 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
+  assert_grep "Follow no-mistakes' own guidance for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  pass "fm-brief.sh: no-mistakes DOD wording includes apostrophe form via helper"
 }
 
 test_script_parses
