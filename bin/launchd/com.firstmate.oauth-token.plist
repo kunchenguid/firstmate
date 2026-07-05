@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.firstmate.oauth-token LaunchAgent template.
+
+  This plist is rendered by bin/fm-oauth-token-install.sh, which substitutes the
+  absolute path to this repo's bin/ for @@FM_BIN@@ and a per-user log directory
+  for @@FM_LOG_DIR@@ before writing it to ~/Library/LaunchAgents/.
+
+  It contains NO secret. Its only job is to run bin/fm-oauth-token-load.sh at
+  login; the helper reads CLAUDE_CODE_OAUTH_TOKEN from the operator's secure
+  source at run time (see fm-oauth-token-load.sh and docs/oauth-token.md). Never
+  put the token value in this file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.firstmate.oauth-token</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@@FM_BIN@@/fm-oauth-token-load.sh</string>
+        <string>--setenv</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>@@FM_LOG_DIR@@/oauth-token.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@@FM_LOG_DIR@@/oauth-token.err.log</string>
+</dict>
+</plist>
