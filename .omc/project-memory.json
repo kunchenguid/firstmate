@@ -101,15 +101,15 @@
   },
   "hotPaths": [
     {
-      "path": "docs/herdr-backend.md",
-      "accessCount": 6,
-      "lastAccessed": 1783368564276,
+      "path": "CONTRIBUTING.md",
+      "accessCount": 4,
+      "lastAccessed": 1783290530298,
       "type": "file"
     },
     {
-      "path": "CONTRIBUTING.md",
-      "accessCount": 2,
-      "lastAccessed": 1783289630227,
+      "path": "docs/herdr-backend.md",
+      "accessCount": 3,
+      "lastAccessed": 1783289684726,
       "type": "file"
     }
   ],
