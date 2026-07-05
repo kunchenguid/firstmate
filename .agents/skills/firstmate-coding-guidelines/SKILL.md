@@ -74,6 +74,9 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
+- Scripts must parse under macOS `/bin/bash` (bash 3.2), not just modern bash on Linux CI.
+- Never assign a heredoc through command substitution (`VAR=$(cat <<EOF ... EOF)`): bash 3.2 tracks quote state through the heredoc body while scanning for the closing `)`, so a lone apostrophe in the body breaks parsing of the whole script (issue #166), and CI's modern bash cannot catch it via `bash -n`.
+- Assign multi-line bodies with `read -r -d '' VAR <<EOF ... EOF || true` instead; `tests/fm-brief.test.sh` structurally refuses the fragile construct across `bin/`.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
