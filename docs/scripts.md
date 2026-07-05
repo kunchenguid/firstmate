@@ -56,6 +56,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
+| `fm-dash.sh`             | Live read-only dashboard of in-flight tasks with editor hyperlinks; `--once` snapshots |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
