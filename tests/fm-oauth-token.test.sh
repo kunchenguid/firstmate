@@ -200,11 +200,19 @@ test_cmd_source_runs_command() {
 test_op_source_uses_op_cli() {
   local fakebin cfg out
   fakebin=$(make_fakebin "$TMP_ROOT/fb7")
-  # op stub prints a fake value for any `op read <ref>` invocation
-  cat > "$fakebin/op" <<'SH'
+  local refcap="$TMP_ROOT/fb7/op.ref"
+  # op stub captures the reference it received and only succeeds for a full
+  # op:// reference, so a scheme-stripped ref (the old bug) would fail.
+  cat > "$fakebin/op" <<SH
 #!/usr/bin/env bash
-case "$1" in
-  read) printf '%s' 'op-token-789' ;;
+case "\$1" in
+  read)
+    printf '%s' "\$2" > "$refcap"
+    case "\$2" in
+      op://*) printf '%s' 'op-token-789' ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac
 SH
@@ -213,8 +221,10 @@ SH
   mkdir -p "$cfg"
   printf 'op://Private/firstmate/claude/token\n' > "$cfg/oauth-token-source"
   out=$(FM_OAUTH_TOKEN_FILE='' FM_CONFIG_OVERRIDE="$cfg" run_load "$fakebin" --print 2>/dev/null)
-  [ "$out" = "op-token-789" ] || fail "op: source did not resolve via the op CLI: '$out'"
-  pass "fm-oauth-token-load: config/oauth-token-source op: prefix resolves the token via the op read subcommand"
+  [ "$out" = "op-token-789" ] || fail "op:// source did not resolve via the op CLI: '$out'"
+  [ "$(cat "$refcap")" = "op://Private/firstmate/claude/token" ] \
+    || fail "op read received a mangled reference: '$(cat "$refcap")'"
+  pass "fm-oauth-token-load: config/oauth-token-source op:// reference resolves via op read with the full reference intact"
 }
 
 test_loose_perms_warn_but_proceed() {

@@ -14,8 +14,8 @@
 #   1. FM_OAUTH_TOKEN_FILE          env path to a file holding just the token
 #   2. config/oauth-token-source    gitignored local file; first non-comment line
 #                                    is either a path to a token file, "cmd:<sh>"
-#                                    whose stdout is the token, or "op:<ref>"
-#                                    resolved with `op read <ref>` (1Password CLI)
+#                                    whose stdout is the token, or "op://<reference>"
+#                                    resolved with `op read` (1Password CLI)
 #   3. ~/.config/firstmate/claude-code-oauth-token
 #                                    default gitignored token file (0600)
 #
@@ -55,7 +55,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # resolve_source: echo the source descriptor per the resolution order above.
-# Echoes a literal path, "cmd:<command>", or "op:<reference>".
+# Echoes a literal path, "cmd:<command>", or "op://<reference>".
 resolve_source() {
   if [ -n "${FM_OAUTH_TOKEN_FILE:-}" ]; then
     printf '%s\n' "$FM_OAUTH_TOKEN_FILE"
@@ -84,10 +84,9 @@ read_token() {
       local cmd=${src#cmd:}
       value=$(sh -c "$cmd" 2>/dev/null) || { echo "error: oauth-token-source cmd failed" >&2; return 1; }
       ;;
-    op:*)
-      local ref=${src#op:}
-      command -v op >/dev/null 2>&1 || { echo "error: oauth-token-source uses op: but the op CLI is not on PATH" >&2; return 1; }
-      value=$(op read "$ref" 2>/dev/null) || { echo "error: op read failed for the configured reference" >&2; return 1; }
+    op://*)
+      command -v op >/dev/null 2>&1 || { echo "error: oauth-token-source uses op:// but the op CLI is not on PATH" >&2; return 1; }
+      value=$(op read "$src" 2>/dev/null) || { echo "error: op read failed for the configured reference" >&2; return 1; }
       ;;
     *)
       if [ ! -f "$src" ]; then

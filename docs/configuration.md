@@ -213,7 +213,7 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 firstmate-launched agents rely on `CLAUDE_CODE_OAUTH_TOKEN` being present in the environment.
 A token set only in the current login shell is lost on reboot, so agents fail until it is manually re-exported.
-The durable mechanism is a per-user LaunchAgent that runs `launchctl setenv CLAUDE_CODE_OAUTH_TOKEN <value>` at every login, reading the token from a gitignored secure source (a `0600` file, a `config/oauth-token-source` `cmd:`/`op:` reference, or `FM_OAUTH_TOKEN_FILE`).
+The durable mechanism is a per-user LaunchAgent that runs `launchctl setenv CLAUDE_CODE_OAUTH_TOKEN <value>` at every login, reading the token from a gitignored secure source (a `0600` file, a `config/oauth-token-source` `cmd:`/`op://` reference, or `FM_OAUTH_TOKEN_FILE`).
 The committed plist template references the helper by placeholder and never holds the token.
 Install it with `bin/fm-oauth-token-install.sh --install`; rotate by updating the secure source and re-running `--install` or `bin/fm-oauth-token-load.sh --setenv`.
 Full setup, rotation, security notes, and the LaunchAgent-versus-env-passthrough design choice are in [`docs/oauth-token.md`](oauth-token.md).

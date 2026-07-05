@@ -69,7 +69,7 @@ Its first non-comment line is one of:
 
 - A literal path to a token file (e.g. `/Users/you/.secure/claude-token`).
 - `cmd:<shell command>` whose stdout is the token, run via `sh -c`.
-- `op:<1Password item reference>` resolved with `op read <reference>` (requires the 1Password CLI).
+- `op://<1Password item reference>` resolved with `op read` (requires the 1Password CLI).
 
 Examples:
 
