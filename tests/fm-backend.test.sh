@@ -764,6 +764,83 @@ test_spawn_conformance_old_vs_new() {
   pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new for a ship-task claude spawn"
 }
 
+# --- symlinked project prefix must not false-refuse the isolation guard -----
+#
+# docs/herdr-backend.md "Known gaps": a real backend's pane_current_path read
+# (tmux, herdr) reports the OS-level PHYSICALLY-resolved cwd. When the project
+# itself lives under a symlinked prefix (e.g. macOS's /tmp -> /private/tmp),
+# fm-spawn.sh's PROJ_ABS - a logical `cd && pwd` - differs string-for-string
+# from that physical read even before treehouse moves the pane at all, so the
+# worktree-discovery poll used to mistake an UNMOVED pane for one that had
+# already left the project, handing validate_spawn_worktree the project's own
+# directory as "the worktree" and tripping its false isolation refusal.
+# make_spawn_symlink_fakebin's tmux stub returns the PHYSICAL project path on
+# the first pane_current_path poll (reproducing that unmoved-but-resolved
+# read), then the real worktree path from the second poll onward (reproducing
+# treehouse actually moving the pane), so this test fails loudly if the
+# PROJ_ABS/PROJ_ABS_REAL canonicalization in bin/fm-spawn.sh ever regresses.
+make_spawn_symlink_fakebin() {  # <dir> <physical-proj-path> <worktree-path> -> echoes fakebin dir
+  local dir=$1 proj_phys=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
+  mkdir -p "$fb"
+  : > "$counter"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      printf x >> "$counter"
+      if [ "\$(wc -c < "$counter")" -le 1 ]; then
+        printf '%s\\n' "$proj_phys"
+      else
+        printf '%s\\n' "$wt"
+      fi
+      exit 0
+    ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+test_spawn_symlinked_project_prefix_avoids_false_refusal() {
+  local real_root link_root proj wt id fb data state config log out rc proj_phys
+  real_root="$TMP_ROOT/symlink-real"; link_root="$TMP_ROOT/symlink-link"
+  mkdir -p "$real_root"
+  ln -s "$real_root" "$link_root"
+  proj="$link_root/proj"
+  wt="$TMP_ROOT/symlink-wt"
+  id="spawnsymlink1"
+  fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
+  # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
+  # /var -> /private/var), so resolve the fakebin's "physical" reply with
+  # pwd -P rather than string concatenation - it must match exactly what
+  # fm-spawn.sh's own PROJ_ABS_REAL computes, including any symlink layers
+  # ABOVE this test's own synthetic real_root/link_root pair.
+  proj_phys=$(cd "$real_root/proj" && pwd -P)
+  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake" "$proj_phys" "$wt")
+  data="$TMP_ROOT/symlink-data"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/symlink-state"; config="$TMP_ROOT/symlink-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/symlink-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree (isolation-guard false-refusal regression)"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
@@ -964,6 +1041,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_conformance_old_vs_new
+test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_unknown_fm_backend_env

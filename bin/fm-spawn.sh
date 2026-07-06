@@ -627,6 +627,18 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
+# /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
+# Every backend's own current-path read (tmux's pane_current_path, herdr's
+# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
+# report the OS-level, physically-resolved cwd, so comparing it against a
+# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
+# below never notices the pane left the project) or false-positive (the
+# isolation guard refuses a spawn that never actually tangled). Canonicalize
+# once here so every downstream comparison uses the same physical form
+# (docs/herdr-backend.md "Known gaps").
+PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -641,10 +653,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
   fi
-  proj_real=
-  if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
-    proj_real=
-  fi
+  proj_real=$PROJ_ABS_REAL
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
@@ -789,9 +798,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$T" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
+  # prefix would otherwise make the pane's OS-level cwd read differ from
+  # PROJ_ABS on the very first poll, before the pane has actually moved.
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
+    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS_REAL" ]; then
       WT="$p"
       break
     fi
