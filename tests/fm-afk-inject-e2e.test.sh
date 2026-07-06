@@ -96,6 +96,10 @@ _buf=
 redraw() {
   printf '\r\033[K%s' "$_buf"
 }
+# Readiness marker: the test polls for this file before typing anything,
+# because the pane's shell can take seconds to start under load and any
+# earlier keystrokes would land in the shell's line editor, not this loop.
+: > "$LOG.ready"
 submit_line() {
   local _line=$_buf _c _hex
   if [ "${_line:0:1}" = "$MARK" ]; then
@@ -125,10 +129,19 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-# Start the loop in the supervisor pane.
+# Start the loop in the supervisor pane. The pane's shell can take seconds to
+# become interactive under load (cf. the tmux smoke deflake), so wait for the
+# loop's ready marker instead of trusting a fixed sleep - keystrokes sent
+# before the loop is live are eaten by the shell's line editor.
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
   "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
-sleep 1  # let the loop start and settle
+loop_ready=0
+for _ in $(seq 1 150); do
+  if [ -f "$LOG_FILE.ready" ]; then loop_ready=1; break; fi
+  sleep 0.2
+done
+[ "$loop_ready" -eq 1 ] || fail "supervisor loop never became ready (no $LOG_FILE.ready after 30s)"
+sleep 0.3  # let the loop settle on its first redraw
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
 # the first Enter (file-based flag) for Scenario B.
