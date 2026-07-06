@@ -32,7 +32,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir>]" >&2
+  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
