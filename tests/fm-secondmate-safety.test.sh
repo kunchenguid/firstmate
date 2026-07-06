@@ -1151,6 +1151,91 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
+  local home subhome childproj childwt fakebin log err rc lock
+  home="$TMP_ROOT/force-lock-home"
+  subhome="$TMP_ROOT/force-lock-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-lock-child-worktree"
+  err="$TMP_ROOT/force-lock-child.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" force-child-lock
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-lock-child-fake")
+  log="$TMP_ROOT/force-lock-child-fake/tmux.log"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+case "${1:-}" in
+  return)
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    lock=$(git -C "$target" rev-parse --git-path index.lock 2>/dev/null || true)
+    if [ -n "$lock" ] && [ -e "$lock" ]; then
+      echo "fatal: Unable to create '$lock': File exists." >&2
+      exit 128
+    fi
+    [ -n "$target" ] && rm -rf -- "$target"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/lsof"
+  lock=$(git -C "$childwt" rev-parse --git-path index.lock)
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
+    FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "force teardown succeeded after child treehouse refused an unproven lock"
+  [ -d "$childwt" ] || fail "force teardown raw-removed child worktree after unproven lock refusal"
+  [ -e "$lock" ] || fail "force teardown removed unproven child index.lock"
+  [ -d "$subhome" ] || fail "force teardown removed subhome after child lock refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after child lock refusal"
+  grep -F 'not provably stale' "$err" >/dev/null || fail "force teardown did not explain unproven child lock refusal"
+  pass "secondmate force teardown preserves child worktree after unproven lock refusal"
+}
+
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data state config projects; do
@@ -1763,6 +1848,7 @@ test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home

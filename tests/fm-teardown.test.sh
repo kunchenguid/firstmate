@@ -313,6 +313,16 @@ SH
   chmod +x "$case_dir/fakebin/lsof"
 }
 
+add_lsof_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+echo "lsof: simulated failure for ${1:-unknown}" >&2
+exit 2
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -773,6 +783,39 @@ test_live_index_lock_is_never_removed_and_teardown_refuses() {
   pass "live-held worktree index.lock is never removed and teardown refuses"
 }
 
+test_lsof_error_never_clears_index_lock() {
+  local case_dir rc lock
+  case_dir=$(make_case lsof-error-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_error "$case_dir"
+
+  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lsof-error-index-lock: teardown should refuse when lsof errors"
+  assert_grep "lsof check failed" "$case_dir/stderr" \
+    "lsof-error-index-lock: teardown did not report the lsof failure"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "lsof-error-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "lsof-error-index-lock: teardown removed a lock after lsof failed"
+  [ -e "$lock" ] || fail "lsof-error-index-lock: lock file was removed after lsof failed"
+  pass "lsof errors leave worktree index.lock in place and refuse teardown"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -810,3 +853,4 @@ test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
+test_lsof_error_never_clears_index_lock

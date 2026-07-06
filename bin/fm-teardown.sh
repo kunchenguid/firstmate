@@ -387,6 +387,7 @@ canonical_existing_dir() {
 
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-2}
+TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
@@ -396,17 +397,45 @@ worktree_git_lock_path() {
   git -C "$dir" rev-parse --git-path index.lock 2>/dev/null
 }
 
+lsof_path_has_holder() {
+  local target=$1 output status
+  if output=$(lsof -- "$target" 2>&1); then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+    return 1
+  fi
+  if [ -n "$output" ]; then
+    printf '%s\n' "$output" | sed 's/^/teardown: lsof check failed: /' >&2
+  else
+    echo "teardown: lsof check failed for $target with exit $status" >&2
+  fi
+  return 2
+}
+
 # Does any live process hold $lock open, or hold the worktree $dir itself open
 # (as cwd or an fd)? See the script header for why this proves liveness. A
 # missing lsof is treated as "cannot prove no holder" (fail safe: assume live).
 worktree_lock_has_live_holder() {
-  local lock=$1 dir=$2
+  local lock=$1 dir=$2 status
   command -v lsof >/dev/null 2>&1 || return 0
-  if [ -n "$lock" ] && lsof -- "$lock" >/dev/null 2>&1; then
-    return 0
+  if [ -n "$lock" ]; then
+    if lsof_path_has_holder "$lock"; then
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 0
+    fi
   fi
-  if [ -n "$dir" ] && lsof -- "$dir" >/dev/null 2>&1; then
-    return 0
+  if [ -n "$dir" ]; then
+    if lsof_path_has_holder "$dir"; then
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 0
+    fi
   fi
   return 1
 }
@@ -446,18 +475,23 @@ teardown_treehouse_return() {
     return 0
   fi
 
-  if [ -e "$lock" ] && worktree_lock_is_provably_stale "$lock" "$dir"; then
-    rm -f "$lock"
-    echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
-    if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
-      echo "teardown: $label return succeeded after stale-lock cleanup" >&2
-      return 0
+  if [ -e "$lock" ]; then
+    if worktree_lock_is_provably_stale "$lock" "$dir"; then
+      rm -f "$lock"
+      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
+      if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        return 0
+      fi
+      echo "teardown: $label return still failing after stale-lock cleanup" >&2
+      return 1
     fi
-    echo "teardown: $label return still failing after stale-lock cleanup" >&2
-    return 1
+
+    echo "teardown: $label return failed and git lock $lock is not provably stale (may belong to a live process); leaving it in place" >&2
+    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
   fi
 
-  echo "teardown: $label return failed and git lock $lock is not provably stale (may belong to a live process); leaving it in place" >&2
+  echo "teardown: $label return still failing after git lock $lock disappeared" >&2
   return 1
 }
 
@@ -699,7 +733,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -747,7 +781,15 @@ cleanup_firstmate_home_children() {
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+          :
+        else
+          child_return_rc=$?
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        fi
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
