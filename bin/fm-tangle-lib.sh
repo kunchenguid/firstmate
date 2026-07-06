@@ -35,6 +35,35 @@ fm_default_branch() {
   return 1
 }
 
+# Canonical absolute git common dir of the repo at <dir>, or return 1 if <dir>
+# is not a git work tree. The common dir is shared by a repo and all its linked
+# worktrees, so two checkouts of one repo resolve to the same value.
+fm__common_dir_abs() {
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) : ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P) || return 1
+}
+
+# True (return 0) if the git checkout at <dir> belongs to the SAME repository as
+# the firstmate repo <root> (default FM_ROOT) - i.e. <dir> is the firstmate repo
+# itself or one of its linked worktrees, sharing one object store. Used to
+# recognize firstmate-on-itself ship tasks (fm-downstream.sh, fm-project-mode.sh,
+# fm-spawn.sh, the PR seams) so a downstream instance defaults its own changes to
+# local-only. Returns 1 if <dir> is not a git work tree or the repos differ.
+fm_is_firstmate_repo() {
+  local dir=$1 root=${2:-${FM_ROOT:-}} a b
+  [ -n "$dir" ] || return 1
+  [ -n "$root" ] || return 1
+  a=$(fm__common_dir_abs "$dir") || return 1
+  b=$(fm__common_dir_abs "$root") || return 1
+  [ "$a" = "$b" ]
+}
+
 # If the git checkout at <root> is tangled - on a NAMED branch that is not its
 # default branch - echo the offending branch name and return 0. For every healthy
 # state (not a git work tree, detached HEAD, or already on the default branch)

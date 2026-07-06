@@ -92,6 +92,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -946,6 +948,15 @@ if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+elif fm_is_firstmate_repo "$PROJ_ABS"; then
+  # firstmate-on-itself ship/scout task: resolve the effective mode through the
+  # downstream guard, so a downstream instance's own changes default to
+  # local-only instead of the no-mistakes-then-upstream-PR path a project
+  # unknown to the registry would otherwise get (bin/fm-downstream.sh; AGENTS.md
+  # section 12).
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" --firstmate-self)
+EOF
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF

@@ -38,6 +38,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META; refusing to merge without recording pr=" >&2; exit 1; }
+# shellcheck source=bin/fm-downstream.sh
+. "$SCRIPT_DIR/fm-downstream.sh"
+# Never merge a firstmate self-change PR on a downstream instance (it would only
+# exist by accident) unless the captain opted into contributing upstream. Fires
+# before fm-pr-check below, so a blocked merge records nothing and prints one
+# message. See bin/fm-downstream.sh and AGENTS.md section 12.
+fm_block_firstmate_upstream "$META" "merge a PR" || exit 1
 
 caller_has_merge_method() {
   local arg

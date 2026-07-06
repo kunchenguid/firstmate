@@ -10,11 +10,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-downstream.sh
+. "$SCRIPT_DIR/fm-downstream.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 
 META="$STATE/$ID.meta"
+# Never arm a merge poll for a firstmate self-change PR on a downstream instance
+# (it would only exist by accident) unless the captain opted into contributing
+# upstream. See bin/fm-downstream.sh and AGENTS.md section 12.
+fm_block_firstmate_upstream "$META" "arm a merge poll" || exit 1
 if [ -f "$META" ]; then
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   PR_HEAD=

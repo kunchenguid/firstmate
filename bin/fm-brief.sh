@@ -6,8 +6,14 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--firstmate-self]
 #        fm-brief.sh <task-id> --secondmate <project>...
+#   --firstmate-self marks a firstmate-on-itself ship task: the effective
+#   delivery mode is resolved through the downstream guard (bin/fm-downstream.sh),
+#   so a downstream instance's own change ships local-only and the brief tells the
+#   crewmate this is a self-change that never auto-PRs upstream. Firstmate passes
+#   this by hand for firstmate-repo briefs, since the caller-supplied repo name
+#   carries no reliable signal that it names firstmate's own repo.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -39,11 +45,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
+FIRSTMATE_SELF=0
 POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --firstmate-self) FIRSTMATE_SELF=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -167,9 +175,17 @@ fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
-read -r MODE _ <<EOF
+# A firstmate-on-itself task resolves through the downstream guard instead of the
+# registry, so a downstream instance's own change ships local-only (AGENTS.md section 12).
+if [ "$FIRSTMATE_SELF" = 1 ]; then
+  read -r MODE _ <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" --firstmate-self)
+EOF
+else
+  read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+fi
 
 case "$MODE" in
   direct-PR)
@@ -221,6 +237,16 @@ EOF
 )
     ;;
 esac
+
+# For a firstmate-on-itself change on a downstream instance the mode above resolved
+# to local-only; explain WHY so the crewmate never tries to push or PR upstream.
+if [ "$FIRSTMATE_SELF" = 1 ] && [ "$MODE" = local-only ]; then
+  DOD="$DOD
+
+This is a firstmate **self-change** on the shared template this instance was cloned from and does not own.
+That is why it ships local-only: firstmate never auto-pushes or auto-PRs its own changes to the upstream template.
+Contributing this change upstream is a separate, deliberate step the captain opts into explicitly; it is never the default here."
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

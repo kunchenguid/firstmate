@@ -18,7 +18,13 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh <project-name>
+#
+# Special project "--firstmate-self": resolve the effective delivery mode for a
+# firstmate-on-itself change. A downstream instance (running a clone of the shared
+# template it does not own) ships its own changes local-only by default so they
+# never auto-PR to the upstream template; an owner/maintainer instance keeps the
+# default no-mistakes pipeline. See bin/fm-downstream.sh and AGENTS.md section 12.
+# Usage: fm-project-mode.sh <project-name>|--firstmate-self
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +32,19 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
-NAME=${1:?usage: fm-project-mode.sh <project-name>}
+NAME=${1:?usage: fm-project-mode.sh <project-name>|--firstmate-self}
+
+if [ "$NAME" = "--firstmate-self" ]; then
+  # shellcheck source=bin/fm-downstream.sh
+  . "$SCRIPT_DIR/fm-downstream.sh"
+  self_status=$(fm_downstream_status "$FM_ROOT" || true)
+  if [ "$self_status" = owner ]; then
+    echo "no-mistakes off"
+  else
+    echo "local-only off"
+  fi
+  exit 0
+fi
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2

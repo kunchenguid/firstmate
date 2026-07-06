@@ -52,6 +52,7 @@ This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+That pipeline-and-PR path is the maintainer path; a downstream instance running a clone of the shared template it does not own must default its own changes to local-only and never auto-PR them to the upstream template (section 12).
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -846,6 +847,16 @@ firstmate is its own repo behind the no-mistakes gate, so improvements to `AGENT
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is tracked for installers and is not loaded by firstmate.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs only fast-forward self-updates of firstmate and registered secondmate homes, re-reads `AGENTS.md` when needed, nudges updated live secondmates, and never touches anything under `projects/`.
+
+### Downstream instances and self-changes
+
+The firstmate repo is a public template most users clone to *run* firstmate, not to maintain it.
+Such a downstream instance has `origin` pointing at the upstream template it does not own, so firstmate-on-itself changes must never auto-push or auto-PR to `origin` - otherwise the shared repo fills with instance PRs that were never meant as contributions.
+`bin/fm-downstream.sh` decides this from live git/gh identity: origin's GitHub owner versus the authenticated login (a fork you own resolves to owner; unresolvable identity degrades to downstream, the safe default).
+When downstream, a firstmate self-change's effective delivery mode is `local-only`: the crewmate commits on its `fm/<id>` branch, firstmate reviews the diff locally, and the captain decides where it lands - no remote, no PR.
+This resolves automatically wherever the firstmate repo is the task's project: `bin/fm-project-mode.sh --firstmate-self` (used by `bin/fm-spawn.sh`, and by `bin/fm-brief.sh --firstmate-self` for the brief's definition of done), with `bin/fm-pr-check.sh` and `bin/fm-pr-merge.sh` hard-refusing a firstmate self-change PR as the backstop.
+Contributing a self-change upstream is a deliberate, explicit opt-in, never the default: set `FM_CONTRIBUTE=1` to push to your own fork and open the PR yourself.
+An owner/maintainer instance keeps the full no-mistakes pipeline-and-PR path unchanged.
 
 ## 13. Agent-only reference skills
 
