@@ -44,6 +44,8 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+          *cmd*) echo cmd; return ;;
+      *cmd*) echo cmd; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +55,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *cmd*) echo cmd; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

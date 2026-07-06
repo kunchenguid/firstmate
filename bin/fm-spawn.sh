@@ -267,7 +267,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cmd)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -328,6 +328,7 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    cmd) printf '%s' 'CMD_ZDR=1 cmd --yolo --skip-onboarding -m deepseek-v4-pro "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -415,7 +416,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cmd)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
