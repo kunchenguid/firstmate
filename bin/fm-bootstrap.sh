@@ -419,6 +419,14 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+# FM_PROJECTS_OVERRIDE drift: when the override points outside FM_HOME, surface it
+# so the operator knows why projects/ clones land in an unexpected directory.
+if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
+  case "$FM_PROJECTS_OVERRIDE" in
+    "$FM_HOME"|"$FM_HOME/"*) ;;
+    *) echo "NOTICE: FM_PROJECTS_OVERRIDE=$FM_PROJECTS_OVERRIDE (outside FM_HOME=$FM_HOME); project clones go to \$FM_PROJECTS_OVERRIDE, not \$FM_HOME/projects" ;;
+  esac
+fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

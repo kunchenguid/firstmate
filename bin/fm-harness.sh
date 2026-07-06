@@ -29,12 +29,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
+  [ "${CLAUDECODE:-}" = "1" ] && command -v claude >/dev/null 2>&1 && { echo claude; return; }
+  [ "${PI_CODING_AGENT:-}" = "true" ] && command -v pi >/dev/null 2>&1 && { echo pi; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  [ "${GROK_AGENT:-}" = "1" ] && command -v grok >/dev/null 2>&1 && { echo grok; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do

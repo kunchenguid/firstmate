@@ -270,6 +270,8 @@ fm_backend_name() {
     printf '%s' "$detected"
     return 0
   fi
+  # Hard default: tmux. Warn if it's not installed — most users want it.
+  command -v tmux >/dev/null 2>&1 || echo "NOTICE: default backend is tmux but tmux is not installed; spawns will fail unless another backend is selected. Install with 'brew install tmux' or set config/backend." >&2
   printf 'tmux'
 }
 
@@ -286,10 +288,28 @@ fm_backend_validate() {  # <name>
 fm_backend_validate_spawn() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
-  fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
-  echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
-  return 1
+  fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" || {
+    echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
+    return 1
+  }
+  return 0
 }
+
+# fm_backend_require_binary: refuse if the backend binary is not on PATH.
+# cmux is excluded: its CLI lives at a well-known bundle path resolved internally.
+fm_backend_require_binary() {  # <name>
+  local name=$1
+  case "$name" in
+    tmux|herdr|zellij|orca)
+      command -v "$name" >/dev/null 2>&1 || {
+        echo "error: backend '$name' selected but '$name' binary not found on PATH" >&2
+        return 1
+      }
+      ;;
+  esac
+  return 0
+}
+
 
 # fm_meta_get: the LAST value of `key=` in <meta-file>, or empty (never
 # errors) if the file or key is absent. Mirrors the ad hoc `grep '^key=' |

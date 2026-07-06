@@ -158,6 +158,7 @@ else
   BACKEND=$(fm_backend_name)
 fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
+fm_backend_require_binary "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=orca does not support --secondmate spawns yet" >&2
