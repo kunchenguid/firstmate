@@ -52,7 +52,7 @@ async def telegram_webhook(request: Request):
 
     # Wake firstmate immediately via wake queue
     epoch = int(time.time())
-    wake_line = f"{epoch}\t0\ttg\t{update_id}\t{text[:80]}\n"
+    wake_line = f"{epoch}\t0\tcheck\t{update_id}\t{text[:80]}\n"
     with open(WAKE_QUEUE, "a") as f:
         f.write(wake_line)
 
