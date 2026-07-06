@@ -153,12 +153,14 @@ TEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-reply-text.XXXXXX") || exit 1
 printf '%s' "$TEXT" > "$TEXT_FILE" || { rm -f "$TEXT_FILE"; exit 1; }
 
 if [ -n "$KEYBOARD_FILE" ] && [ -f "$KEYBOARD_FILE" ]; then
+  fmtg_send_chat_action "$CHAT_ID" typing || true
   if ! response=$(fmtg_send_message_with_keyboard "$CHAT_ID" "$TEXT_FILE" "$KEYBOARD_FILE"); then
     rm -f "$TEXT_FILE"
     echo "fm-tg-reply: failed to send message with keyboard" >&2
     exit 1
   fi
 else
+  fmtg_send_chat_action "$CHAT_ID" typing || true
   if ! response=$(fmtg_send_message "$CHAT_ID" "$TEXT_FILE"); then
     rm -f "$TEXT_FILE"
     echo "fm-tg-reply: failed to send message" >&2

@@ -88,6 +88,26 @@ fmtg_api_call() {
 
 # fmtg_send_message <chat_id> <text-file>: send a text message.
 # On success prints JSON response; on failure exits non-zero.
+# fmtg_send_chat_action <chat_id> <action>: send a chat action (typing, upload_photo, etc.)
+# Shows the typing indicator in Telegram. Dry-run: logs to stderr.
+fmtg_send_chat_action() {
+  local chat_id=$1 action=${2:-typing} payload_file code
+  [ -n "$chat_id" ] || return 2
+  if [ "${FMTG_DRY_RUN:-}" = 1 ]; then
+    echo "fm-tg-lib: [dry-run] sendChatAction $action for chat $chat_id" >&2
+    return 0
+  fi
+  payload_file=$(mktemp "${TMPDIR:-/tmp}/fm-tg-ca.XXXXXX") || return 1
+  jq -cn --arg chat_id "$chat_id" --arg action "$action" \
+    '{chat_id:$chat_id,action:$action}' > "$payload_file" || { rm -f "$payload_file"; return 1; }
+  FMTG_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-resp.XXXXXX") || { rm -f "$payload_file"; return 1; }
+  code=$(fmtg_api_call sendChatAction "$payload_file")
+  local rc=$?
+  rm -f "$payload_file" "$FMTG_RESPONSE_FILE" 2>/dev/null || true
+  [ "$rc" -eq 0 ] && case "$code" in 2[0-9][0-9]) return 0 ;; esac
+  return 1
+}
+
 fmtg_send_message() {
   local chat_id=$1 text_file=$2 payload_file code text_escaped
   [ -n "$chat_id" ] || return 2
