@@ -23,7 +23,11 @@
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed.
+#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      the active step is ci, `axi status` alone cannot tell "still waiting on
+#      checks" from "checks green, waiting on merge" (see nm_ci_checks_green) -
+#      a ci-step log-tail check overrides working -> done once checks read
+#      green, so a green PR is never silently read as still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -280,6 +284,43 @@ log_reports_ci_ready() {
     *) return 1 ;;
   esac
 }
+
+# Is the run's steps[] table currently sitting on the ci step (running or
+# fixing)? Only meaningful for RUN_SOURCE=full, where $RUN_OUT carries that
+# table; the coarse (runs-list) fallback has no per-step detail to check.
+nm_ci_step_active() {
+  printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*ci,(running|fixing),'
+}
+
+# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
+# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
+# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
+# reports every check green - it only reaches outcome=passed once the PR is
+# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
+# never distinguishes "still waiting on checks" from "checks green, waiting on
+# merge": both read as plain `ci,running,...`. The only place that transition is
+# recorded is the ci step's own log text, e.g. "all CI checks passed - still
+# monitoring until merged or closed" or "no CI checks reported - still
+# monitoring until merged or closed" (verified against 360+ real run logs under
+# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
+# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
+# for the MOST RECENT recognized marker (the log is append-only/chronological,
+# so the last match is current): green with nothing red after it means CI is
+# green right now, still only waiting on merge/close.
+nm_ci_checks_green() {
+  local run_id log_tail marker
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 1
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || return 1
+  [ -n "$log_tail" ] || return 1
+  marker=$(printf '%s\n' "$log_tail" \
+    | grep -E 'CI checks passed|no CI checks reported|checks failed|issues detected|CI checks running' \
+    | tail -1)
+  case "$marker" in
+    *"checks passed"*|*"no CI checks reported"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -425,6 +466,10 @@ if [ "$HAVE_RUN" = 1 ]; then
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
+      if [ "$RUN_STATE" = working ] && nm_ci_step_active && nm_ci_checks_green; then
+        RUN_STATE="done"
+        RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+      fi
     fi
   fi
 

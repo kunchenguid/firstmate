@@ -67,6 +67,8 @@ case "${1:-}" in
         shift
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+      logs)
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
   runs)
@@ -156,8 +158,9 @@ reset_fakes() {
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -395,6 +398,67 @@ test_ci_ready_done_log_beats_monitoring_run() {
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
   pass "ci-ready status log beats monitoring run"
+}
+
+# Regression for the PR #252 incident: the crew's own status log never got a
+# "done: ... checks green" line (log_reports_ci_ready above does not apply),
+# but the ci step's log tail shows CI is actually green and only waiting on
+# merge/close. fm-crew-state must surface this as done, not "validating
+# (running)", so a green PR is never silently absorbed as still-in-progress.
+test_ci_monitoring_checks_green_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-green)
+  make_repo_on_branch "$d/wt" fm/feat-cigreen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cigreen.meta" "window=fm:fm-feat-cigreen" "worktree=$d/wt" "kind=ship"
+  # No status-log line at all: the crew never reported its own checks-green line.
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+CI checks running, waiting for results...
+all CI checks passed - still monitoring until merged or closed
+EOF
+)
+  local out; out=$(run_crew_state "$d" feat-cigreen)
+  assert_contains "$out" "state: done" "green ci-monitor run -> done"
+  assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
+  assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
+  assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
+  pass "ci-monitoring run with checks already green surfaces done"
+}
+
+test_ci_monitoring_still_waiting_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-waiting)
+  make_repo_on_branch "$d/wt" fm/feat-ciwait
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciwait.meta" "window=fm:fm-feat-ciwait" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciwait)"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  local out; out=$(run_crew_state "$d" feat-ciwait)
+  assert_contains "$out" "state: working" "ci step still red -> working"
+  assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
+  pass "ci-monitoring run with checks not yet green stays working"
+}
+
+# A later merge-conflict auto-fix round after an earlier green reading must
+# not be masked: the MOST RECENT marker in the log tail wins.
+test_ci_monitoring_green_then_new_issue_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-green-then-issue)
+  make_repo_on_branch "$d/wt" fm/feat-cirelapse
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cirelapse.meta" "window=fm:fm-feat-cirelapse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirelapse)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced, re-arming CI monitor timeout
+issues detected: merge conflict - auto-fixing (attempt 2/10)...
+EOF
+)
+  local out; out=$(run_crew_state "$d" feat-cirelapse)
+  assert_contains "$out" "state: working" "a later relapse marker must win over an earlier green one"
+  assert_not_contains "$out" "state: done" "relapsed ci run must not read as done"
+  pass "a fresh issue after an earlier green reading is not masked"
 }
 
 # (d) terminal run-step is authoritative
@@ -785,6 +849,9 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_monitoring_checks_green_surfaces_done
+test_ci_monitoring_still_waiting_stays_working
+test_ci_monitoring_green_then_new_issue_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list

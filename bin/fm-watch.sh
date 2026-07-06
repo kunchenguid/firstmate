@@ -19,7 +19,13 @@
 #                          NOT provably working does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces. Unless afk is active.
+#                          wedge threshold also surfaces, with an "escalation N"
+#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          consecutive escalations on the SAME pane, the reason
+#                          also carries a "demand-deep-inspection" marker so the
+#                          wake payload itself, not just repetition, forces a
+#                          closer look instead of another routine re-arm. Unless
+#                          afk is active.
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -237,6 +243,17 @@ wake() {
   exit 0
 }
 
+# Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
+# (default 3): a pane that keeps re-wedging on the SAME stale hash - each
+# escalation gets absorbed again as "still validating" one poll later, since the
+# hash never changes - can otherwise repeat forever with no signal that this is
+# no longer a one-off. At the threshold, wedge_timer_check appends a
+# "demand-deep-inspection" marker to the wake payload so the wake reason itself
+# (not just repetition the supervisor has to notice on its own) forces a closer
+# look instead of another routine re-arm. Reset wherever a window's pane/hash
+# state resets to genuinely active (see the two rm-on-reset call sites below).
+FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -245,8 +262,8 @@ wake() {
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label>
-  local win=$1 since_file=$2 label=$3 since age
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -256,9 +273,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label>
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        fm_wake_append stale "$win" "stale: $win (idle ${age}s, possible wedge)" || exit 1
+        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$escalation_file"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+        fi
+        fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
-        wake "stale: $win (idle ${age}s, possible wedge)"
+        wake "$reason"
       fi
       ;;
   esac
@@ -467,6 +490,7 @@ EOF
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
+    ewf="$STATE/.wedge-escalations-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -517,7 +541,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -546,19 +570,20 @@ EOF
               wake "stale: $w"
             fi
           else
-            wedge_timer_check "$w" "$ssf" "non-terminal stale"
+            wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
           fi
         fi
       else
         # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # stale escalation timer.
-        rm -f "$ssf"
+        # stale escalation timer and the consecutive wedge-escalation count.
+        rm -f "$ssf" "$ewf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation timer.
-      rm -f "$ssf"
+      # Pane content changed: the crew is active again, so reset the escalation
+      # timer and the consecutive wedge-escalation count.
+      rm -f "$ssf" "$ewf"
     fi
   done < <(recorded_windows)
 
