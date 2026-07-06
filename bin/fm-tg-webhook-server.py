@@ -32,31 +32,44 @@ def handle_simple(text: str) -> str | None:
     """Handle trivial questions locally. Returns answer or None if complex."""
     lower = text.lower().strip()
     
-    # Math
+    # Common patterns
+    if "squared" in lower or "^2" in lower:
+        try:
+            num = int("".join(c for c in lower.replace("squared", "").replace("^2", "").strip() if c.isdigit() or c == "-"))
+            return str(num * num)
+        except: pass
+    
+    if "cubed" in lower or "^3" in lower:
+        try:
+            num = int("".join(c for c in lower.replace("cubed", "").replace("^3", "").strip() if c.isdigit() or c == "-"))
+            return str(num * num * num)
+        except: pass
+    
+    if "square root" in lower or "sqrt" in lower:
+        import math
+        try:
+            num = int("".join(c for c in lower.replace("square root", "").replace("sqrt", "").strip() if c.isdigit() or c == "-"))
+            return str(int(math.sqrt(num)))
+        except: pass
+    
+    # General math
     if all(c in "0123456789+-*/.= x()?" for c in lower.replace(" ", "")) and any(c in lower for c in "+-*/"):
         expr = lower.rstrip("?").replace("x", "*").replace("=", "").strip()
         try:
-            # Handle "a + 2 = 4, a =" style
             if "=" in expr:
                 parts = expr.split(",")[0].split("=")
                 if len(parts) == 2:
                     left = parts[0].strip()
                     right = parts[1].strip()
-                    # Solve: left contains variable, right is value
-                    # e.g. "a+2" = "4" → extract operation
                     if "+" in left:
                         const = int(left.split("+")[-1].strip())
-                        result = int(right) - const
-                        return str(result)
+                        return str(int(right) - const)
                     if "-" in left:
                         const = int(left.split("-")[-1].strip())
-                        result = int(right) + const
-                        return str(result)
+                        return str(int(right) + const)
                     if "*" in left:
                         const = int(left.split("*")[-1].strip())
-                        result = int(right) // const
-                        return str(result)
-            # Simple arithmetic
+                        return str(int(right) // const)
             result = eval(expr.replace(" ", ""))
             return str(int(result))
         except Exception:
