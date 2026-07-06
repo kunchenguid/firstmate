@@ -426,6 +426,40 @@ EOF
   pass "ci-monitoring run with checks already green surfaces done"
 }
 
+test_ci_monitoring_no_checks_terminal_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecks
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecks.meta" "window=fm:fm-feat-cinochecks" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cinochecks)
+  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
+  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
+  pass "terminal no-checks ci-monitor marker surfaces done"
+}
+
+test_ci_monitoring_no_checks_yet_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-yet)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecksyet
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecksyet.meta" "window=fm:fm-feat-cinochecksyet" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksyet)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+no CI checks reported - still monitoring until merged or closed
+base branch advanced, re-arming CI monitor timeout
+no CI checks reported yet, waiting for checks to register...
+EOF
+)
+  local out; out=$(run_crew_state "$d" feat-cinochecksyet)
+  assert_contains "$out" "state: working" "pending no-checks marker -> working"
+  assert_not_contains "$out" "state: done" "pending no-checks marker must not read as done"
+  assert_not_contains "$out" "checks green" "pending no-checks marker must not read as checks green"
+  pass "pending no-checks ci-monitor marker stays working"
+}
+
 test_ci_monitoring_still_waiting_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-waiting)
@@ -850,6 +884,8 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
 test_terminal_passed

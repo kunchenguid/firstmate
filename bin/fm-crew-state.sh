@@ -314,10 +314,10 @@ nm_ci_checks_green() {
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || return 1
   [ -n "$log_tail" ] || return 1
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported|checks failed|issues detected|CI checks running' \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported"*) return 0 ;;
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) return 0 ;;
     *) return 1 ;;
   esac
 }
