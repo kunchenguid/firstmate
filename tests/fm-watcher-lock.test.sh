@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-watcher-lock.test.sh - watcher singleton + lock-primitive races +
-# watch-arm liveness + guard warnings. These are safety-critical concurrency
-# invariants (a race bug may not reproduce through an e2e), so they stay as
-# focused real-process units.
+# PID identity stability + watch-arm liveness + guard warnings. These are
+# safety-critical process invariants (a race bug may not reproduce through an
+# e2e), so they stay as focused real-process units.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
