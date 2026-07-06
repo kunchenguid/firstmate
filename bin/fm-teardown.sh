@@ -395,9 +395,17 @@ TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
-  local dir=$1
+  local dir=$1 lock abs_dir
   [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  git -C "$dir" rev-parse --git-path index.lock 2>/dev/null
+  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(canonical_existing_dir "$dir") || return 1
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
 }
 
 lsof_path_has_holder() {
@@ -443,13 +451,25 @@ worktree_lock_has_live_holder() {
   return 1
 }
 
+worktree_lock_age() {
+  local lock=$1 m now
+  m=$(fm_path_mtime "$lock") || return 1
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$(( now - m ))"
+}
+
 # Is $lock provably stale per the header's staleness proof? Returns non-zero
 # (never remove) unless the lock exists, has no live holder, and is old enough.
 worktree_lock_is_provably_stale() {
   local lock=$1 dir=$2 age
   [ -n "$lock" ] && [ -e "$lock" ] || return 1
   worktree_lock_has_live_holder "$lock" "$dir" && return 1
-  age=$(fm_path_age "$lock") || return 1
+  if ! age=$(worktree_lock_age "$lock"); then
+    echo "teardown: cannot read mtime for git lock $lock; leaving it in place" >&2
+    return 1
+  fi
   [ "$age" -ge "$STALE_WORKTREE_LOCK_AGE_SECS" ]
 }
 

@@ -282,7 +282,11 @@ if [ "${1:-}" = return ]; then
       *) wt=$a ;;
     esac
   done
-  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null)
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     echo "fatal: Unable to create '$lock': File exists." >&2
     exit 128
@@ -292,6 +296,18 @@ fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
+}
+
+git_index_lock_path() {
+  local dir=$1 lock abs_dir
+  lock=$(git -C "$dir" rev-parse --git-path index.lock)
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(cd "$dir" && pwd -P)
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
 }
 
 # fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
@@ -326,6 +342,16 @@ SH
   chmod +x "$case_dir/fakebin/lsof"
 }
 
+add_stat_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+echo "stat: simulated failure" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/stat"
+}
+
 add_git_status_lock_failure() {
   local case_dir=$1
   cat > "$case_dir/fakebin/git" <<'SH'
@@ -348,6 +374,10 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$dir/$lock" ;;
+  esac
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     echo "fatal: Unable to create '$lock': File exists." >&2
     exit 128
@@ -768,7 +798,7 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   add_lock_aware_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
 
-  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
@@ -797,7 +827,7 @@ test_live_index_lock_is_never_removed_and_teardown_refuses() {
   add_lock_aware_treehouse "$case_dir"
   add_lsof_live_holder "$case_dir"
 
-  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   # Even an old mtime must not be enough on its own: a live holder always wins.
@@ -829,7 +859,7 @@ test_lsof_error_never_clears_index_lock() {
   add_lock_aware_treehouse "$case_dir"
   add_lsof_error "$case_dir"
 
-  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
@@ -864,7 +894,7 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   add_lsof_no_holder "$case_dir"
   add_git_status_lock_failure "$case_dir"
 
-  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
@@ -883,6 +913,72 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
   pass "stale lock cleanup rechecks and refuses dirty worktree before return"
+}
+
+test_non_linked_index_lock_path_is_checked_from_worktree() {
+  local case_dir rc lock
+  case_dir=$(make_case non-linked-index-lock)
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git clone -q "$case_dir/origin.git" "$case_dir/wt"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable normal clone work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "non-linked-index-lock: teardown should clear a normal repo index.lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "non-linked-index-lock: teardown did not report clearing the stale lock"
+  assert_absent "$lock" "non-linked-index-lock: stale lock file should have been removed"
+  pass "normal repo index.lock is resolved from the worktree and cleared when stale"
+}
+
+test_index_lock_mtime_read_failure_refuses() {
+  local case_dir rc lock
+  case_dir=$(make_case mtime-error-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_stat_error "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "mtime-error-index-lock: teardown should refuse when lock mtime cannot be read"
+  assert_grep "cannot read mtime for git lock" "$case_dir/stderr" \
+    "mtime-error-index-lock: teardown did not report the mtime read failure"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "mtime-error-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "mtime-error-index-lock: teardown removed a lock after mtime read failed"
+  [ -e "$lock" ] || fail "mtime-error-index-lock: lock file was removed after mtime read failed"
+  pass "lock mtime read failures leave worktree index.lock in place and refuse teardown"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -924,3 +1020,5 @@ test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
+test_non_linked_index_lock_path_is_checked_from_worktree
+test_index_lock_mtime_read_failure_refuses
