@@ -449,8 +449,8 @@ test_backend_validate_refuses_unknown() {
   # and cmux are all known adapters and spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
-  out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app until a supported shell bridge exists"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate accepted codex-app before the bridge contract is satisfied"
+  out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
+  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate accepted codex-app"
   out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
   pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
@@ -490,8 +490,8 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
-  out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app until a supported shell bridge exists"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate_spawn accepted codex-app before the bridge contract is satisfied"
+  out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
+  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate_spawn accepted codex-app"
   out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
@@ -953,9 +953,9 @@ test_spawn_refuses_codex_app_backend_flag() {
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --backend codex-app 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse until a supported shell bridge exists"
+  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
   assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
-  pass "fm-spawn.sh --backend codex-app is refused until a supported shell-callable bridge exists"
+  pass "fm-spawn.sh --backend codex-app is refused"
 }
 
 test_spawn_refuses_unknown_fm_backend_env() {

@@ -1,9 +1,10 @@
 # Codex App backend contract
 
-Status: blocked for Firstmate as a selectable shell backend because Codex Desktop does not currently expose a supported shell-callable API or CLI bridge to the verified host tools.
-The Codex Desktop host-tool loop works, including status-file writes.
+Status: blocked for Firstmate as a selectable shell backend.
+The Codex Desktop host-tool loop works, including status-file writes, but Firstmate does not yet have a supported shell-callable bridge to those host tools.
 
-This document replaces the earlier passive visible-thread ledger shape. A manual ledger is not a backend.
+This document replaces the earlier passive visible-thread ledger shape.
+A manual ledger is not a backend.
 
 ## Backend acceptance contract
 
@@ -19,47 +20,135 @@ The final point is mandatory. If a Desktop-owned thread cannot write Firstmate s
 
 ## Verified Desktop host-tool smoke
 
-Smoke date: 2026-07-03.
+Latest verified host-tool smoke date: 2026-07-06.
+Environment: Codex Desktop host tools, local host, saved project `/Users/vesta/Desktop/Firstmate/projects/sift`, Desktop-owned worktree `/Users/vesta/.codex-home/worktrees/0a70/sift`, Firstmate home `/Users/vesta/Desktop/Firstmate`.
 
-Environment: Codex Desktop, against a local Firstmate checkout on branch `fm/codex-app-real-backend`.
-
-Thread id: `019f2947-f75e-78b2-aebc-f57ef1b5b399`.
-
-Transcript, trimmed to the backend-relevant facts:
+Codex Desktop/OpenAI local bundle metadata from the smoke machine:
 
 ```text
-create_thread:
-  Created Codex Desktop thread 019f2947-f75e-78b2-aebc-f57ef1b5b399.
-  Prompt asked the thread to write:
-    state/codex-app-host-smoke-j3.status
-    data/codex-app-host-smoke-j3/report.md
+$ /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Codex.app/Contents/Info.plist
+26.623.101652
 
-read_thread:
-  Observed the thread while active.
-  Later observed it completed and idle.
-  Transcript included fileChange entries for both files.
+$ /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' /Applications/Codex.app/Contents/Info.plist
+4674
 
-status file after create:
-  working: host thread wrote status
+$ /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Codex.app/Contents/Info.plist
+com.openai.codex
 
-report file:
-  cwd=<Desktop-owned thread worktree>
-  status_file_write=ok
-  sentinel=FM_CODEX_APP_HOST_TOOL_SMOKE_OK
-
-send_message_to_thread:
-  Sent a follow-up asking the same thread to append a completion status.
-
-status file after follow-up:
-  working: host thread wrote status
-  done: follow-up delivered
-
-archive:
-  Archived the thread through the Desktop host archive tool.
-  A later read still returned the transcript and showed the thread not loaded.
+$ stat -f '%Sm %N' -t '%Y-%m-%d %H:%M:%S %z' /Applications/Codex.app/Contents/Info.plist
+2026-07-02 21:55:53 -0400 /Applications/Codex.app/Contents/Info.plist
 ```
 
-Result: a Desktop-owned Codex thread can write Firstmate status files when the prompt gives it the absolute status path and the Desktop permission context can write that checkout. The return channel is real at the Codex Desktop host-tool layer.
+Smoke target files:
+
+```text
+/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+/Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+```
+
+Host-tool operation sequence:
+
+1. `list_projects` confirmed the saved project target.
+2. `create_thread` requested a new Codex Desktop project worktree thread.
+3. `list_threads` recovered the created thread id after queued worktree setup.
+4. `read_thread` observed the active and completed initial turn.
+5. Shell reads verified the status/report files under the Firstmate home.
+6. `send_message_to_thread` delivered a follow-up to the same thread.
+7. `read_thread` observed the completed follow-up turn.
+8. `set_thread_archived` archived the thread.
+9. A final `read_thread` still returned the transcript and showed `status.type=notLoaded`.
+
+Exact host-tool requests and relevant output:
+
+```text
+list_projects:
+  projectId=/Users/vesta/Desktop/Firstmate/projects/sift
+  projectKind=local
+  label=sift
+  path=/Users/vesta/Desktop/Firstmate/projects/sift
+
+create_thread request:
+  target.type=project
+  target.projectId=/Users/vesta/Desktop/Firstmate/projects/sift
+  target.environment.type=worktree
+  prompt smoke_id=codex-app-host-smoke-20260706-live
+  prompt status_file=/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+  prompt report_file=/Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+  prompt required status line: working: Codex Desktop thread started
+  prompt required sentinel: FM_CODEX_APP_HOST_TOOL_SMOKE_20260706_LIVE_OK
+
+create_thread response:
+  pendingWorktreeId=local:a4a96438-a0ed-4305-b83c-5a47336f5abf
+
+list_threads query=codex-app-host-smoke-20260706-live:
+  id=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  hostId=local
+  status=active
+  cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+
+read_thread initial turn while active:
+  thread.id=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  thread.status.type=active
+  cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+  agentMessage: Running the smoke exactly as delegated: repo identity first, then the Firstmate status/report writes, then the requested `sed` checks.
+
+read_thread initial turn after completion:
+  thread.status.type=idle
+  turn.status=completed
+  durationMs=54923
+
+$ pwd
+/Users/vesta/.codex-home/worktrees/0a70/sift
+
+$ git rev-parse --show-toplevel
+/Users/vesta/.codex-home/worktrees/0a70/sift
+
+$ git branch --show-current
+
+$ sed -n '1,20p' /Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+working: Codex Desktop thread started
+
+$ sed -n '1,40p' /Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+smoke_id=codex-app-host-smoke-20260706-live
+cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+git_root=/Users/vesta/.codex-home/worktrees/0a70/sift
+branch=
+status_file=/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+status_file_write=ok
+sentinel=FM_CODEX_APP_HOST_TOOL_SMOKE_20260706_LIVE_OK
+
+send_message_to_thread request:
+  threadId=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  prompt required status line: done: follow-up delivered through send_message_to_thread
+
+send_message_to_thread response:
+  threadId=019f39ea-5cca-7031-bfb0-f8054a2b253a
+
+read_thread follow-up turn:
+  turn.status=completed
+  durationMs=7118
+
+$ sed -n '1,20p' /Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+working: Codex Desktop thread started
+done: follow-up delivered through send_message_to_thread
+
+set_thread_archived request:
+  threadId=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  archived=true
+
+set_thread_archived response:
+  threadId=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  archived=true
+
+read_thread after archive:
+  thread.id=019f39ea-5cca-7031-bfb0-f8054a2b253a
+  thread.status.type=notLoaded
+  thread.cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+  transcript still included the initial and follow-up completed turns.
+```
+
+Result: a Desktop-owned Codex thread can write Firstmate status files when the prompt gives it the absolute status path and the Desktop permission context can write that checkout.
+The return channel is real at the Codex Desktop host-tool layer.
 
 ## Codex Desktop API blocker
 
@@ -73,7 +162,9 @@ The available Codex CLI and app-server probes found useful pieces but not a supp
 - The managed daemon path was unavailable in this Desktop install.
 - A raw proxy attempt against the Desktop control socket did not accept plain JSON-RPC framing.
 
-That is not enough to add `codex-app` to `FM_BACKEND_KNOWN` or `FM_BACKEND_SPAWN`. A Firstmate backend must be able to create a thread, start or continue turns, read live state while turns run, and archive/stop the same endpoint through a Codex Desktop-supported shell-callable API. Shipping a local ledger would only record intentions; it would not supervise the actual Desktop thread.
+That is not enough to add `codex-app` to `FM_BACKEND_KNOWN` or `FM_BACKEND_SPAWN`.
+A Firstmate backend must be able to create a thread, start or continue turns, read live state while turns run, and archive/stop the same endpoint through a Codex Desktop-supported shell-callable API.
+Shipping a local ledger would only record intentions; it would not supervise the actual Desktop thread.
 
 ## Required Codex Desktop bridge
 
@@ -107,5 +198,10 @@ status return channel:
 ```
 
 Once that bridge exists, the implementation should add a real `bin/backends/codex-app.sh`, persist `backend=codex-app` and `codex_app_thread_id=` in `state/<id>.meta`, and wire spawn/send/peek/watch/teardown through the same dispatcher paths used by the existing adapters.
+
+## Rollout clause
+
+After a supported shell-callable Codex Desktop/OpenAI bridge exists, Firstmate should implement Codex App for ship and scout tasks first.
+Secondmate support remains out of scope until ship/scout supervision, status return, send/read, and archive/teardown are proven through the normal backend dispatcher.
 
 Until then, Codex App support remains a verified host-tool smoke plus this blocked backend contract, not a selectable backend.

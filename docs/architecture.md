@@ -62,7 +62,7 @@ Zellij's container shape is simpler than herdr's: one shared `firstmate` session
 Orca is experimental and selected only explicitly: Orca owns both worktree and terminal lifecycle, records `orca_worktree_id=` and `terminal=`, and removes worktrees through `orca worktree rm` only after the usual firstmate teardown checks pass. Its current behavior and limitations are recorded in `docs/orca-backend.md`.
 cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: treehouse remains its worktree provider (cmux is a session provider only, like herdr/zellij), and its full verification - the socket access setup requirement with Automation mode recommended, the read-screen-fails-on-a-fresh-surface finding, the close-surface-refuses-on-the-last-surface finding, the source-verified runtime marker and fallback behavior, and known gaps - is recorded in `docs/cmux-backend.md`.
 cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
-Codex App support is recorded in `docs/codex-app-backend.md` as a verified Desktop host-tool smoke and blocked shell-backend contract; it is not selectable until Codex Desktop/OpenAI provides a stable shell-callable API or CLI bridge to create, send to, observe, and archive Desktop threads.
+Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
 ## Worktrees, not branches in your checkout
 

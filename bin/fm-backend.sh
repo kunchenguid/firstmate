@@ -26,10 +26,8 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis.
-# Codex App is intentionally not in the known set yet: docs/codex-app-backend.md
-# records the verified Desktop host-tool smoke, but Firstmate needs a supported
-# Codex Desktop/OpenAI shell-callable API or CLI bridge before a Bash backend
-# can create, send to, read, and archive visible Desktop threads.
+# Codex App is intentionally not in the known set yet.
+# docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
@@ -67,9 +65,7 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
-# codex-app remains deliberately absent until Codex Desktop/OpenAI provides a
-# supported shell-callable API or CLI bridge for the host-tool operations
-# documented in docs/codex-app-backend.md.
+# codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
