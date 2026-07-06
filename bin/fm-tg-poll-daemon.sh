@@ -54,23 +54,25 @@ help — this list"
       backlog)
         reply=$(head -40 "$FM_ROOT/data/backlog.md" 2>/dev/null || echo "(empty)")
         ;;
+      *date*|*"what day"*|*"what time"*)
+        reply=$(date '+%A, %Y-%m-%d %H:%M %Z')
+        ;;
       *)
-        # Unknown command: write to wake queue so firstmate handles it.
-        # Don't send placeholder — just acknowledge and let firstmate reply.
+        # Complex command: write to wake queue for firstmate, answer directly.
+        # NO placeholder — firstmate handles it directly.
         epoch=$(date +%s)
         wake_key="${epoch}-tg-${uid}"
         printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "0" "tg" "$wake_key" "$text" >> "$WAKE_QUEUE"
-        reply="👀 Processing: $text
-
-I'll get back to you shortly."
         ;;
     esac
 
     [ -n "$TYPING_PID" ] && kill $TYPING_PID 2>/dev/null
-    tmp=$(mktemp "${TMPDIR:-/tmp}/fmtg-daemon.XXXXXX") || continue
-    printf '%s' "$reply" > "$tmp"
-    FM_HOME="$FM_ROOT" bash "$FM_ROOT/bin/fm-tg-reply.sh" "$chat_id" --text-file "$tmp" 2>/dev/null
-    rm -f "$tmp"
+    if [ -n "$reply" ]; then
+      tmp=$(mktemp "${TMPDIR:-/tmp}/fmtg-daemon.XXXXXX") || continue
+      printf '%s' "$reply" > "$tmp"
+      FM_HOME="$FM_ROOT" bash "$FM_ROOT/bin/fm-tg-reply.sh" "$chat_id" --text-file "$tmp" 2>/dev/null
+      rm -f "$tmp"
+    fi
     touch "$PROCESSED/$uid" 2>/dev/null
   done
 
