@@ -70,6 +70,7 @@ case "$1" in
   has-session) exit 1 ;;
   new-session) exit 0 ;;
   list-windows) exit 0 ;;
+  kill-window) echo "kill-window $*" >> "$STUB_TMUX_LOG"; exit 0 ;;
   new-window) echo "new-window $*" >> "$STUB_TMUX_LOG"; exit 0 ;;
   send-keys) echo "send-keys $*" >> "$STUB_SEND_LOG"; exit 0 ;;
   display-message) echo "firstmate" ;;
@@ -157,6 +158,17 @@ assert_contains "$OUT" "spawned $ID" "prints the spawned line"
 # treehouse get is NEVER used
 assert_absent "$STUB_TREEHOUSE_LOG" "treehouse binary is never invoked on reuse"
 assert_no_grep "treehouse get" "$STUB_SEND_LOG" "'treehouse get' is never sent to the pane"
+
+# the old endpoint is retired BEFORE the new one is created: the fresh endpoint
+# reuses the same fm-<id> window name, which tmux refuses to duplicate, so the swap
+# must free it first (regression for the code-review finding on step ordering).
+assert_grep "kill-window" "$STUB_TMUX_LOG" "old endpoint is retired via kill-window"
+assert_grep "firstmate:fm-$ID" "$STUB_TMUX_LOG" "kill-window targets the previous fm-<id> window"
+kill_ln=$(grep -n 'kill-window' "$STUB_TMUX_LOG" | head -1 | cut -d: -f1)
+new_ln=$(grep -n 'new-window' "$STUB_TMUX_LOG" | head -1 | cut -d: -f1)
+if [ -z "$kill_ln" ] || [ -z "$new_ln" ] || [ "$kill_ln" -ge "$new_ln" ]; then
+  fail "kill-window (line ${kill_ln:-none}) must precede new-window (line ${new_ln:-none})"
+fi
 
 # the new pane opens directly in the existing worktree (no treehouse get to move it)
 assert_grep "$WT" "$STUB_TMUX_LOG" "new-window opens in the existing worktree"

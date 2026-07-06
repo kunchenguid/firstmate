@@ -164,6 +164,9 @@ REUSE_PROJECT=
 REUSE_MODE=
 REUSE_YOLO=
 REUSE_HANDOFF=
+REUSE_OLD_WINDOW=
+REUSE_OLD_BACKEND=
+REUSE_OLD_ZELLIJ_TAB=
 if [ "$REUSE_WORKTREE" -eq 1 ]; then
   [ "$KIND" != secondmate ] || { echo "error: --reuse-worktree cannot be combined with --secondmate" >&2; exit 1; }
   RID=${POS[0]:-}
@@ -187,6 +190,12 @@ if [ "$REUSE_WORKTREE" -eq 1 ]; then
   [ -s "$REUSE_HANDOFF" ] || { echo "error: --reuse-worktree: handoff dump is empty: $REUSE_HANDOFF" >&2; exit 1; }
   REUSE_MODE=$(reuse_meta_field mode)
   REUSE_YOLO=$(reuse_meta_field yolo)
+  # The previous agent's endpoint, so it can be retired before the new one is
+  # created (they share the fm-<id> window name; see the kill step below).
+  REUSE_OLD_WINDOW=$(reuse_meta_field window)
+  REUSE_OLD_ZELLIJ_TAB=$(reuse_meta_field zellij_tab_id)
+  REUSE_OLD_BACKEND=$(reuse_meta_field backend)
+  [ -n "$REUSE_OLD_BACKEND" ] || REUSE_OLD_BACKEND=tmux
   if [ "$HARNESS_SET" -eq 0 ]; then
     R_HARNESS=$(reuse_meta_field harness)
     [ -n "$R_HARNESS" ] && { HARNESS_ARG=$R_HARNESS; HARNESS_SET=1; }
@@ -751,6 +760,16 @@ fi
 # must open directly in the existing worktree, WT.
 PANE_DIR="$PROJ_ABS"
 [ "$REUSE_WORKTREE" -eq 1 ] && PANE_DIR="$WT"
+# A reuse spawn retires the previous agent's endpoint BEFORE creating the new one:
+# the new endpoint reuses the same task window name (fm-<id>), and backends such as
+# tmux refuse a duplicate window name, so the swap must free it first. Best-effort -
+# an already-gone or crashed endpoint just no-ops - and the worktree is untouched
+# (killing a window is not fm-teardown). This is why the context-handoff skill does
+# not retire the old pane separately.
+if [ "$REUSE_WORKTREE" -eq 1 ] && [ -n "$REUSE_OLD_WINDOW" ]; then
+  fm_backend_kill "$REUSE_OLD_BACKEND" "$REUSE_OLD_WINDOW" "$REUSE_OLD_ZELLIJ_TAB" "$W" 2>/dev/null || true
+  sleep 0.5
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
