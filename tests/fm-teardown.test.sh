@@ -39,6 +39,7 @@
 # worktree by a killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (t) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -48,6 +49,8 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+REAL_GIT_FOR_TEST=$(command -v git)
+export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -321,6 +324,38 @@ echo "lsof: simulated failure for ${1:-unknown}" >&2
 exit 2
 SH
   chmod +x "$case_dir/fakebin/lsof"
+}
+
+add_git_status_lock_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+dir=
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C)
+      dir=$2
+      args+=("$1" "$2")
+      shift 2
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+  lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    exit 128
+  fi
+fi
+exec "$real" "${args[@]}"
+SH
+  chmod +x "$case_dir/fakebin/git"
 }
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
@@ -816,6 +851,40 @@ test_lsof_error_never_clears_index_lock() {
   pass "lsof errors leave worktree index.lock in place and refuse teardown"
 }
 
+test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
+  local case_dir rc lock
+  case_dir=$(make_case stale-lock-dirty-recheck)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' dirty > "$case_dir/wt/feature.txt"
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+
+  lock=$(git -C "$case_dir/wt" rev-parse --git-path index.lock)
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
+  assert_grep "uncommitted changes present" "$case_dir/stderr" \
+    "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
+  assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
+  pass "stale lock cleanup rechecks and refuses dirty worktree before return"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -854,3 +923,4 @@ test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
+test_stale_index_lock_cleanup_rechecks_dirty_worktree
