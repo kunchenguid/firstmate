@@ -64,16 +64,31 @@ wait_numeric_file() {
   return 1
 }
 
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+  local out
+  out=$(stat -f %m "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  out=$(stat -c %Y "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) return 1 ;; *) printf '%s\n' "$out"; return 0 ;; esac
 }
 
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
-  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+  local out size mtime
+  out=$(stat -f '%z:%Fm' "$1" 2>/dev/null || true)
+  size=${out%%:*}
+  mtime=${out#*:}
+  if [ "$out" != "$mtime" ]; then
+    case "$size$mtime" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  fi
+  out=$(stat -c '%s:%Y' "$1" 2>/dev/null || true)
+  size=${out%%:*}
+  mtime=${out#*:}
+  if [ "$out" != "$mtime" ]; then
+    case "$size$mtime" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  fi
+  return 1
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }

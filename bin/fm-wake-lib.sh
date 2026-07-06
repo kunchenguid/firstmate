@@ -34,11 +34,28 @@ fm_pid_identity() {
 }
 
 fm_path_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
+  local out
+  out=$(stat -f %m "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  out=$(stat -c %Y "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) return 1 ;; *) printf '%s\n' "$out"; return 0 ;; esac
+}
+
+fm_path_sig() {
+  local out size mtime
+  out=$(stat -f '%z:%Fm' "$1" 2>/dev/null || true)
+  size=${out%%:*}
+  mtime=${out#*:}
+  if [ "$out" != "$mtime" ]; then
+    case "$size$mtime" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
   fi
+  out=$(stat -c '%s:%Y' "$1" 2>/dev/null || true)
+  size=${out%%:*}
+  mtime=${out#*:}
+  if [ "$out" != "$mtime" ]; then
+    case "$size$mtime" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  fi
+  return 1
 }
 
 fm_path_age() {

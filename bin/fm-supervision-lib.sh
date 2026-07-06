@@ -9,13 +9,12 @@
 # fields here for its banner but performs its end-of-turn block decision with the
 # live watcher lock check in bin/fm-wake-lib.sh.
 
-# Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
+  local out
+  out=$(stat -f %m "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out"; return 0 ;; esac
+  out=$(stat -c %Y "$1" 2>/dev/null || true)
+  case "$out" in ''|*[!0-9]*) return 1 ;; *) printf '%s\n' "$out"; return 0 ;; esac
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
