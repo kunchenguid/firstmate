@@ -81,8 +81,29 @@ fi
 FMTG_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-poll.XXXXXX") || exit 0
 trap 'rm -f "$FMTG_RESPONSE_FILE"' EXIT
 
-if ! updates=$(fmtg_get_updates "$offset"); then
-  # Transport or API error: emit once, no wake this cycle.
+updates=$(fmtg_get_updates "$offset")
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  # If it is a 409 conflict (exit code 9) because webhook is active, this is normal.
+  # Output any stashed inbox files as wakes, clear error, and exit 0.
+  if [ "$rc" -eq 9 ]; then
+    shopt -s nullglob
+    inbox_files=("$STATE/tg-inbox"/*.json)
+    if [ "${#inbox_files[@]}" -gt 0 ]; then
+      for f in "${inbox_files[@]}"; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f" .json)
+        case "$base" in
+          ''|.*|*[!A-Za-z0-9._-]*) continue ;;
+        esac
+        update_type=$(jq -r 'if .callback_query then "tg-callback" else "tg-message" end' "$f" 2>/dev/null) || update_type="tg-message"
+        printf '%s %s\n' "$update_type" "$base"
+      done
+    fi
+    clear_error
+    exit 0
+  fi
+  # Transport or other API error: emit once, no wake this cycle.
   emit_error_once "getUpdates failed"
   exit 0
 fi

@@ -155,7 +155,7 @@ fmtg_get_updates() {
     409)
       echo "fm-tg-lib: getUpdates returned HTTP 409 - webhook may be active" >&2
       rm -f "$FMTG_RESPONSE_FILE"
-      return 1
+      return 9
       ;;
     *)
       echo "fm-tg-lib: getUpdates returned HTTP $code" >&2
