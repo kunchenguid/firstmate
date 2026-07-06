@@ -29,14 +29,8 @@ cd "$DIR"
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md
 
-write_skeleton() {
-  cat > "$AGENTS" <<'EOF'
-# Project agent memory
-
-This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
-
-- Add durable project-specific notes here as they are discovered through real work.
-
+write_maintenance_section() {
+  cat <<'EOF'
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
@@ -44,6 +38,28 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 EOF
+}
+
+ensure_maintenance_section() {
+  if grep -Fqx '## Maintaining this file' "$AGENTS"; then
+    return 1
+  fi
+  {
+    printf '\n'
+    write_maintenance_section
+  } >> "$AGENTS"
+  return 0
+}
+
+write_skeleton() {
+  cat > "$AGENTS" <<'EOF'
+# Project agent memory
+
+This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
+
+- Add durable project-specific notes here as they are discovered through real work.
+EOF
+  ensure_maintenance_section || true
 }
 
 is_correct_claude_symlink() {
@@ -108,6 +124,7 @@ fi
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
     mv "$CLAUDE" "$AGENTS"
+    ensure_maintenance_section || true
     ln -s "$AGENTS" "$CLAUDE"
     echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
     exit 0

@@ -28,4 +28,27 @@ test_created_agents_md_includes_self_governance() {
   pass "fm-ensure-agents-md.sh: created AGENTS.md includes self-governance section"
 }
 
+test_promoted_claude_md_includes_self_governance() {
+  local repo agents count
+  repo="$TMP_ROOT/claude-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# Existing agent memory
+
+Run tests with `make test`.
+EOF
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
+  agents="$repo/AGENTS.md"
+  assert_present "$agents" "AGENTS.md was not created during promotion"
+  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md is not a symlink after promotion"
+  assert_grep "Run tests with \`make test\`." "$agents" \
+    "promotion lost existing CLAUDE.md content"
+  count=$(grep -Fc "## Maintaining this file" "$agents")
+  [ "$count" -eq 1 ] || fail "promotion wrote $count self-governance sections"
+  assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
+    "promoted AGENTS.md missing self-governance wording"
+  pass "fm-ensure-agents-md.sh: promoted CLAUDE.md includes self-governance section"
+}
+
 test_created_agents_md_includes_self_governance
+test_promoted_claude_md_includes_self_governance
