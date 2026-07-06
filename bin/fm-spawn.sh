@@ -33,7 +33,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor|hermes)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -279,7 +279,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor|hermes)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +340,23 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (cursor-agent): a positional prompt starts the supervised interactive
+    # session. --force (alias --yolo) runs every tool without the per-command
+    # allowlist approval dialog, which an unattended crewmate needs - the targeted
+    # equivalent of claude's --dangerously-skip-permissions. cursor's effort rides
+    # the model string as a bracket parameter (see model_flag_for_harness), so there
+    # is no __EFFORTFLAG__. No turn-end hook is wired (see the turn-end case below),
+    # so the template is identical for ship/scout/secondmate.
+    cursor) printf '%s' 'cursor-agent --force __MODELFLAG__"$(cat __BRIEF__)"' ;;
+    # hermes (Hermes Agent): the interactive TUI is `hermes chat`, which takes NO
+    # positional prompt (verified: bare `hermes '<x>'` and `hermes chat '<x>'` both
+    # error; -q/-z are one-shot non-interactive). So the brief is NOT in the launch
+    # command - it is delivered as the first interactive message after the TUI is
+    # ready (see the hermes post-launch block below). --yolo bypasses hermes'
+    # dangerous-command approval prompts for an unattended crewmate. hermes has no
+    # verified interactive effort flag, so there is no __EFFORTFLAG__ (requested
+    # effort is still recorded in meta). No turn-end hook is wired (stale-pane).
+    hermes) printf '%s' 'hermes chat --yolo __MODELFLAG__' ;;
     *) return 1 ;;
   esac
 }
@@ -424,11 +441,31 @@ shell_quote() {
 }
 
 model_flag_for_harness() {
-  local harness=$1 model=$2
+  local harness=$1 model=$2 effort=${3:-}
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
     claude|codex|opencode|pi|grok)
       printf -- '--model %s ' "$(shell_quote "$model")"
+      ;;
+    hermes)
+      # hermes selects the model with -m; a provider is encoded in the model string
+      # as "provider/model" (e.g. deepseek/deepseek-v4-flash), so firstmate's single
+      # --model axis maps cleanly without a separate provider axis.
+      printf -- '-m %s ' "$(shell_quote "$model")"
+      ;;
+    cursor)
+      # cursor has no standalone effort flag; effort rides the model string as a
+      # bracket parameter (e.g. 'claude-opus-4-8[effort=high]'), so it is folded in
+      # here rather than via effort_flag_for_harness. A model without bracket support
+      # ignores the parameter on cursor's side; when only effort (no model) is
+      # requested there is nothing to attach it to, so it is omitted and left
+      # recorded in meta - the same "record then omit" contract the other adapters use.
+      case "$effort" in
+        low|medium|high|xhigh|max)
+          printf -- '--model %s ' "$(shell_quote "${model}[effort=${effort}]")" ;;
+        *)
+          printf -- '--model %s ' "$(shell_quote "$model")" ;;
+      esac
       ;;
   esac
 }
@@ -468,6 +505,10 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # cursor has no standalone effort flag either: its effort is folded into the
+    # model string as a bracket parameter by model_flag_for_harness, so nothing is
+    # emitted here. hermes has no verified interactive effort flag, so it too emits
+    # nothing; the requested effort stays recorded in meta for both.
   esac
 }
 
@@ -828,6 +869,15 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+spawn_capture() {  # <target> <lines> -> bounded plain-text pane capture
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_capture "$1" "$2" ;;
+    herdr) fm_backend_herdr_capture "$1" "$2" ;;
+    zellij) fm_backend_zellij_capture "$1" "$2" ;;
+    orca) fm_backend_orca_capture "$1" "$2" ;;
+    cmux) fm_backend_cmux_capture "$1" "$2" ;;
+  esac
+}
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -963,6 +1013,23 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    cursor*)
+      # cursor: no turn-end hook is wired. cursor-agent is Claude-Code-compatible but
+      # its interactive Stop/turn-end hook surface is unverified, so firstmate does
+      # not assume one. cursor draws a clear busy footer ("ctrl+c to stop"), so the
+      # watcher's provably-working check and stale-pane detection cover supervision -
+      # the same hookless path opencode uses. Verified 2026-07-05, cursor-agent 2026.07.01.
+      ;;
+    hermes*)
+      # hermes: no turn-end hook is wired. hermes DOES expose a per-turn `stop` shell
+      # hook (fires at the end of every conversation turn), but wiring it requires
+      # declaring the hook in the user's global ~/.hermes/config.yaml and clearing a
+      # first-use consent allowlist - a higher-blast-radius write into hermes' own
+      # managed config than grok's always-trusted ~/.grok/hooks/ drop-in. That is
+      # deferred; hermes draws a clear busy footer ("Ctrl+C cancel"), so the watcher's
+      # provably-working check and stale-pane detection cover supervision, the same
+      # hookless path opencode uses. Verified 2026-07-05, Hermes Agent v0.18.0.
+      ;;
   esac
 fi
 
@@ -1030,7 +1097,7 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
@@ -1051,5 +1118,32 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+
+# hermes: the interactive `hermes chat` TUI takes no positional prompt, so unlike
+# every other adapter the brief cannot ride the launch command. Deliver it as the
+# first interactive message once the TUI is ready. A single-line pointer to the
+# on-disk brief ($BRIEF, an absolute path) is used rather than pasting the brief's
+# multi-line body: a single line submits cleanly with one Enter on every backend
+# (verified 2026-07-05), whereas raw multi-line keystrokes would submit line by line
+# and a tmux bracketed-paste that avoids that is not portable across backends. The
+# crewmate's first action is to read its brief - the same brief content every other
+# adapter receives inline. Best-effort readiness wait: hermes prints its "/help for
+# commands" welcome banner when the composer is ready (about 5s).
+case "$HARNESS" in
+  hermes*)
+    hermes_ready=0
+    for _ in $(seq 1 40); do
+      if spawn_capture "$T" 60 2>/dev/null | grep -q '/help for commands'; then
+        hermes_ready=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$hermes_ready" = 1 ] || echo "warning: hermes TUI readiness banner not seen within 40s; delivering brief anyway (inspect window $T)" >&2
+    spawn_send_literal "$T" "Your task brief is the file at $BRIEF. Read it in full now and follow it as your complete instructions; begin immediately."
+    sleep 0.3
+    spawn_send_key "$T" Enter
+    ;;
+esac
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
