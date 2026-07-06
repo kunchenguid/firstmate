@@ -101,6 +101,26 @@ I'll get back to you shortly."
         printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "0" "tg" "$wake_key" "Crewmate ${id} finished: ${last_line}" >> "$WAKE_QUEUE"
       fi
     done
+
+    # Check for unhandled tg wake queue items older than 30s — notify captain
+    if [ -f "$WAKE_QUEUE" ]; then
+      now=$(date +%s)
+      while IFS=$'\t' read -r epoch _ kind key payload; do
+        [ -n "$epoch" ] || continue
+        age=$((now - epoch))
+        [ "$age" -gt 30 ] || continue
+        [ "$kind" = "tg" ] || continue
+        # Avoid re-notification
+        notified_file="$FM_ROOT/state/.tg-wake-$key"
+        [ -f "$notified_file" ] && continue
+        touch "$notified_file" 2>/dev/null
+        # Short ping to captain
+        tmp_wake=$(mktemp "${TMPDIR:-/tmp}/fmtg-wake.XXXXXX") || continue
+        printf '%s\n' "Wake: $payload" > "$tmp_wake"
+        FM_HOME="$FM_ROOT" bash "$FM_ROOT/bin/fm-tg-reply.sh" 7366487182 --text-file "$tmp_wake" 2>/dev/null
+        rm -f "$tmp_wake"
+      done < "$WAKE_QUEUE"
+    fi
   fi
 
   sleep 1
