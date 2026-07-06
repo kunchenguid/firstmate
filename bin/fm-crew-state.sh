@@ -415,6 +415,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_DETAIL=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
+  RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -432,6 +433,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   else
     status=$(strip_quotes "$(nm_field status)")
+    RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -491,7 +493,9 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_ci_step_status)
-    if [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+    if [ "$RUN_STATUS" = fixing ]; then
+      CI_LOG_STATE=not-ready
+    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
       CI_LOG_STATE=$(nm_ci_checks_state)
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready

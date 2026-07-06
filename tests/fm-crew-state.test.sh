@@ -549,6 +549,23 @@ test_ci_fixing_after_green_stays_working() {
   pass "ci fixing is not overridden by an earlier green marker"
 }
 
+test_top_level_fixing_done_log_stays_working() {
+  reset_fakes
+  local d; d=$(new_case top-level-fixing-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-topfixing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-topfixing.meta" "window=fm:fm-feat-topfixing" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-topfixing.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-topfixing)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-topfixing)
+  assert_contains "$out" "state: working" "top-level fixing must stay working"
+  assert_contains "$out" "source: run-step" "top-level fixing remains run-step sourced"
+  assert_contains "$out" "validating (fixing)" "top-level fixing keeps fixing detail"
+  assert_not_contains "$out" "state: done" "top-level fixing must not read as stale checks-green done"
+  pass "top-level fixing is not overridden by a stale done log"
+}
+
 # (d) terminal run-step is authoritative
 test_terminal_passed() {
   reset_fakes
@@ -944,6 +961,7 @@ test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working
+test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
