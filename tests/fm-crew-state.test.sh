@@ -192,6 +192,18 @@ run:
 EOF
 }
 
+run_top_level_ci() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: ci
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+EOF
+}
+
 run_parked() {  # <branch>
   cat <<EOF
 run:
@@ -274,6 +286,23 @@ run:
   id: "01RUN"
   branch: $1
   status: running
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
+EOF
+}
+
+run_fixing_ci_running() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
   head: "abc1234"
   pr: "https://github.com/o/r/pull/2"
   findings: none
@@ -443,6 +472,22 @@ EOF
   pass "ci-monitoring run with checks already green surfaces done"
 }
 
+test_top_level_ci_checks_green_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case top-level-ci-green)
+  make_repo_on_branch "$d/wt" fm/feat-topcigreen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-topcigreen.meta" "window=fm:fm-feat-topcigreen" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-topcigreen)
+  assert_contains "$out" "state: done" "top-level ci with green log -> done"
+  assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
+  assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
+  assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
+  pass "top-level ci status uses ci log green marker"
+}
+
 test_ci_monitoring_no_checks_terminal_surfaces_done() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
@@ -547,6 +592,22 @@ test_ci_fixing_after_green_stays_working() {
   assert_contains "$out" "source: run-step" "ci fixing remains run-step sourced"
   assert_not_contains "$out" "state: done" "ci fixing must not read as checks-green done"
   pass "ci fixing is not overridden by an earlier green marker"
+}
+
+test_top_level_fixing_ci_running_after_green_stays_working() {
+  reset_fakes
+  local d; d=$(new_case top-level-fixing-ci-running)
+  make_repo_on_branch "$d/wt" fm/feat-topfixingci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-topfixingci.meta" "window=fm:fm-feat-topfixingci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_ci_running fm/feat-topfixingci)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-topfixingci)
+  assert_contains "$out" "state: working" "top-level fixing with ci running must stay working"
+  assert_contains "$out" "source: run-step" "top-level fixing with ci running remains run-step sourced"
+  assert_contains "$out" "validating (fixing)" "top-level fixing keeps fixing detail"
+  assert_not_contains "$out" "state: done" "top-level fixing must not use stale green marker"
+  pass "top-level fixing is not overridden by a stale ci running row"
 }
 
 test_top_level_fixing_done_log_stays_working() {
@@ -955,12 +1016,14 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working
+test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed

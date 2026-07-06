@@ -294,6 +294,22 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
+nm_effective_ci_step_status() {
+  local step_status
+  if [ "${RUN_STATUS:-}" = fixing ]; then
+    printf 'fixing'
+    return 0
+  fi
+  step_status=$(nm_ci_step_status)
+  if [ -n "$step_status" ]; then
+    printf '%s' "$step_status"
+    return 0
+  fi
+  if [ "${RUN_STATUS:-}" = ci ]; then
+    printf 'running'
+  fi
+}
+
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
@@ -474,7 +490,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
       if [ "$RUN_STATE" = working ]; then
-        CI_STEP_STATUS=$(nm_ci_step_status)
+        CI_STEP_STATUS=$(nm_effective_ci_step_status)
         case "$CI_STEP_STATUS" in
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
@@ -492,7 +508,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_ci_step_status)
+    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
