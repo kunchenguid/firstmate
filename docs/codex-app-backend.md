@@ -1,9 +1,9 @@
-# Codex App runtime backend design
+# Codex App runtime backend
 
-This document is the design contract for making Codex Desktop the native Firstmate work surface.
-The target end state is a `codex-app` runtime backend where Firstmate dispatches work into Codex threads, supervises those threads through Codex thread state and Firstmate status files, and archives threads when normal Firstmate teardown rules say the task is safe to remove.
+This document describes the `codex-app` runtime backend for making Codex Desktop the native Firstmate work surface.
+Firstmate dispatches work into Codex threads, supervises those threads through Codex thread state and Firstmate status files, and archives threads when normal Firstmate teardown rules say the task is safe to remove.
 
-Status: design candidate, not implemented.
+Status: first-pass implementation.
 Verified on 2026-07-06 against the installed `codex` CLI on the reference machine.
 
 ## Goals
@@ -19,12 +19,12 @@ Verified on 2026-07-06 against the installed `codex` CLI on the reference machin
 ## Non-goals
 
 - Do not make model-visible host tools the backend API.
-- Do not pretend `config/backend=codex-app` works until a shell-callable bridge exists.
+- Do not rely on a long-running remote-control daemon in the first implementation pass.
 - Do not replace Firstmate's PR, validation, landed-work, or teardown safety rules.
 - Do not support secondmate launches in the first implementation pass.
 - Do not auto-detect `codex-app` as the runtime backend.
 - Do not depend on long transcript copies in Firstmate state files.
-- Do not require Codex app-server to create git worktrees in the first pass.
+- Do not require Codex app-server to create git worktrees.
 
 ## Current evidence
 
@@ -60,7 +60,7 @@ This checkout is also registered as a Codex Desktop project in the app's project
 
 ## Architecture
 
-`codex-app` should be a normal Firstmate runtime backend with one extra layer:
+`codex-app` is a normal Firstmate runtime backend with one extra layer:
 
 ```text
 Firstmate scripts
@@ -74,10 +74,10 @@ Firstmate scripts
 Backend scripts call stable bridge verbs and parse stable bridge JSON.
 If the Codex protocol changes, the bridge changes first and the rest of Firstmate remains mostly unchanged.
 
-The bridge should be implemented in Node or another JSON-friendly runtime already acceptable for Firstmate.
+The bridge is implemented in Node so Firstmate can handle JSON with structured parsing instead of shell string manipulation.
 Bash remains the caller, not the protocol implementation.
-The first implementation should prefer one-shot direct stdio calls to `codex app-server --listen stdio://`.
-Managed remote-control can become an optimization after bootstrap can verify the standalone Codex install.
+The first implementation uses one-shot direct stdio calls to `codex app-server --listen stdio://`.
+Managed remote-control can become a later optimization after bootstrap can verify the standalone Codex install.
 
 ## Bridge contract
 
@@ -85,7 +85,7 @@ The bridge exposes a small CLI vocabulary.
 All successful commands print one JSON object to stdout.
 All failures print a short human-readable diagnostic to stderr and return non-zero.
 
-Required first-pass verbs:
+Implemented verbs:
 
 - `ensure-running`
 - `start-thread`
@@ -109,11 +109,9 @@ bin/fm-codex-bridge archive-thread --thread-id <id>
 bin/fm-codex-bridge list-live [--cwd <path>]
 ```
 
-The bridge should start by launching `codex app-server --listen stdio://` and sending schema-native newline-delimited request objects.
-Every bridge process should begin with `initialize` and opt into experimental APIs.
-Read-only list operations should pass `useStateDbOnly:true` unless the caller explicitly requests rollout repair.
-If the future daemon path is selected, the bridge may start remote control with `codex remote-control start --json` when no daemon socket is available.
-If daemon startup fails, the diagnostic must name the failed command and distinguish a missing standalone install from a missing socket or app-server error.
+The bridge starts by launching `codex app-server --listen stdio://` and sending schema-native newline-delimited request objects.
+Every bridge process begins with `initialize` and opts into experimental APIs.
+Read-only list operations pass `useStateDbOnly:true` unless the caller explicitly requests rollout repair.
 
 ## Backend metadata
 
@@ -133,15 +131,16 @@ yolo=<on|off>
 tasktmp=<task-temp-path>
 model=<model-or-default>
 effort=<effort-or-default>
+worktree_provider=git-worktree
 ```
 
 `window=` remains populated for compatibility with existing selector helpers.
 For this backend, it is the Codex thread id, not a terminal pane.
 
-In the first implementation, Firstmate should create or acquire the isolated git worktree in the supervising shell before `thread/start`, then pass that worktree path as the Codex thread `cwd`.
+In the first implementation, Firstmate creates the isolated git worktree in the supervising shell before `thread/start`, then passes that worktree path as the Codex thread `cwd`.
 This keeps worktree ownership inside Firstmate's existing safety model while Codex owns the visible thread and turn lifecycle.
 Because `codex-app` has no terminal endpoint before the thread exists, it cannot rely on the tmux-style pattern of typing `treehouse get` into a newly created pane.
-The implementation should introduce a shell-side worktree acquisition helper, using Treehouse when available and a guarded `git worktree add` path when Treehouse is unavailable or unsuitable for this backend.
+The first pass creates a guarded git worktree under `$FM_HOME/projects/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
 The backend must validate that `codex_cwd` matches the expected Firstmate worktree root and is not the primary project checkout.
 If Codex starts a thread anywhere else, ship and scout spawns must refuse before substantive work begins.
 
@@ -151,14 +150,15 @@ First pass spawn flow:
 
 1. Resolve `backend=codex-app` only from explicit configuration or `--backend codex-app`.
 2. Refuse `--secondmate`.
-3. Run `fm-codex-bridge ensure-running`.
-4. Acquire an isolated git worktree through the shell-side worktree helper.
+3. Require `harness=codex`.
+4. Create an isolated git worktree under the project.
 5. Build the normal Firstmate brief and status-file instructions.
-6. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
-7. Set the thread name to `fm-<id>: <short task title>` when available.
-8. Set the thread goal to the Firstmate task objective.
-9. Record meta with `thread_id=`, `codex_cwd=`, and `backend=codex-app`.
-10. Verify the return channel before treating the thread as supervised.
+6. Run `fm-codex-bridge ensure-running`.
+7. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
+8. Set the thread name to `fm-<id>`.
+9. Set the thread goal to the Firstmate task objective.
+10. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
+11. Verify the return channel before treating the thread as supervised.
 
 The return-channel verification is load-bearing.
 The worker prompt must instruct the Codex thread to append:
@@ -170,7 +170,7 @@ working: Codex thread started
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits briefly for that line to appear.
 If it does not appear, the thread is still visible in Codex Desktop but is not a supervised Firstmate task.
-The spawn should fail with a diagnostic naming the thread id and the missing status file write.
+The spawn fails with a diagnostic naming the thread id and the missing status file write.
 
 ## Send and steer flow
 
@@ -180,21 +180,20 @@ The spawn should fail with a diagnostic naming the thread id and the missing sta
 fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt>
 ```
 
-If the Codex thread is active and the protocol accepts same-turn steering, the bridge may use `turn/steer`.
-If the active turn is not steerable, the bridge should return a clear non-zero diagnostic.
-A later enhancement can offer `turn/interrupt` plus a new turn, but the first implementation should avoid surprising interruption.
+The first implementation starts a new turn through `turn/start`.
+A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt-plus-new-turn behavior, but that should require an explicit design decision rather than surprising interruption.
 
 ## Peek and capture flow
 
-`fm-peek.sh` should use `thread/read` or `thread/turns/list`.
-For the first implementation, `capture` should return a bounded text summary assembled from recent user and agent message items.
+`fm-peek.sh` uses `thread/turns/list` through the backend dispatcher.
+For the first implementation, `capture` returns a bounded text summary assembled from recent user and agent message items.
 It should not dump entire thread history.
 
-The bridge should support both summary and full item views, but the backend default should use summary.
+The bridge supports both summary and full item views, but the backend default uses summary.
 
 ## Watcher mapping
 
-The watcher should prefer semantic Codex state when available:
+The watcher uses semantic Codex state through `fm_backend_busy_state` when available:
 
 | Codex state | Firstmate interpretation |
 |---|---|
@@ -229,7 +228,7 @@ It is only the Codex equivalent of removing the visible endpoint after Firstmate
 
 ## Configuration
 
-The backend should be selected explicitly:
+Select the backend explicitly:
 
 ```text
 config/backend
@@ -245,16 +244,8 @@ FM_BACKEND=codex-app
 No runtime auto-detection in the first pass.
 Running inside Codex Desktop is common for the primary supervisor, but auto-selecting the backend would surprise users who still want tmux, herdr, zellij, or cmux from inside Codex.
 
-Bootstrap should report:
-
-```text
-CODEX_APP: available
-CODEX_APP: daemon not running - run codex remote-control start --json or let spawn start it
-CODEX_APP: direct stdio available; managed remote-control unavailable - standalone Codex install missing
-CODEX_APP: unavailable - <diagnostic>
-```
-
-when `backend=codex-app` is selected.
+When `backend=codex-app` is selected, bootstrap requires `codex`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
+It intentionally skips `tmux` and `treehouse` for this backend because Codex Desktop owns the visible thread and Firstmate uses a plain git worktree.
 
 ## Tests
 
@@ -264,7 +255,7 @@ Unit tests should use a fake bridge path injected through an environment variabl
 FM_CODEX_BRIDGE=/tmp/fake-fm-codex-bridge
 ```
 
-Required tests:
+Implemented tests:
 
 - Backend selection accepts `codex-app` only after it is listed as known and spawn-capable.
 - `fm-spawn.sh --backend codex-app` refuses `--secondmate`.
@@ -274,6 +265,7 @@ Required tests:
 - `fm-send.sh` routes to `send-turn`.
 - `fm-peek.sh` routes to recent thread turns.
 - Teardown archives only after existing safety checks pass.
+- Bootstrap requires the Codex CLI for `backend=codex-app` and does not require tmux or Treehouse.
 
 ## Implementation touch points
 
@@ -287,17 +279,16 @@ The higher-risk implementation areas are:
 - `bin/fm-backend.sh`: add `codex-app` to known and spawn-capable backends, source `bin/backends/codex-app.sh`, dispatch capture, send, kill, busy state, and target existence.
 - `bin/backends/codex-app.sh`: implement bridge-backed adapter functions and keep all JSON/protocol parsing out of generic scripts.
 - `bin/fm-spawn.sh`: add a `codex-app` creation branch, skip terminal-send launch plumbing, acquire a shell-side worktree before thread creation, write Codex-specific meta fields, and verify the status return channel.
-- `bin/fm-watch.sh`: make sure semantic `busy` and `idle` from `fm_backend_busy_state` prevent stale-hash terminal heuristics from misclassifying Codex threads.
-- `bin/fm-crew-state.sh`: use `fm_backend_target_exists` or `fm_backend_busy_state` for `codex-app` instead of treating capture failure as a dead pane.
+- `bin/fm-watch.sh`: rely on semantic `busy` and `idle` from `fm_backend_busy_state`; deeper notification integration is deferred.
+- `bin/fm-crew-state.sh`: keep using the backend dispatcher; richer Codex-specific state can be added later if needed.
 - `bin/fm-teardown.sh`: rely on existing landed-work checks, then map endpoint removal to thread archive.
-- `bin/fm-session-start.sh` and bootstrap helpers: report Codex app-server availability only when `backend=codex-app` is selected.
+- `bin/fm-bootstrap.sh`: require the Codex CLI only when `backend=codex-app` is selected.
 
 The implementation should avoid adding `codex-app` special cases to `fm-send.sh` and `fm-peek.sh` unless the generic dispatcher proves insufficient.
 
 Local smoke verification should run against real Codex Desktop:
 
-1. Start remote control.
-2. Spawn a scratch scout task with `--backend codex-app`.
+1. Spawn a scratch scout task with `--backend codex-app --harness codex`.
 3. Confirm a new visible Codex thread appears.
 4. Confirm the thread writes the expected status line.
 5. Send a follow-up with `fm-send.sh`.
@@ -306,18 +297,15 @@ Local smoke verification should run against real Codex Desktop:
 
 ## Rollout sequence
 
-1. Land this design doc.
-2. Add the bridge with fake-protocol tests.
-3. Add backend registration and adapter functions.
-4. Wire spawn, send, peek, watcher busy state, and teardown.
-5. Add bootstrap diagnostics.
-6. Run fake bridge tests.
-7. Run one local Codex Desktop smoke test.
-8. Update README, configuration docs, and AGENTS with short pointers only.
+1. Land the bridge with fake-protocol tests.
+2. Add backend registration and adapter functions.
+3. Wire spawn, send, peek, watcher busy state, and teardown.
+4. Gate bootstrap on the Codex CLI for `backend=codex-app`.
+5. Update README, configuration docs, and AGENTS with short pointers only.
+6. Run one local Codex Desktop smoke test before marking the backend broadly supported.
 
 ## Open questions
 
-- Should the first bridge use a long-lived process for notification subscription, or one-shot JSON-RPC calls through `codex app-server proxy`?
-- Which Codex permission profile should spawned crewmates use by default?
+- Should a later bridge use a long-lived process for notification subscription, or keep one-shot stdio calls?
 - Should the first pass allow `turn/interrupt`, or require manual captain confirmation before interrupting active work?
 - How should model and effort flags map onto Codex app-server fields when the captain selects a non-default Codex model?

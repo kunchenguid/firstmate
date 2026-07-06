@@ -178,6 +178,7 @@ secondmate_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    codex) echo "brew install codex  # or install the Codex CLI from OpenAI" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -189,6 +190,7 @@ install_cmd() {
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
   orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  codex-app) TOOLS="codex node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
   *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
