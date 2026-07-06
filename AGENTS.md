@@ -386,6 +386,10 @@ Route each piece of durable knowledge to its most specific home:
 When the captain invokes `/stow`, load the `stow` skill.
 It sweeps the current session for uncaptured durable knowledge, routes findings with this table, files undone next steps to the backlog, and reports whether the session is safe to reset.
 
+When the captain invokes `/styles-ui <style-name>`, load the `styles-ui` skill.
+It generates a complete, production-grade style-system SKILL.md at the quality bar of `skeuomorphic-ui` and `glassmorphism` — defining the visual language, color tokens, typography, spacing, component patterns, motion preferences, and a quality checklist for the named style.
+Write the generated skill to `.agents/skills/<style-name>/SKILL.md` unless the captain specifies another path.
+
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
@@ -854,6 +858,8 @@ These skills are not captain-invocable; they are conditional operating reference
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `frontend-orchestrator` - load before dispatching any crewmate whose task involves frontend, UI, design, styling, screens, dashboards, components, animation, layout, or visual output. Ensures every frontend crewmate brief includes `ux-taste`, `design-engineer`, and `flagship-ui` and that the deliverable passes all craft-injection gates before acceptance.
+- `flagship-ui` - loaded by `frontend-orchestrator` for the crewmate brief; the craft-injection gate that enforces interactive depth, data visualization, meter-shape correctness, warmth accents, and micro-interactions with real state changes on every UI deliverable.
 
 ## 14. X mode
 
