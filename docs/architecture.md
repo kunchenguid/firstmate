@@ -63,6 +63,7 @@ cmux's container shape is one workspace per task with one surface, no per-home c
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
+When `data/projects.md` gives a project `base=<ref>`, `fm-spawn.sh` refreshes and validates that ref, then detaches the task worktree there before launch.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
@@ -134,8 +135,9 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 
 ## Project modes are explicit
 
-`data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
+`data/projects.md` records each project's delivery mode, optional `+yolo` autonomy flag, and optional `base=<ref>` task base.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+For a project with `base=<ref>`, new task worktrees start from that ref, ship branches track it, direct PR briefs target it, and review diffs use it as the authoritative base.
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.

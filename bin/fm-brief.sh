@@ -24,6 +24,8 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
+# An optional project base ref makes ship briefs create the branch from that ref
+# and, for PR modes, name it as the target base.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic

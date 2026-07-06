@@ -93,7 +93,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, and x_followups= for an X-mention-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, optional base=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, and x_followups= for an X-mention-originated task (section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -315,10 +315,10 @@ All projects live flat under `projects/`.
 Every project in the fleet has one line:
 
 ```markdown
-- <name> [<mode>] - <one-line description> (added <date>)
+- <name> [<mode> +yolo base=<ref>] - <one-line description> (added <date>)
 ```
 
-The registry line records the project name, delivery mode, optional `+yolo` posture, and one-line description.
+The registry line records the project name, delivery mode, optional `+yolo` posture, optional task base ref, and one-line description.
 Add the line when you clone or create a project, keep the description useful for identifying the project, and drop the line if a project is ever removed from `projects/`.
 Do not turn the registry into a knowledge dump.
 Durable descriptive detail belongs in the project's own `AGENTS.md`.
@@ -356,7 +356,7 @@ This knowledge lives in the project's committed `AGENTS.md`.
 A project's `AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it.
 
 **Fleet and captain-private knowledge** belongs to firstmate.
-Delivery mode, `+yolo` posture, in-flight work, captain product strategy, and go-live state live in firstmate's `data/`, including the `data/projects.md` registry line and any planning docs.
+Delivery mode, `+yolo` posture, optional task base refs, in-flight work, captain product strategy, and go-live state live in firstmate's `data/`, including the `data/projects.md` registry line and any planning docs.
 Do not put that knowledge in the project.
 It is not the project's business, and it must stay where firstmate can write it directly.
 
@@ -393,6 +393,8 @@ It sweeps the current session for uncaptured durable knowledge, routes findings 
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
+Also orthogonal is optional `base=<ref>` (`[no-mistakes base=origin/dev]`), which makes new task worktrees detach at that ref, ship briefs branch from and track it, PR briefs target that branch name, and review diffs compare against it.
+Use it for projects whose active development target is not the clone's default branch.
 
 **Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
 
@@ -485,7 +487,7 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 When `config/crew-dispatch.json` exists, include a shared `--harness` for every crewmate or scout batch after consulting the dispatch rules.
 
-The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`HERDR_ENV=1`/cmux runtime signals, nesting resolved innermost-first (`$TMUX`, then `HERDR_ENV=1`, then cmux's primary `CMUX_WORKSPACE_ID` marker and documented macOS-only fallbacks last, since cmux is a terminal application rather than a nestable multiplexer; docs/cmux-backend.md "Runtime auto-detection") - then `tmux`; an auto-detected herdr or cmux spawn prints a loud stderr notice, auto-detected tmux stays silent; zellij and orca are never auto-detected, only explicit `--backend <name>`/`FM_BACKEND=<name>`/`config/backend`), validates the requested backend against spawn-capable adapters, owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
+The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`HERDR_ENV=1`/cmux runtime signals, nesting resolved innermost-first (`$TMUX`, then `HERDR_ENV=1`, then cmux's primary `CMUX_WORKSPACE_ID` marker and documented macOS-only fallbacks last, since cmux is a terminal application rather than a nestable multiplexer; docs/cmux-backend.md "Runtime auto-detection") - then `tmux`; an auto-detected herdr or cmux spawn prints a loud stderr notice, auto-detected tmux stays silent; zellij and orca are never auto-detected, only explicit `--backend <name>`/`FM_BACKEND=<name>`/`config/backend`), validates the requested backend against spawn-capable adapters, owns the verified launch templates, resolves the project's delivery mode and optional base ref (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, `yolo=`, and optional `base=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
 A backend spawn refusal - a missing dependency, an unauthenticated socket, or a version gate - must be surfaced to the captain as a blocker; never silently retry the spawn on a different backend to work around it.
 A non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 When `config/crew-dispatch.json` exists, the script refuses crewmate or scout launches without an explicit harness because firstmate must have already resolved the profile choice at intake.
@@ -503,7 +505,7 @@ If that pre-launch fast-forward is skipped, `fm-spawn.sh` prints a concise warni
 The spawn also propagates the primary's inheritable config into the secondmate home's `config/`, mirroring the bootstrap sweep (section 3).
 No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
 For already-live secondmates, use `bin/fm-config-push.sh` when only this inherited config needs to be pushed.
-Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
+Project worktrees start at detached HEAD on the configured `base=<ref>` when present, otherwise on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the endpoint to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
@@ -524,7 +526,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 - **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
-Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
+Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base, preferring recorded `base=` when present.
 When the task meta records `pr=`, the helper also compares that base against the authoritative PR head (`pr_head=` when reachable, otherwise a fresh `refs/pull/<n>/head` fetch) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
 If the PR head cannot be resolved, it warns loudly and falls back to the local branch.
 In target project repos shipped through that project's own no-mistakes pipeline, commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
@@ -823,7 +825,7 @@ Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md
 The ship-brief Setup opens with a worktree-isolation assertion ahead of the branch step: the crewmate confirms it is in its own disposable task worktree, not the primary checkout, and stops with `blocked: launched in primary checkout, not an isolated worktree` if not - the upstream half of the worktree-tangle guard (section 8).
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` stops after the implementation commit, then firstmate triggers the harness-appropriate no-mistakes validation pipeline; `direct-PR` has the crewmate push and open the PR itself, and `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
-The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
+The scaffold reads the mode and optional base ref via `fm-project-mode.sh`, so you do not pass them.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
