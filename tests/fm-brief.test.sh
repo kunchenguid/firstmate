@@ -32,6 +32,7 @@ write_registry() {
   cat > "$home/data/projects.md" <<'EOF'
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+- arena-crm [no-mistakes base=origin/dev] - fixture for base-aware no-mistakes mode (added 2026-07-06)
 EOF
 }
 
@@ -76,6 +77,22 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_base_aware_branch_setup() {
+  local home id brief
+  home="$TMP_ROOT/base-home"
+  write_registry "$home"
+  id="brief-base-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" arena-crm >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "git checkout -b fm/$id origin/dev && git branch --set-upstream-to=origin/dev fm/$id" "$brief" \
+    "brief branch step did not start from and track origin/dev"
+  assert_grep "no-mistakes PR creation must use that as the base" "$brief" \
+    "brief did not state the no-mistakes PR base contract"
+  pass "fm-brief.sh: base-aware ship briefs create branches from and tracking the configured base"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_base_aware_branch_setup

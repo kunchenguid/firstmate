@@ -214,8 +214,45 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
+test_spawn_configured_base_overrides_backing_clone_branch() {
+  local home seed remote proj wt fakebin id out status expected head branch
+  home="$TMP_ROOT/base-spawn-home"
+  seed="$TMP_ROOT/base-seed"
+  remote="$TMP_ROOT/base-origin.git"
+  proj="$TMP_ROOT/arena-crm"
+  wt="$TMP_ROOT/base-spawn-wt"
+  id="base-origin-dev-gg7"
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  git init -q -b main "$seed"
+  git -C "$seed" commit -q --allow-empty -m main
+  git -C "$seed" checkout -q -b dev
+  git -C "$seed" commit -q --allow-empty -m dev
+  git init -q --bare "$remote"
+  git -C "$seed" remote add origin "$remote"
+  git -C "$seed" push -q origin main dev
+  git clone -q "$remote" "$proj"
+  git -C "$proj" checkout -q -b unrelated-feature origin/main
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  mkdir -p "$home/data"
+  printf '%s\n' "- arena-crm [no-mistakes base=origin/dev] - Arena CRM (added 2026-07-06)" > "$home/data/projects.md"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/base-spawn-fake")
+
+  out=$(run_spawn "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn with configured base should succeed"
+  assert_contains "$out" "spawned $id" "base-aware spawn did not report success"
+  assert_grep "base=origin/dev" "$home/state/$id.meta" "spawn meta did not record origin/dev base"
+  expected=$(git -C "$proj" rev-parse origin/dev)
+  head=$(git -C "$wt" rev-parse HEAD)
+  [ "$head" = "$expected" ] || fail "worktree HEAD did not move to origin/dev; got $head expected $expected"
+  branch=$(git -C "$proj" branch --show-current)
+  [ "$branch" = "unrelated-feature" ] || fail "backing clone branch should remain untouched, got $branch"
+  pass "fm-spawn: configured base checks out leased worktree at origin/dev without inheriting backing clone branch"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_configured_base_overrides_backing_clone_branch

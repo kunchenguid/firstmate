@@ -170,6 +170,16 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+BASE_REF=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$REPO")
+if [ -n "$BASE_REF" ]; then
+  BRANCH_CMD="git checkout -b fm/$ID $BASE_REF && git branch --set-upstream-to=$BASE_REF fm/$ID"
+  BASE_NOTE=" The branch must start from and track \`$BASE_REF\`."
+  PR_BASE_NOTE=" Target PRs at \`${BASE_REF#origin/}\`."
+else
+  BRANCH_CMD="git checkout -b fm/$ID"
+  BASE_NOTE=""
+  PR_BASE_NOTE=""
+fi
 
 case "$MODE" in
   direct-PR)
@@ -179,7 +189,7 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.$PR_BASE_NOTE Then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
@@ -191,7 +201,7 @@ EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto ${BASE_REF:-the current default branch} - if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
 EOF
@@ -219,6 +229,10 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
+    if [ -n "$BASE_REF" ]; then
+      DOD="$DOD
+The branch upstream is \`$BASE_REF\`; no-mistakes PR creation must use that as the base."
+    fi
     ;;
 esac
 
@@ -235,7 +249,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`$BRANCH_CMD\`.$BASE_NOTE$SETUP2
 
 # Rules
 $RULE1

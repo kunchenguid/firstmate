@@ -622,6 +622,11 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+  BASE_REF=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$PROJ_NAME")
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -655,6 +660,34 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
 }
+
+refresh_project_base_ref() {
+  local base=$1 remote branch
+  [ -n "$base" ] || return 0
+  case "$base" in
+    */*)
+      remote=${base%%/*}
+      branch=${base#*/}
+      if git -C "$PROJ_ABS" remote get-url "$remote" >/dev/null 2>&1; then
+        git -C "$PROJ_ABS" fetch --prune "$remote" "+refs/heads/$branch:refs/remotes/$remote/$branch"
+      fi
+      ;;
+  esac
+}
+
+prepare_worktree_base() {
+  local base=$1
+  [ -n "$base" ] || return 0
+  git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+    || { echo "error: configured base $base does not exist in $WT" >&2; exit 1; }
+  git -C "$WT" checkout -q --detach "$base" \
+    || { echo "error: failed to detach $WT at configured base $base" >&2; exit 1; }
+}
+
+if [ "$KIND" != secondmate ] && [ -n "${BASE_REF:-}" ]; then
+  refresh_project_base_ref "$BASE_REF" \
+    || { echo "error: failed to refresh configured base $BASE_REF for $PROJ_ABS" >&2; exit 1; }
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -744,6 +777,7 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    prepare_worktree_base "${BASE_REF:-}"
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -803,6 +837,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  prepare_worktree_base "${BASE_REF:-}"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -926,10 +961,7 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
+  :
 fi
 
 META_WINDOW=$T
@@ -942,6 +974,7 @@ META_WINDOW=$T
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ -z "${BASE_REF:-}" ] || echo "base=$BASE_REF"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
