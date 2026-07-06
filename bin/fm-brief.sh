@@ -157,7 +157,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
-The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Lead the report with a bounded summary of ~15 lines or fewer - what you found, the risks, your recommendation, any decision needed, and the evidence paths - so firstmate reads the summary first and drills into detail by reference.
+Below that summary the report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
@@ -251,6 +252,14 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+# Reporting results
+When you report a substantial result (a \`done\`, or a \`blocked\`/\`failed\` firstmate must act on), lead with a bounded summary, not raw output. Keep the status line one line and, when the result needs more than a line, write a short summary of ~15 lines or fewer covering:
+- status - \`done\` / \`blocked: {why}\` / \`failed: {why}\`;
+- what changed and why, in plain language;
+- the changed files, the tests or checks you ran and their result, the risks, and any decision needed - each as a short reference, not a dump;
+- evidence by path or URL: the PR, the branch \`fm/$ID\`, or \`file:line\` references.
+Full diffs, logs, and file contents are opt-in only: leave them in the PR, the worktree, or a file firstmate can open on request - never paste them into the pane or the status line. firstmate reads the summary first and pulls detail by reference only when it needs it.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

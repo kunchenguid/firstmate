@@ -760,6 +760,12 @@ Reaches the captain immediately:
 
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
+
+**Report shape: summary first, detail by reference.**
+A captain-facing report, and any worker report firstmate consumes before relaying, leads with a bounded summary and never a raw dump.
+Keep the default to ~15 lines or fewer, covering the status, what changed (files or components by reference), the tests or checks run and their result, the risks, any decision needed, and evidence by path or URL.
+Full diffs, logs, and file contents are opt-in only: referenced by path, PR URL, or backlog id and fetched on request, never front-loaded into the message or into firstmate's own context.
+firstmate reads the summary first and pulls detail by reference only when a decision actually needs it.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
 Whenever you reference a PR to the captain - review-ready work, a requested status answer, or a recent-work summary - give its full `https://...` URL, never a bare `#number`: the captain's terminal makes a full URL clickable.
 A shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same message.
@@ -835,6 +841,7 @@ Keep the charter focused on persistent responsibility, available project clones,
 Preserve the requests-from-main-firstmate contract in the charter: marked requests return via status or a doc pointer, while unmarked direct captain messages stay conversational.
 Before seeding, launching, recovering, or handing backlog to a secondmate home, load `secondmate-provisioning`.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
+The ship and scout briefs also carry the bounded report contract (section 9): a substantial result is reported summary-first (status, changed files, tests or checks and their result, risks, decision needed, evidence paths), with full diffs, logs, and file contents kept opt-in behind a path, PR URL, or the worktree rather than pasted into the pane, so firstmate reads the summary first and pulls detail by reference only when needed.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 
