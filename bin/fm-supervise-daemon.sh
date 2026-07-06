@@ -1037,6 +1037,20 @@ fm_super_main() {
         fi
         CUR_TMP=""
         if [ "$rc" -ne 0 ] || [ -z "$reason" ]; then
+          # A frozen fleet makes fm-watch.sh refuse at its own startup (exit 1,
+          # empty stdout; see fm-freeze-lib.sh) - the SAME shape as a genuine
+          # crash. That refusal is an intentional pause, not a crash: counting
+          # it would trip the crash-backoff threshold and log a false "watcher
+          # crashed" error every cycle for as long as the freeze holds. Defer
+          # restart attempts on a fixed interval instead, without touching
+          # crash_times/backoff_secs, so a real crash streak is still tracked
+          # accurately once the fleet is unfrozen.
+          if [ -f "$(fm_fleet_freeze_path "$STATE")" ]; then
+            log "watcher refused: fleet frozen; deferring restart ${INJECT_FAIL_SLEEP}s (not counted as a crash)"
+            WATCHER_PID=""
+            sleep "$INJECT_FAIL_SLEEP"
+            continue
+          fi
           record_crash
           log "watcher exited rc=$rc reason='$reason'; restarting after ${backoff_secs}s"
           WATCHER_PID=""

@@ -20,6 +20,17 @@
 # - `FM_USAGE_CLAUDE_DIR` defaults to `$HOME/.claude/projects`.
 # - `FM_USAGE_CODEX_DIR` defaults to `$HOME/.codex/sessions`.
 # - Missing transcript dirs are treated as empty, not as errors.
+#
+# Session count vs. token sum scoping:
+# - File mtime only proves a transcript file was touched recently; it does not
+#   prove every entry in it was written recently. A long-lived, actively-
+#   appended session file always has a fresh mtime, so its entire historical
+#   token total would otherwise be re-summed on every poll.
+# - The session-count signal stays intentionally coarse (mtime-selected file
+#   count), matching the header's file-count incident signal above.
+# - The output-token sum is additionally scoped per entry: each transcript line
+#   carries its own top-level ISO8601 `timestamp`, and only entries whose own
+#   timestamp falls inside the sliding window are summed.
 set -u
 
 usage() {
@@ -110,33 +121,47 @@ collect_recent_files "$CODEX_DIR" >> "$tmp_files"
 
 SESSION_COUNT=$(wc -l < "$tmp_files" | tr -d '[:space:]')
 
+# File mtime only proves the file was TOUCHED recently, not that every entry in
+# it was written recently: a long-lived, actively-appended session file always
+# has a fresh mtime, so its whole historical total would otherwise be re-summed
+# every poll. Each transcript line carries its own top-level ISO8601
+# "timestamp", so token sums are additionally scoped to entries whose own
+# timestamp falls inside the sliding window (CUTOFF_EPOCH), not just files
+# whose mtime does.
+CUTOFF_EPOCH=$(( $(date +%s) - WINDOW_MINUTES * 60 ))
+
 sum_claude_file() {
-  local file=$1
-  jq -r '
-    select(.message.usage? != null)
+  local file=$1 cutoff=$2
+  jq -r --argjson cutoff "$cutoff" '
+    select(.message.usage? != null and .timestamp? != null)
+    | (.timestamp | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch null) as $ts
+    | select($ts != null and $ts >= $cutoff)
     | (.message.usage.output_tokens // 0)
   ' "$file" 2>/dev/null \
     | awk '{ sum += $1 } END { printf "%.0f\n", sum + 0 }'
 }
 
 sum_codex_file() {
-  local file=$1
-  jq -r '
+  local file=$1 cutoff=$2
+  jq -r --argjson cutoff "$cutoff" '
     def output_from_token_count:
       if type == "number" then .
       elif type == "object" then
         (.output_tokens // .output // .completion_tokens // .completion // .assistant_tokens // 0)
       else 0
       end;
-    if (.type? == "event_msg" and .payload.type? == "token_count") then
-      (.payload.info.token_count? // .payload.info? // empty | output_from_token_count)
-    elif (.type? == "token_count") then
-      (.info.token_count? // .info? // empty | output_from_token_count)
-    elif (.token_count? != null) then
-      (.token_count | output_from_token_count)
-    else
-      empty
-    end
+    select(.timestamp? != null)
+    | (.timestamp | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch null) as $ts
+    | select($ts != null and $ts >= $cutoff)
+    | if (.type? == "event_msg" and .payload.type? == "token_count") then
+        (.payload.info.token_count? // .payload.info? // empty | output_from_token_count)
+      elif (.type? == "token_count") then
+        (.info.token_count? // .info? // empty | output_from_token_count)
+      elif (.token_count? != null) then
+        (.token_count | output_from_token_count)
+      else
+        empty
+      end
   ' "$file" 2>/dev/null \
     | awk '{ sum += $1 } END { printf "%.0f\n", sum + 0 }'
 }
@@ -145,10 +170,10 @@ OUTPUT_TOKENS=0
 while IFS= read -r file; do
   case "$file" in
     "$CLAUDE_DIR"/*)
-      file_tokens=$(sum_claude_file "$file")
+      file_tokens=$(sum_claude_file "$file" "$CUTOFF_EPOCH")
       ;;
     "$CODEX_DIR"/*)
-      file_tokens=$(sum_codex_file "$file")
+      file_tokens=$(sum_codex_file "$file" "$CUTOFF_EPOCH")
       ;;
     *)
       file_tokens=0

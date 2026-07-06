@@ -29,6 +29,8 @@ case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-freeze-lib.sh
+. "$SCRIPT_DIR/fm-freeze-lib.sh"
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
@@ -72,7 +74,17 @@ beacon_desc=$FM_SUP_BEACON_DESC
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
 if [ "$watcher_fresh" = false ]; then
-  if [ "$READ_ONLY" -eq 1 ]; then
+  frozen_file=$(fm_fleet_freeze_path "$STATE")
+  if [ -f "$frozen_file" ]; then
+    frozen=1
+    frozen_reason=$(fm_fleet_freeze_reason "$STATE")
+  else
+    frozen=0
+    frozen_reason=""
+  fi
+  if [ "$frozen" -eq 1 ]; then
+    fix="The fleet is frozen (state: $frozen_file${frozen_reason:+; reason: $frozen_reason}), so bin/fm-watch-arm.sh will keep refusing by design - this is expected, not a lapse. Run bin/fm-freeze.sh off when ready to resume supervision."
+  elif [ "$READ_ONLY" -eq 1 ]; then
     fix='Watcher repair belongs to the session holding the fleet lock; do not drain or re-arm from this read-only session.'
   elif "$queue_pending"; then
     fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
@@ -82,9 +94,15 @@ if [ "$watcher_fresh" = false ]; then
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
-    printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
+    if [ "$frozen" -eq 1 ]; then
+      printf '●  FLEET FROZEN - WATCHER INTENTIONALLY DOWN\n'
+    else
+      printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
+    fi
     printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
-    if [ "$READ_ONLY" -eq 1 ]; then
+    if [ "$frozen" -eq 1 ]; then
+      : # fix line below already explains the freeze; no extra advisory needed.
+    elif [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else
       printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'

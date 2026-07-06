@@ -18,16 +18,20 @@ make_case_dirs() {
   mkdir -p "$dir/claude/projects/project-a" "$dir/codex/sessions/2026/07/06"
 }
 
+now_iso() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
 write_claude_session() {
-  local file=$1 tokens=${2:-0}
+  local file=$1 tokens=${2:-0} ts=${3:-$(now_iso)}
   mkdir -p "$(dirname "$file")"
-  printf '{"type":"assistant","message":{"usage":{"output_tokens":%s}}}\n' "$tokens" > "$file"
+  printf '{"type":"assistant","timestamp":"%s","message":{"usage":{"output_tokens":%s}}}\n' "$ts" "$tokens" > "$file"
 }
 
 write_codex_session() {
-  local file=$1 tokens=${2:-0}
+  local file=$1 tokens=${2:-0} ts=${3:-$(now_iso)}
   mkdir -p "$(dirname "$file")"
-  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"token_count":{"output_tokens":%s}}}}\n' "$tokens" > "$file"
+  printf '{"type":"event_msg","timestamp":"%s","payload":{"type":"token_count","info":{"token_count":{"output_tokens":%s}}}}\n' "$ts" "$tokens" > "$file"
 }
 
 age_file_old() {
@@ -118,8 +122,50 @@ test_missing_transcript_dirs_are_empty() {
   pass "missing transcript dirs degrade as empty"
 }
 
+test_long_lived_file_excludes_stale_entries_by_own_timestamp() {
+  local dir out file i old_ts
+  dir="$TMP_ROOT/long-lived"
+  make_case_dirs "$dir"
+  file="$dir/claude/projects/project-a/long-lived.jsonl"
+  old_ts="2020-01-01T00:00:00Z"
+  : > "$file"
+  i=1
+  while [ "$i" -le 50 ]; do
+    printf '{"type":"assistant","timestamp":"%s","message":{"usage":{"output_tokens":5000}}}\n' "$old_ts" >> "$file"
+    i=$((i + 1))
+  done
+  # File mtime is fresh (just written), simulating an actively-appended
+  # long-lived session whose historical entries are all outside the window.
+
+  out=$(run_tripwire "$dir" 10 100000)
+  [ -z "$out" ] || fail "stale entries in a fresh-mtime file should not count toward the window, got: $out"
+  pass "long-lived file's historical entries are excluded by per-entry timestamp"
+}
+
+test_long_lived_file_counts_only_recent_entries() {
+  local dir out file i old_ts
+  dir="$TMP_ROOT/long-lived-mixed"
+  make_case_dirs "$dir"
+  file="$dir/claude/projects/project-a/mixed.jsonl"
+  old_ts="2020-01-01T00:00:00Z"
+  : > "$file"
+  i=1
+  while [ "$i" -le 10 ]; do
+    printf '{"type":"assistant","timestamp":"%s","message":{"usage":{"output_tokens":5000}}}\n' "$old_ts" >> "$file"
+    i=$((i + 1))
+  done
+  printf '{"type":"assistant","timestamp":"%s","message":{"usage":{"output_tokens":3000}}}\n' "$(now_iso)" >> "$file"
+
+  out=$(run_tripwire "$dir" 10 2000)
+  assert_contains "$out" "breach=output_tokens" "recent-entry breach line did not name the token signal"
+  assert_contains "$out" "output_tokens=3000/2000" "recent-entry sum should exclude the 50000 stale total"
+  pass "long-lived file counts only entries within the sliding window"
+}
+
 test_healthy_fixture_stays_silent
 test_session_count_breach_alarms_once
 test_output_token_breach_alarms_once
 test_large_old_fixture_set_is_bounded_by_mtime
 test_missing_transcript_dirs_are_empty
+test_long_lived_file_excludes_stale_entries_by_own_timestamp
+test_long_lived_file_counts_only_recent_entries
