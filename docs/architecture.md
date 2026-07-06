@@ -44,6 +44,18 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using the target's recorded `harness=` meta, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Fleet freeze and incident guardrails
+
+`bin/fm-freeze.sh on [reason...]` writes a local `state/.fleet-freeze` flag; `off` removes it and `status` reports it.
+It is a blunt incident pause: it does not inspect, steer, or tear down any crewmate itself.
+While the flag exists, `bin/fm-freeze-lib.sh` makes `fm-spawn.sh`, `fm-send.sh`, `fm-watch.sh`, `fm-watch-arm.sh`, and `fm-supervise-daemon.sh` (both its main loop and its escalation-injection path) refuse to run, so nothing can spawn, steer, wake, or supervise the fleet until it is lifted.
+A single command can still bypass the freeze deliberately with `FM_FLEET_FREEZE_BYPASS=1`.
+`bin/fm-guard.sh` and `bin/fm-session-start.sh` both report a frozen watcher-down state as an expected pause rather than a supervision lapse, and the daemon defers its own watcher restart attempts on a fixed interval while frozen instead of counting them as crashes.
+
+`bin/fm-fleet-map.sh` is a read-only diagnostic for the companion failure mode: firstmate's tracked `state/*.meta` records drifting out of sync with the human-visible Herdr agent surface. It cross-references tracked state against `herdr agent list` by target and working directory, prints tracked-vs-live mismatches as warnings, and never spawns, steers, tears down, or mutates anything - it only reads.
+
+`bin/fm-usage-tripwire.sh` is a read-only watcher check born from a token-burn incident: it scans transcript files under `FM_USAGE_CLAUDE_DIR`/`FM_USAGE_CODEX_DIR` whose mtime falls in a sliding `FM_USAGE_WINDOW_MINUTES` window, counts them as a session-burst signal against `FM_USAGE_SESSION_THRESHOLD`, and separately sums each transcript line's own timestamped output tokens against `FM_USAGE_OUTPUT_THRESHOLD` so a long-lived, actively-appended session is not re-summed in full on every poll. It prints exactly one alarm line on a breach and nothing when healthy, matching the `state/<id>.check.sh` watcher-check contract; arm it with `ln -sf "$(pwd -P)/bin/fm-usage-tripwire.sh" state/usage-tripwire.check.sh`.
+
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.

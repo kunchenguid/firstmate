@@ -260,6 +260,8 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalati
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_FLEET_FREEZE_BYPASS=      # truthy bypasses fleet-freeze refusal for exactly one spawn/send/watch/watch-arm/daemon command
+FM_FLEET_MAP_HERDR_JSON=     # fm-fleet-map.sh test fixture: parse this saved `herdr agent list` JSON file instead of calling herdr
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=2 # seconds fm-teardown.sh waits before retrying a worktree return that failed on a git lock
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
@@ -285,4 +287,10 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# fm-usage-tripwire.sh (read-only watcher check for token/session usage bursts)
+FM_USAGE_WINDOW_MINUTES=60         # sliding window in minutes
+FM_USAGE_SESSION_THRESHOLD=50      # alarm when recent transcript-file count exceeds this
+FM_USAGE_OUTPUT_THRESHOLD=150000   # alarm when summed recent output tokens exceeds this
+FM_USAGE_CLAUDE_DIR=$HOME/.claude/projects   # Claude transcript root
+FM_USAGE_CODEX_DIR=$HOME/.codex/sessions     # Codex transcript root
 ```
