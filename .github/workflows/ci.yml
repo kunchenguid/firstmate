@@ -16,6 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+      # bash -n over every bin script: catches syntax regressions shellcheck's
+      # parser tolerates. Note the macOS bash 3.2 heredoc-in-$() apostrophe bug
+      # (issue #166) does NOT reproduce on the runner's bash 4+; the wording
+      # checks in tests/fm-brief.test.sh guard that specific regression.
+      - run: |
+          set -eu
+          for f in bin/*.sh bin/backends/*.sh; do bash -n "$f"; done
 
   tests:
     name: Behavior tests

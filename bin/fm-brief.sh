@@ -171,6 +171,10 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# The DOD blocks below are heredocs inside $(...) command substitution. macOS
+# system bash 3.2 tracks quote state through such heredoc bodies, so a single
+# unbalanced apostrophe in any of them breaks parsing of the ENTIRE script
+# (issue #166). Keep apostrophes out of these bodies, or pair them.
 case "$MODE" in
   direct-PR)
     SETUP2=""

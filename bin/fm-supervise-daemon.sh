@@ -769,7 +769,9 @@ should_force_self() {  # <reason>
   [ -n "$skip" ] || return 1
   local -a prefixes
   IFS='|' read -ra prefixes <<<"$skip"
-  for prefix in "${prefixes[@]}"; do
+  # ${arr[@]+...} guard: read yields an empty array when $skip's first line is
+  # empty, and bash 3.2 treats an empty "${arr[@]}" as unbound under set -u.
+  for prefix in ${prefixes[@]+"${prefixes[@]}"}; do
     [ -n "$prefix" ] || continue
     [ "$reason" != "${reason#"$prefix"}" ] && return 0
   done
