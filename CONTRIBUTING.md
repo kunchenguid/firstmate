@@ -74,7 +74,7 @@ Check and test the toolbelt before pushing:
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
-tests/fm-bash32-compat.test.sh            # macOS system bash 3.2 guard: bash -n every bin/ script under the system bash, self-tested $( ) heredoc quote lexer, and fm-brief.sh end-to-end scaffold
+tests/fm-bash32-compat.test.sh            # macOS system bash 3.2 guard: bash -n every bin/ script under the system bash, self-tested $( ) heredoc quote lexer, and fm-brief.sh end-to-end scaffolds of every ship delivery mode plus scout
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
 tests/fm-turnend-guard.test.sh            # shared supervision predicate plus Claude Stop-hook scoping, loop guard, fail-open, and live watcher health tests

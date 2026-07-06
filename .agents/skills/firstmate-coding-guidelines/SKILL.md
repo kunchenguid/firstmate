@@ -74,6 +74,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
+- Scripts must also parse and run under macOS system bash 3.2 (`/bin/bash`); `CONTRIBUTING.md` documents the two sharp edges (quote lexing inside `$( )` heredoc bodies, and empty-array `"${arr[@]}"` under `set -u`), and `tests/fm-bash32-compat.test.sh` guards them.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
