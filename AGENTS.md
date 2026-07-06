@@ -419,6 +419,10 @@ If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) bef
 
 ### Intake
 
+Two captain-invocable skills front-run this lifecycle.
+When the captain says `/plan <feature> [project]` or "let's plan X", load the `plan` skill; the approved spec re-enters intake as a tracked story, a brief, and a normal ship dispatch.
+When the captain asks "where are we [on <project>]" or says `/deck [project]`, load the `deck` skill and generate the on-demand summary from live state instead of answering from memory.
+
 **Resolve the project first.**
 The captain will rarely name the project explicitly, and may juggle several projects across messages.
 Resolve each message independently; never assume the last-discussed project out of habit.
