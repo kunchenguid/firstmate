@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Telegram webhook — receives updates, writes to inbox. Firstmate answers."""
+"""Telegram webhook — receives updates, writes to inbox, wakes firstmate via wake queue."""
 from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 from pathlib import Path
 from fastapi import FastAPI, Request
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 FM_ROOT = Path(os.environ.get("FM_ROOT", "/home/m_gogate/hermes/firstmate"))
 INBOX = FM_ROOT / "state" / "tg-inbox"
+WAKE_QUEUE = FM_ROOT / "state" / ".wake-queue"
 CHAT_ID_FILE = FM_ROOT / "state" / ".tg-chat-id"
 BOT_TOKEN = "8743350050:AAFHOKSS5KgYAvmY_j1MV3m3blcy7KXNBlU"
 
@@ -44,8 +46,15 @@ async def telegram_webhook(request: Request):
     CHAT_ID_FILE.write_text(str(chat_id))
     send_typing(chat_id)
 
+    # Write to inbox
     inbox_file = INBOX / f"{update_id}.json"
     inbox_file.write_text(json.dumps(body))
+
+    # Wake firstmate immediately via wake queue
+    epoch = int(time.time())
+    wake_line = f"{epoch}\t0\ttg\t{update_id}\t{text[:80]}\n"
+    with open(WAKE_QUEUE, "a") as f:
+        f.write(wake_line)
 
     return JSONResponse({"ok": True})
 
