@@ -65,6 +65,46 @@ process_inbox() {
       *date*|*"what day"*|*"what time"*)
         reply=$(date '+%A, %Y-%m-%d %H:%M %Z')
         handled=1 ;;
+      *project*|*"working on"*)
+        reply=$(cat "$FM_ROOT/data/projects.md" 2>/dev/null || echo "(no projects)")
+        handled=1 ;;
+      *ticker*|*strategy*buy*|*spread*bet*)
+        # Check latest signals and HALT state
+        halt=$(cat /home/m_gogate/hermes/stock_data/HALT 2>/dev/null || echo "unknown")
+        sigs_file=$(ls -t /home/m_gogate/hermes/strategies-to-test/results/ig_forward/signals/*.json 2>/dev/null | head -1)
+        if [ -n "$sigs_file" ]; then
+          tickers=$(python3 -c "
+import json
+with open('$sigs_file') as f: data = json.load(f)
+r14 = [s['ticker'] for s in data.get('signals',[]) if 'legacy_any_rsi14gated' in s.get('strategies',[])]
+print(', '.join(sorted(r14)) if r14 else 'none')
+" 2>/dev/null) || tickers="error"
+          reply="HALT: $halt. rsi14gated tickers: $tickers."
+        else
+          reply="HALT: $halt. No signal file found."
+        fi
+        handled=1 ;;
+      *armed*|*halt*|*paper*trading*)
+        halt=$(cat /home/m_gogate/hermes/stock_data/HALT 2>/dev/null || echo "not found")
+        reply="Paper trading HALT file: $halt"
+        handled=1 ;;
+      *crew*|*flight*|*task*)
+        tasks=$(ls "$FM_ROOT/state/"*.meta 2>/dev/null | wc -l)
+        if [ "$tasks" -gt 0 ]; then
+          details=""
+          for m in "$FM_ROOT/state/"*.meta; do
+            [ -f "$m" ] || continue
+            id=$(basename "$m" .meta)
+            kind=$(awk -F= '/^kind=/ {print $2}' "$m" 2>/dev/null) || kind=""
+            [ "$kind" = "secondmate" ] && continue
+            last=$(tail -1 "$FM_ROOT/state/$id.status" 2>/dev/null || echo "running")
+            details="$details\n  $id: $last"
+          done
+          reply="$tasks in flight:$details"
+        else
+          reply="No tasks in flight."
+        fi
+        handled=1 ;;
     esac
 
     # If no pattern match, try DuckDuckGo
