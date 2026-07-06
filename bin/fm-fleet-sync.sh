@@ -17,10 +17,10 @@
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
-# caller's cwd, including "projects/<name>") or a bare "<name>", resolved
-# against this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# A path that already exists as given is used as-is; only when it does not
-# resolve is it retried against the projects dir. Example: from anywhere,
+# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
+# this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
+# Bare names and "projects/<name>" forms prefer this home's projects dir before
+# falling back to an explicit path. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
 # passing its full projects/dotfiles-private path.
 set -eu
@@ -55,15 +55,32 @@ project_label() {
 # sync_project's existing "not a directory" skip.
 resolve_project_arg() {
   local arg=$1 candidate
-  if [ -d "$arg" ]; then
-    printf '%s\n' "$arg"
-    return 0
-  fi
-  candidate="$PROJECTS/${arg#projects/}"
-  if [ -d "$candidate" ]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
+  case "$arg" in
+    projects/*)
+      candidate="$PROJECTS/${arg#projects/}"
+      if [ -d "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      ;;
+    */*)
+      if [ -d "$arg" ]; then
+        printf '%s\n' "$arg"
+        return 0
+      fi
+      ;;
+    *)
+      candidate="$PROJECTS/$arg"
+      if [ -d "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      if [ -d "$arg" ]; then
+        printf '%s\n' "$arg"
+        return 0
+      fi
+      ;;
+  esac
   printf '%s\n' "$arg"
 }
 
