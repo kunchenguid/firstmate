@@ -285,11 +285,13 @@ log_reports_ci_ready() {
   esac
 }
 
-# Is the run's steps[] table currently sitting on the ci step (running or
-# fixing)? Only meaningful for RUN_SOURCE=full, where $RUN_OUT carries that
-# table; the coarse (runs-list) fallback has no per-step detail to check.
-nm_ci_step_active() {
-  printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*ci,(running|fixing),'
+nm_ci_step_status() {
+  local row rest
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
 }
 
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
@@ -307,18 +309,19 @@ nm_ci_step_active() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
-nm_ci_checks_green() {
+nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || return 1
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || return 1
-  [ -n "$log_tail" ] || return 1
+  [ -n "$run_id" ] || { printf 'unknown'; return; }
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) return 0 ;;
-    *) return 1 ;;
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
+    *) printf 'unknown' ;;
   esac
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -410,6 +413,8 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  CI_STEP_STATUS=""
+  CI_LOG_STATE=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -466,15 +471,34 @@ if [ "$HAVE_RUN" = 1 ]; then
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
-      if [ "$RUN_STATE" = working ] && nm_ci_step_active && nm_ci_checks_green; then
-        RUN_STATE="done"
-        RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+      if [ "$RUN_STATE" = working ]; then
+        CI_STEP_STATUS=$(nm_ci_step_status)
+        case "$CI_STEP_STATUS" in
+          running)
+            CI_LOG_STATE=$(nm_ci_checks_state)
+            if [ "$CI_LOG_STATE" = green ]; then
+              RUN_STATE="done"
+              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            fi
+            ;;
+          fixing)
+            CI_LOG_STATE=not-ready
+            ;;
+        esac
       fi
     fi
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_ci_step_status)
+    if [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+      CI_LOG_STATE=$(nm_ci_checks_state)
+    elif [ "$CI_STEP_STATUS" = fixing ]; then
+      CI_LOG_STATE=not-ready
+    fi
+    if [ "$CI_LOG_STATE" != not-ready ]; then
+      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

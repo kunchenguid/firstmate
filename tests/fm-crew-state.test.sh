@@ -285,6 +285,23 @@ run:
 EOF
 }
 
+run_ci_fixing() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,fixing,0,0
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # (a) active run-step is authoritative
 test_active_run_is_authoritative() {
@@ -493,6 +510,43 @@ EOF
   assert_contains "$out" "state: working" "a later relapse marker must win over an earlier green one"
   assert_not_contains "$out" "state: done" "relapsed ci run must not read as done"
   pass "a fresh issue after an earlier green reading is not masked"
+}
+
+test_ci_ready_done_log_relapse_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-then-relapse)
+  make_repo_on_branch "$d/wt" fm/feat-cireadyrelapse
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cireadyrelapse.meta" "window=fm:fm-feat-cireadyrelapse" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cireadyrelapse.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cireadyrelapse)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced, re-arming CI monitor timeout
+CI checks running, waiting for results...
+EOF
+)
+  local out; out=$(run_crew_state "$d" feat-cireadyrelapse)
+  assert_contains "$out" "state: working" "a stale ready status must not mask a later CI relapse"
+  assert_contains "$out" "source: run-step" "relapsed ci run remains run-step sourced"
+  assert_not_contains "$out" "state: done" "relapsed ci run with stale done log must not read as done"
+  pass "stale checks-green status log does not mask CI relapse"
+}
+
+test_ci_fixing_after_green_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-fixing-after-green)
+  make_repo_on_branch "$d/wt" fm/feat-cifixing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cifixing.meta" "window=fm:fm-feat-cifixing" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cifixing.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_fixing fm/feat-cifixing)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cifixing)
+  assert_contains "$out" "state: working" "ci fixing step must stay working"
+  assert_contains "$out" "source: run-step" "ci fixing remains run-step sourced"
+  assert_not_contains "$out" "state: done" "ci fixing must not read as checks-green done"
+  pass "ci fixing is not overridden by an earlier green marker"
 }
 
 # (d) terminal run-step is authoritative
@@ -888,6 +942,8 @@ test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
+test_ci_ready_done_log_relapse_stays_working
+test_ci_fixing_after_green_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
