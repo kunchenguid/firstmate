@@ -104,7 +104,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
+claude, codex, opencode, pi, grok, and cursor are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
@@ -120,6 +120,7 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
+For cursor, `fm-spawn.sh` instead merges a firstmate-owned `stop` hook idempotently into the operator's shared `$CURSOR_CONFIG_DIR/hooks.json`, or `~/.cursor/hooks.json` when `CURSOR_CONFIG_DIR` is unset, preserving any existing `sessionStart`/`stop` hooks, and drops a per-task `.fm-cursor-turnend` pointer in the worktree; teardown removes the task token and pointer. That hook shells out to `jq`, so `jq` is a runtime dependency for cursor crewmate turn-end supervision.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

@@ -81,5 +81,5 @@ This is possible (unlike the crewmate per-task hook) because the guard script is
 ## Harness coverage
 
 Verified and active on `claude` only, since that is what the primary runs today.
-Other harnesses (`codex`, `opencode`, `pi`, `grok`) do not get this structural backstop yet; `fm-guard.sh`'s pull-based warning is still their only defense.
+Other harnesses (`codex`, `opencode`, `pi`, `grok`, `cursor`) do not get this structural backstop yet; `fm-guard.sh`'s pull-based warning is still their only defense.
 Extending this is future work, following the same empirical-verification-before-trusting-a-mechanism pattern used for each harness's turn-end hook in `bin/fm-spawn.sh` and documented in the `harness-adapters` skill (e.g. grok's Stop hook required a global, trust-gate-free hook location because project hooks need an explicit trust grant firstmate cannot establish at launch).
