@@ -156,7 +156,7 @@ process.stdin.on("end", () => {
 }
 
 test_bridge_start_thread_uses_app_server_stdio() {
-  local dir fb log prompt out thread_id cwd status
+  local dir fb log prompt out thread_id cwd status log_before
   dir="$TMP_ROOT/bridge-start"
   mkdir -p "$dir/wt"
   log="$dir/codex.log"
@@ -165,7 +165,7 @@ test_bridge_start_thread_uses_app_server_stdio() {
   fb=$(make_fake_codex_bin "$dir")
 
   out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" \
-    "$ROOT/bin/fm-codex-bridge" start-thread --cwd "$dir/wt" --name "fm-task" --goal "ship it" --prompt-file "$prompt" --model gpt-5 --effort high)
+    "$ROOT/bin/fm-codex-bridge" start-thread --cwd "$dir/wt" --name "fm-task" --goal "ship it" --model gpt-5)
   status=$?
   expect_code 0 "$status" "bridge start-thread should succeed against fake app-server"
   thread_id=$(printf '%s' "$out" | json_field thread_id)
@@ -176,8 +176,15 @@ test_bridge_start_thread_uses_app_server_stdio() {
   assert_contains "$(cat "$log")" $'request\tthread/start\t' "bridge did not start a thread"
   assert_contains "$(cat "$log")" $'request\tthread/name/set\t' "bridge did not set the thread name"
   assert_contains "$(cat "$log")" $'request\tthread/goal/set\t' "bridge did not set the thread goal"
+  log_before=$(cat "$log")
+  assert_not_contains "$log_before" $'request\tturn/start\t' "bridge start-thread should not start the initial turn before cwd validation"
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id "$thread_id" --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should start the initial turn after validation"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the initial turn"
-  pass "fm-codex-bridge start-thread: uses app-server stdio, normalizes thread_id/cwd, then starts the first turn"
+  pass "fm-codex-bridge: start-thread normalizes thread cwd before send-turn starts the first turn"
 }
 
 test_backend_dispatch_accepts_codex_app() {

@@ -41,6 +41,9 @@ case "$verb" in
     ;;
   start-thread)
     cwd=$(arg_value --cwd "$@" || true)
+    printf '{"ok":true,"thread_id":"%s","cwd":"%s","thread":{"id":"%s","status":{"type":"idle"}}}\n' "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}" "${FM_FAKE_BRIDGE_CWD:-$cwd}" "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}"
+    ;;
+  send-turn)
     prompt=$(arg_value --prompt-file "$@" || true)
     if [ "${FM_FAKE_BRIDGE_WRITE_STATUS:-0}" = 1 ]; then
       printf 'working: Codex thread started\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
@@ -49,7 +52,7 @@ case "$verb" in
       printf 'prompt-file\x1f%s\n' "$prompt" >> "$LOG"
       sed -n '1,220p' "$prompt" > "$LOG.prompt"
     fi
-    printf '{"ok":true,"thread_id":"%s","cwd":"%s","thread":{"id":"%s","status":{"type":"idle"}}}\n' "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}" "${FM_FAKE_BRIDGE_CWD:-$cwd}" "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}"
+    printf '{"ok":true,"thread_id":"%s","turn":{"id":"turn-spawn-123","status":"inProgress"}}\n' "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}"
     ;;
   archive-thread)
     printf '{"ok":true,"archived":true}\n'
@@ -137,6 +140,7 @@ test_spawn_codex_app_records_thread_and_worktree() {
   log=$(cat "$case_dir/bridge.log")
   assert_contains "$log" "ensure-running" "spawn should verify the bridge before starting"
   assert_contains "$log" $'start-thread\x1f--cwd\x1f' "spawn should call start-thread with a cwd"
+  assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "spawn should start the prompt turn after thread validation"
   prompt="$case_dir/bridge.log.prompt"
   assert_grep "working: Codex thread started" "$prompt" "spawn prompt should include the return-channel line"
   assert_contains "$out" "spawned $id harness=codex kind=ship" "spawn output should keep the normal summary shape"
@@ -156,7 +160,7 @@ test_spawn_codex_app_refuses_secondmate() {
 }
 
 test_spawn_codex_app_refuses_primary_cwd_from_bridge() {
-  local id case_dir project out status
+  local id case_dir project out status wt log
   id=codex-primary-x2
   case_dir=$(make_case primary-cwd "$id")
   project="$case_dir/home/projects/app"
@@ -164,17 +168,36 @@ test_spawn_codex_app_refuses_primary_cwd_from_bridge() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn should refuse when Codex returns the primary checkout cwd"
   assert_contains "$out" "Codex thread thread-spawn-123 started in '$project'" "primary cwd refusal should name the returned cwd"
+  wt="$case_dir/home/projects/.firstmate-worktrees/$id"
+  assert_absent "$wt" "primary cwd refusal should remove the git worktree"
+  git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
+    && fail "primary cwd refusal should unregister the git worktree"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "primary cwd refusal should delete the task branch"
+  assert_absent "$case_dir/home/state/$id.meta" "primary cwd refusal should not leave task metadata"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "primary cwd refusal should archive the Codex thread"
+  assert_not_contains "$log" "send-turn" "primary cwd refusal should not start the prompt turn before cwd validation"
   pass "fm-spawn.sh --backend codex-app: refuses when Codex reports the primary checkout cwd"
 }
 
 test_spawn_codex_app_requires_return_channel_status() {
-  local id case_dir out status
+  local id case_dir out status wt project log
   id=codex-no-status-x3
   case_dir=$(make_case no-status "$id")
+  project="$case_dir/home/projects/app"
   out=$(run_spawn_case "$case_dir" "$id" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn should fail without the Codex status handshake"
   assert_contains "$out" "did not write return-channel status" "missing handshake refusal should explain the missing status line"
+  wt="$case_dir/home/projects/.firstmate-worktrees/$id"
+  assert_absent "$wt" "missing handshake refusal should remove the git worktree"
+  git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
+    && fail "missing handshake refusal should unregister the git worktree"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "missing handshake refusal should delete the task branch"
+  assert_absent "$case_dir/home/state/$id.meta" "missing handshake refusal should not leave task metadata"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "missing handshake test should start the prompt turn before waiting"
+  assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "missing handshake refusal should archive the Codex thread"
   pass "fm-spawn.sh --backend codex-app: refuses when the Codex thread does not verify the status return channel"
 }
 

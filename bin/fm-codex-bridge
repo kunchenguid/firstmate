@@ -16,7 +16,7 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.FM_CODEX_BRIDGE_TIMEOUT_MS || 3000
 function usage() {
   console.error(`usage:
   fm-codex-bridge ensure-running
-  fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> --prompt-file <file> [--model <model>] [--effort <effort>]
+  fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> [--model <model>]
   fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>]
   fm-codex-bridge read-thread --thread-id <id> [--include-turns]
   fm-codex-bridge thread-status --thread-id <id>
@@ -265,7 +265,6 @@ async function ensureRunning() {
 
 async function startThread(opts) {
   const cwd = requireOpt(opts, "cwd");
-  const prompt = readPrompt(requireOpt(opts, "prompt-file"));
   return withServer(async server => {
     const threadParams = {
       cwd,
@@ -284,11 +283,9 @@ async function startThread(opts) {
     if (opts.goal) {
       await server.request("thread/goal/set", { threadId, objective: opts.goal, status: "active" });
     }
-    const turn = await server.request("turn/start", turnParams(threadId, prompt, { ...opts, cwd: normalized.cwd || cwd }));
     return {
       ok: true,
       ...normalized,
-      turn,
       response: started,
     };
   });

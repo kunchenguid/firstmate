@@ -100,8 +100,8 @@ Suggested command shapes:
 
 ```text
 bin/fm-codex-bridge ensure-running
-bin/fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> --prompt-file <file> [--model <model>] [--effort <effort>]
-bin/fm-codex-bridge send-turn --thread-id <id> --prompt-file <file>
+bin/fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> [--model <model>]
+bin/fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>]
 bin/fm-codex-bridge read-thread --thread-id <id> [--include-turns]
 bin/fm-codex-bridge thread-status --thread-id <id>
 bin/fm-codex-bridge turns-list --thread-id <id> --limit <n> --items-view summary|full
@@ -157,8 +157,10 @@ First pass spawn flow:
 7. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
 8. Set the thread name to `fm-<id>`.
 9. Set the thread goal to the Firstmate task objective.
-10. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
-11. Verify the return channel before treating the thread as supervised.
+10. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
+11. Start the initial prompt turn through `send-turn`.
+12. Verify the return channel before treating the thread as supervised.
+13. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
 
 The return-channel verification is load-bearing.
 The worker prompt must instruct the Codex thread to append:
@@ -169,15 +171,14 @@ working: Codex thread started
 
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits briefly for that line to appear.
-If it does not appear, the thread is still visible in Codex Desktop but is not a supervised Firstmate task.
-The spawn fails with a diagnostic naming the thread id and the missing status file write.
+If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
 
 ## Send and steer flow
 
 `fm-send.sh fm-<id> <text>` maps to:
 
 ```text
-fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt>
+fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt> [--cwd <path>]
 ```
 
 The first implementation starts a new turn through `turn/start`.

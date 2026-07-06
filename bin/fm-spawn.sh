@@ -180,6 +180,9 @@ ORCA_TERMINAL=
 WORKTREE_PROVIDER=treehouse
 CODEX_THREAD_ID=
 CODEX_CWD=
+CODEX_PROMPT_FILE=
+CODEX_ABORT_CLEANUP=0
+CODEX_WORKTREE_BRANCH=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -199,7 +202,7 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=${1:-$?}
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -229,7 +232,59 @@ orca_spawn_abort_cleanup() {
   fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+
+codex_app_write_abort_meta() {
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  {
+    echo "window=${CODEX_THREAD_ID:-$W}"
+    echo "worktree=${WT:-}"
+    echo "project=${PROJ_ABS:-}"
+    echo "harness=${HARNESS:-codex}"
+    echo "kind=$KIND"
+    echo "mode=${MODE:-no-mistakes}"
+    echo "yolo=${YOLO:-off}"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    echo "backend=codex-app"
+    [ -z "${CODEX_THREAD_ID:-}" ] || echo "thread_id=$CODEX_THREAD_ID"
+    [ -z "${CODEX_CWD:-}" ] || echo "codex_cwd=$CODEX_CWD"
+    echo "worktree_provider=$WORKTREE_PROVIDER"
+  } > "$STATE/$ID.meta" 2>/dev/null || true
+}
+
+codex_app_spawn_abort_cleanup() {
+  local status=${1:-$?} cleanup_failed=0
+  [ "$CODEX_ABORT_CLEANUP" = 1 ] || return "$status"
+  CODEX_ABORT_CLEANUP=0
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    fm_backend_kill codex-app "$CODEX_THREAD_ID" 2>/dev/null || cleanup_failed=1
+  fi
+  if [ "$WORKTREE_PROVIDER" = git-worktree ] && [ -n "${PROJ_ABS:-}" ] && [ -d "$PROJ_ABS" ]; then
+    if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
+      git -C "$PROJ_ABS" worktree remove --force "$WT" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+    if [ -n "${CODEX_WORKTREE_BRANCH:-}" ] && git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$CODEX_WORKTREE_BRANCH"; then
+      git -C "$PROJ_ABS" branch -D "$CODEX_WORKTREE_BRANCH" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+  fi
+  if [ "$cleanup_failed" = 0 ]; then
+    rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" 2>/dev/null || true
+    [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP" 2>/dev/null || true
+  else
+    codex_app_write_abort_meta
+  fi
+  return "$status"
+}
+
+spawn_abort_cleanup() {
+  local status=$?
+  orca_spawn_abort_cleanup "$status" || true
+  codex_app_spawn_abort_cleanup "$status" || true
+  return "$status"
+}
+trap spawn_abort_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -691,6 +746,7 @@ codex_app_create_git_worktree() {
   root="$PROJECTS/.firstmate-worktrees"
   path="$root/$ID"
   branch="fm/$ID"
+  CODEX_WORKTREE_BRANCH=$branch
   if [ -e "$path" ]; then
     echo "error: codex-app worktree path already exists: $path" >&2
     exit 1
@@ -706,6 +762,7 @@ codex_app_create_git_worktree() {
   }
   WT=$(cd "$path" && pwd -P)
   WORKTREE_PROVIDER=git-worktree
+  CODEX_ABORT_CLEANUP=1
 }
 
 codex_app_goal_text() {
@@ -735,14 +792,13 @@ codex_app_prompt_file() {
 }
 
 codex_app_start_thread() {
-  local bridge prompt goal raw cwd_real wt_real
+  local bridge goal raw cwd_real wt_real
   fm_backend_codex_app_ensure_running >/dev/null || exit 1
   bridge=$(fm_backend_codex_app_bridge)
-  prompt=$(codex_app_prompt_file)
+  CODEX_PROMPT_FILE=$(codex_app_prompt_file)
   goal=$(codex_app_goal_text)
-  CODEX_START_ARGS=(start-thread --cwd "$WT" --name "$W" --goal "$goal" --prompt-file "$prompt")
+  CODEX_START_ARGS=(start-thread --cwd "$WT" --name "$W" --goal "$goal")
   [ -z "$MODEL" ] || CODEX_START_ARGS+=(--model "$MODEL")
-  [ -z "$EFFORT" ] || CODEX_START_ARGS+=(--effort "$EFFORT")
   raw=$("$bridge" "${CODEX_START_ARGS[@]}") || exit 1
   CODEX_THREAD_ID=$(printf '%s' "$raw" | fm_backend_codex_app_json_field thread_id) || {
     echo "error: codex-app bridge did not return thread_id" >&2
@@ -762,6 +818,15 @@ codex_app_start_thread() {
     exit 1
   fi
   T="$CODEX_THREAD_ID"
+}
+
+codex_app_start_initial_turn() {
+  local bridge
+  bridge=$(fm_backend_codex_app_bridge)
+  CODEX_TURN_ARGS=(send-turn --thread-id "$CODEX_THREAD_ID" --prompt-file "$CODEX_PROMPT_FILE" --cwd "$WT")
+  [ -z "$MODEL" ] || CODEX_TURN_ARGS+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || CODEX_TURN_ARGS+=(--effort "$EFFORT")
+  "$bridge" "${CODEX_TURN_ARGS[@]}" >/dev/null || exit 1
 }
 
 codex_app_wait_return_channel() {
@@ -1067,6 +1132,11 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+if [ "$BACKEND" = codex-app ]; then
+  codex_app_start_initial_turn
+  codex_app_wait_return_channel
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -1114,6 +1184,7 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$BACKEND" = codex-app ] && CODEX_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1129,9 +1200,7 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-if [ "$BACKEND" = codex-app ]; then
-  codex_app_wait_return_channel
-else
+if [ "$BACKEND" != codex-app ]; then
   # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
   # process (go build, go test, ...) inherit it. Sent before the launch command so
   # the env is set when the agent starts; the brief sleep lets the export land.
