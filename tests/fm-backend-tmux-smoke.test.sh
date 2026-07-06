@@ -67,8 +67,10 @@ tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
 # echoes unexecuted until it is live. Wait for the new prompt (a line
 # STARTING with smoke$ - the echoed command above does not) as proof the
 # shell actually ran the first command before the fixed sleeps below.
+# 60s budget: on a shared machine (full suite plus a live agent pipeline)
+# a fresh login shell has been observed to blow past the old 20s.
 shell_ready=0
-for _ in $(seq 1 100); do
+for _ in $(seq 1 300); do
   if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q '^smoke\$'; then shell_ready=1; break; fi
   sleep 0.2
 done

@@ -513,7 +513,13 @@ test_arm_hup_cleans_child_and_temp_output() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  # Reset SIGHUP to default before exec'ing the arm: pipeline/daemon test
+  # runners ignore SIGHUP, the disposition is inherited, and a non-interactive
+  # shell cannot trap an entry-ignored signal - the arm's HUP trap would
+  # silently never install and the kill -HUP below would be a no-op (the
+  # deterministic "got 124" failure under such runners).
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    perl -e '$SIG{HUP} = "DEFAULT"; exec @ARGV or die "exec: $!"' "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
