@@ -502,6 +502,25 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
+test_ci_monitoring_green_then_rearm_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-green-then-rearm)
+  make_repo_on_branch "$d/wt" fm/feat-cirearm
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cirearm.meta" "window=fm:fm-feat-cirearm" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirearm)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+base branch advanced, re-arming CI monitor timeout
+EOF
+)
+  local out; out=$(run_crew_state "$d" feat-cirearm)
+  assert_contains "$out" "state: working" "base-advance rearm marker -> working"
+  assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
+  assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
+  pass "base-advance rearm after green stays working"
+}
+
 test_ci_monitoring_no_checks_yet_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks-yet)
@@ -704,6 +723,27 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+  reset_fakes
+  local d; d=$(new_case coarse-ready-other-log)
+  make_repo_on_branch "$d/wt" fm/feat-coarseready
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarseready.meta" "window=fm:fm-feat-coarseready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/4 checks green\n' > "$d/state/feat-coarseready.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  running    fm/feat-coarseready bbbbbbb  2026-07-02 22:05
+EOF
+)"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  local out; out=$(run_crew_state "$d" feat-coarseready)
+  assert_contains "$out" "state: done" "coarse ready status -> done"
+  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
+  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
+  pass "coarse run does not probe another branch's ci log"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1018,6 +1058,7 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
@@ -1029,6 +1070,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture
