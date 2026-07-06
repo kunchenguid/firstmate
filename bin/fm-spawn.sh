@@ -104,6 +104,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+REUSE_WORKTREE=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -124,6 +125,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --reuse-worktree) REUSE_WORKTREE=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -144,6 +146,64 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# --reuse-worktree: relaunch a FRESH agent on the EXISTING worktree/branch recorded
+# in state/<id>.meta, seeded with data/<id>/handoff.md. This is the agent-swap half
+# of the context-handoff skill (AGENTS.md section 8): it keeps the id, worktree,
+# branch, kind, mode, yolo, and project, skips `treehouse get` and the isolated-
+# worktree assertion (the worktree already exists and was proven isolated at first
+# spawn), stands up a NEW backend endpoint, re-installs the turn-end/context hook,
+# rewrites meta window=, and resets state/<id>.context + state/<id>.turn-ended so
+# the fresh agent starts from a clean context signal. It does NOT run treehouse get,
+# does NOT kill the old pane (the skill retires it), and does NOT destroy the
+# worktree (that is teardown). Missing meta, a vanished worktree, or a missing
+# handoff dump abort rather than launching blind. project/harness/model/effort/
+# backend are recovered from meta unless the caller overrode them on this spawn.
+REUSE_WT=
+REUSE_PROJECT=
+REUSE_MODE=
+REUSE_YOLO=
+REUSE_HANDOFF=
+if [ "$REUSE_WORKTREE" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || { echo "error: --reuse-worktree cannot be combined with --secondmate" >&2; exit 1; }
+  RID=${POS[0]:-}
+  [ -n "$RID" ] || { echo "error: --reuse-worktree requires a task id" >&2; exit 1; }
+  [ "${#POS[@]}" -eq 1 ] || { echo "error: --reuse-worktree takes only <id>; project/harness come from state/$RID.meta" >&2; exit 1; }
+  R_META="$STATE/$RID.meta"
+  [ -f "$R_META" ] || { echo "error: --reuse-worktree: no meta for $RID at $R_META" >&2; exit 1; }
+  reuse_meta_field() { grep "^$1=" "$R_META" 2>/dev/null | head -n1 | cut -d= -f2- || true; }
+  R_KIND=$(reuse_meta_field kind)
+  case "$R_KIND" in
+    secondmate) echo "error: --reuse-worktree: $RID is a secondmate; not supported" >&2; exit 1 ;;
+    ship|scout) KIND=$R_KIND ;;
+  esac
+  REUSE_WT=$(reuse_meta_field worktree)
+  [ -n "$REUSE_WT" ] || { echo "error: --reuse-worktree: state/$RID.meta has no worktree=" >&2; exit 1; }
+  [ -d "$REUSE_WT" ] || { echo "error: --reuse-worktree: recorded worktree is gone: $REUSE_WT" >&2; exit 1; }
+  REUSE_PROJECT=$(reuse_meta_field project)
+  [ -n "$REUSE_PROJECT" ] || { echo "error: --reuse-worktree: state/$RID.meta has no project=" >&2; exit 1; }
+  REUSE_HANDOFF="$DATA/$RID/handoff.md"
+  [ -f "$REUSE_HANDOFF" ] || { echo "error: --reuse-worktree: no handoff dump at $REUSE_HANDOFF (steer the old agent to write it first)" >&2; exit 1; }
+  [ -s "$REUSE_HANDOFF" ] || { echo "error: --reuse-worktree: handoff dump is empty: $REUSE_HANDOFF" >&2; exit 1; }
+  REUSE_MODE=$(reuse_meta_field mode)
+  REUSE_YOLO=$(reuse_meta_field yolo)
+  if [ "$HARNESS_SET" -eq 0 ]; then
+    R_HARNESS=$(reuse_meta_field harness)
+    [ -n "$R_HARNESS" ] && { HARNESS_ARG=$R_HARNESS; HARNESS_SET=1; }
+  fi
+  if [ "$MODEL_SET" -eq 0 ]; then
+    R_MODEL=$(reuse_meta_field model)
+    [ -n "$R_MODEL" ] && [ "$R_MODEL" != default ] && MODEL=$R_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    R_EFFORT=$(reuse_meta_field effort)
+    case "$R_EFFORT" in low|medium|high|xhigh|max) EFFORT=$R_EFFORT ;; esac
+  fi
+  if [ "$BACKEND_SET" -eq 0 ]; then
+    R_BACKEND=$(reuse_meta_field backend)
+    [ -n "$R_BACKEND" ] && { BACKEND_ARG=$R_BACKEND; BACKEND_SET=1; }
+  fi
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -283,6 +343,11 @@ if [ "$KIND" = secondmate ]; then
       ARG3=${POS[2]:-}
       ;;
   esac
+elif [ "$REUSE_WORKTREE" -eq 1 ]; then
+  # A reuse spawn carries no positional project (validated to a single <id> arg
+  # above); project and harness come from meta, not POS[1].
+  PROJ=$REUSE_PROJECT
+  ARG3=${POS[2]:-}
 else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
@@ -620,6 +685,24 @@ if [ "$KIND" = secondmate ]; then
   else
     BRIEF="$DATA/$ID/brief.md"
   fi
+elif [ "$REUSE_WORKTREE" -eq 1 ]; then
+  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  WT="$REUSE_WT"
+  # Compose the fresh agent's launch brief: the original task brief + the previous
+  # agent's handoff dump + a "resume from here" preamble. Written OUTSIDE the
+  # worktree (state/), so it never dirties the branch; teardown removes it.
+  ORIG_BRIEF="$DATA/$ID/brief.md"
+  [ -f "$ORIG_BRIEF" ] || { echo "error: --reuse-worktree: no original brief at $ORIG_BRIEF" >&2; exit 1; }
+  mkdir -p "$STATE"
+  BRIEF="$STATE/$ID.reuse-brief.md"
+  {
+    cat "$ORIG_BRIEF"
+    printf '\n\n---\n\n# Context handoff - resume from here\n\n'
+    printf 'You are a FRESH agent taking over task %s on the SAME worktree and branch as the previous agent, which hit its context limit.\n' "$ID"
+    printf 'The worktree and its in-progress diff are intact: do NOT re-clone, reset, or recreate the branch. Read the handoff dump below, reconcile it against the live working tree with git status and git diff, then continue the task from where it left off. The original brief above is still the source of truth for the definition of done.\n\n'
+    printf -- '---\n\n# Handoff dump (data/%s/handoff.md), written by the previous agent\n\n' "$ID"
+    cat "$REUSE_HANDOFF"
+  } > "$BRIEF"
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
@@ -657,11 +740,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 W="fm-$ID"
+# --reuse-worktree reuses an existing worktree, so it is incompatible with orca,
+# whose backend owns the worktree lifecycle (it creates a fresh one per spawn).
+if [ "$REUSE_WORKTREE" -eq 1 ] && [ "$BACKEND" = orca ]; then
+  echo "error: --reuse-worktree is not supported on the orca backend (Orca owns worktree lifecycle)" >&2
+  exit 1
+fi
+# Task-pane start directory. Normally the project checkout, then `treehouse get`
+# moves the pane into the worktree. A reuse spawn skips treehouse get, so the pane
+# must open directly in the existing worktree, WT.
+PANE_DIR="$PROJ_ABS"
+[ "$REUSE_WORKTREE" -eq 1 ] && PANE_DIR="$WT"
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
-    fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+    fm_backend_tmux_create_task "$SES" "$W" "$PANE_DIR" || exit 1
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -690,7 +784,7 @@ case "$BACKEND" in
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PANE_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -702,7 +796,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PANE_DIR") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -714,7 +808,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PANE_DIR") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -785,7 +879,7 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$REUSE_WORKTREE" -ne 1 ]; then
   spawn_send_text_line "$T" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -830,9 +924,15 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
-EOF
+      CTXFILE="$STATE_REAL/$ID.context"
+      # The Stop hook runs fm-ctx-hook.sh, which touches $TURNEND (the unchanged
+      # turn-end signal the watcher relies on) AND records the crewmate's context
+      # tokens to state/<id>.context. state/<id>.context is deliberately not a
+      # *.status/*.turn-ended file, so writing it never trips the watcher's signal
+      # scan; the context-handoff skill reads it on a heartbeat. json_escape +
+      # shell_quote are the same helpers the grok hook install below uses.
+      hook_cmd=$(json_escape "bash $(shell_quote "$FM_ROOT/bin/fm-ctx-hook.sh") $(shell_quote "$TURNEND") $(shell_quote "$CTXFILE")")
+      printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_cmd" > "$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
@@ -925,6 +1025,19 @@ if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+elif [ "$REUSE_WORKTREE" -eq 1 ]; then
+  # A reuse spawn keeps the original task's delivery mode and yolo posture verbatim
+  # from meta; the swap changes the agent, not the task's landing contract.
+  MODE=$REUSE_MODE
+  YOLO=$REUSE_YOLO
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  if [ -z "$MODE" ] || [ -z "$YOLO" ]; then
+    read -r RM RY <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+    [ -n "$MODE" ] || MODE=$RM
+    [ -n "$YOLO" ] || YOLO=$RY
+  fi
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
@@ -974,6 +1087,13 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+# A reuse spawn hands the worktree to a FRESH agent, so clear the previous agent's
+# context signal and its last turn-end marker; the new agent's Stop hook rewrites
+# both from a clean slate on its first turn.
+if [ "$REUSE_WORKTREE" -eq 1 ]; then
+  rm -f "$STATE_REAL/$ID.context" "$TURNEND"
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
