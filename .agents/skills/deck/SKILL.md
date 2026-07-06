@@ -39,7 +39,8 @@ If ground truth disagrees with itself - a backlog story with no meta, a meta who
 
 Write the artifact to `.lavish/deck.html` for the whole fleet or `.lavish/deck-<project>.html` for one project (gitignored scratch, never committed).
 Run `lavish-axi design` for the CDN snippets and use the Tailwind v4 + DaisyUI v5 stack; keep every nesting level free of horizontal overflow.
-Imitate the visual structure of the live-deck prototype (plan reference `.lavish/firstmate-deck-live.html`), but populate it entirely from step 2's data - no remembered, sample, or placeholder content:
+If a live-deck prototype happens to exist at `.lavish/firstmate-deck-live.html` (captain-local gitignored scratch, absent on most installs), it may serve as an optional visual reference.
+Either way, the numbered structure below is the authoritative template; populate it entirely from step 2's data - no remembered, sample, or placeholder content:
 
 1. **Status strip** - counts across the rendered scope: needs-you, building (in-flight and working), queued, projects tracked.
 2. **One section per project with stories** - heading with project name, mode badge, and one-line identity; then story cards ordered needs-you → building → queued → recent done.
