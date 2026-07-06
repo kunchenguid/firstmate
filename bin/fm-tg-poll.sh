@@ -160,9 +160,9 @@ while [ "$idx" -lt "$update_count" ]; do
     # --- message handling (Phase 1) ---
     # Check sender is allowed.
     from_id=$(printf '%s' "$msg" | jq -r '.from.id // empty' 2>/dev/null) || from_id=
+    chat_id=$(printf '%s' "$msg" | jq -r '.chat.id // empty' 2>/dev/null) || chat_id=
     if [ -z "$from_id" ] || ! is_allowed_user "$from_id"; then
       # Unknown sender: send a polite decline once, then skip.
-      chat_id=$(printf '%s' "$msg" | jq -r '.chat.id // empty' 2>/dev/null) || chat_id=
       if [ -n "$chat_id" ] && [ -z "$FMTG_DRY" ]; then
         decline_file="$STATE/tg-declined-$from_id"
         if [ ! -f "$decline_file" ]; then
@@ -189,6 +189,11 @@ while [ "$idx" -lt "$update_count" ]; do
     if [ -z "$text" ]; then
       idx=$((idx + 1))
       continue
+    fi
+
+    # Fire typing indicator so the captain sees we're processing.
+    if [ -z "$FMTG_DRY" ]; then
+      fmtg_send_chat_action "$chat_id" typing 2>/dev/null || true
     fi
 
     # Defend the inbox filename.
