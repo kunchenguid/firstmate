@@ -15,7 +15,14 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# Usage: fm-fleet-sync.sh [<project-dir>]
+# Usage: fm-fleet-sync.sh [<project-dir-or-name>]
+# The single-project form accepts either a path (absolute, or relative to the
+# caller's cwd, including "projects/<name>") or a bare "<name>", resolved
+# against this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
+# A path that already exists as given is used as-is; only when it does not
+# resolve is it retried against the projects dir. Example: from anywhere,
+# `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
+# passing its full projects/dotfiles-private path.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +47,24 @@ project_label() {
     projects/*) basename "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
   esac
+}
+
+# resolve_project_arg <arg>: accept a path (used as-is when it already exists)
+# or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
+# back to the original argument unresolved so a genuinely bad path still hits
+# sync_project's existing "not a directory" skip.
+resolve_project_arg() {
+  local arg=$1 candidate
+  if [ -d "$arg" ]; then
+    printf '%s\n' "$arg"
+    return 0
+  fi
+  candidate="$PROJECTS/${arg#projects/}"
+  if [ -d "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  printf '%s\n' "$arg"
 }
 
 default_branch() {
@@ -270,7 +295,7 @@ sync_project() {
 }
 
 if [ $# -eq 1 ]; then
-  sync_project "$1"
+  sync_project "$(resolve_project_arg "$1")"
   exit 0
 fi
 
