@@ -63,7 +63,16 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 # --- send text + Enter -------------------------------------------------------
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
-sleep 0.3
+# The pane's shell can take seconds to start under load; typed input just
+# echoes unexecuted until it is live. Wait for the new prompt (a line
+# STARTING with smoke$ - the echoed command above does not) as proof the
+# shell actually ran the first command before the fixed sleeps below.
+shell_ready=0
+for _ in $(seq 1 100); do
+  if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q '^smoke\$'; then shell_ready=1; break; fi
+  sleep 0.2
+done
+[ "$shell_ready" -eq 1 ] || fail "real tmux: pane shell never became ready (no smoke\$ prompt)"
 tmux send-keys -t "$TARGET" -l "clear" ; tmux send-keys -t "$TARGET" Enter
 sleep 0.3
 
@@ -99,7 +108,12 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
 fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+# Poll until the loop's final line has actually landed instead of trusting a
+# fixed sleep (the loop can lag under load).
+for _ in $(seq 1 100); do
+  case "$(fm_backend_tmux_capture "$TARGET" 5 2>/dev/null)" in *tag-line-80*) break ;; esac
+  sleep 0.2
+done
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;
