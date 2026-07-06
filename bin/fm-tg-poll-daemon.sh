@@ -88,7 +88,7 @@ print(', '.join(sorted(r14)) if r14 else 'none')
         halt=$(cat /home/m_gogate/hermes/stock_data/HALT 2>/dev/null || echo "not found")
         reply="Paper trading HALT file: $halt"
         handled=1 ;;
-      *crew*|*flight*|*task*)
+      *crew*|*flight*|*task*|*subagent*|*agent*active*)
         tasks=$(ls "$FM_ROOT/state/"*.meta 2>/dev/null | wc -l)
         if [ "$tasks" -gt 0 ]; then
           details=""
@@ -104,6 +104,12 @@ print(', '.join(sorted(r14)) if r14 else 'none')
         else
           reply="No tasks in flight."
         fi
+        handled=1 ;;
+      *"who are you"*|*"what are you"*)
+        reply="Firstmate — your AI pair programmer and fleet supervisor. I manage crewmates across your projects."
+        handled=1 ;;
+      *count*|*calculate*|*math*)
+        reply="Yes, I can count. Try me."
         handled=1 ;;
     esac
 
@@ -126,8 +132,8 @@ print(', '.join(sorted(r14)) if r14 else 'none')
 }
 
 while true; do
-  safe_poll
   process_inbox
+  safe_poll
   CYCLE=$((CYCLE + 1))
 
   if [ $((CYCLE % 10)) -eq 0 ]; then
