@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Continuous Telegram poller + supervisor.
-# Auto-replies to simple commands. Complex messages stay in inbox for firstmate.
+# Continuous Telegram poller + supervisor with DuckDuckGo knowledge fallback.
+# Auto-replies to simple commands AND factual questions via DDG Instant Answer.
+# Complex/unanswered questions stay in inbox for firstmate.
 # Usage: nohup bin/fm-tg-poll-daemon.sh > /dev/null 2>&1 &
 
 FM_ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
@@ -13,20 +14,23 @@ CHAT_ID=""
 
 mkdir -p "$INBOX" 2>/dev/null
 
+# DuckDuckGo instant answer lookup
+ddg_lookup() {
+  local q="$1" encoded ans
+  encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$q" 2>/dev/null) || return 1
+  ans=$(curl -s --max-time 5 "https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1" 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+a=d.get('Answer','') or d.get('AbstractText','')
+print(a.strip()[:400] if a else '')
+" 2>/dev/null) || return 1
+  [ -n "$ans" ] && printf '%s' "$ans" && return 0
+  return 1
+}
+
 safe_poll() {
-  # PID-based lock with 60s stale timeout
-  if [ -f "$POLL_LOCK" ]; then
-    lock_pid=$(cat "$POLL_LOCK" 2>/dev/null) || lock_pid=""
-    if [ -n "$lock_pid" ]; then
-      lock_age=$(($(date +%s) - $(stat -c %Y "$POLL_LOCK" 2>/dev/null || echo 0)))
-      if [ "$lock_age" -lt 60 ] && kill -0 "$lock_pid" 2>/dev/null; then
-        return 0  # genuine active lock
-      fi
-    fi
-    # Stale lock — remove it
-    rm -f "$POLL_LOCK"
-  fi
-  echo $$ > "$POLL_LOCK"
+  [ -f "$POLL_LOCK" ] && return 0
+  touch "$POLL_LOCK" 2>/dev/null || return 0
   bash "$FM_ROOT/bin/fm-tg-poll.sh" 2>/dev/null
   rm -f "$POLL_LOCK"
 }
@@ -49,7 +53,7 @@ process_inbox() {
 
     case "$lower" in
       help|/help)
-        reply="Commands: status, backlog, help"
+        reply="Commands: status, backlog, help. Or ask me anything!"
         handled=1 ;;
       status|"fleet status")
         tasks=$(ls "$FM_ROOT/state/"*.meta 2>/dev/null | wc -l)
@@ -61,13 +65,16 @@ process_inbox() {
       *date*|*"what day"*|*"what time"*)
         reply=$(date '+%A, %Y-%m-%d %H:%M %Z')
         handled=1 ;;
-      *"who is"*"president"*)
-        reply="Donald Trump (inaugurated January 2025, second non-consecutive term)."
-        handled=1 ;;
-      *"who is"*"pm"*"india"*|*"prime minister"*"india"*)
-        reply="Narendra Modi, BJP. PM since 2014, third term from 2024 elections."
-        handled=1 ;;
     esac
+
+    # If no pattern match, try DuckDuckGo
+    if [ "$handled" = 0 ]; then
+      ddg_ans=$(ddg_lookup "$text" 2>/dev/null) || ddg_ans=""
+      if [ -n "$ddg_ans" ]; then
+        reply="$ddg_ans"
+        handled=1
+      fi
+    fi
 
     if [ "$handled" = 1 ]; then
       tmp=$(mktemp "${TMPDIR:-/tmp}/fmtg-daemon.XXXXXX") || continue
@@ -84,7 +91,6 @@ while true; do
   CYCLE=$((CYCLE + 1))
 
   if [ $((CYCLE % 10)) -eq 0 ]; then
-    # Crewmate completion detection
     for meta in "$FM_ROOT/state/"*.meta; do
       [ -f "$meta" ] || continue
       id=$(basename "$meta" .meta)
