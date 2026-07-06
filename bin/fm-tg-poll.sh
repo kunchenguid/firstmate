@@ -14,6 +14,8 @@
 #   a message from an allowed user -> stash the full Update object to
 #       state/tg-inbox/<update_id>.json and print one compact line
 #       "tg-message <update_id>" (which becomes the watcher's check: wake payload)
+#   a callback_query from an allowed user -> answerCallbackQuery immediately,
+#       stash to inbox as tg-callback <update_id>
 #   a message from an unknown user -> send a polite decline once, skip
 #
 # Config (home .env or env): FMTG_BOT_TOKEN (required),
@@ -104,65 +106,114 @@ while [ "$idx" -lt "$update_count" ]; do
   # Track max update_id for offset advancement.
   [ "$uid" -gt "$max_update_id" ] 2>/dev/null && max_update_id=$uid
 
-  # Extract the message. We only subscribed to "message" updates.
+  # Extract the message or callback_query.
   msg=$(printf '%s' "$update" | jq -c '.message // empty' 2>/dev/null) || msg=
-  [ -n "$msg" ] || { idx=$((idx + 1)); continue; }
+  cq=$(printf '%s' "$update" | jq -c '.callback_query // empty' 2>/dev/null) || cq=
 
-  # Check sender is allowed.
-  from_id=$(printf '%s' "$msg" | jq -r '.from.id // empty' 2>/dev/null) || from_id=
-  if [ -z "$from_id" ] || ! is_allowed_user "$from_id"; then
-    # Unknown sender: send a polite decline once, then skip.
-    chat_id=$(printf '%s' "$msg" | jq -r '.chat.id // empty' 2>/dev/null) || chat_id=
-    if [ -n "$chat_id" ] && [ -z "$FMTG_DRY" ]; then
-      decline_file="$STATE/tg-declined-$from_id"
-      if [ ! -f "$decline_file" ]; then
-        msg_text="Sorry, this bot is private. Only the captain can use it."
-        # Send decline; ignore failures.
-        tmp_decline=$(mktemp "${TMPDIR:-/tmp}/fm-tg-decline.XXXXXX") || true
-        if [ -n "$tmp_decline" ]; then
-          printf '%s\n' "$msg_text" > "$tmp_decline"
-          FMTG_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-resp.XXXXXX") || true
-          if [ -n "$FMTG_RESPONSE_FILE" ]; then
-            fmtg_send_message "$chat_id" "$tmp_decline" >/dev/null 2>&1 || true
-            rm -f "$FMTG_RESPONSE_FILE"
-          fi
-          rm -f "$tmp_decline"
-        fi
-        touch "$decline_file" 2>/dev/null || true
+  if [ -n "$cq" ]; then
+    # --- callback_query handling (Phase 3) ---
+    # Extract from_user and answer callback immediately.
+    from_id=$(printf '%s' "$cq" | jq -r '.from.id // empty' 2>/dev/null) || from_id=
+    cq_uid=$(printf '%s' "$cq" | jq -r '.id // empty' 2>/dev/null) || cq_uid=
+    cq_data=$(printf '%s' "$cq" | jq -r '.data // empty' 2>/dev/null) || cq_data=
+
+    if [ -z "$from_id" ] || ! is_allowed_user "$from_id"; then
+      # Unknown user: answer silently and skip.
+      if [ -n "$cq_uid" ] && [ -z "$FMTG_DRY" ]; then
+        fmtg_answer_callback "$cq_uid" >/dev/null 2>&1 || true
       fi
+      idx=$((idx + 1))
+      continue
     fi
-    idx=$((idx + 1))
-    continue
-  fi
 
-  # Check for non-empty text.
-  text=$(printf '%s' "$msg" | jq -r '(.text // "") | gsub("[[:space:]]+"; " ") | gsub("^ +| +$"; "")' 2>/dev/null) || text=
-  if [ -z "$text" ]; then
-    idx=$((idx + 1))
-    continue
-  fi
+    # Answer callback query immediately (Telegram ~30s requirement).
+    if [ -n "$cq_uid" ] && [ -z "$FMTG_DRY" ]; then
+      fmtg_answer_callback "$cq_uid" >/dev/null 2>&1 || true
+    fi
 
-  # Defend the inbox filename.
-  case "$uid" in
-    ''|.*|*[!A-Za-z0-9._-]*) idx=$((idx + 1)); continue ;;
-  esac
+    # Defend the inbox filename.
+    case "$uid" in
+      ''|.*|*[!A-Za-z0-9._-]*) idx=$((idx + 1)); continue ;;
+    esac
 
-  # Stash the full update atomically.
-  INBOX="$STATE/tg-inbox"
-  mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; idx=$((idx + 1)); continue; }
-  if printf '%s' "$update" | jq '.' > "$INBOX/$uid.json.tmp" 2>/dev/null; then
-    if ! mv -f "$INBOX/$uid.json.tmp" "$INBOX/$uid.json" 2>/dev/null; then
+    # Stash the full update atomically.
+    INBOX="$STATE/tg-inbox"
+    mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; idx=$((idx + 1)); continue; }
+    if printf '%s' "$update" | jq '.' > "$INBOX/$uid.json.tmp" 2>/dev/null; then
+      if ! mv -f "$INBOX/$uid.json.tmp" "$INBOX/$uid.json" 2>/dev/null; then
+        rm -f "$INBOX/$uid.json.tmp"
+        emit_error_once "cannot write inbox"
+        idx=$((idx + 1)); continue
+      fi
+    else
       rm -f "$INBOX/$uid.json.tmp"
       emit_error_once "cannot write inbox"
       idx=$((idx + 1)); continue
     fi
-  else
-    rm -f "$INBOX/$uid.json.tmp"
-    emit_error_once "cannot write inbox"
-    idx=$((idx + 1)); continue
+
+    any_stashed=1
+    idx=$((idx + 1))
+    continue
   fi
 
-  any_stashed=1
+  if [ -n "$msg" ]; then
+    # --- message handling (Phase 1) ---
+    # Check sender is allowed.
+    from_id=$(printf '%s' "$msg" | jq -r '.from.id // empty' 2>/dev/null) || from_id=
+    if [ -z "$from_id" ] || ! is_allowed_user "$from_id"; then
+      # Unknown sender: send a polite decline once, then skip.
+      chat_id=$(printf '%s' "$msg" | jq -r '.chat.id // empty' 2>/dev/null) || chat_id=
+      if [ -n "$chat_id" ] && [ -z "$FMTG_DRY" ]; then
+        decline_file="$STATE/tg-declined-$from_id"
+        if [ ! -f "$decline_file" ]; then
+          msg_text="Sorry, this bot is private. Only the captain can use it."
+          tmp_decline=$(mktemp "${TMPDIR:-/tmp}/fm-tg-decline.XXXXXX") || true
+          if [ -n "$tmp_decline" ]; then
+            printf '%s\n' "$msg_text" > "$tmp_decline"
+            FMTG_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-resp.XXXXXX") || true
+            if [ -n "$FMTG_RESPONSE_FILE" ]; then
+              fmtg_send_message "$chat_id" "$tmp_decline" >/dev/null 2>&1 || true
+              rm -f "$FMTG_RESPONSE_FILE"
+            fi
+            rm -f "$tmp_decline"
+          fi
+          touch "$decline_file" 2>/dev/null || true
+        fi
+      fi
+      idx=$((idx + 1))
+      continue
+    fi
+
+    # Check for non-empty text.
+    text=$(printf '%s' "$msg" | jq -r '(.text // "") | gsub("[[:space:]]+"; " ") | gsub("^ +| +$"; "")' 2>/dev/null) || text=
+    if [ -z "$text" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+
+    # Defend the inbox filename.
+    case "$uid" in
+      ''|.*|*[!A-Za-z0-9._-]*) idx=$((idx + 1)); continue ;;
+    esac
+
+    # Stash the full update atomically.
+    INBOX="$STATE/tg-inbox"
+    mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; idx=$((idx + 1)); continue; }
+    if printf '%s' "$update" | jq '.' > "$INBOX/$uid.json.tmp" 2>/dev/null; then
+      if ! mv -f "$INBOX/$uid.json.tmp" "$INBOX/$uid.json" 2>/dev/null; then
+        rm -f "$INBOX/$uid.json.tmp"
+        emit_error_once "cannot write inbox"
+        idx=$((idx + 1)); continue
+      fi
+    else
+      rm -f "$INBOX/$uid.json.tmp"
+      emit_error_once "cannot write inbox"
+      idx=$((idx + 1)); continue
+    fi
+
+    any_stashed=1
+  fi
+
   idx=$((idx + 1))
 done
 
@@ -182,6 +233,8 @@ if [ "$any_stashed" -eq 1 ]; then
     case "$base" in
       ''|.*|*[!A-Za-z0-9._-]*) continue ;;
     esac
-    printf 'tg-message %s\n' "$base"
+    # Determine if this is a callback_query or a message by checking the JSON.
+    update_type=$(jq -r 'if .callback_query then "tg-callback" else "tg-message" end' "$f" 2>/dev/null) || update_type="tg-message"
+    printf '%s %s\n' "$update_type" "$base"
   done
 fi
