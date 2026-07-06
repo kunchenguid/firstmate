@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|cursor|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -29,8 +29,18 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
+  # cursor (cursor-agent) is checked FIRST because it ALSO sets CLAUDECODE=1 and
+  # AI_AGENT=claude-code_* (it is Claude-Code-compatible under the hood), so a
+  # claude-first check would misdetect a cursor session as claude. CURSOR_AGENT=1
+  # is set only by cursor-agent (verified 2026-07-05, cursor-agent 2026.07.01).
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
+  # hermes sets HERMES_SESSION_ID for every session (interactive and one-shot),
+  # plus HERMES_INTERACTIVE=1 and HERMES_YOLO_MODE=1 in the interactive TUI
+  # (verified 2026-07-05, Hermes Agent v0.18.0). HERMES_SESSION_ID is the most
+  # universal marker, so match it.
+  [ -n "${HERMES_SESSION_ID:-}" ] && { echo hermes; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
@@ -40,19 +50,23 @@ detect_own() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename "$comm")" in
+      *cursor-agent*|*cursor*) echo cursor; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *hermes*) echo hermes; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
+          *cursor-agent*|*cursor*) echo cursor; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *hermes*) echo hermes; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

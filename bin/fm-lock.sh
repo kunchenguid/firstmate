@@ -15,7 +15,8 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# cursor matches cursor-agent's basename; hermes matches its own.
+HARNESS_RE='claude|codex|opencode|grok|cursor|hermes|^pi$'
 
 harness_pid() {
   local pid=$$ comm args
