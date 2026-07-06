@@ -43,6 +43,7 @@ Options:
   --keyboard <file>   Attach an inline keyboard from a JSON file.
                       The file must contain a JSON array of button rows.
                       Example: [["Approve":"approve:id"],["Decline":"decline:id"]]
+  --typing-only        Fire sendChatAction and exit (no message sent).
   --help              Show this help.
 EOF
 }
@@ -84,6 +85,10 @@ while [ "$#" -gt 0 ]; do
       fi
       KEYBOARD_FILE="$2"
       shift 2
+      ;;
+    --typing-only)
+      TYPING_ONLY=1
+      shift
       ;;
     *)
       usage
@@ -147,6 +152,12 @@ if [ -z "$FMTG_TOKEN" ]; then
   exit 1
 fi
 command -v curl >/dev/null 2>&1 || { echo "fm-tg-reply: curl not found" >&2; exit 1; }
+
+# Typing-only mode: fire sendChatAction and exit.
+if [ "${TYPING_ONLY:-0}" = 1 ]; then
+  fmtg_send_chat_action "$CHAT_ID" typing 2>/dev/null || true
+  exit 0
+fi
 
 # Write the text to a temp file for the send functions.
 TEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-reply-text.XXXXXX") || exit 1
