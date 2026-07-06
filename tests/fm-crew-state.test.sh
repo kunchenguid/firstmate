@@ -511,7 +511,7 @@ test_ci_monitoring_green_then_rearm_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirearm)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 all CI checks passed - still monitoring until merged or closed
-base branch advanced, re-arming CI monitor timeout
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cirearm)
@@ -530,7 +530,7 @@ test_ci_monitoring_no_checks_yet_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksyet)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 no CI checks reported - still monitoring until merged or closed
-base branch advanced, re-arming CI monitor timeout
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 no CI checks reported yet, waiting for checks to register...
 EOF
 )
@@ -566,7 +566,7 @@ test_ci_monitoring_green_then_new_issue_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirelapse)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 all CI checks passed - still monitoring until merged or closed
-base branch advanced, re-arming CI monitor timeout
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 issues detected: merge conflict - auto-fixing (attempt 2/10)...
 EOF
 )
@@ -586,7 +586,7 @@ test_ci_ready_done_log_relapse_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cireadyrelapse)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 all CI checks passed - still monitoring until merged or closed
-base branch advanced, re-arming CI monitor timeout
+base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 CI checks running, waiting for results...
 EOF
 )
