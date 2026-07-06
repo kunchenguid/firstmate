@@ -853,6 +853,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `fmtg-respond` - load on a `tg-message <update_id>` `check:` wake to handle the message, on a `tg-mode-error ...` `check:` wake to report the Telegram-mode configuration blocker, and on any milestone or terminal wake for a tg-linked task before posting its completion follow-up (Phase 2+); relevant only when Telegram mode is on.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 ## 14. X mode
@@ -889,3 +890,46 @@ On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-re
 It owns mention classification, acting on the request, reply composition, voice, thread-splitting, image attachments, dry-run preview, and the completion-follow-up procedure in full, including what an `x-mode-error` wake means instead.
 `docs/configuration.md` "X mode (.env)" has the wire-protocol reference.
 The one fact that must survive here because it fires on a generic terminal wake, not the mention wake itself: when an X-linked task reaches a terminal state, post its final completion follow-up per section 8's wake-handling step before tearing down.
+
+## 15. Telegram mode
+
+Telegram mode lets a firstmate instance receive messages from the captain via a private Telegram bot and act on them through firstmate's normal lifecycle.
+It is **inert until opted in**, so a user who never enables it sees zero behavior change.
+
+**Activation is `.env` presence, not a command.**
+Put `FMTG_BOT_TOKEN` and `FMTG_ALLOWED_USERS` (comma-separated Telegram user IDs) into the home's `.env` file.
+The token authorizes the bot connection; the user ID list restricts access to the captain.
+This is a private 1:1 bridge, not a public channel like X mode.
+
+**Mechanism.**
+Bootstrap wires the Telegram poll automatically and purely additively from `.env` presence; see `docs/configuration.md` "Telegram mode (.env)" for the generated-artifact mechanism.
+The poll shim (`state/tg-watch.check.sh`) calls `bin/fm-tg-poll.sh` each check cycle, which uses Telegram's `getUpdates` long-polling API.
+Messages from allowed users are stashed to `state/tg-inbox/<update_id>.json` and wake firstmate with `tg-message <update_id>` via the standard watcher `check:` mechanism.
+Replies are sent via `bin/fm-tg-reply.sh <chat_id> --text-file <path>`, calling Telegram's `sendMessage` API.
+
+**Cadence.**
+A Telegram instance polls every 30s instead of the default 300s.
+To get that, arm the watcher with the Telegram cadence sourced: `[ -f config/tg-mode.env ] && . config/tg-mode.env; bin/fm-watch-arm.sh`.
+As with X mode, a cadence transition (opt-in or opt-out while a watcher is running) is applied by restarting the home-scoped watcher with the new environment: `[ -f config/tg-mode.env ] && . config/tg-mode.env; bin/fm-watch-arm.sh --restart`.
+
+**Captain-only.**
+Only messages from user IDs listed in `FMTG_ALLOWED_USERS` reach the inbox.
+Unknown senders receive a single polite decline message and are otherwise ignored.
+Because the bridge is private 1:1 (unlike X mode's public channel), replies can use internal vocabulary: task IDs, tool names, and other firstmate internals that would be inappropriate in public.
+
+**Answering.**
+On a `tg-message <update_id>` or `tg-mode-error ...` `check:` wake, load `fmtg-respond` (section 13).
+It owns message classification, reply composition, voice, and the procedure for draining the inbox.
+In Phase 1, the bridge supports read-only status queries (`status`, `backlog`, `help`).
+Task dispatch and interactive decisions (inline keyboards) are planned for Phase 2 and 3.
+`docs/configuration.md` "Telegram mode (.env)" has the configuration reference.
+
+**Task linking and follow-ups (Phase 2).**
+When a Telegram message spawns real work, the task is linked to the originating message via `state/<id>.meta` lines: `tg_chat=<chat_id>`, `tg_message=<message_id>`, `tg_followups=<n>`, `tg_link_ts=<epoch>`.
+Follow-ups use `bin/fm-tg-followup.sh` (mirroring `bin/fm-x-followup.sh`) for up to 3 completion updates per linked task, posted as threaded replies to the original acknowledgment message.
+The final outcome clears the link.
+
+**Inline keyboard decisions (Phase 3).**
+Unlike X mode's text-only follow-ups, Telegram supports inline keyboards for one-tap decisions.
+When firstmate needs a captain decision (merge PR, approve finding), the reply includes buttons with callback data encoding the action and task context (e.g. `"merge:fix-login-k3"`).
+Callback queries arrive as updates and are processed through the same inbox/wake path.

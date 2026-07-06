@@ -248,12 +248,12 @@ Away mode is active. Do not arm the normal watcher directly; load /afk and
 ensure the daemon is running, because the daemon owns watcher supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ -f "$CONFIG/tg-mode.env" ]; then
   cat <<EOF
 Arm the watcher yourself as your harness's own tracked background task with
-the X-mode cadence sourced first - this script never arms it itself.
+the bridge cadence sourced first - this script never arms it itself.
 
-  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"; [ -f "$CONFIG/tg-mode.env" ] && . "$CONFIG/tg-mode.env"
   bin/fm-watch-arm.sh
 
 EOF

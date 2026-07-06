@@ -209,6 +209,39 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+
+## Telegram mode (.env)
+
+Telegram mode lets a firstmate instance receive messages from the captain via a private Telegram bot and act on them through firstmate's normal lifecycle.
+It is off unless the firstmate home's gitignored `.env` contains a non-empty `FMTG_BOT_TOKEN`.
+`FMTG_ALLOWED_USERS` (comma-separated Telegram user IDs) restricts access to the listed users; messages from anyone else receive a single polite decline and are ignored.
+The bridge uses Telegram's `getUpdates` long-polling API for inbound messages and `sendMessage` for outbound replies.
+
+The locked session-start bootstrap step turns the token into local generated state.
+It writes `state/tg-watch.check.sh`, a check shim that runs `bin/fm-tg-poll.sh`, and `config/tg-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher arms in that home.
+When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
+Steady-state off is silent and writes nothing.
+Telegram mode is purely additive: no edit is made to `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-wake-lib.sh`, or the afk daemon.
+It lives entirely in Telegram-specific `bin/` scripts (`fm-tg-lib.sh`, `fm-tg-poll.sh`, `fm-tg-reply.sh`), the `fmtg-respond` skill, and the generated local artifacts above.
+
+`bin/fm-tg-poll.sh` calls `getUpdates` with `Authorization: Bearer <FMTG_BOT_TOKEN>`.
+An empty result is silent.
+A message from an allowed user with non-empty `text` is stored at `state/tg-inbox/<update_id>.json` and wakes firstmate with `tg-message <update_id>`.
+The full Telegram `Update` object is preserved.
+The `fmtg-respond` skill decides whether the stashed message is a status query, backlog query, help request, or pure acknowledgment.
+
+In Phase 1, supported commands are `status`, `backlog`, and `help`.
+Replies are sent via `bin/fm-tg-reply.sh <chat_id> --text-file <path>`, which calls Telegram's `sendMessage`.
+The reply text is never inlined into a shell command; the `--text-file` path or stdin form is used.
+Phase 2 will add task dispatch with `bin/fm-tg-link.sh` and `bin/fm-tg-followup.sh` for completion follow-ups (up to 3 per task), mirroring X mode's `fm-x-link.sh` and `fm-x-followup.sh`.
+Phase 3 will add inline keyboard decisions via `callback_query` updates.
+
+Set `FMTG_DRY_RUN` to preview replies without sending to Telegram.
+Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`.
+In dry-run, `fm-tg-reply.sh` records the would-be payload to `state/tg-outbox/<ts>-<chat_id>.json` instead of posting.
+The poll script still runs and stashes to inbox; only the reply path is gated.
+This enables end-to-end testing without a live bot.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -258,6 +291,9 @@ FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|read
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
+FMTG_BOT_TOKEN=          # Telegram bot token; .env opt-in authorizes the Telegram bridge
+FMTG_ALLOWED_USERS=      # comma-separated Telegram user IDs allowed to use the bot
+FMTG_DRY_RUN=            # truthy previews Telegram replies to state/tg-outbox/ without posting or requiring a token
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
