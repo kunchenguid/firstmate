@@ -98,8 +98,18 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # earliest lines scroll out of a small window) while a large one reaches back
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
-fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+# shellcheck disable=SC2016  # literal shell code typed into the tmux pane
+fm_backend_tmux_send_literal "$TARGET" 'for i in $(seq 1 80); do echo tag-line-$i; done' \
+  || fail "fm_backend_tmux_send_literal failed for numbered output"
+sleep 0.2
+fm_backend_tmux_send_key "$TARGET" Enter || fail "fm_backend_tmux_send_key Enter failed for numbered output"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  out=$(fm_backend_tmux_capture "$TARGET" 20) || fail "fm_backend_tmux_capture failed while waiting for numbered output"
+  case "$out" in
+    *tag-line-80*) break ;;
+    *) sleep 0.2 ;;
+  esac
+done
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;

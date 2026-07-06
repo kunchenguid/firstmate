@@ -133,11 +133,42 @@ fm_pane_is_busy() {  # <target>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
+# fm_tmux_pane_boot_state: classify known pre-composer codex screens as booting.
+# A codex pane can briefly show an update prompt or model-loading banner before
+# its real composer is ready. Typing during that window can be swallowed by the
+# boot UI, so submit callers wait until these codex-specific screens clear.
+fm_tmux_pane_boot_state() {  # <target> -> booting|ready|unknown
+  local target=$1 tail40
+  tail40=$(tmux capture-pane -p -t "$target" -S -40 2>/dev/null) || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$tail40" | grep -qiE 'Update available!' \
+     && printf '%s\n' "$tail40" | grep -qiE 'Press enter to continue'; then
+    printf 'booting'; return 0
+  fi
+  if printf '%s\n' "$tail40" | grep -qiE 'OpenAI Codex' \
+     && printf '%s\n' "$tail40" | grep -qiE 'model:[[:space:]]+loading'; then
+    printf 'booting'; return 0
+  fi
+  printf 'ready'; return 0
+}
+
+fm_tmux_wait_until_not_booting() {  # <target> -> ready|unknown|send-deferred
+  local target=$1 max_s=${FM_TMUX_BOOT_WAIT_SECS:-20} poll_s=${FM_TMUX_BOOT_POLL_SLEEP:-1}
+  local elapsed=0 state
+  while :; do
+    state=$(fm_tmux_pane_boot_state "$target")
+    [ "$state" = booting ] || { printf '%s' "$state"; return 0; }
+    [ "$elapsed" -lt "$max_s" ] || { printf 'send-deferred'; return 0; }
+    sleep "$poll_s"
+    elapsed=$((elapsed + poll_s))
+  done
+}
+
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
-# pick their own success policy:
+# it. Echoes the final verdict on stdout
+# (empty|pending|unknown|send-failed|send-deferred) so callers can pick their own
+# success policy:
 #   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
 #     not be mistaken for a delivered escalation).
 #   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
@@ -155,7 +186,9 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 boot_state
+  boot_state=$(fm_tmux_wait_until_not_booting "$target")
+  [ "$boot_state" != send-deferred ] || { printf 'send-deferred'; return 0; }
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"

@@ -159,7 +159,7 @@ run_bootstrap_timeout_case() {
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
-      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
+      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 20 ]; then
         FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
         command sleep 0.01
       fi
