@@ -50,8 +50,9 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # The old fm-spawn bug that originally motivated this fixture shape was fixed in
 # fm-spawn-symlink-guard-s8: fm-spawn.sh now normalizes PROJ_ABS and observed
 # backend cwd reads before the worktree-discovery comparison.
-# The dedicated regression is
-# tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
+# The dedicated regressions are
+# tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal
+# and tests/fm-spawn-symlink-wait.test.sh.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
 SESSION="fm-autodetect-smoke-$$"
 export HERDR_SESSION="$SESSION"
