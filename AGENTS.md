@@ -903,9 +903,9 @@ This is a private 1:1 bridge, not a public channel like X mode.
 
 **Mechanism.**
 Bootstrap wires the Telegram poll automatically and purely additively from `.env` presence; see `docs/configuration.md` "Telegram mode (.env)" for the generated-artifact mechanism.
-The poll shim (`state/tg-watch.check.sh`) calls `bin/fm-tg-poll.sh` each check cycle, which uses Telegram's `getUpdates` long-polling API.
-Messages from allowed users are stashed to `state/tg-inbox/<update_id>.json` and wake firstmate with `tg-message <update_id>` via the standard watcher `check:` mechanism.
-Replies are sent via `bin/fm-tg-reply.sh <chat_id> --text-file <path>`, calling Telegram's `sendMessage` API.
+The poll shim (`state/tg-watch.check.sh`) calls `bin/fm-tg-poll.sh` each check cycle, which uses Telegram's `getUpdates` long-polling API for both `message` and `callback_query` update types.
+Messages from allowed users are stashed to `state/tg-inbox/<update_id>.json` and wake firstmate with `tg-message <update_id>` or `tg-callback <update_id>` via the standard watcher `check:` mechanism.
+Replies are sent via `bin/fm-tg-reply.sh <chat_id> --text-file <path>`, calling Telegram's `sendMessage` API (with optional `--keyboard <json-file>` for inline keyboards).
 
 **Cadence.**
 A Telegram instance polls every 30s instead of the default 300s.
@@ -918,18 +918,41 @@ Unknown senders receive a single polite decline message and are otherwise ignore
 Because the bridge is private 1:1 (unlike X mode's public channel), replies can use internal vocabulary: task IDs, tool names, and other firstmate internals that would be inappropriate in public.
 
 **Answering.**
-On a `tg-message <update_id>` or `tg-mode-error ...` `check:` wake, load `fmtg-respond` (section 13).
+On a `tg-message <update_id>`, `tg-callback <update_id>`, or `tg-mode-error ...` `check:` wake, load `fmtg-respond` (section 13).
 It owns message classification, reply composition, voice, and the procedure for draining the inbox.
-In Phase 1, the bridge supports read-only status queries (`status`, `backlog`, `help`).
-Task dispatch and interactive decisions (inline keyboards) are planned for Phase 2 and 3.
-`docs/configuration.md` "Telegram mode (.env)" has the configuration reference.
+In Phase 1, the bridge supported read-only status queries (`status`, `backlog`, `help`).
+Phase 2 added task dispatch (backlog creation, scout/ship dispatch) and Phase 3 added interactive inline keyboard decisions.
 
 **Task linking and follow-ups (Phase 2).**
 When a Telegram message spawns real work, the task is linked to the originating message via `state/<id>.meta` lines: `tg_chat=<chat_id>`, `tg_message=<message_id>`, `tg_followups=<n>`, `tg_link_ts=<epoch>`.
-Follow-ups use `bin/fm-tg-followup.sh` (mirroring `bin/fm-x-followup.sh`) for up to 3 completion updates per linked task, posted as threaded replies to the original acknowledgment message.
-The final outcome clears the link.
+Linking is done by `bin/fm-tg-link.sh <task-id> <chat_id> <message_id>` after spawn, and supports `--carry-count --carry-ts` for re-linking on task recovery.
+Follow-ups use `bin/fm-tg-followup.sh` (mirroring `bin/fm-x-followup.sh`) for up to 3 completion updates per linked task within a 7-day window, posted as threaded replies (`reply_parameters.message_id`) to the original acknowledgment message.
+`--check` detects whether a follow-up is due (exit 0 prints `chat_id message_id`). `--final` always clears the link after posting, used for terminal outcomes (shipped, failed, merged).
+The final outcome clears the link via `fmtg_meta_link_clear` so no stale links remain.
 
 **Inline keyboard decisions (Phase 3).**
 Unlike X mode's text-only follow-ups, Telegram supports inline keyboards for one-tap decisions.
-When firstmate needs a captain decision (merge PR, approve finding), the reply includes buttons with callback data encoding the action and task context (e.g. `"merge:fix-login-k3"`).
-Callback queries arrive as updates and are processed through the same inbox/wake path.
+When firstmate needs a captain decision (merge PR, approve finding), the reply includes buttons with callback data encoding the action and task context.
+
+Callback data encoding scheme: `<action>:<task-id>` (max 64 bytes).
+
+| Action | callback_data | Handler |
+|--------|--------------|---------|
+| Merge PR | `merge:<task-id>` | `bin/fm-pr-merge.sh <id> <pr-url>` |
+| Skip / leave | `skip:<task-id>` | Clear decision, leave task in queue |
+| Approve finding | `approve:<task-id>` | Approve ask-user finding |
+| Decline finding | `decline:<task-id>` | Decline finding |
+
+The reply is sent via `bin/fm-tg-reply.sh <chat_id> --text-file <path> --keyboard <kb-json>` where the keyboard JSON file contains the `inline_keyboard` array.
+Use button styles: `"style":"success"` for approve/merge, `"style":"danger"` for decline/skip.
+
+Decision lifecycle:
+1. `fm-tg-decision.sh record <task-id> <chat_id> <message_id>` records the pending decision in `state/tg-decisions/<task-id>.json` with a default 24h timeout.
+2. `fm-tg-poll.sh` processes `callback_query` updates: validates sender, calls `answerCallbackQuery` immediately (Telegram ~30s requirement), stashes to inbox as `tg-callback <update_id>`.
+3. `fmtg-respond` parses `callback_data`, routes to the action, resolves the decision via `fm-tg-decision.sh resolve <task-id> <action>`, and removes the inline keyboard via `editMessageReplyMarkup`.
+4. `fm-tg-decision.sh timeout` runs periodically to expire stale decisions (default 24h), removing their keyboards.
+
+The `answerCallbackQuery` call is handled by `fm-tg-poll.sh` before stashing, so `fmtg-respond` never needs to call it.
+Keyboard removal is handled by `fmtg_edit_reply_markup` in `bin/fm-tg-lib.sh`.
+
+`docs/configuration.md` "Telegram mode (.env)" has the configuration reference.

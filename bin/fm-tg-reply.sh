@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Send a reply message to the captain via the Telegram Bot API.
 #
-# Usage: fm-tg-reply.sh <chat_id> --text-file <path>
-#        fm-tg-reply.sh <chat_id> -
+# Usage: fm-tg-reply.sh <chat_id> --text-file <path> [--keyboard <json-file>]
+#        fm-tg-reply.sh <chat_id> - [--keyboard <json-file>]
 #
 # The --text-file / stdin forms exist so a caller never has to inline reply
 # text (which may be influenced by an incoming message) into a shell command.
 #
-# Sends via sendMessage to the given chat_id. On success it echoes the
-# message_id from the Telegram response; on failure exits non-zero.
+# Sends via sendMessage to the given chat_id. With --keyboard, attaches an
+# inline keyboard from the JSON file (containing an inline_keyboard array).
+# On success it echoes the message_id from the Telegram response.
 #
 # Config (home .env or env): FMTG_BOT_TOKEN (required).
 #
@@ -26,19 +27,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tg-lib.sh"
 
 usage() {
-  echo "usage: fm-tg-reply.sh <chat_id> --text-file <path> | fm-tg-reply.sh <chat_id> -" >&2
+  echo "usage: fm-tg-reply.sh <chat_id> --text-file <path> [--keyboard <json-file>] | fm-tg-reply.sh <chat_id> - [--keyboard <json-file>]" >&2
 }
 
 help() {
   cat <<'EOF'
-usage: fm-tg-reply.sh <chat_id> --text-file <path>
-       fm-tg-reply.sh <chat_id> -
+usage: fm-tg-reply.sh <chat_id> --text-file <path> [--keyboard <json-file>]
+       fm-tg-reply.sh <chat_id> - [--keyboard <json-file>]
 
 Send a reply message to the captain via the Telegram Bot API.
 
 Options:
   --text-file <path>  Read reply text from a file.
   -                   Read reply text from stdin.
+  --keyboard <file>   Attach an inline keyboard from a JSON file.
+                      The file must contain a JSON array of button rows.
+                      Example: [["Approve":"approve:id"],["Decline":"decline:id"]]
   --help              Show this help.
 EOF
 }
@@ -54,24 +58,40 @@ if [ -z "$CHAT_ID" ]; then
 fi
 shift
 
-# Parse text source.
-case "${1:-}" in
-  --text-file)
-    if [ "$#" -lt 2 ]; then
-      echo "fm-tg-reply: missing --text-file path" >&2
+# Parse text source and optional keyboard.
+KEYBOARD_FILE=""
+TEXT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --text-file)
+      if [ "$#" -lt 2 ]; then
+        echo "fm-tg-reply: missing --text-file path" >&2
+        usage
+        exit 2
+      fi
+      TEXT=$(cat -- "$2") || { echo "fm-tg-reply: cannot read text file: $2" >&2; exit 1; }
+      shift 2
+      ;;
+    -)
+      TEXT=$(cat)
+      shift
+      ;;
+    --keyboard)
+      if [ "$#" -lt 2 ]; then
+        echo "fm-tg-reply: missing --keyboard file path" >&2
+        usage
+        exit 2
+      fi
+      KEYBOARD_FILE="$2"
+      shift 2
+      ;;
+    *)
       usage
       exit 2
-    fi
-    TEXT=$(cat -- "$2") || { echo "fm-tg-reply: cannot read text file: $2" >&2; exit 1; }
-    ;;
-  -)
-    TEXT=$(cat)
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
+      ;;
+  esac
+done
+
 if [ -z "$TEXT" ]; then
   echo "fm-tg-reply: empty reply text" >&2
   exit 2
@@ -94,11 +114,28 @@ if [ -n "$FMTG_DRY" ]; then
     echo "fm-tg-reply: cannot create dry-run outbox: $outbox_dir" >&2
     exit 1
   }
-  jq -cn --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
-    '{chat_id:$chat_id,text:$text}' > "$outbox_file" 2>/dev/null || {
-    echo "fm-tg-reply: cannot write dry-run outbox: $outbox_file" >&2
-    exit 1
-  }
+  if [ -n "$KEYBOARD_FILE" ] && [ -f "$KEYBOARD_FILE" ]; then
+    kb_json=$(jq -c '.' "$KEYBOARD_FILE" 2>/dev/null) || kb_json=
+    if [ -n "$kb_json" ]; then
+      jq -cn --arg chat_id "$CHAT_ID" --arg text "$TEXT" --argjson kb "$kb_json" \
+        '{chat_id:$chat_id,text:$text,reply_markup:{inline_keyboard:$kb}}' > "$outbox_file" 2>/dev/null || {
+        echo "fm-tg-reply: cannot write dry-run outbox: $outbox_file" >&2
+        exit 1
+      }
+    else
+      jq -cn --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
+        '{chat_id:$chat_id,text:$text}' > "$outbox_file" 2>/dev/null || {
+        echo "fm-tg-reply: cannot write dry-run outbox: $outbox_file" >&2
+        exit 1
+      }
+    fi
+  else
+    jq -cn --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
+      '{chat_id:$chat_id,text:$text}' > "$outbox_file" 2>/dev/null || {
+      echo "fm-tg-reply: cannot write dry-run outbox: $outbox_file" >&2
+      exit 1
+    }
+  fi
   printf 'fm-tg-reply: DRY RUN - would send to chat %s (recorded: state/tg-outbox/%s): %s\n' \
     "$CHAT_ID" "$(basename "$outbox_file")" "$TEXT" >&2
   printf 'dry-run-%s\n' "$(date +%s)"
@@ -111,14 +148,22 @@ if [ -z "$FMTG_TOKEN" ]; then
 fi
 command -v curl >/dev/null 2>&1 || { echo "fm-tg-reply: curl not found" >&2; exit 1; }
 
-# Write the text to a temp file for fmtg_send_message.
+# Write the text to a temp file for the send functions.
 TEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-tg-reply-text.XXXXXX") || exit 1
 printf '%s' "$TEXT" > "$TEXT_FILE" || { rm -f "$TEXT_FILE"; exit 1; }
 
-if ! response=$(fmtg_send_message "$CHAT_ID" "$TEXT_FILE"); then
-  rm -f "$TEXT_FILE"
-  echo "fm-tg-reply: failed to send message" >&2
-  exit 1
+if [ -n "$KEYBOARD_FILE" ] && [ -f "$KEYBOARD_FILE" ]; then
+  if ! response=$(fmtg_send_message_with_keyboard "$CHAT_ID" "$TEXT_FILE" "$KEYBOARD_FILE"); then
+    rm -f "$TEXT_FILE"
+    echo "fm-tg-reply: failed to send message with keyboard" >&2
+    exit 1
+  fi
+else
+  if ! response=$(fmtg_send_message "$CHAT_ID" "$TEXT_FILE"); then
+    rm -f "$TEXT_FILE"
+    echo "fm-tg-reply: failed to send message" >&2
+    exit 1
+  fi
 fi
 rm -f "$TEXT_FILE"
 
