@@ -675,6 +675,13 @@ refresh_project_base_ref() {
   esac
 }
 
+validate_project_base_ref() {
+  local base=$1
+  [ -n "$base" ] || return 0
+  git -C "$PROJ_ABS" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+    || { echo "error: configured base $base does not exist in $PROJ_ABS" >&2; exit 1; }
+}
+
 prepare_worktree_base() {
   local base=$1
   [ -n "$base" ] || return 0
@@ -687,6 +694,7 @@ prepare_worktree_base() {
 if [ "$KIND" != secondmate ] && [ -n "${BASE_REF:-}" ]; then
   refresh_project_base_ref "$BASE_REF" \
     || { echo "error: failed to refresh configured base $BASE_REF for $PROJ_ABS" >&2; exit 1; }
+  validate_project_base_ref "$BASE_REF"
 fi
 
 W="fm-$ID"

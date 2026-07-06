@@ -164,7 +164,8 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  new-window) [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf 'new-window\n' >> "$FM_FAKE_TMUX_LOG"; exit 0 ;;
+  has-session|new-session|send-keys) exit 0 ;;
 esac
 exit 0
 SH
@@ -250,9 +251,35 @@ test_spawn_configured_base_overrides_backing_clone_branch() {
   pass "fm-spawn: configured base checks out leased worktree at origin/dev without inheriting backing clone branch"
 }
 
+test_spawn_missing_configured_base_aborts_before_endpoint() {
+  local home proj wt fakebin id out status log
+  home="$TMP_ROOT/bad-base-home"
+  proj=$(make_repo "$TMP_ROOT/bad-base-arena-crm")
+  wt="$TMP_ROOT/bad-base-wt"
+  id="bad-base-hh8"
+  log="$home/tmux.log"
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  printf '%s\n' "- bad-base-arena-crm [no-mistakes base=origin/missing] - Bad base (added 2026-07-06)" > "$home/data/projects.md"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/bad-base-fake")
+
+  export FM_FAKE_TMUX_LOG="$log"
+  out=$(run_spawn "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  unset FM_FAKE_TMUX_LOG
+  expect_code 1 "$status" "spawn with missing configured base should fail"
+  assert_contains "$out" "configured base origin/missing does not exist" "missing configured base lacked a clear error"
+  assert_absent "$home/state/$id.meta" "aborted bad-base spawn must not record meta"
+  if [ -s "$log" ]; then
+    fail "bad-base spawn created a tmux endpoint before validating its configured base"
+  fi
+  pass "fm-spawn: missing configured base aborts before creating a task endpoint"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_configured_base_overrides_backing_clone_branch
+test_spawn_missing_configured_base_aborts_before_endpoint

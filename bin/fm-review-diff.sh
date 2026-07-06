@@ -2,8 +2,9 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares against the task's recorded base when present, else compares
+# remote-backed projects against origin/<default> after fetching the default
+# branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
@@ -42,6 +43,7 @@ META="$STATE/$ID.meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+META_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
@@ -62,8 +64,6 @@ default_branch() {
   done
   return 1
 }
-
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -115,13 +115,28 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+if [ -n "$META_BASE" ]; then
+  BASE=$META_BASE
+  case "$BASE" in
+    */*)
+      BASE_REMOTE=${BASE%%/*}
+      BASE_BRANCH=${BASE#*/}
+      if git -C "$WT" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
+        git -C "$WT" fetch "$BASE_REMOTE" "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_REMOTE/$BASE_BRANCH" --quiet \
+          || { echo "error: failed to fetch configured base $BASE" >&2; exit 1; }
+      fi
+      ;;
+  esac
 else
-  BASE="$DEFAULT"
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+    # Update the remote-tracking ref itself; a bare single-branch fetch can leave
+    # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
+    git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
+    BASE="origin/$DEFAULT"
+  else
+    BASE="$DEFAULT"
+  fi
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }

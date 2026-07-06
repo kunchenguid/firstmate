@@ -120,6 +120,29 @@ test_no_pr_meta_uses_local_branch() {
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
 }
 
+test_meta_base_overrides_default_branch() {
+  local case_dir out
+  case_dir=$(make_case meta-base)
+  git -C "$case_dir/project" checkout -q -b dev origin/main
+  printf 'dev-base\n' > "$case_dir/project/dev-base.txt"
+  git -C "$case_dir/project" add dev-base.txt
+  git -C "$case_dir/project" commit -qm "dev base"
+  git -C "$case_dir/project" push -q origin dev
+
+  git -C "$case_dir/wt" reset -q --hard origin/dev
+  printf 'task-change\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "task change"
+  write_task_meta "$case_dir" "base=origin/dev"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/dev' "meta-base: diff should report the recorded task base"
+  assert_contains "$out" '+task-change' "meta-base: diff should include task changes"
+  assert_not_contains "$out" '+dev-base' "meta-base: diff must not include the configured base branch changes"
+  pass "fm-review-diff uses task meta base instead of the repository default"
+}
+
 test_unreachable_pr_head_falls_back_with_warning() {
   local case_dir out err
   case_dir=$(make_case fetch-fallback)
@@ -144,4 +167,5 @@ test_unreachable_pr_head_falls_back_with_warning() {
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
+test_meta_base_overrides_default_branch
 test_unreachable_pr_head_falls_back_with_warning
