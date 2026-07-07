@@ -23,7 +23,11 @@
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed.
+#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      the active step is ci, `axi status` alone cannot tell "still waiting on
+#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
+#      a ci-step log-tail check overrides working -> done once checks read
+#      green, so a green PR is never silently read as still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -280,6 +284,62 @@ log_reports_ci_ready() {
     *) return 1 ;;
   esac
 }
+
+nm_ci_step_status() {
+  local row rest
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
+}
+
+nm_effective_ci_step_status() {
+  local step_status
+  if [ "${RUN_STATUS:-}" = fixing ]; then
+    printf 'fixing'
+    return 0
+  fi
+  step_status=$(nm_ci_step_status)
+  if [ -n "$step_status" ]; then
+    printf '%s' "$step_status"
+    return 0
+  fi
+  if [ "${RUN_STATUS:-}" = ci ]; then
+    printf 'running'
+  fi
+}
+
+# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
+# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
+# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
+# reports every check green - it only reaches outcome=passed once the PR is
+# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
+# never distinguishes "still waiting on checks" from "checks green, waiting on
+# merge": both read as plain `ci,running,...`. The only place that transition is
+# recorded is the ci step's own log text, e.g. "all CI checks passed - still
+# monitoring until merged or closed" or "no CI checks reported - still
+# monitoring until merged or closed" (verified against 360+ real run logs under
+# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
+# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
+# for the MOST RECENT recognized marker (the log is append-only/chronological,
+# so the last match is current): green with nothing red after it means CI is
+# green right now, still only waiting on merge/close.
+nm_ci_checks_state() {
+  local run_id log_tail marker
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || { printf 'unknown'; return; }
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$log_tail" ] || { printf 'unknown'; return; }
+  marker=$(printf '%s\n' "$log_tail" \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | tail -1)
+  case "$marker" in
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *) printf 'unknown' ;;
+  esac
+}
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -369,6 +429,9 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  CI_STEP_STATUS=""
+  CI_LOG_STATE=""
+  RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -386,6 +449,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   else
     status=$(strip_quotes "$(nm_field status)")
+    RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -425,11 +489,39 @@ if [ "$HAVE_RUN" = 1 ]; then
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
+      if [ "$RUN_STATE" = working ]; then
+        CI_STEP_STATUS=$(nm_effective_ci_step_status)
+        case "$CI_STEP_STATUS" in
+          running)
+            CI_LOG_STATE=$(nm_ci_checks_state)
+            if [ "$CI_LOG_STATE" = green ]; then
+              RUN_STATE="done"
+              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            fi
+            ;;
+          fixing)
+            CI_LOG_STATE=not-ready
+            ;;
+        esac
+      fi
     fi
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    if [ "$RUN_SOURCE" = coarse ]; then
+      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
+    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+    if [ "$RUN_STATUS" = fixing ]; then
+      CI_LOG_STATE=not-ready
+    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+      CI_LOG_STATE=$(nm_ci_checks_state)
+    elif [ "$CI_STEP_STATUS" = fixing ]; then
+      CI_LOG_STATE=not-ready
+    fi
+    if [ "$CI_LOG_STATE" != not-ready ]; then
+      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

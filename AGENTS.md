@@ -25,7 +25,7 @@ Hard rules, in priority order:
 1. **Never write to a project.**
    You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
    You read projects to understand them; crewmates change them.
-   Six sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), fleet sync via `bin/fm-fleet-sync.sh` (sections 3 and 7), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), inheritable config propagation via `bin/fm-config-push.sh` and the bootstrap/spawn convergence paths (sections 3 and 4), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
+   Six sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), fleet sync via `bin/fm-fleet-sync.sh` (sections 3, 7, and 8), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), inheritable config propagation via `bin/fm-config-push.sh` and the bootstrap/spawn convergence paths (sections 3 and 4), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
    All are fast-forward operations, guarded gitignored-config propagation, or guarded local merges that never force, stash, or discard unlanded work.
    Project `AGENTS.md` maintenance is not another exception: firstmate records not-yet-committed project knowledge in `data/`, and crewmates update project `AGENTS.md` through normal delivery (section 6).
 2. **Never merge a PR without the captain's explicit word.**
@@ -77,7 +77,7 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
-config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit); not inherited into secondmate homes
+config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -102,7 +102,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -354,6 +354,9 @@ Firstmate keeps project knowledge split by ownership.
 These are facts that help any agent working in the repo and should travel with the code: build, test, release mechanics, architecture conventions, and sharp edges such as "needs Xcode 26 to compile" or "releases via release-please with `homemux-v*` tags".
 This knowledge lives in the project's committed `AGENTS.md`.
 A project's `AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it.
+A project's `AGENTS.md` is only for knowledge useful to almost every future session in that repo.
+Prefer a pointer to the authoritative file, command, or doc over repeating what the codebase already shows, and rewrite or prune stale entries instead of appending by default.
+The canonical self-governance wording for project `AGENTS.md` files lives in `bin/fm-ensure-agents-md.sh`; this section states the principle and points there.
 
 **Fleet and captain-private knowledge** belongs to firstmate.
 Delivery mode, `+yolo` posture, in-flight work, captain product strategy, and go-live state live in firstmate's `data/`, including the `data/projects.md` registry line and any planning docs.
@@ -475,6 +478,7 @@ bin/fm-spawn.sh <id> projects/<repo> --backend herdr  # experimental herdr backe
 bin/fm-spawn.sh <id> projects/<repo> --backend zellij # experimental zellij backend (docs/zellij-backend.md); version-gates at spawn
 bin/fm-spawn.sh <id> projects/<repo> --backend orca   # experimental Orca backend (docs/orca-backend.md); Orca owns worktree + terminal; Escape unsupported
 bin/fm-spawn.sh <id> projects/<repo> --backend cmux   # experimental cmux backend (docs/cmux-backend.md); GUI-first macOS-only, treehouse still owns worktree; requires a one-time socket-access setup (docs/cmux-backend.md "Setup")
+# backend=codex-app is not accepted yet; see docs/codex-app-backend.md.
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
 bin/fm-spawn.sh <id> <firstmate-home> --secondmate   # launch or recover an explicit secondmate home
@@ -485,7 +489,7 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 When `config/crew-dispatch.json` exists, include a shared `--harness` for every crewmate or scout batch after consulting the dispatch rules.
 
-The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`HERDR_ENV=1`/cmux runtime signals, nesting resolved innermost-first (`$TMUX`, then `HERDR_ENV=1`, then cmux's primary `CMUX_WORKSPACE_ID` marker and documented macOS-only fallbacks last, since cmux is a terminal application rather than a nestable multiplexer; docs/cmux-backend.md "Runtime auto-detection") - then `tmux`; an auto-detected herdr or cmux spawn prints a loud stderr notice, auto-detected tmux stays silent; zellij and orca are never auto-detected, only explicit `--backend <name>`/`FM_BACKEND=<name>`/`config/backend`), validates the requested backend against spawn-capable adapters, owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
+The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`HERDR_ENV=1`/cmux runtime signals, nesting resolved innermost-first (`$TMUX`, then `HERDR_ENV=1`, then cmux's primary `CMUX_WORKSPACE_ID` marker and documented macOS-only fallbacks last, since cmux is a terminal application rather than a nestable multiplexer; docs/cmux-backend.md "Runtime auto-detection") - then `tmux`; an auto-detected herdr or cmux spawn prints a loud stderr notice, auto-detected tmux stays silent; zellij and orca are never auto-detected, only explicit `--backend <name>`/`FM_BACKEND=<name>`/`config/backend`), validates the requested backend against spawn-capable adapters, rejects `codex-app` as unknown, owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
 A backend spawn refusal - a missing dependency, an unauthenticated socket, or a version gate - must be surfaced to the captain as a blocker; never silently retry the spawn on a different backend to work around it.
 A non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 When `config/crew-dispatch.json` exists, the script refuses crewmate or scout launches without an explicit harness because firstmate must have already resolved the profile choice at intake.
@@ -493,6 +497,7 @@ When `--model` or `--effort` is omitted, the corresponding meta value is `defaul
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
 For ship and scout tasks, tmux/herdr/zellij/cmux create a runtime endpoint and run `treehouse get`; Orca creates an Orca-owned worktree, validates it, then creates the terminal. In all cases, the script asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+Selecting `backend=codex-app` fails as an unknown backend; see `docs/codex-app-backend.md`.
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
 For `kind=secondmate`, the script creates the same kind of runtime endpoint but starts directly in the persistent home.
 With herdr, ordinary crewmate and scout spawns use the current `FM_HOME` workspace; a primary `--secondmate` spawn uses the secondmate target home's workspace, so secondmate-owned tabs do not mix into the primary `firstmate` space.
@@ -514,6 +519,7 @@ Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything lon
 Steer a secondmate the same way.
 Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays inside the secondmate home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
 Because `fm-send` to a `kind=secondmate` target marks the request as from-firstmate (section 7 intake), the secondmate's answer comes back on that status/doc path too, not in its chat; read the response there as an ordinary status signal and do not peek its chat for it.
+A secondmate-reported merged PR is exactly the case the fleet-sync-on-merge wake rule (section 8) exists for, since the secondmate's own teardown never touches this home's separate project clone.
 
 ### Delivery modes and yolo
 
@@ -547,6 +553,7 @@ Load `harness-adapters` for the target harness's skill invocation form; natural 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
+That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 Judge a validating crewmate by the run's step status, never by whether its shell is still running.
@@ -555,8 +562,9 @@ Because the run-step is authoritative before pane liveness, a crewmate whose win
 That log is an append-only wake-*event* log, not a current-state field, and it goes stale the moment a resolved gate lets the run resume: after you answer a `needs-decision`/`blocked` and the crewmate silently resumes (responds to the gate, the pipeline fixes, it re-validates), the log's last line still reads `needs-decision`/`blocked` while the run-step has moved on.
 So never infer current state from a `tail` of that log; `bin/fm-crew-state.sh` reports the live run-step state and explicitly flags the stale log line superseded, where a raw `tail` would mislead you into re-escalating settled work.
 The fields below name the run-step states and outcomes it reads from `no-mistakes axi status`; run that command directly when you want the full gate findings.
+During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 
-- `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone.
+- `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); `ci` stays working until the ci log's most recent recognized marker says checks passed or no checks are terminally ready, and a later re-arm or issue marker returns it to working.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
   The crewmate owes a response; if it is idle-waiting for the run to advance on its own, steer it to follow no-mistakes' active-gate help.
 - `outcome: passed` or `checks-passed` - the helper reports `done`; `passed` means the PR is already merged or closed, while `checks-passed` means it is ready for PR review.
@@ -629,6 +637,7 @@ The watcher reads that evidence with `bin/fm-crew-state.sh` (run-step first, the
 A `heartbeat` with no captain-relevant change is likewise absorbed.
 Absorbed wakes are advanced past their suppression marker and logged to `state/.watch-triage.log` while the watcher keeps blocking - no queue entry, no exit, no LLM turn.
 It exits with one reason line on an *actionable* wake: a `signal` carrying a captain-relevant verb (`needs-decision:`/`blocked:`/`failed:`/`done:`/`PR ready`/`checks green`/`ready in branch`/`merged`); a no-verb `signal` whose crewmate is NOT provably working (it stopped its turn with no running pipeline and no busy pane, so it may be done, waiting on a decision, or wedged); any `check`; a `stale` whose crewmate is not provably working, whether or not its status log's last line is captain-relevant (surfaced at once, never left to wait out the timer); a provably-working `stale` that stays idle past the wedge threshold (`FM_STALE_ESCALATE_SECS`, default 240s); or the heartbeat fleet-scan's fail-safe backstop catching a captain-relevant status the per-wake path missed.
+Repeated provably-working stale escalations on the same unchanged pane are counted in `state/.wedge-escalations-*`; at `FM_WEDGE_DEMAND_INSPECT_COUNT` (default 3), the stale reason includes `demand-deep-inspection` so the wake is not mistaken for another routine validation wait.
 A captain-relevant status-log line does not by itself make a stale pane terminal: a crewmate gets no new status entry once firstmate hands it to a no-mistakes validation, so its last line can still read `done:` from BEFORE that validation started for the run's entire duration; a provably-working crew therefore always wins over that stale line and is absorbed (with the same wedge-escalation safety net), and only a crewmate that is NOT provably working has its status log trusted to decide terminal-vs-non-terminal.
 Only an actionable wake is written to the durable queue at `state/.wake-queue` - before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat` - and only an actionable wake ends the background task, so you re-arm exactly once per actionable event instead of once per wake.
 That is what eliminates the quiet-stretch churn without swallowing a finish: during a long crew validation the run is actively running, so the crewmate's `turn-ended`/`working:`/stale wakes (and no-change heartbeats) are absorbed in bash, the liveness beacon (`state/.last-watcher-beat`) stays fresh the whole time so `fm-guard.sh` never false-alarms, and your LLM is woken only when something genuinely needs you - including the moment that crewmate stops with no running pipeline, which now surfaces immediately.
@@ -674,18 +683,20 @@ On wake, in order of cheapness:
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
    A status line is the wake *event*, not the crewmate's current state; when you need the live state - especially to confirm a `needs-decision`/`blocked` is still real and not already resolved-and-resumed - read it with `bin/fm-crew-state.sh <id>`, which reconciles the authoritative run-step over the possibly-stale log line, and never `tail` the status log as the current-state source.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
+   If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before re-arming.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    Do not report that the fleet is unchanged.
 
 When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, load `fmx-respond` (section 13) and post the X-mention's **final** completion follow-up if that task is X-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --final --text-file <path>`, so the link always clears here regardless of how many of the up-to-three follow-ups were already spent on earlier milestones.
+When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as part of handling the wake, so the primary's clone never sits stale until the next session start or teardown.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-Each task's backend live-task inventory is the ground truth (tmux when `backend=` is absent; a task's meta may record a different `backend=` - herdr, zellij, orca, and cmux are the other implemented, spawn-capable, experimental backends today, docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, and docs/cmux-backend.md).
+Each task's backend live-task inventory is the ground truth (tmux when `backend=` is absent; a task's meta may record a different `backend=` - herdr, zellij, orca, and cmux are the other implemented, spawn-capable, experimental backends today, docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, and docs/cmux-backend.md; codex-app is not selectable, see docs/codex-app-backend.md).
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
@@ -850,9 +861,11 @@ It performs only fast-forward self-updates of firstmate and registered secondmat
 These skills are not captain-invocable; they are conditional operating references you must load at the trigger points below.
 
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
+- `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 ## 14. X mode

@@ -41,6 +41,29 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#
+# Stale worktree git lock recovery (backlog teardown-lock-race-l2): a crew
+# process killed mid-git-operation can leave a stale .git/worktrees/<wt>/index.lock
+# (or, for a non-linked worktree, .git/index.lock) that makes `treehouse return
+# --force` fail with a "File exists" error. On that failure, teardown_treehouse_return
+# waits FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS (default 2s) and retries once, since the
+# owning process may simply be exiting. If the lock is still present, it is removed and
+# the return retried ONE more time, but ONLY when the lock is provably stale, meaning
+# ALL of the following hold:
+#   1. the lock file still exists after the retry wait above;
+#   2. its mtime age is at least FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) - a
+#      freshly created lock might belong to a process `lsof` has not yet reflected;
+#   3. `lsof` reports no process holding the lock file open, and no process has the
+#      worktree directory itself open (as cwd or an fd) - a live git process keeps its
+#      own lock file open for the full duration of the operation, so an empty `lsof`
+#      result means the file was abandoned by a process that has since exited, not that
+#      no process ever held it.
+# The same proof is used when non-force safety inspection cannot run because the lock
+# is present; teardown clears only a provably stale lock, then re-runs the safety
+# checks before any destructive return. A missing `lsof`, or a lock that fails any of
+# the three checks, is treated as NOT provably stale (fail safe): the lock is left
+# untouched and the original failure is surfaced, exactly as before this fix. Teardown
+# output notes every wait, retry, and removal so the captain can see what happened.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +78,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -362,6 +387,240 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
+STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-2}
+TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
+TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
+
+# Absolute path to the git index lock for a worktree/repo dir, or empty when it
+# cannot be resolved (dir missing or not a git worktree at all).
+worktree_git_lock_path() {
+  local dir=$1 lock abs_dir
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(canonical_existing_dir "$dir") || return 1
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
+}
+
+lsof_path_has_holder() {
+  local target=$1 output status
+  if output=$(lsof -- "$target" 2>&1); then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+    return 1
+  fi
+  if [ -n "$output" ]; then
+    printf '%s\n' "$output" | sed 's/^/teardown: lsof check failed: /' >&2
+  else
+    echo "teardown: lsof check failed for $target with exit $status" >&2
+  fi
+  return 2
+}
+
+# Does any live process hold $lock open, or hold the worktree $dir itself open
+# (as cwd or an fd)? See the script header for why this proves liveness. A
+# missing lsof is treated as "cannot prove no holder" (fail safe: assume live).
+worktree_lock_has_live_holder() {
+  local lock=$1 dir=$2 status
+  command -v lsof >/dev/null 2>&1 || return 0
+  if [ -n "$lock" ]; then
+    if lsof_path_has_holder "$lock"; then
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 0
+    fi
+  fi
+  if [ -n "$dir" ]; then
+    if lsof_path_has_holder "$dir"; then
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 0
+    fi
+  fi
+  return 1
+}
+
+worktree_lock_age() {
+  local lock=$1 m now
+  m=$(fm_path_mtime "$lock") || return 1
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$(( now - m ))"
+}
+
+# Is $lock provably stale per the header's staleness proof? Returns non-zero
+# (never remove) unless the lock exists, has no live holder, and is old enough.
+worktree_lock_is_provably_stale() {
+  local lock=$1 dir=$2 age
+  [ -n "$lock" ] && [ -e "$lock" ] || return 1
+  worktree_lock_has_live_holder "$lock" "$dir" && return 1
+  if ! age=$(worktree_lock_age "$lock"); then
+    echo "teardown: cannot read mtime for git lock $lock; leaving it in place" >&2
+    return 1
+  fi
+  [ "$age" -ge "$STALE_WORKTREE_LOCK_AGE_SECS" ]
+}
+
+worktree_safety_blocked_by_lock() {
+  local reason=$1 lock
+  lock=$(worktree_git_lock_path "$WT") || lock=""
+  [ -n "$lock" ] && [ -e "$lock" ] || return 1
+  echo "teardown: cannot inspect worktree $WT for $reason while git lock $lock is present; checking whether the lock is stale" >&2
+  return 0
+}
+
+cleanup_stale_lock_for_safety_check() {
+  local dir=$1 lock
+  lock=$(worktree_git_lock_path "$dir") || lock=""
+  [ -n "$lock" ] && [ -e "$lock" ] || return 0
+
+  echo "teardown: worktree safety check blocked by git lock $lock; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
+  sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
+
+  if [ ! -e "$lock" ]; then
+    echo "teardown: worktree safety check lock cleared on its own; retrying safety checks" >&2
+    return 0
+  fi
+
+  if worktree_lock_is_provably_stale "$lock" "$dir"; then
+    rm -f "$lock"
+    echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
+    return 0
+  fi
+
+  echo "teardown: worktree safety check blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place" >&2
+  return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+}
+
+# Return a worktree/home via `treehouse return --force`, tolerating a stale git
+# lock left by a killed crew process. On failure: wait briefly and retry once
+# (the owning process may be exiting), then - only if the lock is provably
+# stale - remove it and retry once more. A lock that is not provably stale is
+# left untouched and the original failure is surfaced to the caller.
+teardown_treehouse_return() {
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock
+
+  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+    return 0
+  fi
+
+  lock=$(worktree_git_lock_path "$dir") || lock=""
+  if [ -z "$lock" ] || [ ! -e "$lock" ]; then
+    return 1
+  fi
+
+  echo "teardown: $label return failed with git lock $lock present; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
+  sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
+
+  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+    echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+    return 0
+  fi
+
+  if [ -e "$lock" ]; then
+    if worktree_lock_is_provably_stale "$lock" "$dir"; then
+      rm -f "$lock"
+      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
+      if [ -n "$post_cleanup_check" ]; then
+        if ! "$post_cleanup_check"; then
+          echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
+          return 1
+        fi
+      fi
+      if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        return 0
+      fi
+      echo "teardown: $label return still failing after stale-lock cleanup" >&2
+      return 1
+    fi
+
+    echo "teardown: $label return failed and git lock $lock is not provably stale (may belong to a live process); leaving it in place" >&2
+    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+  fi
+
+  echo "teardown: $label return still failing after git lock $lock disappeared" >&2
+  return 1
+}
+
+validate_worktree_teardown_safety() {
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  [ -d "$WT" ] || return 0
+  [ "$FORCE" != "--force" ] || return 0
+  case "$KIND" in
+    secondmate|scout) return 0 ;;
+  esac
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "uncommitted changes"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
+    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
+    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "commits not on a remote"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
+    echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
+    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
+
+  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  elif [ -n "$dirty" ]; then
+    echo "REFUSED: worktree $WT has uncommitted changes." >&2
+    echo "uncommitted changes present" >&2
+    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    return 1
+  elif [ -n "$unpushed" ]; then
+    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+    if [ -z "$branch" ]; then
+      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+    fi
+    if ! work_is_landed "$branch"; then
+      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -560,7 +819,7 @@ remove_firstmate_home() {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
@@ -600,7 +859,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -648,7 +907,15 @@ cleanup_firstmate_home_children() {
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+          :
+        else
+          child_return_rc=$?
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        fi
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
@@ -710,57 +977,15 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if [ "$KIND" = secondmate ]; then
-    :
-  elif [ "$KIND" = scout ]; then
+  if validate_worktree_teardown_safety; then
     :
   else
-    # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
-    # Reachability test: is HEAD reachable from ANY remote-tracking branch? Empty
-    # means the work is already pushed (a fork is a remote too, so upstream-
-    # contribution PRs pushed to a fork pass here). Non-empty does NOT prove the work
-    # is unlanded: a squash or rebase merge rewrites the branch into a new commit on
-    # the default branch, and a repo that auto-deletes the head branch on merge also
-    # drops its remote-tracking ref - so a merged-and-deleted branch trips this test
-    # while being fully landed. We therefore treat reachability as a fast accept, not
-    # the sole verdict, and fall through to a landed-work check before refusing.
-    unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
-    if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-      # local-only ships have no remote in the common case, so the "on a remote"
-      # test above is expected to be non-empty. The work is safe once it is merged
-      # into the local default branch (firstmate does that merge on the captain's
-      # approval). Refuse until then.
-      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
-      unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
-      if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-        echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-        [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-        [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-        echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-        exit 1
-      fi
-    elif [ -n "$dirty" ]; then
-      # Uncommitted changes are never landed and the reset would discard them; always
-      # refuse, regardless of whether the committed work itself has landed.
-      echo "REFUSED: worktree $WT has uncommitted changes." >&2
-      echo "uncommitted changes present" >&2
-      echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    safety_rc=$?
+    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+      cleanup_stale_lock_for_safety_check "$WT" || exit 1
+      validate_worktree_teardown_safety || exit 1
+    else
       exit 1
-    elif [ -n "$unpushed" ]; then
-      # Commits not reachable from any remote. Before refusing, recognize LANDED work:
-      # a merged PR whose head contains the current local work, or content already in
-      # the up-to-date default branch. On a gh lookup error work_is_landed falls back
-      # to the content check, and if that is also inconclusive it returns false - so
-      # we never silently allow teardown of possibly-unlanded work; only genuinely
-      # unlanded work is refused.
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      if ! work_is_landed "$branch"; then
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-        printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-        echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
-        exit 1
-      fi
     fi
   fi
 fi
@@ -793,8 +1018,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project.
-  ( cd "$PROJ" && treehouse return --force "$WT" )
+  # the project. teardown_treehouse_return tolerates a stale git lock left by a
+  # killed crew process; see the script header for the exact staleness proof.
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
 fi
 
 if [ "$BACKEND" != orca ]; then

@@ -76,6 +76,24 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_ship_project_memory_wording() {
+  local home id brief
+  home="$TMP_ROOT/project-memory-home"
+  mkdir -p "$home/data"
+  id="brief-memory-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
+    "project-memory contract lost the durable-knowledge bar"
+  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
+    "project-memory contract lost pointer-over-copy guidance"
+  assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
+    "project-memory contract lost the self-governance add-in-same-pass rule"
+  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_ship_project_memory_wording

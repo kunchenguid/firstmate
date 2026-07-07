@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-watcher-lock.test.sh - watcher singleton + lock-primitive races +
-# watch-arm liveness + guard warnings. These are safety-critical concurrency
-# invariants (a race bug may not reproduce through an e2e), so they stay as
-# focused real-process units.
+# PID identity stability + watch-arm liveness + guard warnings. These are
+# safety-critical process invariants (a race bug may not reproduce through an
+# e2e), so they stay as focused real-process units.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -415,7 +415,7 @@ test_watcher_self_evicts_on_lock_takeover() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
   while [ "$i" -lt 50 ]; do
@@ -619,7 +619,31 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_pid_identity_is_locale_invariant() {
+  # The watcher records its process identity under one locale; arm/guard/turn-end
+  # re-read it under the machine's ambient locale. ps's lstart date format follows
+  # LC_TIME, so an unpinned read on a non-C locale (e.g. ko_KR) would differ only
+  # in the date portion and reject a genuinely live watcher. The fix pins LC_ALL=C
+  # inside fm_pid_identity, so its output must be byte-identical regardless of the
+  # caller's exported LC_ALL/LC_TIME. That invariant holds on any host because the
+  # pin is internal, so this stays deterministic on CI even where an alternate
+  # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
+  local live baseline via_lc_all via_lc_time
+  sleep 300 &
+  live=$!
+  baseline=$(LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
+  [ "$via_lc_all" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_ALL (got '$via_lc_all', want '$baseline')"
+  [ "$via_lc_time" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_TIME (got '$via_lc_time', want '$baseline')"
+  pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
+}
+
 test_singleton_start
+test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

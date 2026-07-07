@@ -13,8 +13,8 @@
 #      diffs the two command logs byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
 #      fake tools and compare command logs".
-#   3. Asserts the new `--backend`/`FM_BACKEND` selection refuses an unknown
-#      backend loudly (tmux is the only verified adapter in P1).
+#   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
+#      and the blocked `codex-app` backend loudly.
 #
 # fm-watch.sh's signal/stale/check/heartbeat wake-string contract is already
 # exercised end-to-end against this refactor by tests/fm-watch-triage.test.sh
@@ -445,13 +445,15 @@ test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
   local out
-  # bogus names a backend with no adapter at all; tmux, herdr, zellij, and
-  # orca are all known adapters, and all four are spawn-supported.
+  # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
+  # and cmux are all known adapters and spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
+  out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
+  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate accepted codex-app"
   out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
-  pass "fm_backend_validate: implemented adapters accepted, an unknown backend refused loudly"
+  pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
 }
 
 test_backend_source_shell_portable() {
@@ -485,8 +487,11 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn herdr 2>/dev/null || fail "fm_backend_validate_spawn should accept herdr"
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
+  fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
+  out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
+  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate_spawn accepted codex-app"
   out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
@@ -713,6 +718,17 @@ SH
   printf '%s\n' "$fb"
 }
 
+run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> -- <spawn args...>
+  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
+  [ "${1:-}" = -- ] && shift
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
+    "$bin/bin/fm-spawn.sh" "$@"
+}
+
 # NOTE: the old-vs-new spawn command-log conformance test that used to live here
 # was retired. It asserted the P1 backend refactor was a byte-for-byte pure
 # extraction of the spawn window-creation/targeting sequence, but that sequence
@@ -725,8 +741,95 @@ SH
 # tests/fm-tangle-guard.test.sh ("fm-spawn: appends windows by session-colon,
 # pins the name, and targets the window id"), and the real tmux create/kill path
 # by tests/fm-backend-tmux-smoke.test.sh. The send/peek/teardown conformance
-# tests below remain pure extractions and stay. (make_spawn_fakebin is retained;
-# test_spawn_default_backend_writes_no_meta_field still uses it.)
+# tests below remain pure extractions and stay. (make_spawn_fakebin and
+# run_spawn_case are retained: test_spawn_default_backend_writes_no_meta_field
+# uses make_spawn_fakebin, and #294's run_spawn_symlink_case uses run_spawn_case.)
+
+# --- symlinked project prefix must not false-refuse the isolation guard -----
+#
+# docs/herdr-backend.md "Known gaps": a real backend's pane_current_path read
+# (tmux, herdr) reports the OS-level PHYSICALLY-resolved cwd. When the project
+# itself lives under a symlinked prefix (e.g. macOS's /tmp -> /private/tmp),
+# fm-spawn.sh's PROJ_ABS - a logical `cd && pwd` - differs string-for-string
+# from that physical read even before treehouse moves the pane at all, so the
+# worktree-discovery poll used to mistake an UNMOVED pane for one that had
+# already left the project, handing validate_spawn_worktree the project's own
+# directory as "the worktree" and tripping its false isolation refusal.
+# make_spawn_symlink_fakebin's tmux stub returns an unmoved project path on the
+# first pane_current_path poll, then the real worktree path from the second poll
+# onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
+# canonicalization in bin/fm-spawn.sh ever regresses.
+make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
+  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
+  mkdir -p "$fb"
+  : > "$counter"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      printf x >> "$counter"
+      if [ "\$(wc -c < "$counter")" -le 1 ]; then
+        printf '%s\\n' "$initial_path"
+      else
+        printf '%s\\n' "$wt"
+      fi
+      exit 0
+    ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+run_spawn_symlink_case() {  # <label> <physical|logical>
+  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
+  real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
+  mkdir -p "$real_root"
+  ln -s "$real_root" "$link_root"
+  proj="$link_root/proj"
+  wt="$TMP_ROOT/symlink-wt-$label"
+  id="spawnsymlink$label"
+  fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
+  # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
+  # /var -> /private/var), so resolve the fakebin's "physical" reply with
+  # pwd -P rather than string concatenation - it must match exactly what
+  # fm-spawn.sh's own PROJ_ABS_REAL computes, including any symlink layers
+  # ABOVE this test's own synthetic real_root/link_root pair.
+  proj_phys=$(cd "$real_root/proj" && pwd -P)
+  case "$first_reply" in
+    physical) initial_path=$proj_phys ;;
+    logical) initial_path=$proj ;;
+    *) fail "unknown symlink first-reply mode: $first_reply" ;;
+  esac
+  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
+  data="$TMP_ROOT/symlink-data-$label"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/symlink-spawn-$label.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
+
+  rm -rf "/tmp/fm-$id"
+}
+
+test_spawn_symlinked_project_prefix_avoids_false_refusal() {
+  run_spawn_symlink_case physical physical
+  run_spawn_symlink_case logical logical
+  pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
@@ -818,6 +921,17 @@ test_spawn_refuses_unknown_backend_flag() {
   [ "$status" -ne 0 ] || fail "fm-spawn --backend bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected backend"
   pass "fm-spawn.sh --backend bogus is refused loudly"
+}
+
+test_spawn_refuses_codex_app_backend_flag() {
+  local out status
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --backend codex-app 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
+  assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
+  pass "fm-spawn.sh --backend codex-app is refused"
 }
 
 test_spawn_refuses_unknown_fm_backend_env() {
@@ -927,8 +1041,10 @@ test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
+test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
+test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env

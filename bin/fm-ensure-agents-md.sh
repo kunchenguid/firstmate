@@ -4,6 +4,9 @@
 # relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present, and refuses to clobber distinct real files or wrong symlinks.
+# Owns the canonical "## Maintaining this file" self-governance wording for
+# project AGENTS.md files, appending it to created skeletons and promoted
+# CLAUDE.md files that lack it.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -29,6 +32,35 @@ cd "$DIR"
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md
 
+write_maintenance_section() {
+  cat <<'EOF'
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
+EOF
+}
+
+ensure_maintenance_section() {
+  if grep -Fqx '## Maintaining this file' "$AGENTS"; then
+    return 0
+  fi
+  sep=''
+  if [ -s "$AGENTS" ]; then
+    if [ -n "$(tail -c 1 "$AGENTS")" ]; then
+      sep=$'\n\n'
+    else
+      sep=$'\n'
+    fi
+  fi
+  {
+    printf '%s' "$sep"
+    write_maintenance_section
+  } >> "$AGENTS"
+}
+
 write_skeleton() {
   cat > "$AGENTS" <<'EOF'
 # Project agent memory
@@ -37,6 +69,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 EOF
+  ensure_maintenance_section
 }
 
 is_correct_claude_symlink() {
@@ -101,6 +134,7 @@ fi
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
     mv "$CLAUDE" "$AGENTS"
+    ensure_maintenance_section
     ln -s "$AGENTS" "$CLAUDE"
     echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
     exit 0

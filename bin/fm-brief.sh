@@ -27,7 +27,10 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path.
+# learnings can be committed to AGENTS.md through the project's delivery path;
+# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
+# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
+# self-governance section when a touched project AGENTS.md lacks it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -216,7 +219,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
-After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
     ;;
@@ -254,7 +257,9 @@ $RULE1
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
+Record only project knowledge useful to almost every future session.
+For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD

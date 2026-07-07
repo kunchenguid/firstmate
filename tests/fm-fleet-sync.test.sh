@@ -256,6 +256,70 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_single_project_by_bare_name_resolves() {
+  local home out
+  home=$(new_home)
+  build_pair "$home" kappa >/dev/null
+  advance_origin "$home" kappa C1
+
+  out=$(run_sync "$home" "kappa")
+
+  assert_contains "$out" "kappa: synced" "bare project name resolves against the home's projects dir"
+  pass "single-project form accepts a bare project name"
+}
+
+test_single_project_by_bare_name_ignores_cwd_shadow() {
+  local home cwd out
+  home=$(new_home)
+  build_pair "$home" mu >/dev/null
+  advance_origin "$home" mu C1
+  cwd="$home/shadow"
+  mkdir -p "$cwd/mu"
+
+  out=$(cd "$cwd" && run_sync "$home" "mu")
+
+  assert_contains "$out" "mu: synced" "bare project name prefers the home's projects dir"
+  assert_not_contains "$out" "skipped: not a git repo" "bare project name ignores a cwd shadow directory"
+  pass "single-project bare name resolution is not cwd-sensitive"
+}
+
+test_single_project_by_projects_relative_name_resolves() {
+  local home out
+  home=$(new_home)
+  build_pair "$home" lambda >/dev/null
+  advance_origin "$home" lambda C1
+
+  out=$(run_sync "$home" "projects/lambda")
+
+  assert_contains "$out" "lambda: synced" "projects/<name> form resolves against the home's projects dir"
+  pass "single-project form accepts a projects/<name> relative name"
+}
+
+test_single_project_by_projects_relative_name_ignores_cwd_shadow() {
+  local home cwd out
+  home=$(new_home)
+  build_pair "$home" nu >/dev/null
+  advance_origin "$home" nu C1
+  cwd="$home/shadow"
+  mkdir -p "$cwd/projects/nu"
+
+  out=$(cd "$cwd" && run_sync "$home" "projects/nu")
+
+  assert_contains "$out" "nu: synced" "projects/<name> form prefers the home's projects dir"
+  assert_not_contains "$out" "skipped: not a git repo" "projects/<name> form ignores a cwd shadow directory"
+  pass "single-project projects/<name> resolution is not cwd-sensitive"
+}
+
+test_single_project_unresolvable_name_still_skips() {
+  local home out
+  home=$(new_home)
+
+  out=$(run_sync "$home" "does-not-exist")
+
+  assert_contains "$out" "skipped: not a directory" "an unresolvable name still hits the existing not-a-directory skip"
+  pass "single-project form leaves a genuinely bad name unresolved"
+}
+
 test_whole_fleet_form() {
   local home behind current out
   home=$(new_home)
@@ -302,5 +366,10 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_single_project_by_bare_name_resolves
+test_single_project_by_bare_name_ignores_cwd_shadow
+test_single_project_by_projects_relative_name_resolves
+test_single_project_by_projects_relative_name_ignores_cwd_shadow
+test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck

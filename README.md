@@ -109,6 +109,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
+`codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
@@ -120,6 +121,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
+| `/bearings`        | Generate a "pick up where I left off" status report from live fleet state - backlog, per-task crew state, open PRs, scout reports, pending decisions, and date-gated queued work - written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
 
@@ -144,6 +146,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
+- [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified Claude Code Stop-hook mechanism, scoping, and known gaps.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
