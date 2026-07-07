@@ -820,16 +820,27 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Right after the pane is created it may transiently report its parent
+  # (FM_ROOT), so only accept a departure once the pane has been seen at the
+  # project, or to a path that is not that transient FM_ROOT.
+  FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL="$FM_ROOT"
+  WT_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-60}"
+  seen_proj=
+  for _ in $(seq 1 "$WT_TIMEOUT"); do
     p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      pr=$(real_path_or_raw "$p")
+      if [ "$pr" = "$PROJ_ABS_REAL" ]; then
+        seen_proj=1
+      elif [ -n "$seen_proj" ] || [ "$pr" != "$FM_ROOT_REAL" ]; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WT_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 
