@@ -421,6 +421,14 @@ Route each piece of durable knowledge to its most specific home:
 | Knowledge generalizable to every firstmate user | the shared `AGENTS.md`, shipped via PR through the pipeline |
 | Task-scoped notes | backlog item notes, inspect first with `tasks-axi show <id> --full`, then replace the body with `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when superseded prior state should remain recoverable, or hand-edit per the active backend |
 | Investigation findings | scout reports at `data/<id>/report.md` |
+| Half-formed ideas to refine later | `data/parking.md` via the `parking` skill (see Parking lot below) |
+
+### Parking lot
+
+The parking lot captures the captain's half-formed ideas mid-conversation so sparks are not lost, then resurfaces them on a schedule to refine and promote.
+Capture is an always-on reflex: the phrases `Parking:`, `park this`, and `put this in parking` (and clear near-variants such as "park that idea" or "add to the parking lot") mean capture the idea to `data/parking.md` per the `parking` skill's capture procedure, without invoking the skill.
+Distill a one-liner, preserve the captain's verbatim words, record context plus a back-reference, resolve any deadline to an absolute date, and confirm in one line; ask a question only when an idea is time-sensitive but carries no resolvable date.
+Everything else - the store schema, rituals, decay, clustering, cron scheduling, and promotion - lives in the captain-invocable `parking` skill; load it on `/parking`, a review or refine request, a ritual cron fire, or a promotion.
 
 When the captain invokes `/stow`, load the `stow` skill.
 It sweeps the current session for uncaptured durable knowledge, routes findings with this table, files undone next steps to the backlog, and reports whether the session is safe to reset.
