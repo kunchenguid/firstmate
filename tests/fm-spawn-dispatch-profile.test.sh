@@ -20,7 +20,29 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # The window starts at the project; treehouse then moves the pane to the
+    # worktree. Model that per window: the first poll of a given -t target reports
+    # FM_FAKE_PROJ_PATH, later polls FM_FAKE_PANE_PATH. Key the marker by target so
+    # a batch spawn's second task sees the project first too (FM_FAKE_POLL_FILE,
+    # truncated per run, is the per-target marker prefix).
+    __tgt= __prev=
+    for __a in "$@"; do
+      [ "$__prev" = "-t" ] && __tgt=$__a
+      __prev=$__a
+    done
+    __seen=1
+    if [ -n "${FM_FAKE_POLL_FILE:-}" ]; then
+      __mark="${FM_FAKE_POLL_FILE}.$(printf '%s' "$__tgt" | tr -c 'A-Za-z0-9._-' _)"
+      [ -e "$__mark" ] || __seen=
+      : > "$__mark"
+    fi
+    if [ -z "$__seen" ] && [ -n "${FM_FAKE_PROJ_PATH:-}" ]; then
+      printf '%s\n' "$FM_FAKE_PROJ_PATH"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -84,10 +106,12 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  : > "$home/.pollcount"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_PROJ_PATH="$PROJ_DIR" \
+    FM_FAKE_POLL_FILE="$home/.pollcount" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }

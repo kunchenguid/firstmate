@@ -159,7 +159,21 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # The window starts at the project; treehouse then moves the pane to the
+    # resolved path. Model that: the first poll reports FM_FAKE_PROJ_PATH, later
+    # polls FM_FAKE_PANE_PATH (FM_FAKE_POLL_FILE, truncated per run, is the counter).
+    __n=1
+    if [ -n "${FM_FAKE_POLL_FILE:-}" ]; then
+      __n=$(( $(cat "$FM_FAKE_POLL_FILE" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$__n" > "$FM_FAKE_POLL_FILE"
+    fi
+    if [ "$__n" -le 1 ] && [ -n "${FM_FAKE_PROJ_PATH:-}" ]; then
+      printf '%s\n' "$FM_FAKE_PROJ_PATH"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -177,10 +191,12 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  : > "$home/.pollcount-$id"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_PROJ_PATH="$proj" \
+    FM_FAKE_POLL_FILE="$home/.pollcount-$id" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }

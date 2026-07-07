@@ -738,8 +738,8 @@ test_peek_conformance_old_vs_new() {
 
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
-make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
-  local dir=$1 wt=$2 fb="$1/fakebin"
+make_spawn_fakebin() {  # <dir> <proj-path> <fake-worktree-path> -> echoes fakebin dir
+  local dir=$1 proj=$2 wt=$3 fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
@@ -747,7 +747,18 @@ set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      # The window is created at the project (tmux new-window -c proj); treehouse
+      # then moves the pane to the worktree. Model that ordering: the first poll
+      # reports the project, later polls the worktree. The command log (truncated
+      # per run) doubles as the poll counter.
+      if [ "\$(grep -c pane_current_path "\${FM_TMUX_LOG:?}")" -le 1 ]; then
+        printf '%s\\n' "$proj"
+      else
+        printf '%s\\n' "$wt"
+      fi
+      exit 0 ;;
+    esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
@@ -776,7 +787,7 @@ test_spawn_conformance_old_vs_new() {
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
   id="spawnconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake" "$wt")
+  fb=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake" "$proj" "$wt")
   mkdir -p "$data/$id"
   printf 'test brief content\n' > "$data/$id/brief.md"
   state_old="$TMP_ROOT/spawn-state-old"; state_new="$TMP_ROOT/spawn-state-new"
@@ -1015,7 +1026,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
-  fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
+  fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$proj" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
@@ -1037,7 +1048,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
+  fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$proj" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
@@ -1061,7 +1072,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
+  fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$proj" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
