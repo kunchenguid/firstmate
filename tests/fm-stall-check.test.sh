@@ -95,6 +95,29 @@ EOF
   pass "detects queued blocked-by item whose blocker is Done"
 }
 
+test_unblocked_item_blocker_in_archive() {
+  local dir out
+  dir=$(make_case unblocked_archive)
+  cat > "$dir/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] next-leg-b3 - continue feature (repo: firstmate) blocked-by: old-base-a2 - waits for base
+
+## Done
+- [x] recent-z1 - unrelated recent work - https://github.com/lndshk/firstmate/pull/20 (merged 2026-07-07)
+EOF
+  cat > "$dir/data/done-archive.md" <<'EOF'
+## Done
+- [x] old-base-a2 - base work pruned long ago - https://github.com/lndshk/firstmate/pull/2 (merged 2026-06-01)
+EOF
+
+  out=$(run_check "$dir") || fail "archived-blocker check exited non-zero"
+  printf '%s\n' "$out" | grep -F 'ready: next-leg-b3 - blocker old-base-a2 is done; dispatchable' >/dev/null \
+    || fail "archived-blocker finding missing: $out"
+  pass "detects queued item whose blocker was pruned to the done archive"
+}
+
 test_date_gate_ready() {
   local dir out
   dir=$(make_case dategate)
@@ -225,6 +248,7 @@ EOF
 
 test_finished_but_not_advanced
 test_unblocked_parked_item
+test_unblocked_item_blocker_in_archive
 test_date_gate_ready
 test_idle_stall_candidate
 test_silent_when_clear_and_secondmate_skip

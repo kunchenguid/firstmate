@@ -10,6 +10,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="$FM_HOME/data"
 BACKLOG="$DATA/backlog.md"
+DONE_ARCHIVE="$DATA/done-archive.md"
 IDLE_SECS=${FM_STALL_IDLE_SECS:-600}
 
 # shellcheck source=bin/fm-tmux-lib.sh
@@ -66,6 +67,26 @@ in_flight_ids() {
 
 done_ids() {
   awk_ids_in_section "## Done"
+}
+
+# The live backlog keeps only the 10 most recent Done entries; older completions
+# are pruned into data/done-archive.md (tasks-axi done_keep). A blocker resolved
+# long ago lives only there, so read it as a fallback source of done ids. The
+# archive holds only completed items, so every list entry is a done id.
+archive_done_ids() {
+  [ -f "$DONE_ARCHIVE" ] || return 0
+  awk '
+    /^- / {
+      line = $0
+      sub(/^- /, "", line)
+      sub(/^\[[ xX]\][[:space:]]+/, "", line)
+      if (match(line, /^\*\*[^*]+\*\*/)) {
+        print substr(line, RSTART + 2, RLENGTH - 4)
+      } else if (match(line, /^[^[:space:]]+/)) {
+        print substr(line, RSTART, RLENGTH)
+      }
+    }
+  ' "$DONE_ARCHIVE"
 }
 
 queued_blockers() {
@@ -174,7 +195,7 @@ EOF
 
 check_unblocked_queued() {
   local done id blocker
-  done=$(done_ids)
+  done=$( done_ids; archive_done_ids )
   [ -n "$done" ] || return 0
   queued_blockers | while IFS=$(printf '\t') read -r id blocker; do
     [ -n "$id" ] || continue
