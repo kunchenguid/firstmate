@@ -4,6 +4,9 @@
 # relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present, and refuses to clobber distinct real files or wrong symlinks.
+# Owns the canonical "## Maintaining this file" self-governance wording for
+# project AGENTS.md files, appending it to created skeletons and promoted
+# CLAUDE.md files that lack it.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]

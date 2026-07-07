@@ -12,7 +12,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
-| `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
+| `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it; owns the canonical `## Maintaining this file` self-governance wording and appends it when creating the skeleton or promoting a real `CLAUDE.md` |
 | `fm-guard.sh`            | Warn when the primary checkout is tangled, when queued wakes are pending, or when a stale or missing watcher needs a prominent banner; `FM_GUARD_READ_ONLY=1` keeps the alarms but suppresses drain, arm, and checkout repair commands |
 | `fm-turnend-guard.sh`    | Claude Code Stop hook, primary-scoped only: blocks (exit 2, exact reason) a primary turn end when work is in flight without a live identity-matched watcher lock and fresh beacon, using Claude Code's own `stop_hook_active` field so it never blocks twice in one turn (docs/turnend-guard.md) |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
