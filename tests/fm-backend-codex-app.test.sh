@@ -169,6 +169,10 @@ case "$verb" in
     printf '{"ok":true,"turn":{"id":"turn-from-bridge","status":"inProgress"}}\n'
     ;;
   turns-list)
+    if [ "${FM_FAKE_BRIDGE_EMPTY_TEXT:-0}" = 1 ]; then
+      printf '{"ok":true,"text":"","turns":[{"id":"turn-from-bridge","status":"completed"}]}\n'
+      exit 0
+    fi
     if [ "${FM_FAKE_BRIDGE_LONG_TEXT:-0}" = 1 ]; then
       printf '{"ok":true,"text":"line 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6","turns":[{"id":"turn-from-bridge","status":"completed"}]}\n'
     else
@@ -437,6 +441,21 @@ test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
   pass "codex-app adapter: capture trims output lines separately from turn fetch limit"
 }
 
+test_backend_capture_returns_empty_parsed_text() {
+  local dir bridge log out status
+  dir="$TMP_ROOT/backend-capture-empty-text"
+  mkdir -p "$dir"
+  log="$dir/bridge.log"
+  bridge=$(make_fake_bridge "$dir")
+  out=$(FM_CODEX_BRIDGE="$bridge" FM_FAKE_BRIDGE_LOG="$log" FM_FAKE_BRIDGE_EMPTY_TEXT=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture codex-app thread-abc 3' "$ROOT" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app capture should accept an empty transcript field: $out"
+  [ -z "$out" ] || fail "capture should return empty parsed text instead of bridge JSON: $out"
+  assert_contains "$(cat "$log")" $'turns-list\x1f--thread-id\x1fthread-abc' "capture did not call bridge turns-list"
+  pass "codex-app adapter: capture returns empty parsed transcript text"
+}
+
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
@@ -448,3 +467,4 @@ test_backend_dispatch_accepts_codex_app
 test_backend_capture_send_busy_exists_and_kill_route_to_bridge
 test_backend_busy_state_maps_active_lifecycle_statuses
 test_backend_capture_trims_to_requested_lines_with_separate_turn_limit
+test_backend_capture_returns_empty_parsed_text

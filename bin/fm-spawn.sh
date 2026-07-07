@@ -184,6 +184,7 @@ CODEX_PROMPT_FILE=
 CODEX_ABORT_CLEANUP=0
 CODEX_WORKTREE_BRANCH=
 CODEX_WORKTREE_BASE=
+CODEX_WORKTREE_BASE_REF=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -251,6 +252,7 @@ codex_app_write_abort_meta() {
     [ -z "${CODEX_THREAD_ID:-}" ] || echo "thread_id=$CODEX_THREAD_ID"
     [ -z "${CODEX_CWD:-}" ] || echo "codex_cwd=$CODEX_CWD"
     echo "worktree_provider=$WORKTREE_PROVIDER"
+    [ -z "${CODEX_WORKTREE_BASE_REF:-}" ] || echo "worktree_base_ref=$CODEX_WORKTREE_BASE_REF"
   } > "$STATE/$ID.meta" 2>/dev/null || true
 }
 
@@ -771,7 +773,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 codex_app_create_git_worktree() {
-  local root path branch
+  local root path branch default base_ref base
   root="$PROJECTS/.firstmate-worktrees"
   path="$root/$ID"
   branch="fm/$ID"
@@ -784,15 +786,29 @@ codex_app_create_git_worktree() {
     echo "error: codex-app task branch already exists: $branch" >&2
     exit 1
   fi
+  default=$(default_branch "$PROJ_ABS") || {
+    echo "error: cannot determine default branch for codex-app task $ID; expected origin/HEAD, main, or master" >&2
+    exit 1
+  }
+  base_ref="refs/remotes/origin/$default"
+  if ! base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null); then
+    base_ref="refs/heads/$default"
+    base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null) || {
+      echo "error: codex-app default branch '$default' cannot be resolved to a verified local commit for task $ID" >&2
+      exit 1
+    }
+  fi
+  CODEX_WORKTREE_BASE=$base
+  CODEX_WORKTREE_BASE_REF=$base_ref
   mkdir -p "$root"
-  git -C "$PROJ_ABS" worktree add -q --detach "$path" HEAD || {
+  git -C "$PROJ_ABS" worktree add -q --detach "$path" "$CODEX_WORKTREE_BASE" || {
     echo "error: git worktree add failed for codex-app task $ID" >&2
     exit 1
   }
   WT=$(cd "$path" && pwd -P)
   WORKTREE_PROVIDER=git-worktree
   CODEX_ABORT_CLEANUP=1
-  CODEX_WORKTREE_BASE=$(git -C "$WT" rev-parse HEAD) || {
+  [ "$(git -C "$WT" rev-parse HEAD)" = "$CODEX_WORKTREE_BASE" ] || {
     echo "error: git worktree base cannot be resolved for codex-app task $ID" >&2
     exit 1
   }

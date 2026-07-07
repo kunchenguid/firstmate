@@ -56,8 +56,7 @@ fm_backend_codex_app_capture() {  # <thread-id> <lines> [expected-label]
   fm_backend_codex_app_tool_check || return 1
   bridge=$(fm_backend_codex_app_bridge)
   out=$("$bridge" turns-list --thread-id "$thread_id" --limit "$turn_limit" --items-view summary) || return 1
-  text=$(printf '%s' "$out" | fm_backend_codex_app_json_field text 2>/dev/null || true)
-  if [ -n "$text" ]; then
+  if text=$(printf '%s' "$out" | fm_backend_codex_app_json_field text 2>/dev/null); then
     payload=$text
   else
     payload=$out

@@ -158,9 +158,10 @@ meta_value() {  # <meta> <key>
 }
 
 test_spawn_codex_app_records_thread_and_worktree() {
-  local id case_dir out status meta wt project log prompt branch
+  local id case_dir out status meta wt project log prompt branch base_head
   id=codex-ok-x1
   case_dir=$(make_case spawn-ok "$id")
+  base_head=$(git -C "$case_dir/home/projects/app" rev-parse HEAD)
   out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
   status=$?
   expect_code 0 "$status" "codex-app spawn should succeed: $out"
@@ -178,6 +179,7 @@ test_spawn_codex_app_records_thread_and_worktree() {
     || fail "project git worktree list should include codex-app worktree"
   branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
   [ "$branch" = HEAD ] || fail "codex-app spawn should create the startup worktree detached, got branch '$branch'"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$base_head" ] || fail "codex-app spawn should start from the default-branch commit"
   ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "codex-app spawn should let the brief create fm/$id instead of precreating it"
   [ "$(meta_value "$meta" codex_cwd)" = "$wt" ] || fail "codex_cwd should match the worktree"
   log=$(cat "$case_dir/bridge.log")
@@ -191,6 +193,51 @@ test_spawn_codex_app_records_thread_and_worktree() {
   assert_grep "working: Codex thread started" "$prompt" "spawn prompt should include the return-channel line"
   assert_contains "$out" "spawned $id harness=codex kind=ship" "spawn output should keep the normal summary shape"
   pass "fm-spawn.sh --backend codex-app: creates an isolated git worktree, starts a Codex thread, verifies status, and records metadata"
+}
+
+test_spawn_codex_app_uses_default_branch_when_project_on_feature() {
+  local id case_dir project default_branch default_head feature_head out status meta wt
+  id=codex-feature-base-x11
+  case_dir=$(make_case feature-base "$id")
+  project="$case_dir/home/projects/app"
+  default_branch=$(git -C "$project" symbolic-ref --short HEAD)
+  printf 'default work\n' > "$project/default.txt"
+  git -C "$project" add default.txt
+  git -C "$project" commit -q -m default-work
+  default_head=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" checkout -q -b feature/wip
+  printf 'feature work\n' > "$project/feature.txt"
+  git -C "$project" add feature.txt
+  git -C "$project" commit -q -m feature-work
+  feature_head=$(git -C "$project" rev-parse HEAD)
+
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should use default branch while project is on feature: $out"
+  meta="$case_dir/home/state/$id.meta"
+  wt=$(meta_value "$meta" worktree)
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$default_head" ] || fail "codex-app worktree should start from $default_branch, not feature HEAD"
+  [ "$(git -C "$wt" rev-parse HEAD)" != "$feature_head" ] || fail "codex-app worktree stacked on feature HEAD"
+  assert_absent "$wt/feature.txt" "codex-app worktree should not include feature-only files"
+  pass "fm-spawn.sh --backend codex-app: uses the default branch commit instead of feature HEAD"
+}
+
+test_spawn_codex_app_refuses_without_verifiable_default_branch() {
+  local id case_dir project out status wt
+  id=codex-no-default-x12
+  case_dir=$(make_case no-default "$id")
+  project="$case_dir/home/projects/app"
+  git -C "$project" branch -m feature-only
+  git -C "$project" checkout -q --detach HEAD
+
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex-app spawn should refuse without a verifiable default branch"
+  assert_contains "$out" "cannot determine default branch for codex-app task $id" "refusal should explain missing default branch"
+  assert_not_contains "$(cat "$case_dir/bridge.log" 2>/dev/null || true)" "start-thread" "spawn should not launch Codex without a verified default base"
+  wt="$case_dir/home/projects/.firstmate-worktrees/$id"
+  assert_absent "$wt" "spawn should not create a codex-app worktree without a verified default base"
+  pass "fm-spawn.sh --backend codex-app: refuses detached projects without a verifiable default branch"
 }
 
 test_send_codex_app_uses_recorded_task_gotmpdir() {
@@ -419,6 +466,8 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 }
 
 test_spawn_codex_app_records_thread_and_worktree
+test_spawn_codex_app_uses_default_branch_when_project_on_feature
+test_spawn_codex_app_refuses_without_verifiable_default_branch
 test_send_codex_app_uses_recorded_task_gotmpdir
 test_send_codex_app_uses_recorded_task_cwd
 test_send_codex_app_uses_recorded_task_model_and_effort
