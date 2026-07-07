@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh's post-treehouse-get worktree-wait loop:
-# the seen_proj gate against a transient FM_ROOT pane read, and the
+# rejecting the project and FM_ROOT pane reads in either order, and the
 # FM_SPAWN_WORKTREE_TIMEOUT override. Uses a fake tmux that serves a
 # scripted sequence of pane_current_path answers so the loop's poll-by-poll
 # behavior is deterministic without a real terminal or treehouse.
@@ -69,13 +69,14 @@ run_spawn() {
 }
 
 # A transient FM_ROOT pane read (the pane's parent, before the shell finishes
-# cd'ing into the project) must not be accepted as the worktree: the loop must
-# keep polling until it has actually seen the project, and only then accept a
-# later departure. This is the case fm-spawn's own FM_ROOT is itself a valid,
-# distinct git worktree that validate_spawn_worktree cannot reject on its own -
-# so without the gate this transient read is silently accepted as correct.
-test_seen_proj_gate_skips_transient_fm_root() {
-  local id=seen-proj-w1 rec case_dir home proj wt seqfile out status
+# cd'ing into the project) must not be accepted as the worktree: FM_ROOT and
+# the project are both rejected unconditionally, so the loop keeps polling
+# until a real departure. This is the case fm-spawn's own FM_ROOT is itself a
+# valid, distinct git worktree that validate_spawn_worktree cannot reject on
+# its own - so without this rejection the transient read is silently accepted
+# as correct.
+test_transient_fm_root_read_is_skipped() {
+  local id=transient-root-w1 rec case_dir home proj wt seqfile out status
   rec=$(make_case "$id")
   IFS='|' read -r case_dir home proj wt <<EOF
 $rec
@@ -86,7 +87,7 @@ EOF
   status=$?
   expect_code 0 "$status" "spawn should succeed once the pane is actually seen at the project"
   assert_contains "$out" "worktree=$wt" "spawn did not record the real worktree ($out)"
-  pass "seen_proj gate skips a transient FM_ROOT pane read"
+  pass "a transient FM_ROOT pane read before the project is skipped"
 }
 
 # FM_SPAWN_WORKTREE_TIMEOUT overrides both the poll count and the error
@@ -107,10 +108,11 @@ EOF
   pass "FM_SPAWN_WORKTREE_TIMEOUT overrides the wait bound and error message"
 }
 
-# Even after the project has been seen, a later FM_ROOT read must be rejected:
-# FM_ROOT is never a valid worktree and accepting it would launch the crewmate
-# into the primary checkout (the tangle this loop guards). The loop must keep
-# waiting past the FM_ROOT read and accept only the real worktree that follows.
+# A later FM_ROOT read, after the project has already been seen, must also be
+# rejected: FM_ROOT is never a valid worktree and accepting it would launch
+# the crewmate into the primary checkout (the tangle this loop guards). The
+# rejection is unconditional regardless of poll order, so pairing this with
+# the transient-read case above covers both orderings.
 test_fm_root_rejected_after_project_seen() {
   local id=fm-root-after-proj-w1 rec case_dir home proj wt seqfile out status
   rec=$(make_case "$id")
@@ -126,6 +128,6 @@ EOF
   pass "FM_ROOT read after the project is rejected, not accepted as the worktree"
 }
 
-test_seen_proj_gate_skips_transient_fm_root
+test_transient_fm_root_read_is_skipped
 test_configurable_timeout_used_in_error
 test_fm_root_rejected_after_project_seen

@@ -821,20 +821,19 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   # Right after the pane is created it may transiently report its parent
-  # (FM_ROOT), so only accept a departure once the pane has been seen at the
-  # project. FM_ROOT is never a valid worktree (a departure to it would tangle
-  # the primary checkout, which validate_spawn_worktree cannot catch because
-  # FM_ROOT is a distinct worktree root), so reject it unconditionally.
+  # (FM_ROOT) before the shell finishes cd'ing into the project; FM_ROOT is
+  # never a valid worktree (a departure to it would tangle the primary
+  # checkout, which validate_spawn_worktree cannot catch because FM_ROOT is a
+  # distinct worktree root), so a departure is accepted only once the pane
+  # resolves to neither the project nor FM_ROOT - no ordering/timing gate
+  # needed, since both are rejected unconditionally regardless of poll order.
   FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL="$FM_ROOT"
   WT_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-60}"
-  seen_proj=
   for _ in $(seq 1 "$WT_TIMEOUT"); do
     p=$(spawn_current_path "$T" || true)
     if [ -n "$p" ]; then
       pr=$(real_path_or_raw "$p")
-      if [ "$pr" = "$PROJ_ABS_REAL" ]; then
-        seen_proj=1
-      elif [ -n "$seen_proj" ] && [ "$pr" != "$FM_ROOT_REAL" ]; then
+      if [ "$pr" != "$PROJ_ABS_REAL" ] && [ "$pr" != "$FM_ROOT_REAL" ]; then
         WT="$p"
         break
       fi
