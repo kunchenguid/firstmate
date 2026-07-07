@@ -442,7 +442,7 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup_panes dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -452,9 +452,15 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   }
   dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
+    dup_panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+      echo "error: could not list herdr panes for workspace $wsid (session $session)" >&2
+      return 1
+    }
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
-      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      dup=${dup%$'\r'}
+      dup_pane=$(printf '%s' "$dup_panes" | jq -r '.result.panes[]? | [.tab_id, .pane_id] | @tsv' 2>/dev/null \
+        | awk -F '\t' -v t="$dup" '$1 == t { print $2; exit }')
       if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
         echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
         return 1
@@ -938,8 +944,8 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
+  printf '%s' "$panes" | jq -r --arg t "$tab_id" \
+    '.result.panes[]? | select(.tab_id == $t) | .pane_id' 2>/dev/null | head -1
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
@@ -957,7 +963,7 @@ fm_backend_herdr_resolve_bare_selector() {  # <name>
     tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$name" \
       '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
     [ -n "$tab_id" ] || continue
-    wsid=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null | head -1)
+    wsid=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .workspace_id' 2>/dev/null | head -1)
     [ -n "$wsid" ] || continue
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue

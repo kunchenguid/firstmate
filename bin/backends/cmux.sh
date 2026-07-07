@@ -516,7 +516,7 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
   raw=$(fm_backend_cmux_cli read-screen --workspace "$FM_BACKEND_CMUX_WORKSPACE" --surface "$FM_BACKEND_CMUX_SURFACE" --scrollback --lines "$fetch" --json 2>/dev/null) || return 1
   out=$(printf '%s' "$raw" | jq -r '.text // empty' 2>/dev/null) || return 1
-  printf '%s' "$out" | tail -n "$lines"
+  printf '%s' "$out" | tr -d '\r' | tail -n "$lines"
 }
 
 # fm_backend_cmux_composer_state: classify the composer's own row as

@@ -7,6 +7,19 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-ensure-agents-md)
 
+probe_symlink_support() {
+  local dir="$TMP_ROOT/symlink-probe"
+  mkdir -p "$dir"
+  : > "$dir/target"
+  ln -s target "$dir/link" 2>/dev/null || return 1
+  [ -L "$dir/link" ]
+}
+
+if ! probe_symlink_support; then
+  echo "skip: symlinks not supported by this checkout"
+  exit 0
+fi
+
 test_created_agents_md_includes_self_governance() {
   local repo agents
   repo="$TMP_ROOT/new-project"

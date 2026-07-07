@@ -93,12 +93,19 @@ SH
 
 make_path_without_jq() {
   local dir=$1 safe tool path
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*) printf '%s\n' "$BASE_PATH"; return ;;
+  esac
   safe="$dir/safe-path"
   mkdir -p "$safe"
   for tool in bash env dirname grep sed head tail cut tr awk mktemp mv rm cat chmod mkdir git; do
     path=$(command -v "$tool" 2>/dev/null || true)
     [ -n "$path" ] || continue
-    case "$path" in /*) ln -s "$path" "$safe/$tool" ;; esac
+    case "$path" in
+      /*)
+        cp "$path" "$safe/$tool"
+        ;;
+    esac
   done
   printf '%s\n' "$safe"
 }

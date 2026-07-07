@@ -866,6 +866,9 @@ exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  case "$EXCL" in
+    [A-Za-z]:/*) command -v cygpath >/dev/null 2>&1 && EXCL=$(cygpath -u "$EXCL") ;;
+  esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }

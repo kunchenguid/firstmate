@@ -792,6 +792,9 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 test_spawn_conformance_old_vs_new() {
   local old_bin fb proj wt data id log_old log_new out_old out_new
   local state_old state_new config_old config_new
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*) echo "skip: old fm-spawn baseline is not Git-Bash path-safe on Windows"; return ;;
+  esac
   old_bin=$(build_old_bin spawn-old)
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
   id="spawnconform1"
