@@ -751,7 +751,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # not get wrong - see docs/herdr-backend.md "Native agent-state submit
 # confirmation" for the empirical timing behind this):
 #   - Slow transition: fm_backend_herdr_wait_for_working samples repeatedly
-#     across the FULL <enter-sleep> budget (not once at the end), so a
+#     across herdr's per-attempt confirmation budget (not once at the end), so a
 #     transition landing partway through a window is still caught before this
 #     loop gives up and sends a needless extra Enter.
 #   - Instant round-trip (a turn starts AND returns to idle between two
@@ -771,17 +771,18 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$sleep_s" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
@@ -876,13 +877,13 @@ fm_backend_herdr_busy_state() {  # <target>
 #             it cannot even read.
 #
 # <polls> spread across <budget-seconds> (rather than one check at the end)
-# is what makes this robust against a SLOW transition: a caller passing the
-# existing enter-sleep budget unmodified now gets several samples across that
-# same window instead of a single one, so a transition that lands partway
-# through is not missed just because it had not landed by the FIRST sample.
+# is what makes this robust against a SLOW transition: a caller now gets
+# several samples across that window instead of a single one, so a transition
+# that lands partway through is not missed just because it had not landed by
+# the FIRST sample.
 # Empirical evidence (docs/herdr-backend.md "Native agent-state submit
 # confirmation"): real claude and codex observed first-working at 90-490ms
-# after Enter, so a several-hundred-ms budget sampled every ~50-100ms reliably
+# after Enter, so a several-hundred-ms budget sampled repeatedly reliably
 # catches it. The remaining, inherent gap - a turn so fast it starts AND
 # returns to idle between two samples - is bounded by how tightly <polls> is
 # packed into <budget-seconds>; nothing observed in real testing has come
@@ -891,10 +892,22 @@ fm_backend_herdr_busy_state() {  # <target>
 # analysis for both directions this must guard).
 # FM_BACKEND_HERDR_SUBMIT_POLLS (default 6): how many samples
 # fm_backend_herdr_send_text_submit spreads across each Enter attempt's
-# existing <enter-sleep> budget. Overridable for tests (a value of 1
+# confirmation budget. Overridable for tests (a value of 1
 # reproduces the old single-check-at-the-end timing exactly, for byte-for-byte
 # call-count assertions).
 FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
+FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
+
+fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
+  awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {
+    b += 0
+    m += 0
+    if (b < 0) b = 0
+    if (m < 0) m = 0
+    if (m > b) b = m
+    printf "%.4f", b
+  }' 2>/dev/null || printf '%s' "${1:-0}"
+}
 
 fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
   local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0

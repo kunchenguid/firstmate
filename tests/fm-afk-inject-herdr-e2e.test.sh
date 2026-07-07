@@ -128,7 +128,7 @@ LOG="$1"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
 report_agent_state() {  # <idle|working>
-  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" >/dev/null 2>&1
+  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
 }
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true

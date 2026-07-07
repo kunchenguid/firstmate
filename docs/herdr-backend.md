@@ -416,7 +416,7 @@ A message that lands from an idle or done baseline must move the target agent in
 Two ways this signal can be missed, and how the design guards each:
 
 - **Slow transition.** A single check right after Enter could sample before herdr has updated `agent_status`, wrongly concluding "not submitted" and causing a needless extra Enter (harmless on its own here, since only Enter is retried, never the text - but wasteful and, for a stricter caller, could read as a false negative).
-  Fix: `fm_backend_herdr_wait_for_working` samples repeatedly (`FM_BACKEND_HERDR_SUBMIT_POLLS`, default 6) across the caller's existing per-attempt budget (the `<enter-sleep>` parameter, unchanged), instead of checking once at the end.
+  Fix: `fm_backend_herdr_wait_for_working` samples repeatedly (`FM_BACKEND_HERDR_SUBMIT_POLLS`, default 6) across the larger of the caller's per-attempt budget (`<enter-sleep>`) and herdr's own minimum confirmation budget (`FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP`, default 0.6s), instead of checking once at the end.
   A transition landing anywhere in that window is caught, and the function returns the instant `busy` is observed, without waiting out the rest of the budget.
 - **Instant round-trip.** A turn that starts and returns to idle entirely between two polls would, in the limit, never show as submit-active at all.
   This is not eliminated in principle, but it is bounded by how densely `FM_BACKEND_HERDR_SUBMIT_POLLS` samples the budget, and the empirical evidence below shows real turns take far longer than the sampling interval to even START, let alone finish.
