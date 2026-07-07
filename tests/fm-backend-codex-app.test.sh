@@ -18,6 +18,7 @@ const log = process.env.FM_FAKE_CODEX_LOG;
 const threadId = process.env.FM_FAKE_CODEX_THREAD_ID || "thread-123";
 const turnId = process.env.FM_FAKE_CODEX_TURN_ID || "turn-456";
 const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
+const omitCwd = process.env.FM_FAKE_CODEX_OMIT_CWD === "1";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
 const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
 const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
@@ -32,7 +33,7 @@ function record(msg) {
   fs.appendFileSync(log, "request\t" + (msg.method || "") + "\t" + JSON.stringify(msg.params || {}) + "\n");
 }
 function thread(cwd, status = "idle") {
-  return {
+  const value = {
     id: threadId,
     sessionId: threadId,
     preview: "fake preview",
@@ -41,11 +42,12 @@ function thread(cwd, status = "idle") {
     cliVersion: "fake",
     createdAt: 1,
     updatedAt: 2,
-    cwd,
     source: { kind: "appServer" },
     status: { type: status },
     turns: []
   };
+  if (!omitCwd) value.cwd = cwd;
+  return value;
 }
 function hasSchemaNativeTextInput(params) {
   return Array.isArray(params.input) && params.input.some(item =>
@@ -63,7 +65,9 @@ rl.on("line", line => {
   if (msg.method === "initialize") {
     write({ id, result: { userAgent: "Codex Desktop/fake", codexHome: "/tmp/fake-codex-home", platformFamily: "unix", platformOs: "macos" } });
   } else if (msg.method === "thread/start") {
-    write({ id, result: { thread: thread(cwd), cwd, model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } } });
+    const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
+    if (!omitCwd) result.cwd = cwd;
+    write({ id, result });
   } else if (msg.method === "thread/name/set" || msg.method === "thread/goal/set") {
     if (metadataFail) write({ id, error: { code: -32000, message: "metadata failed" } });
     else write({ id, result: {} });
@@ -256,6 +260,24 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
 }
 
+test_bridge_start_thread_requires_reported_cwd() {
+  local dir fb log out status
+  dir="$TMP_ROOT/bridge-start-missing-cwd"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_OMIT_CWD=1 \
+    "$ROOT/bin/fm-codex-bridge" start-thread --cwd "$dir/wt" --name "fm-task" --goal "ship it" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "bridge start-thread should fail when Codex omits cwd"
+  assert_contains "$out" "start-thread response did not include cwd" "missing cwd failure should explain the absent app-server cwd"
+  assert_contains "$(cat "$log")" $'request\tthread/start\t' "missing cwd case should still start the thread before validating the response"
+  assert_contains "$(cat "$log")" $'request\tthread/archive\t' "missing cwd case should archive the unsupervised thread"
+  assert_not_contains "$(cat "$log")" $'request\tturn/start\t' "missing cwd case should not start the initial turn"
+  pass "fm-codex-bridge: start-thread requires a reported thread cwd"
+}
+
 test_bridge_turns_list_renders_chronological_text_from_desc_response() {
   local dir fb log out status text
   dir="$TMP_ROOT/bridge-turn-order"
@@ -350,6 +372,7 @@ test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_start_thread_requires_reported_cwd
 test_bridge_turns_list_renders_chronological_text_from_desc_response
 test_bridge_start_thread_returns_id_when_metadata_calls_fail
 test_backend_dispatch_accepts_codex_app

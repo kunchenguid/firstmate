@@ -71,6 +71,7 @@ esac
 # The target's BACKEND comes from fm-<id> meta, or from matching the resolved
 # explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
+TARGET_TASKTMP=""
 TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 case "$RAW_TARGET" in
@@ -78,6 +79,7 @@ case "$RAW_TARGET" in
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
       TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+      TARGET_TASKTMP=$(fm_meta_get "$meta" tasktmp)
     fi
     ;;
 esac
@@ -104,7 +106,11 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+  if [ "$TARGET_BACKEND" = codex-app ] && [ -n "$TARGET_TASKTMP" ]; then
+    verdict=$(GOTMPDIR="$TARGET_TASKTMP/gotmp" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+  else
+    verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+  fi
   case "$verdict" in
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2

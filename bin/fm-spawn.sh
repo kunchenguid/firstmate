@@ -803,7 +803,7 @@ codex_app_start_thread() {
   goal=$(codex_app_goal_text)
   CODEX_START_ARGS=(start-thread --cwd "$WT" --name "$W" --goal "$goal")
   [ -z "$MODEL" ] || CODEX_START_ARGS+=(--model "$MODEL")
-  raw=$("$bridge" "${CODEX_START_ARGS[@]}") || exit 1
+  raw=$(GOTMPDIR="$TASK_TMP/gotmp" "$bridge" "${CODEX_START_ARGS[@]}") || exit 1
   CODEX_THREAD_ID=$(printf '%s' "$raw" | fm_backend_codex_app_json_field thread_id) || {
     echo "error: codex-app bridge did not return thread_id" >&2
     exit 1
@@ -834,14 +834,14 @@ codex_app_start_initial_turn() {
   [ -z "$MODEL" ] || CODEX_TURN_ARGS+=(--model "$MODEL")
   [ -z "$EFFORT" ] || CODEX_TURN_ARGS+=(--effort "$EFFORT")
   CODEX_TURN_ARGS+=(--wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' --wait-status-polls "$polls" --wait-status-sleep "$sleep_s")
-  "$bridge" "${CODEX_TURN_ARGS[@]}" >/dev/null || exit 1
+  GOTMPDIR="$TASK_TMP/gotmp" "$bridge" "${CODEX_TURN_ARGS[@]}" >/dev/null || exit 1
 }
 
 codex_app_wait_return_channel() {
   local status_file="$STATE_REAL/$ID.status" i polls sleep_s
   polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
   sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
-  for i in $(seq 1 "$polls"); do
+  for _ in $(seq 1 "$polls"); do
     if grep -Fx 'working: Codex thread started' "$status_file" >/dev/null 2>&1; then
       return 0
     fi

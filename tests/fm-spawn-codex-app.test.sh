@@ -7,6 +7,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-codex-app-tests)
 
@@ -19,6 +20,7 @@ LOG="${FM_FAKE_BRIDGE_LOG:?}"
 verb=${1:-}
 shift || true
 {
+  printf 'gotmpdir\x1f%s\x1f%s\n' "$verb" "${GOTMPDIR-}"
   printf '%s' "$verb"
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
@@ -133,6 +135,20 @@ run_teardown_case() {  # <case-dir> <id> [extra args...]
     "$TEARDOWN" "$id" "$@"
 }
 
+run_send_case() {  # <case-dir> <id> <message...>
+  local case_dir=$1 id=$2
+  shift 2
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/home/state" \
+  FM_DATA_OVERRIDE="$case_dir/home/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+  FM_CODEX_BRIDGE="$case_dir/fm-codex-bridge" \
+  FM_FAKE_BRIDGE_LOG="$case_dir/bridge.log" \
+  FM_SEND_SETTLE=0 \
+    "$SEND" "fm-$id" "$@"
+}
+
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" | tail -1 | cut -d= -f2- || true
 }
@@ -164,11 +180,30 @@ test_spawn_codex_app_records_thread_and_worktree() {
   assert_contains "$log" "ensure-running" "spawn should verify the bridge before starting"
   assert_contains "$log" $'start-thread\x1f--cwd\x1f' "spawn should call start-thread with a cwd"
   assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "spawn should start the prompt turn after thread validation"
+  assert_contains "$log" $'gotmpdir\x1fstart-thread\x1f/tmp/fm-codex-ok-x1/gotmp' "spawn should pass GOTMPDIR to the start-thread bridge call"
+  assert_contains "$log" $'gotmpdir\x1fsend-turn\x1f/tmp/fm-codex-ok-x1/gotmp' "spawn should pass GOTMPDIR to the initial send-turn bridge call"
   assert_contains "$log" $'--wait-status-file\x1f' "spawn should keep the bridge alive for return-channel verification"
   prompt="$case_dir/bridge.log.prompt"
   assert_grep "working: Codex thread started" "$prompt" "spawn prompt should include the return-channel line"
   assert_contains "$out" "spawned $id harness=codex kind=ship" "spawn output should keep the normal summary shape"
   pass "fm-spawn.sh --backend codex-app: creates an isolated git worktree, starts a Codex thread, verifies status, and records metadata"
+}
+
+test_send_codex_app_uses_recorded_task_gotmpdir() {
+  local id case_dir out status log
+  id=codex-send-x8
+  case_dir=$(make_case send-gotmp "$id")
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should succeed before send GOTMPDIR verification: $out"
+  : > "$case_dir/bridge.log"
+
+  out=$(run_send_case "$case_dir" "$id" "Run go test." 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm-send should submit to codex-app task: $out"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'gotmpdir\x1fsend-turn\x1f/tmp/fm-codex-send-x8/gotmp' "fm-send should pass the recorded GOTMPDIR to codex-app turns"
+  pass "fm-send.sh: codex-app turns inherit the task GOTMPDIR"
 }
 
 test_spawn_codex_app_waits_past_old_return_channel_window() {
@@ -318,6 +353,7 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 }
 
 test_spawn_codex_app_records_thread_and_worktree
+test_send_codex_app_uses_recorded_task_gotmpdir
 test_spawn_codex_app_waits_past_old_return_channel_window
 test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge

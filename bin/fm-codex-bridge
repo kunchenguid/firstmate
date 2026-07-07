@@ -456,7 +456,11 @@ async function startThread(opts) {
     };
     if (opts.model && opts.model !== "default") threadParams.model = opts.model;
     const started = await server.request("thread/start", threadParams);
-    const normalized = normalizeThread(started, cwd);
+    const normalized = normalizeThread(started, "");
+    if (!normalized.cwd) {
+      await server.request("thread/archive", { threadId: normalized.thread_id }).catch(() => undefined);
+      throw new Error("Codex start-thread response did not include cwd");
+    }
     const threadId = normalized.thread_id;
     const metadataErrors = await setThreadMetadata(server, threadId, opts);
     const result = {
