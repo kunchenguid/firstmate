@@ -54,7 +54,7 @@ Relevant facts from that pass:
 - `ThreadStatus` has `idle`, `active`, `systemError`, and `notLoaded` variants.
 - `TurnStatus` has `completed`, `interrupted`, `failed`, and `inProgress` variants.
 - `ThreadStartResponse` returns a `thread` object and an effective `cwd`.
-- On this machine, `codex app-server daemon version` failed because `/Users/ra/.codex/app-server-control/app-server-control.sock` did not exist, so bootstrap must start or diagnose the daemon before backend use.
+- On this machine, `codex app-server daemon version` failed because `/Users/ra/.codex/app-server-control/app-server-control.sock` did not exist, so the first pass uses direct stdio and bootstrap probes `codex app-server --help` instead of depending on the daemon.
 
 This checkout is also registered as a Codex Desktop project in the app's project list.
 
@@ -102,17 +102,17 @@ Suggested command shapes:
 ```text
 bin/fm-codex-bridge ensure-running
 bin/fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> [--model <model>]
-bin/fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>]
+bin/fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>] [--wait-status-file <file>] [--wait-status-line <line>] [--wait-status-polls <n>] [--wait-status-sleep <seconds>] [--turn-lifecycle-polls <n>] [--turn-lifecycle-sleep <seconds>]
 bin/fm-codex-bridge read-thread --thread-id <id> [--include-turns]
 bin/fm-codex-bridge thread-status --thread-id <id>
-bin/fm-codex-bridge turns-list --thread-id <id> --limit <n> --items-view summary|full
+bin/fm-codex-bridge turns-list --thread-id <id> --limit <n> --items-view summary|full|notLoaded
 bin/fm-codex-bridge archive-thread --thread-id <id>
 bin/fm-codex-bridge list-live [--cwd <path>]
 ```
 
 The bridge starts by launching `codex app-server --listen stdio://` and sending schema-native newline-delimited request objects.
 Every bridge process begins with `initialize` and opts into experimental APIs.
-Read-only list operations pass `useStateDbOnly:true` unless the caller explicitly requests rollout repair.
+Read-only thread listing passes `useStateDbOnly:true` to avoid rollout repair scans in the current first-pass bridge.
 
 ## Backend metadata
 
@@ -141,7 +141,7 @@ For this backend, it is the Codex thread id, not a terminal pane.
 In the first implementation, Firstmate creates the isolated git worktree in the supervising shell before `thread/start`, then passes that worktree path as the Codex thread `cwd`.
 This keeps worktree ownership inside Firstmate's existing safety model while Codex owns the visible thread and turn lifecycle.
 Because `codex-app` has no terminal endpoint before the thread exists, it cannot rely on the tmux-style pattern of typing `treehouse get` into a newly created pane.
-The first pass creates a guarded detached git worktree under `$FM_HOME/projects/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
+The first pass creates a guarded detached git worktree under `${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
 The worktree deliberately starts detached so the normal Firstmate brief can create `fm/<id>` itself.
 The backend must validate that `codex_cwd` matches the expected Firstmate worktree root and is not the primary project checkout.
 If Codex starts a thread anywhere else, ship and scout spawns must refuse before substantive work begins.
@@ -153,7 +153,7 @@ First pass spawn flow:
 1. Resolve `backend=codex-app` only from explicit configuration or `--backend codex-app`.
 2. Refuse `--secondmate`.
 3. Require `harness=codex`.
-4. Create an isolated detached git worktree under the project.
+4. Create an isolated detached git worktree under the effective Firstmate projects directory.
 5. Build the normal Firstmate brief and status-file instructions.
 6. Run `fm-codex-bridge ensure-running`.
 7. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
@@ -175,11 +175,12 @@ working: Codex thread started
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits up to 60 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
-The startup `send-turn` parent receives that same file, expected line, and timeout budget, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified.
+The startup `send-turn` parent receives that same file, expected line, and timeout budget, records the status-file byte offset before `turn/start`, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified from new status output.
 The worker keeps the same Codex app-server stdio process alive after that handshake while it polls the thread status until the turn leaves an active state.
 The lifecycle hold is controlled by `FM_CODEX_APP_TURN_LIFECYCLE_POLLS` and `FM_CODEX_APP_TURN_LIFECYCLE_SLEEP`, defaulting to 4320 polls at 5 seconds.
-If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
-If the archive attempt fails, startup cleanup stops before removing the worktree, task branch, status file, or metadata so the live thread can be recovered manually.
+If the expected line does not appear, the spawn archives the thread, removes the startup worktree only when the worktree is clean and still at the verified base commit, and fails with a diagnostic naming the thread id and the missing status file write.
+If the archive attempt fails, startup cleanup stops before removing the worktree, status file, or metadata so the live thread can be recovered manually.
+If the startup worktree is dirty or its git state cannot be verified, startup cleanup writes recovery metadata and preserves the worktree instead of deleting it.
 
 ## Send and steer flow
 
@@ -191,6 +192,7 @@ fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt> [--
 
 The first implementation starts a new turn through `turn/start` in a detached bridge worker.
 The CLI returns after the turn is accepted, while the worker keeps the app-server alive until the thread leaves an active state.
+Follow-up sends pass the recorded `codex_cwd` as `cwd`, propagate the recorded model and effort when they are not `default`, and run with the task's `GOTMPDIR` when `tasktmp=` is present in meta.
 A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt-plus-new-turn behavior, but that should require an explicit design decision rather than surprising interruption.
 
 ## Peek and capture flow
@@ -209,10 +211,9 @@ The watcher uses semantic Codex state through `fm_backend_busy_state` when avail
 
 | Codex state | Firstmate interpretation |
 |---|---|
-| `active` | busy |
+| `active`, `inProgress`, `running` | busy |
 | `idle` | not busy; inspect status file and latest turn |
-| `systemError` | failed or blocked, surface to captain |
-| `notLoaded` | unknown; fall back to status file and `thread/read` |
+| `systemError`, `notLoaded`, or any unknown state | unknown; fall back to status file and `thread/read` |
 
 Turn status provides more detail:
 
@@ -278,7 +279,10 @@ Implemented tests:
 - Spawn refuses when the returned `codex_cwd` equals the primary checkout.
 - Spawn accepts a status-file return-channel write that arrives after the old five-second startup window.
 - Spawn refuses when the status-file return channel is not verified.
+- Spawn ignores stale return-channel status lines written before the current turn.
+- Spawn preserves dirty or unverifiable failed-startup worktrees for recovery instead of deleting them.
 - `fm-send.sh` routes to `send-turn`.
+- `fm-send.sh` passes the recorded Codex cwd, model, effort, and per-task `GOTMPDIR` into follow-up turns.
 - `fm-peek.sh` routes to recent thread turns.
 - Teardown archives only after existing safety checks pass.
 - Teardown archives before removing the git worktree and preserves state when archive fails.
@@ -289,28 +293,28 @@ Implemented tests:
 The existing backend dispatcher already covers the send and peek paths cleanly.
 `fm-send.sh` resolves a target through `fm_backend_resolve_selector`, then calls `fm_backend_send_text_submit`.
 `fm-peek.sh` resolves the same target and calls `fm_backend_capture`.
-For `codex-app`, those two paths should mostly need new dispatcher arms and adapter functions, not bespoke call-site branches.
+For `codex-app`, `fm-peek.sh` stays fully generic, while `fm-send.sh` adds only the small environment shim needed to pass the recorded cwd, model, effort, and task temp directory into bridge-backed turns.
 
 The higher-risk implementation areas are:
 
-- `bin/fm-backend.sh`: add `codex-app` to known and spawn-capable backends, source `bin/backends/codex-app.sh`, dispatch capture, send, kill, busy state, and target existence.
-- `bin/backends/codex-app.sh`: implement bridge-backed adapter functions and keep all JSON/protocol parsing out of generic scripts.
-- `bin/fm-spawn.sh`: add a `codex-app` creation branch, skip terminal-send launch plumbing, acquire a shell-side worktree before thread creation, write Codex-specific meta fields, and verify the status return channel.
-- `bin/fm-watch.sh`: rely on semantic `busy` and `idle` from `fm_backend_busy_state`; deeper notification integration is deferred.
-- `bin/fm-crew-state.sh`: keep using the backend dispatcher; richer Codex-specific state can be added later if needed.
-- `bin/fm-teardown.sh`: rely on existing landed-work checks, then map endpoint removal to thread archive.
-- `bin/fm-bootstrap.sh`: require a Codex CLI with `app-server` support only when `backend=codex-app` is selected.
+- `bin/fm-backend.sh`: lists `codex-app` as known and spawn-capable, sources `bin/backends/codex-app.sh`, and dispatches capture, send, kill, busy state, and target existence.
+- `bin/backends/codex-app.sh`: implements bridge-backed adapter functions and keeps all JSON/protocol parsing out of generic scripts.
+- `bin/fm-spawn.sh`: owns the `codex-app` creation branch, skips terminal-send launch plumbing, acquires a shell-side worktree before thread creation, writes Codex-specific meta fields, and verifies the status return channel.
+- `bin/fm-watch.sh`: relies on semantic `busy` and `idle` from `fm_backend_busy_state`; deeper notification integration is deferred.
+- `bin/fm-crew-state.sh`: keeps using the backend dispatcher; richer Codex-specific state can be added later if needed.
+- `bin/fm-teardown.sh`: relies on existing landed-work checks, then maps endpoint removal to thread archive.
+- `bin/fm-bootstrap.sh`: requires a Codex CLI with `app-server` support only when `backend=codex-app` is selected.
 
-The implementation should avoid adding `codex-app` special cases to `fm-send.sh` and `fm-peek.sh` unless the generic dispatcher proves insufficient.
+Future call-site special cases should stay as small as the current `fm-send.sh` environment shim; protocol logic belongs in the bridge and backend adapter.
 
 Local smoke verification should run against real Codex Desktop:
 
 1. Spawn a scratch scout task with `--backend codex-app --harness codex`.
-3. Confirm a new visible Codex thread appears.
-4. Confirm the thread writes the expected status line.
-5. Send a follow-up with `fm-send.sh`.
-6. Read it with `fm-peek.sh`.
-7. Archive it through teardown.
+2. Confirm a new visible Codex thread appears.
+3. Confirm the thread writes the expected status line.
+4. Send a follow-up with `fm-send.sh`.
+5. Read it with `fm-peek.sh`.
+6. Archive it through teardown.
 
 ## Rollout sequence
 
@@ -325,4 +329,4 @@ Local smoke verification should run against real Codex Desktop:
 
 - Should a later bridge use a long-lived process for notification subscription, or keep one-shot stdio calls?
 - Should the first pass allow `turn/interrupt`, or require manual captain confirmation before interrupting active work?
-- How should model and effort flags map onto Codex app-server fields when the captain selects a non-default Codex model?
+- Should non-default Codex model and effort values get additional validation against `model/list` before bridge submission?

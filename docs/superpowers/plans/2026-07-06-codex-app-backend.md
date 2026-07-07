@@ -22,7 +22,7 @@ Ship and scout spawns create an isolated git worktree in the supervising shell b
 - [x] **Step 1: Write the failing bridge test**
 
 Add a fake `codex` executable that logs app-server requests and returns newline JSON responses for `initialize`, `thread/start`, `turn/start`, `thread/read`, `thread/turns/list`, `thread/list`, and `thread/archive`.
-Assert that `bin/fm-codex-bridge start-thread --cwd "$wt" --name fm-task --goal "$goal" --prompt-file "$prompt"` prints JSON containing `thread_id`, `cwd`, and the raw response.
+Assert that `bin/fm-codex-bridge start-thread --cwd "$wt" --name fm-task --goal "$goal"` prints JSON containing `thread_id`, `cwd`, and the raw response.
 
 Run: `bash tests/fm-backend-codex-app.test.sh`
 Expected: FAIL because `bin/fm-codex-bridge` does not exist.
@@ -32,7 +32,8 @@ Expected: FAIL because `bin/fm-codex-bridge` does not exist.
 Create an executable Node script with verbs `ensure-running`, `start-thread`, `send-turn`, `read-thread`, `thread-status`, `turns-list`, `archive-thread`, and `list-live`.
 Use `codex app-server --listen stdio://`, send `initialize` first, then send bare newline JSON request objects with `id`, `method`, and `params`.
 For turns, send `input: [{type:"text", text, text_elements:[]}]`, `cwd`, optional `model`, optional `effort`, `approvalPolicy:"never"`, `approvalsReviewer:"user"`, and `sandboxPolicy:{type:"dangerFullAccess"}`.
-For `start-thread`, start an empty thread, set the name and goal when present, then start the first turn with the prompt file.
+For `start-thread`, start an empty thread and set the name and goal when present.
+For `send-turn`, start the turn in a detached worker so the app-server process stays alive after the parent observes the ready result.
 
 - [x] **Step 3: Verify the bridge test passes**
 
@@ -48,7 +49,7 @@ Expected: PASS for bridge request routing and response normalization.
 
 - [x] **Step 1: Write failing adapter tests**
 
-Assert `fm_backend_validate codex-app` succeeds, `fm_backend_validate_spawn codex-app` succeeds, `fm_backend_capture codex-app thread-1 5` calls bridge `turns-list`, `fm_backend_send_text_submit codex-app thread-1 "hello" ...` calls bridge `send-turn`, `fm_backend_busy_state codex-app thread-1` maps `active` to `busy`, and `fm_backend_target_exists codex-app thread-1` succeeds when bridge `thread-status` returns a known status.
+Assert `fm_backend_validate codex-app` succeeds, `fm_backend_validate_spawn codex-app` succeeds, `fm_backend_capture codex-app thread-1 5` calls bridge `turns-list`, `fm_backend_send_text_submit codex-app thread-1 "hello" ...` calls bridge `send-turn`, `fm_backend_busy_state codex-app thread-1` maps active statuses to `busy`, and `fm_backend_target_exists codex-app thread-1` succeeds when bridge `thread-status` returns a known status.
 
 Run: `bash tests/fm-backend-codex-app.test.sh`
 Expected: FAIL because `codex-app` is unknown.
@@ -98,13 +99,14 @@ Validate the resulting worktree with the existing `validate_spawn_worktree` guar
 
 For ship and scout tasks, acquire the worktree before thread creation, build `TASK_TMP`, `STATE_REAL`, `TURNEND`, and the launch prompt, and call bridge `start-thread`.
 Do not send shell text into a terminal endpoint.
-Record Codex metadata before waiting for the return-channel status line.
+Record Codex metadata only after the return-channel status line is verified.
 
 - [x] **Step 4: Add return-channel verification**
 
 Append an instruction to the Codex prompt requiring the worker to write `working: Codex thread started` to the absolute status file before substantive work.
-Poll the status file briefly.
+Pass that status file, expected line, and timeout budget into bridge `send-turn` so the detached worker rejects stale pre-existing lines by reading only from the pre-turn byte offset.
 If the line is missing, fail with a diagnostic that names the thread id and status path.
+If startup fails, archive the thread and remove the startup worktree only when the worktree is still clean and at the verified base commit; otherwise preserve metadata and the worktree for recovery.
 
 - [x] **Step 5: Verify spawn tests pass**
 
@@ -120,7 +122,7 @@ Expected: PASS for successful spawn, secondmate refusal, primary-checkout refusa
 - [x] **Step 1: Write failing teardown test**
 
 Create a landed codex-app task meta with `worktree_provider=git-worktree`.
-Assert teardown archives the thread through bridge `archive-thread`, removes the git worktree with `git worktree remove --force`, and keeps the existing dirty or unlanded refusal behavior.
+Assert teardown archives the thread through bridge `archive-thread`, removes the git worktree with `git worktree remove --force`, preserves state when archive fails, and keeps the existing dirty or unlanded refusal behavior.
 
 Run: `bash tests/fm-spawn-codex-app.test.sh`
 Expected: FAIL because teardown still assumes treehouse for non-Orca worktrees.
@@ -162,7 +164,7 @@ When `backend=codex-app`, set the tool list to Codex-oriented tools.
 - [x] **Step 3: Update docs**
 
 Mark `docs/codex-app-backend.md` as implemented first pass.
-Update runtime backend docs, README backend lists, and AGENTS short pointers without duplicating the design contract.
+Update runtime backend docs, script references, contributor docs, README backend lists, and AGENTS short pointers without duplicating the design contract.
 
 - [x] **Step 4: Verify docs and bootstrap tests pass**
 
