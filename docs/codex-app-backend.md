@@ -22,7 +22,8 @@ If a Desktop-owned thread cannot write Firstmate status files, the backend canno
 ## Verified Desktop host-tool smoke
 
 Latest verified host-tool smoke date: 2026-07-06.
-Environment: Codex Desktop host tools, local host, saved project `/Users/vesta/Desktop/Firstmate/projects/sift`, Desktop-owned worktree `/Users/vesta/.codex-home/worktrees/0a70/sift`, Firstmate home `/Users/vesta/Desktop/Firstmate`.
+Environment: Codex Desktop host tools, local host, saved project `<FIRSTMATE_HOME>/projects/sift`, Desktop-owned worktree `<CODEX_DESKTOP_WORKTREE>`, Firstmate home `<FIRSTMATE_HOME>`.
+Local absolute path prefixes are redacted as `<FIRSTMATE_HOME>` and `<CODEX_DESKTOP_WORKTREE>`; file names, host-tool ids, thread ids, status lines, and report values are otherwise exact.
 
 Codex Desktop/OpenAI local bundle metadata from the smoke machine:
 
@@ -43,8 +44,8 @@ $ stat -f '%Sm %N' -t '%Y-%m-%d %H:%M:%S %z' /Applications/Codex.app/Contents/In
 Smoke target files:
 
 ```text
-/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
-/Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+<FIRSTMATE_HOME>/state/codex-app-host-smoke-20260706-live.status
+<FIRSTMATE_HOME>/data/codex-app-host-smoke-20260706-live/report.md
 ```
 
 Host-tool operation sequence:
@@ -63,18 +64,18 @@ Exact host-tool requests and relevant output:
 
 ```text
 list_projects:
-  projectId=/Users/vesta/Desktop/Firstmate/projects/sift
+  projectId=<FIRSTMATE_HOME>/projects/sift
   projectKind=local
   label=sift
-  path=/Users/vesta/Desktop/Firstmate/projects/sift
+  path=<FIRSTMATE_HOME>/projects/sift
 
 create_thread request:
   target.type=project
-  target.projectId=/Users/vesta/Desktop/Firstmate/projects/sift
+  target.projectId=<FIRSTMATE_HOME>/projects/sift
   target.environment.type=worktree
   prompt smoke_id=codex-app-host-smoke-20260706-live
-  prompt status_file=/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
-  prompt report_file=/Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+  prompt status_file=<FIRSTMATE_HOME>/state/codex-app-host-smoke-20260706-live.status
+  prompt report_file=<FIRSTMATE_HOME>/data/codex-app-host-smoke-20260706-live/report.md
   prompt required status line: working: Codex Desktop thread started
   prompt required sentinel: FM_CODEX_APP_HOST_TOOL_SMOKE_20260706_LIVE_OK
 
@@ -85,12 +86,12 @@ list_threads query=codex-app-host-smoke-20260706-live:
   id=019f39ea-5cca-7031-bfb0-f8054a2b253a
   hostId=local
   status=active
-  cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+  cwd=<CODEX_DESKTOP_WORKTREE>
 
 read_thread initial turn while active:
   thread.id=019f39ea-5cca-7031-bfb0-f8054a2b253a
   thread.status.type=active
-  cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+  cwd=<CODEX_DESKTOP_WORKTREE>
   agentMessage: Running the smoke exactly as delegated: repo identity first, then the Firstmate status/report writes, then the requested `sed` checks.
 
 read_thread initial turn after completion:
@@ -99,22 +100,22 @@ read_thread initial turn after completion:
   durationMs=54923
 
 $ pwd
-/Users/vesta/.codex-home/worktrees/0a70/sift
+<CODEX_DESKTOP_WORKTREE>
 
 $ git rev-parse --show-toplevel
-/Users/vesta/.codex-home/worktrees/0a70/sift
+<CODEX_DESKTOP_WORKTREE>
 
 $ git branch --show-current
 
-$ sed -n '1,20p' /Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+$ sed -n '1,20p' <FIRSTMATE_HOME>/state/codex-app-host-smoke-20260706-live.status
 working: Codex Desktop thread started
 
-$ sed -n '1,40p' /Users/vesta/Desktop/Firstmate/data/codex-app-host-smoke-20260706-live/report.md
+$ sed -n '1,40p' <FIRSTMATE_HOME>/data/codex-app-host-smoke-20260706-live/report.md
 smoke_id=codex-app-host-smoke-20260706-live
-cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
-git_root=/Users/vesta/.codex-home/worktrees/0a70/sift
+cwd=<CODEX_DESKTOP_WORKTREE>
+git_root=<CODEX_DESKTOP_WORKTREE>
 branch=
-status_file=/Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+status_file=<FIRSTMATE_HOME>/state/codex-app-host-smoke-20260706-live.status
 status_file_write=ok
 sentinel=FM_CODEX_APP_HOST_TOOL_SMOKE_20260706_LIVE_OK
 
@@ -129,7 +130,7 @@ read_thread follow-up turn:
   turn.status=completed
   durationMs=7118
 
-$ sed -n '1,20p' /Users/vesta/Desktop/Firstmate/state/codex-app-host-smoke-20260706-live.status
+$ sed -n '1,20p' <FIRSTMATE_HOME>/state/codex-app-host-smoke-20260706-live.status
 working: Codex Desktop thread started
 done: follow-up delivered through send_message_to_thread
 
@@ -144,7 +145,7 @@ set_thread_archived response:
 read_thread after archive:
   thread.id=019f39ea-5cca-7031-bfb0-f8054a2b253a
   thread.status.type=notLoaded
-  thread.cwd=/Users/vesta/.codex-home/worktrees/0a70/sift
+  thread.cwd=<CODEX_DESKTOP_WORKTREE>
   transcript still included the initial and follow-up completed turns.
 ```
 
