@@ -54,6 +54,7 @@ test_signal_catchup_without_running_watcher() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
   # watcher can absorb no-verb working: notes when the crew is provably working).
@@ -151,6 +152,7 @@ test_check_output_is_queued() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   check_file="$state/task.check.sh"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
