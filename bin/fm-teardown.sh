@@ -2385,16 +2385,21 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  elif [ "$KIND" = adopted ]; then
+  if [ "$KIND" = adopted ]; then
     # An adopted task owns no firstmate worktree - worktree= is the human's own
     # live cwd - so there is nothing to land or dirty-check; teardown just
-    # un-registers it.
+    # un-registers it. Checked before validate_worktree_teardown_safety so its
+    # REFUSED side-effect never fires on the human's real, unlanded cwd.
     :
   else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+    # Call as a standalone command guarded by ||, so set -e does not abort on a
+    # non-zero return and safety_rc captures the safety function's own exit code
+    # (not a preceding test's - the SC2319 trap the adopted-branch reorder fixed).
+    safety_rc=0
+    validate_worktree_teardown_safety || safety_rc=$?
+    if [ "$safety_rc" -eq 0 ]; then
+      :
+    elif [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
       validate_worktree_teardown_safety || exit 1
     else
