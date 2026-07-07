@@ -102,6 +102,59 @@ EOF
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
 }
 
+test_home_seed_clones_registered_external_project() {
+  local home subhome work remote repo remote_abs repo_abs out status seeded_url
+  home="$TMP_ROOT/registry-parent"
+  subhome="$TMP_ROOT/registry-sub"
+  work="$TMP_ROOT/registry-work-flow"
+  remote="$TMP_ROOT/registry-flow.git"
+  repo="$TMP_ROOT/github/flow"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$TMP_ROOT/github"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/dev
+  printf '# flow\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-dev
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd -P)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin dev
+  git clone --quiet "file://$remote_abs" "$repo"
+  git -C "$repo" checkout -q dev
+  repo_abs=$(cd "$repo" && pwd -P)
+
+  printf '%s\n' '- flow [direct-PR] - Flow project (added 2026-07-07)' > "$home/data/projects.md"
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_abs",
+      "gitCommonDir": "$repo_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='flow engineering' FM_SECONDMATE_SCOPE='flow engineering' \
+    "$ROOT/bin/fm-home-seed.sh" flow-sm "$subhome" flow 2>&1)
+  status=$?
+  expect_code 0 "$status" "seed should clone registered external project: $out"
+  assert_present "$subhome/projects/flow" "seed should clone the project into the secondmate home"
+  seeded_url=$(git -C "$subhome/projects/flow" remote get-url origin)
+  [ "$seeded_url" = "file://$remote_abs" ] || fail "seeded clone origin was $seeded_url, expected file://$remote_abs"
+  assert_grep '- flow [direct-PR] - Flow project' "$subhome/data/projects.md" "seed should copy the parent project registry line"
+  pass "secondmate seed clones projects from registry-backed external canonical paths"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -1815,6 +1868,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
+test_home_seed_clones_registered_external_project
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

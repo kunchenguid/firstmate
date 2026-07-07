@@ -17,18 +17,18 @@
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
-# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
-# this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# Bare names and "projects/<name>" forms prefer this home's projects dir before
-# falling back to an explicit path. Example: from anywhere,
-# `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
-# passing its full projects/dotfiles-private path.
+# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved through
+# fm-project-resolve.sh. A JSON project registry can point at an external
+# canonical checkout; otherwise legacy names fall back to this home's projects
+# dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE). Example: from anywhere,
+# `fm-fleet-sync.sh dotfiles-private` syncs just that one registered clone.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+PROJECTS_REAL=$(cd "$PROJECTS" 2>/dev/null && pwd -P || printf '%s\n' "$PROJECTS")
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -42,45 +42,30 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
+  local id source
+  source=$("$SCRIPT_DIR/fm-project-resolve.sh" --field source "$PROJ" 2>/dev/null || true)
+  id=$("$SCRIPT_DIR/fm-project-resolve.sh" --field project_id "$PROJ" 2>/dev/null || true)
+  if [ "$source" = json ] && [ -n "$id" ]; then
+    printf '%s\n' "$id"
+    return 0
+  fi
   case "$PROJ" in
+    "$PROJECTS_REAL"/*) basename "$PROJ" ;;
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
   esac
 }
 
-# resolve_project_arg <arg>: accept a path (used as-is when it already exists)
-# or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
-# back to the original argument unresolved so a genuinely bad path still hits
-# sync_project's existing "not a directory" skip.
+# resolve_project_arg <arg>: accept a path or project id, resolved through the
+# shared project resolver. Falls back to the original argument unresolved so a
+# genuinely bad path still hits sync_project's existing "not a directory" skip.
 resolve_project_arg() {
-  local arg=$1 candidate
-  case "$arg" in
-    projects/*)
-      candidate="$PROJECTS/${arg#projects/}"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      ;;
-    */*)
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
-      ;;
-    *)
-      candidate="$PROJECTS/$arg"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
-      ;;
-  esac
+  local arg=$1 resolved
+  if resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$arg" 2>/dev/null); then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
   printf '%s\n' "$arg"
 }
 
@@ -195,7 +180,7 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
@@ -217,11 +202,31 @@ sync_project() {
 
   prune_gone_branches || true
 
-  DEFAULT=$(default_branch) || {
+  registry_source=$("$SCRIPT_DIR/fm-project-resolve.sh" --field source "$PROJ" 2>/dev/null || true)
+  if [ "$registry_source" = json ]; then
+    DEFAULT=$("$SCRIPT_DIR/fm-project-resolve.sh" --field default_branch "$PROJ" 2>/dev/null || true)
+    BASE=$("$SCRIPT_DIR/fm-project-resolve.sh" --field base_ref "$PROJ" 2>/dev/null || true)
+    if [ -z "$DEFAULT" ] && [ -n "$BASE" ]; then
+      DEFAULT=${BASE##*/}
+    fi
+    if [ -z "$BASE" ] && [ -n "$DEFAULT" ]; then
+      BASE="origin/$DEFAULT"
+    fi
+  else
+    DEFAULT=$(default_branch) || {
+      echo "$label: skipped: cannot determine default branch"
+      return 0
+    }
+    BASE="origin/$DEFAULT"
+  fi
+  [ -n "$DEFAULT" ] || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE="origin/$DEFAULT"
+  [ -n "$BASE" ] || {
+    echo "$label: skipped: cannot determine base ref"
+    return 0
+  }
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
@@ -316,9 +321,8 @@ if [ $# -eq 1 ]; then
   exit 0
 fi
 
-[ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
-  [ -e "$proj" ] || continue
-  [ -d "$proj" ] || continue
+while IFS=$'\t' read -r project_id proj; do
+  [ -n "$project_id" ] || continue
+  [ -n "$proj" ] || continue
   sync_project "$proj"
-done
+done < <("$SCRIPT_DIR/fm-project-resolve.sh" --list)

@@ -84,11 +84,12 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
-  projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
+  projects.md        thin fleet navigation registry; firstmate-private, human-readable project list (section 6)
+  projects.json      optional machine project registry with canonical paths, base refs, and policy metadata; firstmate-private, read by fm-project-resolve.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
-projects/            cloned repos; gitignored; READ-ONLY for you except script-managed codex-app task worktrees under `.firstmate-worktrees/`
+projects/            default clone root and Firstmate-owned task-worktree root; gitignored; READ-ONLY for you except script-managed codex-app task worktrees under `.firstmate-worktrees/`
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
@@ -127,7 +128,7 @@ It composes today's `fm-lock.sh`, `fm-bootstrap.sh`, and `fm-wake-drain.sh` - ca
 3. **Wake queue** - when locked, drains the durable wake queue and prints the records prominently as this turn's first work queue, exactly as `bin/fm-wake-drain.sh` did before; a lapsed watcher chain still surfaces here via the same guard banner.
    When the lock could not be acquired, the queue is left untouched because another session owns it, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, re-arm, or checkout repair commands.
 4. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, and `data/learnings.md`, each clearly delimited.
-   A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use this template's defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
+   A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use this template's defaults, `projects.md` absent means register known canonical project clones before dispatch, etc.).
 5. **Fleet-state digest** - the full `data/backlog.md`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
 6. **Next step** - a conditional closing reminder for the actual watcher owner: stay read-only when the lock was refused, use `/afk` when away mode is active, source `config/x-mode.env` before arming when X mode is active, or arm normally otherwise.
@@ -186,7 +187,8 @@ Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` second
 
 The digest's context section already contains `data/projects.md`, the fleet registry of what each project is; `data/secondmates.md`, the registered secondmate routing table used to route work by scope (section 7); `data/captain.md`, this captain's curated preferences and working style; and `data/learnings.md`, fleet-local operational facts and gotchas this home has captured.
 Treat any harness memory of captain preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
-If the digest reported `data/projects.md` as `ABSENT` or disagreeing with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
+If the digest reported `data/projects.md` as `ABSENT` or disagreeing with the known canonical project clones, rebuild the project registry before dispatching work.
+For a new or ambiguous repository, confirm the canonical path and defaults with the captain first.
 An `ABSENT` `data/captain.md` or `data/secondmates.md` or `data/learnings.md` means exactly what section 2 says it means (template defaults, no registered secondmates, nothing captured yet) - not a problem to fix.
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
@@ -309,7 +311,7 @@ All truth lives in each task's backend live-task inventory (tmux by hard default
 
 ## 6. Project management
 
-All projects live flat under `projects/`.
+Projects may live in the default `projects/` directory or at registry-backed external canonical paths.
 
 `data/projects.md` is firstmate's thin navigation registry.
 Every project in the fleet has one line:
@@ -319,9 +321,15 @@ Every project in the fleet has one line:
 ```
 
 The registry line records the project name, delivery mode, optional `+yolo` posture, and one-line description.
-Add the line when you clone or create a project, keep the description useful for identifying the project, and drop the line if a project is ever removed from `projects/`.
+Add the line when you register, clone, or create a project, keep the description useful for identifying the project, and drop the line if a project is ever removed from the fleet.
 Do not turn the registry into a knowledge dump.
 Durable descriptive detail belongs in the project's own `AGENTS.md`.
+
+`data/projects.json` is the optional machine sidecar for projects whose canonical checkout, base ref, remotes, or worktree policy cannot be safely inferred from `projects/<name>`.
+Its full contract lives in `docs/configuration.md`; use `bin/fm-project-resolve.sh` rather than parsing it directly.
+When first working in a repository that is not registered yet, confirm the canonical clone path, default branch/base ref, origin/fork remotes, delivery mode, `+yolo` posture, issue-system metadata, backend preference, and worktree policy with the captain before saving defaults.
+Do not register Codex-managed linked worktrees under `$CODEX_HOME/worktrees` as canonical projects.
+In Phase 1, Firstmate may discover those worktrees for collision awareness, but adoption or deletion requires explicit task ownership metadata.
 
 `data/secondmates.md` is the secondmate routing table.
 Every persistent secondmate has one line:
@@ -394,11 +402,12 @@ It sweeps the current session for uncaptured durable knowledge, routes findings 
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
-**Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
+**Clone or register existing:** use `projects/<name>` for Firstmate-managed clones, or record an external canonical checkout in `data/projects.json` when the captain already has the repo elsewhere.
+Add the `data/projects.md` line with the chosen mode, then initialize only if the mode is `no-mistakes`.
 
 **Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.
 Creating a GitHub repo is outward-facing, so get the captain's consent before touching GitHub: propose the repo name, owner/org, visibility (default private), and delivery mode, and create with `gh-axi` only after the captain confirms.
-Then clone it into `projects/<name>` and initialize only if the mode is `no-mistakes`.
+Then clone it into `projects/<name>` unless the captain chooses an external canonical location, and initialize only if the mode is `no-mistakes`.
 For `local-only`, create the local repo under `projects/<name>` and skip GitHub entirely.
 
 **Initialize (`no-mistakes` mode only):**

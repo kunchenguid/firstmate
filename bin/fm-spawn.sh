@@ -719,7 +719,14 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJECT_ID=$("$SCRIPT_DIR/fm-project-resolve.sh" --field project_id "$PROJ")
+  PROJECT_SOURCE=$("$SCRIPT_DIR/fm-project-resolve.sh" --field source "$PROJ")
+  PROJECT_BASE_REF=$("$SCRIPT_DIR/fm-project-resolve.sh" --field base_ref "$PROJ")
+  if [ "$PROJECT_SOURCE" != json ]; then
+    PROJECT_BASE_REF=
+  fi
+  PROJ_RESOLVED=$("$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$PROJ")
+  PROJ_ABS="$(cd "$PROJ_RESOLVED" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -786,17 +793,25 @@ codex_app_create_git_worktree() {
     echo "error: codex-app task branch already exists: $branch" >&2
     exit 1
   fi
-  default=$(default_branch "$PROJ_ABS") || {
-    echo "error: cannot determine default branch for codex-app task $ID; expected origin/HEAD, main, or master" >&2
-    exit 1
-  }
-  base_ref="refs/remotes/origin/$default"
-  if ! base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null); then
-    base_ref="refs/heads/$default"
+  if [ -n "${PROJECT_BASE_REF:-}" ]; then
+    base_ref=$PROJECT_BASE_REF
     base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null) || {
-      echo "error: codex-app default branch '$default' cannot be resolved to a verified local commit for task $ID" >&2
+      echo "error: codex-app registered base ref '$base_ref' cannot be resolved to a verified local commit for task $ID" >&2
       exit 1
     }
+  else
+    default=$(default_branch "$PROJ_ABS") || {
+      echo "error: cannot determine default branch for codex-app task $ID; expected origin/HEAD, main, or master" >&2
+      exit 1
+    }
+    base_ref="refs/remotes/origin/$default"
+    if ! base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null); then
+      base_ref="refs/heads/$default"
+      base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null) || {
+        echo "error: codex-app default branch '$default' cannot be resolved to a verified local commit for task $ID" >&2
+        exit 1
+      }
+    fi
   fi
   CODEX_WORKTREE_BASE=$base
   CODEX_WORKTREE_BASE_REF=$base_ref
@@ -1179,7 +1194,7 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  PROJ_NAME=${PROJECT_ID:-$(basename "$PROJ_ABS")}
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
@@ -1196,6 +1211,8 @@ META_WINDOW=$T
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "${PROJECT_ID:-}" ] || echo "project_id=$PROJECT_ID"
+  [ -z "${PROJECT_BASE_REF:-}" ] || echo "project_base_ref=$PROJECT_BASE_REF"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"

@@ -30,7 +30,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
@@ -452,6 +451,11 @@ source_origin_url() {
   normalize_origin_url "$src" "$url"
 }
 
+project_source_path() {
+  local project=$1
+  "$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$project"
+}
+
 seeded_origin_url() {
   local project=$1 dst=$2 expected=$3 url
   url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
@@ -530,7 +534,7 @@ EOF
 
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src="$PROJECTS/$project"
+  src=$(project_source_path "$project") || return 1
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -558,7 +562,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url
-  src="$PROJECTS/$project"
+  src=$(project_source_path "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF

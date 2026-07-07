@@ -133,6 +133,8 @@ tasktmp=<task-temp-path>
 model=<model-or-default>
 effort=<effort-or-default>
 worktree_provider=git-worktree
+project_id=<stable-project-id>
+project_base_ref=<registry-base-ref-when-present>
 ```
 
 `window=` remains populated for compatibility with existing selector helpers.
@@ -142,9 +144,13 @@ In the first implementation, Firstmate creates the isolated git worktree in the 
 This keeps worktree ownership inside Firstmate's existing safety model while Codex owns the visible thread and turn lifecycle.
 Because `codex-app` has no terminal endpoint before the thread exists, it cannot rely on the tmux-style pattern of typing `treehouse get` into a newly created pane.
 The first pass creates a guarded detached git worktree under `${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
+When `data/projects.json` supplies a `baseRef`, that ref is the authoritative worktree base.
+Otherwise the legacy path resolves the project default from `origin/HEAD`, `main`, or `master`.
 The worktree deliberately starts detached so the normal Firstmate brief can create `fm/<id>` itself.
 The backend must validate that `codex_cwd` matches the expected Firstmate worktree root and is not the primary project checkout.
 If Codex starts a thread anywhere else, ship and scout spawns must refuse before substantive work begins.
+Codex Desktop's own managed worktrees under `$CODEX_HOME/worktrees` are not adopted or removed in this backend pass.
+They may be discovered for collision awareness, but task-level ownership metadata is required before Firstmate can manage an existing Codex worktree.
 
 ## Spawn flow
 
@@ -153,17 +159,18 @@ First pass spawn flow:
 1. Resolve `backend=codex-app` only from explicit configuration or `--backend codex-app`.
 2. Refuse `--secondmate`.
 3. Require `harness=codex`.
-4. Create an isolated detached git worktree under the effective Firstmate projects directory.
-5. Build the normal Firstmate brief and status-file instructions.
-6. Run `fm-codex-bridge ensure-running`.
-7. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
-8. Set the thread name to `fm-<id>`.
-9. Set the thread goal to the Firstmate task objective.
-10. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
-11. Start the initial prompt turn through `send-turn`.
-12. Keep the app-server process alive in a detached `send-turn` worker until the return channel writes the expected status line.
-13. Verify the return channel before treating the thread as supervised.
-14. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
+4. Resolve the project through `fm-project-resolve.sh`.
+5. Create an isolated detached git worktree under the effective Firstmate projects directory from the registry `baseRef` when present.
+6. Build the normal Firstmate brief and status-file instructions.
+7. Run `fm-codex-bridge ensure-running`.
+8. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
+9. Set the thread name to `fm-<id>`.
+10. Set the thread goal to the Firstmate task objective.
+11. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
+12. Start the initial prompt turn through `send-turn`.
+13. Keep the app-server process alive in a detached `send-turn` worker until the return channel writes the expected status line.
+14. Verify the return channel before treating the thread as supervised.
+15. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, `project_id=`, optional `project_base_ref=`, and `worktree_provider=git-worktree`.
 
 The return-channel verification is load-bearing.
 The worker prompt must instruct the Codex thread to append:

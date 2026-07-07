@@ -79,6 +79,80 @@ Personal preferences for one captain's fleet live locally in `data/captain.md`; 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed right after `data/captain.md` in the session-start context digest.
 The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: rewrite or prune stale entries instead of appending forever.
 
+## Project Registry
+
+`data/projects.md` is the captain-readable project list.
+It keeps the short project id, delivery mode, optional `+yolo` posture, and a one-line description.
+It remains compatible with the legacy line format:
+
+```markdown
+- <project-id> [<mode> +yolo] - <description> (added <date>)
+```
+
+`data/projects.json` is the optional machine sidecar.
+Use it when a project lives outside `$FM_HOME/projects`, when the safe base branch must be explicit, or when Firstmate needs durable metadata beyond delivery mode.
+The file is local and gitignored because it records one captain's filesystem paths and workflow defaults.
+When it is present, `bin/fm-project-resolve.sh` is the only supported machine reader.
+Scripts should consume resolver fields instead of parsing either registry file directly.
+
+Schema version 1:
+
+```json
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "/Users/ra/Documents/GitHub/intellio-labs/flow",
+      "gitCommonDir": "/Users/ra/Documents/GitHub/intellio-labs/flow/.git",
+      "remotes": {
+        "origin": "https://github.com/Intellio-Labs/flow.git",
+        "fork": "git@github.com:RaFoyer/flow.git"
+      },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "no-mistakes",
+      "yolo": false,
+      "linear": {
+        "team": "Engineering",
+        "issuePrefix": "INT"
+      },
+      "backendPolicy": {
+        "default": "codex-app"
+      },
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+```
+
+Required fields are `projectId`, `canonicalPath`, `defaultBranch`, `baseRef`, `mode`, and `yolo`.
+`gitCommonDir` is recommended and is validated when present.
+`remotes`, `linear`, `backendPolicy`, and future policy blocks are optional metadata, but keeping them in the sidecar avoids asking the same first-use questions repeatedly.
+`canonicalPath` must be an absolute path to the full canonical checkout.
+It must not be a linked Git worktree, a path under `$CODEX_HOME/worktrees`, the filesystem root, an ancestor path, or another disposable task-worktree root.
+For new work, `baseRef` is authoritative and must point at the safe starting ref, such as `refs/remotes/origin/dev`.
+The canonical checkout's current branch or dirty state is not a base-selection signal.
+
+First-use onboarding should confirm:
+
+- Canonical checkout path.
+- Default branch and explicit base ref.
+- Origin remote and optional fork remote.
+- Delivery mode and `+yolo` posture.
+- Issue-system metadata such as Linear team and ticket prefix.
+- Preferred runtime backend and worktree policy.
+- Known setup and verification commands, if they are already known.
+
+Codex Desktop worktrees are not canonical projects.
+Firstmate may discover them for collision warnings by reading Git metadata, but Phase 1 treats `$CODEX_HOME/worktrees` as Codex-owned and observe-only.
+Explicit adoption of an existing Codex worktree needs task-level ownership metadata and a deletion policy before teardown may touch it.
+
+`bin/fm-project-resolve.sh --field <field> <project>` prints a single normalized field.
+`bin/fm-project-resolve.sh --json <project>` prints the normalized resolver object.
+`bin/fm-project-resolve.sh --list` prints registered project ids and canonical paths for fleet-wide consumers.
+When `data/projects.json` is absent, the resolver falls back to `data/projects.md` and `$FM_HOME/projects/<project-id>`.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

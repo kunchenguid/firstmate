@@ -67,7 +67,8 @@ Its full implementation notes, app-server evidence, bridge contract, and known g
 
 ## Worktrees, not branches in your checkout
 
-Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, Orca creates its own worktrees for `backend=orca`, and codex-app creates guarded plain git worktrees under the effective Firstmate projects directory.
+Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, Orca creates its own worktrees for `backend=orca`, and codex-app creates guarded Firstmate-owned plain git worktrees under the effective Firstmate projects directory.
+Codex Desktop-managed worktrees under `$CODEX_HOME/worktrees` are discovered separately and are not canonical project clones.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
