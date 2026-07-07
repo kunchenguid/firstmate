@@ -59,3 +59,35 @@ The procedure:
 
 Create `data/parking.md` on the first capture if it does not yet exist.
 A non-urgent capture is a single turn with no questions.
+
+## Rituals
+
+Three durable crons fire the rituals. Create them with `CronCreate`, each `durable: true`, local time, with a prompt that invokes this skill's ritual (for example "Run the parking-lot morning ritual: review data/parking.md"):
+
+- Morning: `57 8 * * *` (~8:57am).
+- Afternoon: `30 15 * * *` (3:30pm exact; the scheduler's small jitter still applies).
+- Weekly digest: `7 17 * * 5` (~Friday 5:07pm).
+
+The off-minute times avoid the fleet-wide :00/:30 pileup.
+These crons auto-expire after 7 days, so they are self-re-armed (see below).
+
+**Morning and afternoon.**
+Surface time-sensitive items first: anything due soon or overdue is shown loudly at the top.
+Then offer one or two non-urgent `raw` or `refining` ideas to dive into.
+The afternoon (3:30pm) framing is "want to refine anything before you wrap?"
+If the lot is empty, say nothing and do not manufacture a nudge.
+
+**Weekly digest.**
+A whole-lot overview: what is aging (decay), what is `ready`, and what is time-sensitive in the coming week.
+
+### Decay nudge
+
+A `raw` or `refining` idea whose `last-touched` is older than 14 days is gently surfaced in the next ritual: "this has sat N days - refine or drop?"
+This keeps the lot from becoming a graveyard.
+Acting on it (a note append, a status change, or a drop) resets `last-touched`.
+
+### Theme clustering
+
+During a ritual, group related parked ideas and suggest combining them: "3 ideas here all touch Redshift access - combine into one effort?"
+This turns scattered sparks into a single deliberate effort.
+Clustering is a suggestion, not an automatic merge; the captain decides.
