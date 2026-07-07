@@ -127,6 +127,30 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- numeric session name (the unnamed default session is "0") ---------------
+# tmux parses a bare numeric -t target as a window index in the current
+# session, not a session name, so create_task against a session named "0"
+# used to fail with "create window failed: index 0 in use" (or silently
+# create the window in the wrong session for a free index). The adapter's
+# trailing-colon session targets must keep this working.
+
+NUMSESSION="0"
+NUMWINDOW="fm-num1"
+
+tmux new-session -d -s "$NUMSESSION" -x 200 -y 50 \
+  || fail "real tmux: new-session -s 0 failed"
+fm_backend_tmux_create_task "$NUMSESSION" "$NUMWINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed against a session named 0 (numeric-target regression)"
+tmux list-windows -t "$NUMSESSION:" -F '#{window_name}' | grep -qx "$NUMWINDOW" \
+  || fail "task window did not land in the session named 0"
+if tmux list-windows -t "$SESSION:" -F '#{window_name}' | grep -qx "$NUMWINDOW"; then
+  fail "task window leaked into the '$SESSION' session instead of the session named 0"
+fi
+if fm_backend_tmux_create_task "$NUMSESSION" "$NUMWINDOW" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_create_task should refuse an existing window name in a numeric session"
+fi
+pass "real tmux: fm_backend_tmux_create_task works against a session named 0 and refuses a duplicate there"
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"
