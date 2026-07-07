@@ -56,6 +56,7 @@ test_routine_then_terminal_after_restart() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
+  printf 'window=sess:fm-task-w1\nkind=ship\n' > "$state/task-w1.meta"
   status_file="$state/task-w1.status"
 
   # A routine status fires a signal; the watcher queues it and exits.
