@@ -419,7 +419,20 @@ make_launch_capturing_tmux() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # Model the real project-first pane flow the seen_proj gate requires: report
+    # the project cwd once, then the worktree. Secondmate spawns skip the wait
+    # loop and set neither env, so this stays a no-op for them.
+    proj="${FM_FAKE_PROJ_PATH:-}"
+    if [ -n "$proj" ]; then
+      marker="$(dirname "$0")/.pane-seen-proj"
+      if [ ! -f "$marker" ]; then
+        : > "$marker"
+        printf '%s\n' "$proj"; exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -662,7 +675,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PROJ_PATH="$proj" FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
