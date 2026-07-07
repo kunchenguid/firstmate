@@ -613,17 +613,20 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #   bare     - an UNBORDERED composer (verified real claude 2.x and codex
 #              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
 #              "Incident (2026-07-07)"): the row's TRIMMED content starts with
-#              a known prompt glyph but carries no closing border at all -
-#              claude's own live input row is a bare "❯ …" with no
-#              surrounding │, and codex's is a bare "› …". Both harnesses ALSO
-#              render bordered decorative boxes elsewhere (a startup welcome
-#              banner, an update-available notice) that satisfy the bordered
-#              shape above; requiring a match on EITHER shape and keeping the
-#              last (bottom-most) one is what keeps the live composer winning
-#              over a stale decorative box still sitting in the same capture
-#              window - a bordered box is only ever followed later on screen
-#              by the actual live composer, never the reverse, in every
-#              harness observed so far.
+#              one of the verified agent-specific prompt glyphs but carries no
+#              closing border at all - claude's own live input row is a bare
+#              "❯ …" with no surrounding │, and codex's is a bare "› …". Both
+#              harnesses ALSO render bordered decorative boxes elsewhere (a
+#              startup welcome banner, an update-available notice) that
+#              satisfy the bordered shape above; requiring a match on EITHER
+#              shape and keeping the last (bottom-most) one is what keeps the
+#              live composer winning over a stale decorative box still sitting
+#              in the same capture window - a bordered box is only ever
+#              followed later on screen by the actual live composer, never the
+#              reverse, in every harness observed so far. The bare shape is
+#              deliberately narrower than the bordered content classifier so a
+#              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
+#              through to `unknown` instead of being misread as delivered.
 #
 #   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -652,9 +655,9 @@ FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude), › (codex), plus the generic shell-style glyphs > $ % # already
-# recognized inside a bordered composer.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›>$%#]'}
+# (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
+# recognized after a bordered composer row has already been structurally found.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed stripped="" found=0 shape=""

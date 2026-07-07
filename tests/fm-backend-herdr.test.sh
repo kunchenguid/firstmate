@@ -877,16 +877,19 @@ test_composer_state_unknown_on_capture_failure() {
 }
 
 test_composer_state_unknown_when_no_composer_row_found() {
-  local dir log resp fb out
+  local dir log resp fb out glyph idx=1
   dir="$TMP_ROOT/composer-no-row"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # A capture with no border-delimited row at all (e.g. a bare shell prompt,
-  # never a firstmate-recognized composer box).
-  printf 'plain-shell-prompt$ \n' > "$resp/1.out"
+  for glyph in '>' '$' '%' '#'; do
+    printf '%s \n' "$glyph" > "$resp/$idx.out"
+    idx=$((idx + 1))
+  done
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = unknown ] || fail "a capture with no recognizable composer row should read as unknown, got '$out'"
-  pass "fm_backend_herdr_composer_state: reports unknown when no border-delimited composer row is found"
+  for glyph in '>' '$' '%' '#'; do
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "a bare shell prompt '$glyph' should read as unknown, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: reports unknown for bare shell prompts with no composer row"
 }
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
