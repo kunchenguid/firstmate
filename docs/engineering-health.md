@@ -18,7 +18,7 @@ Section numbers, section titles, and the externally referenced subsection headin
 | .agents/skills/fmx-respond | 5,867 | 3,834 | -34.7% |
 | .agents/skills/harness-adapters | 5,142 | 4,365 | -15.1% |
 | .agents/skills/bootstrap-diagnostics | - | 1,386 | new (moved out of AGENTS.md) |
-| other 8 skills (unchanged) | 10,899 | 10,899 | 0% |
+| other 8 skills (unchanged) | 9,899 | 9,899 | 0% |
 | **Always-loaded total** | **25,867** | **21,570** | **-16.6%** |
 | **Audited surface total** | **49,932** | **43,825** | **-12.2%** |
 
