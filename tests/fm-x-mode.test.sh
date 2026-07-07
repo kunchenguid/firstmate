@@ -13,7 +13,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$(command -v env)")}
 # The client under test uses the real jq; make it resolvable regardless of where
 # it is installed (Homebrew, Nix profile bins, etc.), which the bare BASE_PATH may
 # not include. Prepended after the fakebin so the fake curl still wins.
@@ -1474,7 +1474,8 @@ if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
   : > "$FAKE_MV_FAILED_ONCE"
   exit 2
 fi
-exec /bin/mv "$@"
+self=$(dirname "$0")
+PATH="${PATH#"$self":}" exec mv "$@"
 SH
   chmod +x "$fakebin/mv"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
