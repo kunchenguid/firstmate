@@ -39,6 +39,19 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   capture-pane)
+    target=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "-t" ]; then
+        target=$arg
+        break
+      fi
+      prev=$arg
+    done
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_DIR:-}" ] && [ -n "$target" ] && [ -f "$FM_FAKE_TMUX_CAPTURE_DIR/$target" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_DIR/$target"
+      exit 0
+    fi
     [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && cat "$FM_FAKE_TMUX_CAPTURE"
     exit 0 ;;
 esac
@@ -52,6 +65,7 @@ run_check() {
   local dir=$1
   PATH="$dir/fakebin:$PATH" \
   FM_FAKE_TMUX_CAPTURE="${FM_FAKE_TMUX_CAPTURE:-}" \
+  FM_FAKE_TMUX_CAPTURE_DIR="${FM_FAKE_TMUX_CAPTURE_DIR:-}" \
   FM_HOME="$dir" \
   FM_STALL_IDLE_SECS="${FM_STALL_IDLE_SECS:-600}" \
   FM_ADVISOR_IDLE_STALL_SECS="${FM_ADVISOR_IDLE_STALL_SECS:-1800}" \
@@ -268,11 +282,12 @@ EOF
 }
 
 test_advisor_with_child_work_not_flagged() {
-  local dir out capture home
+  local dir out capture capture_dir home
   dir=$(make_case advisor_child_work)
   capture="$dir/capture.txt"
+  capture_dir="$dir/captures"
   home="$dir/advisor-home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$capture_dir"
   cat > "$dir/state/strat-advisor.meta" <<EOF
 window=fm-strat-advisor
 kind=secondmate
@@ -284,11 +299,42 @@ EOF
 window=fm-child-a1
 kind=ship
 EOF
+  printf '%s\n' 'working: actively running child task' > "$home/state/child-a1.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-a1.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-a1.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+  printf '%s\n' 'all quiet' '> ' > "$capture_dir/fm-strat-advisor"
+  printf '%s\n' '• Working (10s • esc to interrupt)' > "$capture_dir/fm-child-a1"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_DIR="$capture_dir" out=$(run_check "$dir") || fail "advisor child-work check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for advisor with child work, got: $out"
+  pass "does not flag advisor with a busy child pane in its home"
+}
+
+test_advisor_with_terminal_idle_child_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_idle_terminal_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/learn-advisor.meta" <<EOF
+window=fm-learn-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'done: routed work complete' > "$dir/state/learn-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/learn-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/learn-advisor.status"
+  cat > "$home/state/learn-first-pass-r7.meta" <<'EOF'
+window=fm-learn-first-pass-r7
+kind=ship
+EOF
+  printf '%s\n' 'working: started' 'done: report written' > "$home/state/learn-first-pass-r7.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/learn-first-pass-r7.status" 2>/dev/null || touch -t 200001010000 "$home/state/learn-first-pass-r7.status"
   printf '%s\n' 'all quiet' '> ' > "$capture"
 
-  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor child-work check exited non-zero"
-  [ -z "$out" ] || fail "expected silence for advisor with child work, got: $out"
-  pass "does not flag advisor with active child meta in its home"
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor idle-terminal-child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: learn-advisor - idle [0-9]+s, no active child work, route its next program step or confirm intentionally parked' >/dev/null \
+    || fail "advisor idle finding missing with terminal idle child: $out"
+  pass "detects idle terminal advisor whose only child is terminal and idle"
 }
 
 test_advisor_busy_not_flagged() {
@@ -344,5 +390,6 @@ test_pr_ready_task_not_flagged
 test_advisor_idle_terminal_no_children_flagged
 test_advisor_needs_decision_not_flagged
 test_advisor_with_child_work_not_flagged
+test_advisor_with_terminal_idle_child_flagged
 test_advisor_busy_not_flagged
 test_guard_surfaces_stall_pointer

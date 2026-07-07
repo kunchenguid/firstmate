@@ -191,19 +191,47 @@ home_for_secondmate_meta() { # <id> <meta>
   ' "$DATA/secondmates.md"
 }
 
+last_status_line() { # <status-file>
+  awk 'NF { line = $0 } END { print line }' "$1" 2>/dev/null || true
+}
+
+terminal_status_line() { # <line>
+  case "$1" in
+    done:*|result:*|failed:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+child_has_active_work() { # <child-state> <meta>
+  local child_state=$1 meta=$2 id window status m age last
+  window=$(window_for_meta "$meta")
+  if [ -n "$window" ] && fm_pane_is_busy "$window"; then
+    return 0
+  fi
+
+  id=$(basename "$meta" .meta)
+  status="$child_state/$id.status"
+  [ -f "$status" ] || return 1
+  last=$(last_status_line "$status")
+  terminal_status_line "$last" && return 1
+  m=$(stat_mtime "$status") || return 1
+  age=$(( $(now_epoch) - m ))
+  [ "$age" -lt "$ADVISOR_IDLE_SECS" ]
+}
+
 secondmate_has_child_work() { # <home>
   local child_state=$1/state meta
   [ -d "$child_state" ] || return 1
   for meta in "$child_state"/*.meta; do
     [ -e "$meta" ] || continue
-    return 0
+    child_has_active_work "$child_state" "$meta" && return 0
   done
   return 1
 }
 
 advisor_terminal_status() { # <status-file>
   local last
-  last=$(awk 'NF { line = $0 } END { print line }' "$1" 2>/dev/null || true)
+  last=$(last_status_line "$1")
   case "$last" in
     done:*|result:*) return 0 ;;
     *) return 1 ;;
