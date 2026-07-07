@@ -42,13 +42,12 @@ EOF
 
 ensure_maintenance_section() {
   if grep -Fqx '## Maintaining this file' "$AGENTS"; then
-    return 1
+    return 0
   fi
   {
     printf '\n'
     write_maintenance_section
   } >> "$AGENTS"
-  return 0
 }
 
 write_skeleton() {
@@ -59,7 +58,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 EOF
-  ensure_maintenance_section || true
+  ensure_maintenance_section
 }
 
 is_correct_claude_symlink() {
@@ -124,7 +123,7 @@ fi
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
     mv "$CLAUDE" "$AGENTS"
-    ensure_maintenance_section || true
+    ensure_maintenance_section
     ln -s "$AGENTS" "$CLAUDE"
     echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
     exit 0
