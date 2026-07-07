@@ -670,8 +670,11 @@ while :; do
       [ -e "$c" ] || continue
       # Same orphan guard as scan_signals: teardown removes .check.sh and
       # .meta together, so a survivor with no matching .meta belongs to a
-      # torn-down task and must never run or wake firstmate.
-      if [ ! -e "$STATE/$(basename "$c" .check.sh).meta" ]; then
+      # torn-down task and must never run or wake firstmate. x-watch.check.sh
+      # is the one exception: fm-bootstrap.sh's X-mode relay poll shim, keyed
+      # by the fixed name "x-watch" rather than a spawned task id, so it has
+      # no state/x-watch.meta by design and must never be treated as an orphan.
+      if [ "$(basename "$c" .check.sh)" != "x-watch" ] && [ ! -e "$STATE/$(basename "$c" .check.sh).meta" ]; then
         triage_log "absorbed orphan check (no matching .meta): $c"
         rm -f "$c" 2>/dev/null || true
         continue

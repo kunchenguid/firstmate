@@ -380,6 +380,31 @@ SH
   pass "a check.sh with no matching state/<id>.meta never runs and is removed"
 }
 
+# --- the X-mode relay poll shim (state/x-watch.check.sh) is exempt ----------
+# x-watch.check.sh (fm-bootstrap.sh's X-mode relay poll shim) is keyed by the
+# fixed name "x-watch", not a spawned task id, so it never has a matching
+# state/x-watch.meta by design. The orphan guard must not treat it as an
+# orphan: it must keep running and must not be deleted.
+test_x_watch_check_sh_survives_orphan_guard_and_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case x-watch-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/x-watch.meta - by design, this shim is never task-keyed.
+  cat > "$state/x-watch.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "check: x-mention deadbeef"
+SH
+  chmod +x "$state/x-watch.check.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher never fired for x-watch.check.sh's actionable output (should surface): $(cat "$out")"
+  fi
+  [ -s "$out" ] || fail "x-watch.check.sh's actionable output did not produce a wake reason"
+  [ -e "$state/x-watch.check.sh" ] || fail "x-watch.check.sh was wrongly deleted as an orphan"
+  pass "x-watch.check.sh survives the orphan guard and keeps running with no state/x-watch.meta"
+}
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
@@ -1209,6 +1234,7 @@ test_orphan_turn_ended_never_surfaces
 test_orphan_turn_ended_recreated_every_poll_never_surfaces
 test_orphan_status_with_captain_relevant_verb_never_surfaces
 test_orphan_check_sh_never_runs
+test_x_watch_check_sh_survives_orphan_guard_and_runs
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
