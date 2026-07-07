@@ -8,6 +8,8 @@
  */
 
 const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const CLIENT_INFO = { name: "firstmate", version: "0.1.0" };
@@ -17,7 +19,7 @@ function usage() {
   console.error(`usage:
   fm-codex-bridge ensure-running
   fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> [--model <model>]
-  fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>] [--wait-status-file <file>] [--wait-status-line <line>] [--wait-status-polls <n>] [--wait-status-sleep <seconds>]
+  fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>] [--wait-status-file <file>] [--wait-status-line <line>] [--wait-status-polls <n>] [--wait-status-sleep <seconds>] [--turn-lifecycle-polls <n>] [--turn-lifecycle-sleep <seconds>]
   fm-codex-bridge read-thread --thread-id <id> [--include-turns]
   fm-codex-bridge thread-status --thread-id <id>
   fm-codex-bridge turns-list --thread-id <id> [--limit <n>] [--items-view summary|full|notLoaded]
@@ -86,8 +88,29 @@ function statusFileContainsLine(file, expectedLine) {
   }
 }
 
+function writeJsonFile(file, value) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(value) + "\n");
+  fs.renameSync(tmp, file);
+}
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function statusWaitBudgetMs(opts) {
+  if (!opts["wait-status-file"]) return 0;
+  const polls = Math.max(1, Math.floor(numericOption(
+    opts["wait-status-polls"],
+    "--wait-status-polls",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+  )));
+  const sleepMs = Math.round(numericOption(
+    opts["wait-status-sleep"],
+    "--wait-status-sleep",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_SLEEP || "0.25",
+  ) * 1000);
+  return Math.max(0, polls - 1) * sleepMs;
 }
 
 async function waitForStatusFile(threadId, opts) {
@@ -109,6 +132,33 @@ async function waitForStatusFile(threadId, opts) {
     if (i + 1 < polls && sleepMs > 0) await delay(sleepMs);
   }
   throw new Error(`Codex thread ${threadId} did not write return-channel status to ${file}`);
+}
+
+function isActiveStatus(status) {
+  return status === "active" || status === "inProgress" || status === "running" || status === "unknown";
+}
+
+async function holdTurnLifecycle(server, threadId, opts) {
+  const polls = Math.max(1, Math.floor(numericOption(
+    opts["turn-lifecycle-polls"],
+    "--turn-lifecycle-polls",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_POLLS || "4320",
+  )));
+  const sleepMs = Math.round(numericOption(
+    opts["turn-lifecycle-sleep"],
+    "--turn-lifecycle-sleep",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_SLEEP || "5",
+  ) * 1000);
+  for (let i = 0; i < polls; i += 1) {
+    if (sleepMs > 0) await delay(sleepMs);
+    try {
+      const result = await server.request("thread/read", { threadId, includeTurns: false });
+      const normalized = normalizeThread(result, "");
+      if (!isActiveStatus(normalized.status)) return;
+    } catch (_) {
+      // Keep the app-server alive through transient status-read failures.
+    }
+  }
 }
 
 function statusType(status) {
@@ -296,6 +346,74 @@ async function withServer(fn) {
   }
 }
 
+function sendTurnWorkerArgs(optsFile, readyFile) {
+  return [__filename, "send-turn-worker", "--opts-file", optsFile, "--ready-file", readyFile];
+}
+
+function waitForReadyFile(file, child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let childExit = null;
+    child.on("exit", (code, signal) => {
+      childExit = { code, signal };
+    });
+    const poll = () => {
+      try {
+        const raw = fs.readFileSync(file, "utf8");
+        resolve(JSON.parse(raw));
+        return;
+      } catch (err) {
+        if (err.code !== "ENOENT") {
+          reject(new Error(`cannot read Codex turn worker ready file: ${err.message}`));
+          return;
+        }
+      }
+      if (childExit) {
+        reject(new Error(`Codex turn worker exited before reporting ready${childExit.signal ? ` (${childExit.signal})` : ` (${childExit.code})`}`));
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error("timeout waiting for Codex turn worker to report ready"));
+        return;
+      }
+      setTimeout(poll, 100);
+    };
+    poll();
+  });
+}
+
+async function sendTurnDetached(opts) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-codex-turn-"));
+  const optsFile = path.join(tmpDir, "opts.json");
+  const readyFile = path.join(tmpDir, "ready.json");
+  fs.writeFileSync(optsFile, JSON.stringify(opts) + "\n");
+  const child = spawn(process.execPath, sendTurnWorkerArgs(optsFile, readyFile), {
+    detached: true,
+    stdio: "ignore",
+  });
+  const readyTimeoutMs = DEFAULT_TIMEOUT_MS + statusWaitBudgetMs(opts) + 5000;
+  let ready;
+  try {
+    ready = await waitForReadyFile(readyFile, child, readyTimeoutMs);
+  } catch (err) {
+    try {
+      child.kill("SIGTERM");
+    } catch (_) {
+      // Best-effort worker cleanup.
+    }
+    throw err;
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (_) {
+      // Best-effort temp cleanup.
+    }
+  }
+  child.unref();
+  if (!ready.ok) throw new Error(ready.error || "Codex turn worker failed");
+  return ready;
+}
+
 async function ensureRunning() {
   return withServer(async (_server, init) => ({
     ok: true,
@@ -354,10 +472,26 @@ async function startThread(opts) {
 async function sendTurn(opts) {
   const threadId = requireOpt(opts, "thread-id");
   const prompt = readPrompt(requireOpt(opts, "prompt-file"));
+  return sendTurnDetached({ ...opts, "thread-id": threadId, prompt });
+}
+
+async function sendTurnWorker(opts, readyFile) {
+  const threadId = requireOpt(opts, "thread-id");
+  const prompt = opts.prompt != null ? opts.prompt : readPrompt(requireOpt(opts, "prompt-file"));
+  let reportedReady = false;
   return withServer(async server => {
-    const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
-    await waitForStatusFile(threadId, opts);
-    return { ok: true, thread_id: threadId, turn };
+    try {
+      const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
+      await waitForStatusFile(threadId, opts);
+      const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };
+      writeJsonFile(readyFile, ready);
+      reportedReady = true;
+      await holdTurnLifecycle(server, threadId, opts);
+      return ready;
+    } catch (err) {
+      if (!reportedReady) writeJsonFile(readyFile, { ok: false, error: err.message });
+      throw err;
+    }
   });
 }
 
@@ -396,10 +530,11 @@ async function turnsList(opts) {
       sortDirection: "desc",
     });
     const turns = result.data || [];
+    const chronologicalTurns = [...turns].reverse();
     return {
       ok: true,
       thread_id: threadId,
-      text: turnsText(turns),
+      text: turnsText(chronologicalTurns),
       turns,
       nextCursor: result.nextCursor || null,
       backwardsCursor: result.backwardsCursor || null,
@@ -439,7 +574,8 @@ async function main() {
   }
   const opts = parseArgs(argv);
   let result;
-  if (verb === "ensure-running") result = await ensureRunning(opts);
+  if (verb === "send-turn-worker") result = await sendTurnWorker(JSON.parse(fs.readFileSync(requireOpt(opts, "opts-file"), "utf8")), requireOpt(opts, "ready-file"));
+  else if (verb === "ensure-running") result = await ensureRunning(opts);
   else if (verb === "start-thread") result = await startThread(opts);
   else if (verb === "send-turn") result = await sendTurn(opts);
   else if (verb === "read-thread") result = await readThread(opts);

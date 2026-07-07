@@ -138,7 +138,7 @@ meta_value() {  # <meta> <key>
 }
 
 test_spawn_codex_app_records_thread_and_worktree() {
-  local id case_dir out status meta wt project log prompt
+  local id case_dir out status meta wt project log prompt branch
   id=codex-ok-x1
   case_dir=$(make_case spawn-ok "$id")
   out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
@@ -156,6 +156,9 @@ test_spawn_codex_app_records_thread_and_worktree() {
   assert_present "$wt" "codex-app spawn should create a git worktree"
   git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
     || fail "project git worktree list should include codex-app worktree"
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [ "$branch" = HEAD ] || fail "codex-app spawn should create the startup worktree detached, got branch '$branch'"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "codex-app spawn should let the brief create fm/$id instead of precreating it"
   [ "$(meta_value "$meta" codex_cwd)" = "$wt" ] || fail "codex_cwd should match the worktree"
   log=$(cat "$case_dir/bridge.log")
   assert_contains "$log" "ensure-running" "spawn should verify the bridge before starting"
@@ -206,7 +209,7 @@ test_spawn_codex_app_refuses_primary_cwd_from_bridge() {
   assert_absent "$wt" "primary cwd refusal should remove the git worktree"
   git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
     && fail "primary cwd refusal should unregister the git worktree"
-  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "primary cwd refusal should delete the task branch"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "primary cwd refusal should leave no task branch"
   assert_absent "$case_dir/home/state/$id.meta" "primary cwd refusal should not leave task metadata"
   log=$(cat "$case_dir/bridge.log")
   assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "primary cwd refusal should archive the Codex thread"
@@ -227,7 +230,7 @@ test_spawn_codex_app_requires_return_channel_status() {
   assert_absent "$wt" "missing handshake refusal should remove the git worktree"
   git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
     && fail "missing handshake refusal should unregister the git worktree"
-  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "missing handshake refusal should delete the task branch"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" || fail "missing handshake refusal should leave no task branch"
   assert_absent "$case_dir/home/state/$id.meta" "missing handshake refusal should not leave task metadata"
   log=$(cat "$case_dir/bridge.log")
   assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "missing handshake test should start the prompt turn before waiting"
@@ -251,8 +254,8 @@ test_spawn_codex_app_preserves_startup_state_when_archive_fails() {
   wt=$(cd "$logical_wt" && pwd -P)
   git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
     || fail "archive failure should preserve the project worktree registration"
-  git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" \
-    || fail "archive failure should preserve the task branch"
+  ! git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "archive failure before brief execution should not create the task branch"
   assert_present "$meta" "archive failure should write recovery metadata"
   [ "$(meta_value "$meta" thread_id)" = thread-spawn-123 ] || fail "recovery meta should retain thread_id"
   assert_present "$status_file" "archive failure should preserve the startup status file"

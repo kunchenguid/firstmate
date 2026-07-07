@@ -20,7 +20,11 @@ const turnId = process.env.FM_FAKE_CODEX_TURN_ID || "turn-456";
 const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
 const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
+const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
+const substantiveDelayMs = Number(process.env.FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS || "0");
+const holdActiveUntilSubstantive = process.env.FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE === "1";
 const metadataFail = process.env.FM_FAKE_CODEX_METADATA_FAIL === "1";
+let substantiveDone = false;
 function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -76,10 +80,24 @@ rl.on("line", line => {
         fs.appendFileSync(statusFile, "working: Codex thread started\n");
       }, statusDelayMs);
     }
+    if (substantiveFile) {
+      setTimeout(() => {
+        fs.appendFileSync(substantiveFile, "substantive: bridge still alive\n");
+        substantiveDone = true;
+      }, substantiveDelayMs);
+    }
   } else if (msg.method === "thread/read") {
-    write({ id, result: { thread: thread(cwd, process.env.FM_FAKE_CODEX_STATUS || "idle") } });
+    const status = holdActiveUntilSubstantive && !substantiveDone ? "active" : (process.env.FM_FAKE_CODEX_STATUS || "idle");
+    write({ id, result: { thread: thread(cwd, status) } });
   } else if (msg.method === "thread/turns/list") {
-    write({ id, result: { data: [{ id: turnId, status: "completed", items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] }], nextCursor: null, backwardsCursor: null } });
+    if (process.env.FM_FAKE_CODEX_DESC_TURNS === "1") {
+      write({ id, result: { data: [
+        { id: "turn-new", status: "completed", items: [{ type: "agentMessage", text: "newest line" }] },
+        { id: "turn-old", status: "completed", items: [{ type: "agentMessage", text: "older line" }] }
+      ], nextCursor: null, backwardsCursor: null } });
+    } else {
+      write({ id, result: { data: [{ id: turnId, status: "completed", items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] }], nextCursor: null, backwardsCursor: null } });
+    }
   } else if (msg.method === "thread/list") {
     write({ id, result: { data: [thread(cwd, process.env.FM_FAKE_CODEX_STATUS || "idle")], nextCursor: null } });
   } else {
@@ -203,7 +221,7 @@ test_bridge_start_thread_uses_app_server_stdio() {
   log_before=$(cat "$log")
   assert_not_contains "$log_before" $'request\tturn/start\t' "bridge start-thread should not start the initial turn before cwd validation"
 
-  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" \
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_CODEX_APP_TURN_LIFECYCLE_POLLS=3 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.01 \
     "$ROOT/bin/fm-codex-bridge" send-turn --thread-id "$thread_id" --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "bridge send-turn should start the initial turn after validation"
@@ -213,23 +231,48 @@ test_bridge_start_thread_uses_app_server_stdio() {
 }
 
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
-  local dir fb log prompt status_file out status
+  local dir fb log prompt status_file substantive_file out status i
   dir="$TMP_ROOT/bridge-turn-lifecycle"
   mkdir -p "$dir/wt"
   log="$dir/codex.log"
   prompt="$dir/prompt.txt"
   status_file="$dir/status.log"
+  substantive_file="$dir/substantive.log"
   printf 'Write the return-channel line, captain.\n' > "$prompt"
   fb=$(make_fake_codex_bin "$dir")
 
-  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_STATUS_DELAY_MS=200 FM_CODEX_APP_RETURN_CHANNEL_POLLS=40 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.05 \
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_STATUS_DELAY_MS=200 FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=500 FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE=1 FM_CODEX_APP_RETURN_CHANNEL_POLLS=40 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.05 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=40 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.05 \
     "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' 2>&1)
   status=$?
   expect_code 0 "$status" "bridge send-turn should keep app-server alive until the status file handshake: $out"
   assert_grep "working: Codex thread started" "$status_file" "bridge should wait for the app-server-driven status write"
+  for ((i = 0; i < 40; i += 1)); do
+    [ -f "$substantive_file" ] && break
+    sleep 0.05
+  done
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep app-server alive after the startup status line"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
+}
+
+test_bridge_turns_list_renders_chronological_text_from_desc_response() {
+  local dir fb log out status text
+  dir="$TMP_ROOT/bridge-turn-order"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_DESC_TURNS=1 \
+    "$ROOT/bin/fm-codex-bridge" turns-list --thread-id thread-123 --limit 2 --items-view summary)
+  status=$?
+  expect_code 0 "$status" "bridge turns-list should succeed against fake app-server"
+  text=$(printf '%s' "$out" | json_field text)
+  case "$text" in
+    *"older line"*"newest line"*) : ;;
+    *) fail "turns-list text should render oldest-to-newest before backend tailing, got: $text" ;;
+  esac
+  pass "fm-codex-bridge: turns-list renders chronological text from desc Codex results"
 }
 
 test_bridge_start_thread_returns_id_when_metadata_calls_fail() {
@@ -307,6 +350,7 @@ test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_turns_list_renders_chronological_text_from_desc_response
 test_bridge_start_thread_returns_id_when_metadata_calls_fail
 test_backend_dispatch_accepts_codex_app
 test_backend_capture_send_busy_exists_and_kill_route_to_bridge

@@ -760,7 +760,7 @@ codex_app_create_git_worktree() {
     exit 1
   fi
   mkdir -p "$root"
-  git -C "$PROJ_ABS" worktree add -q -b "$branch" "$path" HEAD || {
+  git -C "$PROJ_ABS" worktree add -q --detach "$path" HEAD || {
     echo "error: git worktree add failed for codex-app task $ID" >&2
     exit 1
   }

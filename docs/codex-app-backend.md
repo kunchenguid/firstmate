@@ -141,7 +141,8 @@ For this backend, it is the Codex thread id, not a terminal pane.
 In the first implementation, Firstmate creates the isolated git worktree in the supervising shell before `thread/start`, then passes that worktree path as the Codex thread `cwd`.
 This keeps worktree ownership inside Firstmate's existing safety model while Codex owns the visible thread and turn lifecycle.
 Because `codex-app` has no terminal endpoint before the thread exists, it cannot rely on the tmux-style pattern of typing `treehouse get` into a newly created pane.
-The first pass creates a guarded git worktree under `$FM_HOME/projects/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
+The first pass creates a guarded detached git worktree under `$FM_HOME/projects/.firstmate-worktrees/<id>` and records `worktree_provider=git-worktree` so teardown uses `git worktree remove` instead of Treehouse.
+The worktree deliberately starts detached so the normal Firstmate brief can create `fm/<id>` itself.
 The backend must validate that `codex_cwd` matches the expected Firstmate worktree root and is not the primary project checkout.
 If Codex starts a thread anywhere else, ship and scout spawns must refuse before substantive work begins.
 
@@ -152,7 +153,7 @@ First pass spawn flow:
 1. Resolve `backend=codex-app` only from explicit configuration or `--backend codex-app`.
 2. Refuse `--secondmate`.
 3. Require `harness=codex`.
-4. Create an isolated git worktree under the project.
+4. Create an isolated detached git worktree under the project.
 5. Build the normal Firstmate brief and status-file instructions.
 6. Run `fm-codex-bridge ensure-running`.
 7. Start a Codex thread through the bridge with the isolated worktree as `cwd`.
@@ -160,7 +161,7 @@ First pass spawn flow:
 9. Set the thread goal to the Firstmate task objective.
 10. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
 11. Start the initial prompt turn through `send-turn`.
-12. Keep the app-server process alive inside `send-turn` until the return channel writes the expected status line.
+12. Keep the app-server process alive in a detached `send-turn` worker until the return channel writes the expected status line.
 13. Verify the return channel before treating the thread as supervised.
 14. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
 
@@ -174,7 +175,9 @@ working: Codex thread started
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits up to 60 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
-The startup `send-turn` call receives that same file, expected line, and timeout budget so the bridge does not close the Codex app-server stdio process while the first turn is still producing the handshake.
+The startup `send-turn` parent receives that same file, expected line, and timeout budget, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified.
+The worker keeps the same Codex app-server stdio process alive after that handshake while it polls the thread status until the turn leaves an active state.
+The lifecycle hold is controlled by `FM_CODEX_APP_TURN_LIFECYCLE_POLLS` and `FM_CODEX_APP_TURN_LIFECYCLE_SLEEP`, defaulting to 4320 polls at 5 seconds.
 If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
 If the archive attempt fails, startup cleanup stops before removing the worktree, task branch, status file, or metadata so the live thread can be recovered manually.
 
@@ -186,7 +189,8 @@ If the archive attempt fails, startup cleanup stops before removing the worktree
 fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt> [--cwd <path>]
 ```
 
-The first implementation starts a new turn through `turn/start`.
+The first implementation starts a new turn through `turn/start` in a detached bridge worker.
+The CLI returns after the turn is accepted, while the worker keeps the app-server alive until the thread leaves an active state.
 A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt-plus-new-turn behavior, but that should require an explicit design decision rather than surprising interruption.
 
 ## Peek and capture flow
@@ -194,7 +198,8 @@ A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt
 `fm-peek.sh` uses `thread/turns/list` through the backend dispatcher.
 For the first implementation, `capture` returns a bounded text summary assembled from recent user and agent message items.
 It should not dump entire thread history.
-The requested capture line count is applied to the returned text tail, while `FM_CODEX_APP_CAPTURE_TURN_LIMIT` controls the separate bounded `thread/turns/list` fetch size and defaults to 20 turns.
+The bridge renders fetched turns oldest-to-newest before the backend applies the requested capture line count to the returned text tail.
+`FM_CODEX_APP_CAPTURE_TURN_LIMIT` controls the separate bounded `thread/turns/list` fetch size and defaults to 20 turns.
 
 The bridge supports both summary and full item views, but the backend default uses summary.
 
