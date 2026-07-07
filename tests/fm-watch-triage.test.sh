@@ -36,7 +36,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -58,6 +58,26 @@ wait_numeric_file() {
       ''|*[!0-9]*) ;;
       *) return 0 ;;
     esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_file_exists() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_file_absent() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ ! -e "$file" ] && return 0
     sleep 0.1
     i=$((i + 1))
   done
@@ -279,6 +299,59 @@ test_turn_ended_provably_working_absorbed() {
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
 
+test_absorbed_turn_end_followup_surfaces_later_parked_gate() {
+  local dir state fakebin out drain_out verdict marker pid
+  dir=$(make_case turn-ended-followup-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; verdict="$dir/verdict"
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+cat "$verdict"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  printf 'state: working · source: run-step · validating (running)\n' > "$verdict"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
+  : > "$state/task.turn-ended"
+  marker="$state/.runstep-followup-task"
+
+  watch_bg "$state" "$fakebin" "$out" FM_RUNSTEP_FOLLOWUP_INTERVAL=1
+  pid=$!
+  wait_file_exists "$marker" 40 || {
+    reap "$pid"
+    fail "absorbed turn-end did not record a targeted run-step follow-up marker"
+  }
+  printf 'state: parked · source: run-step · parked at review gate\n' > "$verdict"
+  wait_for_exit "$pid" 60 || fail "watcher did not surface the later parked gate from the targeted follow-up"
+  grep -F "signal: run-step follow-up: task: state: parked" "$out" >/dev/null \
+    || fail "follow-up wake did not carry the parked fm-crew-state line: $(cat "$out")"
+  [ ! -e "$marker" ] || fail "follow-up marker was not cleared after surfacing the parked gate"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the run-step follow-up failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "run-step follow-up: task" >/dev/null \
+    || fail "run-step follow-up wake was not queued as a signal wake"
+  pass "an absorbed turn-end records a targeted follow-up that surfaces a later parked no-mistakes gate"
+}
+
+test_runstep_followup_marker_without_meta_is_discarded() {
+  local dir state fakebin out marker pid
+  dir=$(make_case runstep-followup-torn-down); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  marker="$state/.runstep-followup-task"
+  printf 'task\n' > "$marker"
+
+  watch_bg "$state" "$fakebin" "$out" FM_RUNSTEP_FOLLOWUP_INTERVAL=0
+  pid=$!
+  wait_file_absent "$marker" 30 || {
+    reap "$pid"
+    fail "run-step follow-up marker without task metadata was not discarded"
+  }
+  if ! wait_live "$pid" 10; then
+    reap "$pid"
+    fail "watcher exited for a torn-down task's stale run-step follow-up marker: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "torn-down follow-up marker enqueued a wake"; }
+  reap "$pid"
+  pass "a run-step follow-up marker is discarded once task metadata is gone"
+}
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
@@ -324,11 +397,13 @@ test_working_note_not_working_surfaced() {
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
-  local dir state fakebin out drain_out status_file pid
+  local dir state fakebin out drain_out status_file pid marker
   dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+  marker="$state/.runstep-followup-task"
+  printf 'task\n' > "$marker"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not exit for an actionable needs-decision signal"
@@ -336,6 +411,7 @@ test_actionable_signal_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
+  [ ! -e "$marker" ] || fail "actionable signal did not clear the stale run-step follow-up marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
@@ -1097,6 +1173,8 @@ test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_absorbed_turn_end_followup_surfaces_later_parked_gate
+test_runstep_followup_marker_without_meta_is_discarded
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced

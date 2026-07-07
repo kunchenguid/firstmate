@@ -99,6 +99,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+RUNSTEP_FOLLOWUP_INTERVAL=${FM_RUNSTEP_FOLLOWUP_INTERVAL:-30}  # seconds between targeted post-turn run-step rechecks
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -271,7 +272,7 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason task
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -288,6 +289,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
+        task=$(window_to_task "$win" "$STATE")
+        [ -n "$task" ] && clear_runstep_followup_for_task "$task"
         rm -f "$since_file"
         wake "$reason"
       fi
@@ -368,11 +371,13 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key task
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  task=$(window_to_task "$win" "$STATE")
+  [ -n "$task" ] && clear_runstep_followup_for_task "$task"
   wake "stale: $win"
 }
 
@@ -426,6 +431,13 @@ run_check() {
 # fleet-scan can tell apart a captain-relevant status that already woke firstmate
 # from one that has not - the latter being a per-wake-path miss it must surface.
 _hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+_runstep_followup_path() { printf '%s/.runstep-followup-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+
+clear_runstep_followup_for_task() {  # <task>
+  local task=$1
+  [ -n "$task" ] || return 0
+  rm -f "$(_runstep_followup_path "$task")"
+}
 
 # Record a status file's captain-relevant last line as surfaced (no-op for a
 # non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
@@ -467,6 +479,66 @@ heartbeat_scan_finds_actionable() {
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
   return 1
+}
+
+# A no-verb signal can be correctly absorbed while fm-crew-state still reads as
+# an active run-step, then transition to a no-mistakes gate after the turn-end
+# signal has already been suppressed.
+# Record only those tasks and re-check them on a short targeted cadence, instead
+# of making every heartbeat scan call no-mistakes for the whole fleet.
+record_runstep_followups_for_signal() {  # <file> ...
+  local f base task seen="" marker
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    marker=$(_runstep_followup_path "$task")
+    printf '%s\n' "$task" > "$marker" 2>/dev/null || true
+  done
+}
+
+clear_runstep_followups_for_signal() {  # <file> ...
+  local f base task seen=""
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    clear_runstep_followup_for_task "$task"
+  done
+}
+
+runstep_followup_scan() {
+  local marker task line reason
+  for marker in "$STATE"/.runstep-followup-*; do
+    [ -e "$marker" ] || continue
+    [ "$(age_of "$marker")" -ge "$RUNSTEP_FOLLOWUP_INTERVAL" ] || continue
+    task=$(cat "$marker" 2>/dev/null || true)
+    [ -n "$task" ] || { rm -f "$marker"; continue; }
+    [ -f "$STATE/$task.meta" ] || { rm -f "$marker"; continue; }
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+    if crew_state_line_is_provably_working "$line"; then
+      touch "$marker" 2>/dev/null || true
+      triage_log "absorbed run-step follow-up (still working): $task"
+      continue
+    fi
+    reason="signal: run-step follow-up: $task"
+    [ -n "$line" ] && reason="$reason: $line"
+    fm_wake_append signal "runstep-followup-$task" "$reason" || exit 1
+    rm -f "$marker"
+    wake "$reason"
+  done
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -647,6 +719,10 @@ while :; do
     touch "$STATE/.last-check"
   fi
 
+  if ! afk_present; then
+    runstep_followup_scan
+  fi
+
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
@@ -685,6 +761,8 @@ EOF
       done <<EOF
 $pending
 EOF
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      clear_runstep_followups_for_signal $files
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
@@ -694,6 +772,8 @@ $pending
 EOF
       wake "$reason"
     else
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+      record_runstep_followups_for_signal $files
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
@@ -777,6 +857,7 @@ EOF
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
+              clear_runstep_followup_for_task "$(window_to_task "$w" "$STATE")"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
             fi
