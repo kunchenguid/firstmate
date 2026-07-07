@@ -50,5 +50,20 @@ EOF
   pass "fm-ensure-agents-md.sh: promoted CLAUDE.md includes self-governance section"
 }
 
+test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
+  local repo agents before
+  repo="$TMP_ROOT/no-trailing-newline-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nRun tests with make test.' > "$repo/CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for newline-less CLAUDE.md promotion"
+  agents="$repo/AGENTS.md"
+  assert_grep "Run tests with make test." "$agents" \
+    "newline-less promotion lost or mangled the last content line"
+  before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
+  [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
+  pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
+}
+
 test_created_agents_md_includes_self_governance
 test_promoted_claude_md_includes_self_governance
+test_promoted_claude_md_without_trailing_newline_keeps_blank_separator

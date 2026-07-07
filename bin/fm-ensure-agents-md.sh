@@ -44,8 +44,16 @@ ensure_maintenance_section() {
   if grep -Fqx '## Maintaining this file' "$AGENTS"; then
     return 0
   fi
+  sep=''
+  if [ -s "$AGENTS" ]; then
+    if [ -n "$(tail -c 1 "$AGENTS")" ]; then
+      sep=$'\n\n'
+    else
+      sep=$'\n'
+    fi
+  fi
   {
-    printf '\n'
+    printf '%s' "$sep"
     write_maintenance_section
   } >> "$AGENTS"
 }
