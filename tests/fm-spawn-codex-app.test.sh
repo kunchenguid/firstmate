@@ -47,6 +47,10 @@ case "$verb" in
     ;;
   send-turn)
     prompt=$(arg_value --prompt-file "$@" || true)
+    cwd=$(arg_value --cwd "$@" || true)
+    if [ "${FM_FAKE_BRIDGE_WRITE_UNTRACKED:-0}" = 1 ] && [ -n "$cwd" ]; then
+      printf 'startup work\n' > "$cwd/startup-untracked.txt"
+    fi
     if [ "${FM_FAKE_BRIDGE_WRITE_STATUS:-0}" = 1 ]; then
       printf 'working: Codex thread started\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
     fi
@@ -206,6 +210,26 @@ test_send_codex_app_uses_recorded_task_gotmpdir() {
   pass "fm-send.sh: codex-app turns inherit the task GOTMPDIR"
 }
 
+test_send_codex_app_uses_recorded_task_cwd() {
+  local id case_dir out status log meta wt
+  id=codex-send-cwd-x9
+  case_dir=$(make_case send-cwd "$id")
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should succeed before send cwd verification: $out"
+  meta="$case_dir/home/state/$id.meta"
+  wt=$(meta_value "$meta" worktree)
+  : > "$case_dir/bridge.log"
+
+  out=$(run_send_case "$case_dir" "$id" "Run pwd." 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm-send should submit with recorded cwd to codex-app task: $out"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "fm-send should call bridge send-turn"
+  assert_contains "$log" $'--cwd\x1f'"$wt" "fm-send should pass the recorded codex-app cwd"
+  pass "fm-send.sh: codex-app turns inherit the task cwd"
+}
+
 test_spawn_codex_app_waits_past_old_return_channel_window() {
   local id case_dir out status meta
   id=codex-delayed-x5
@@ -300,6 +324,29 @@ test_spawn_codex_app_preserves_startup_state_when_archive_fails() {
   pass "fm-spawn.sh --backend codex-app: preserves startup resources when archive fails"
 }
 
+test_spawn_codex_app_preserves_dirty_startup_worktree() {
+  local id case_dir out status logical_wt wt project meta log
+  id=codex-startup-dirty-x10
+  case_dir=$(make_case startup-dirty "$id")
+  project="$case_dir/home/projects/app"
+  out=$(FM_FAKE_BRIDGE_WRITE_UNTRACKED=1 FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail when the status handshake is missing after startup worktree changes"
+  assert_contains "$out" "preserving worktree and state for manual recovery" "dirty startup cleanup should explain preserved resources"
+  logical_wt="$case_dir/home/projects/.firstmate-worktrees/$id"
+  meta="$case_dir/home/state/$id.meta"
+  assert_present "$logical_wt" "dirty startup cleanup should preserve the git worktree"
+  assert_present "$logical_wt/startup-untracked.txt" "dirty startup cleanup should preserve untracked work"
+  wt=$(cd "$logical_wt" && pwd -P)
+  git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
+    || fail "dirty startup cleanup should preserve the project worktree registration"
+  assert_present "$meta" "dirty startup cleanup should write recovery metadata"
+  [ "$(meta_value "$meta" thread_id)" = thread-spawn-123 ] || fail "dirty recovery meta should retain thread_id"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "dirty startup cleanup should still try to archive the Codex thread"
+  pass "fm-spawn.sh --backend codex-app: preserves dirty startup worktrees"
+}
+
 test_teardown_codex_app_archives_and_removes_git_worktree() {
   local id case_dir out status meta wt project log
   id=codex-teardown-x4
@@ -354,10 +401,12 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 
 test_spawn_codex_app_records_thread_and_worktree
 test_send_codex_app_uses_recorded_task_gotmpdir
+test_send_codex_app_uses_recorded_task_cwd
 test_spawn_codex_app_waits_past_old_return_channel_window
 test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge
 test_spawn_codex_app_requires_return_channel_status
 test_spawn_codex_app_preserves_startup_state_when_archive_fails
+test_spawn_codex_app_preserves_dirty_startup_worktree
 test_teardown_codex_app_archives_and_removes_git_worktree
 test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails

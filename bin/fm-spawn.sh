@@ -183,6 +183,7 @@ CODEX_CWD=
 CODEX_PROMPT_FILE=
 CODEX_ABORT_CLEANUP=0
 CODEX_WORKTREE_BRANCH=
+CODEX_WORKTREE_BASE=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -253,6 +254,25 @@ codex_app_write_abort_meta() {
   } > "$STATE/$ID.meta" 2>/dev/null || true
 }
 
+codex_app_startup_discard_safe() {
+  local base status_out head branch_head
+  [ "$WORKTREE_PROVIDER" = git-worktree ] || return 0
+  [ -n "${PROJ_ABS:-}" ] && [ -d "$PROJ_ABS" ] || return 1
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || return 1
+  base=${CODEX_WORKTREE_BASE:-}
+  [ -n "$base" ] || base=$(git -C "$PROJ_ABS" rev-parse HEAD 2>/dev/null) || return 1
+  git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  status_out=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$status_out" ] || return 1
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  [ "$head" = "$base" ] || return 1
+  if [ -n "${CODEX_WORKTREE_BRANCH:-}" ] && git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$CODEX_WORKTREE_BRANCH"; then
+    branch_head=$(git -C "$PROJ_ABS" rev-parse "refs/heads/$CODEX_WORKTREE_BRANCH" 2>/dev/null) || return 1
+    [ "$branch_head" = "$base" ] || return 1
+  fi
+  return 0
+}
+
 codex_app_spawn_abort_cleanup() {
   local status=${1:-$?} cleanup_failed=0
   [ "$CODEX_ABORT_CLEANUP" = 1 ] || return "$status"
@@ -264,7 +284,12 @@ codex_app_spawn_abort_cleanup() {
       return "$status"
     fi
   fi
-  if [ "$WORKTREE_PROVIDER" = git-worktree ] && [ -n "${PROJ_ABS:-}" ] && [ -d "$PROJ_ABS" ]; then
+  if [ "$WORKTREE_PROVIDER" = git-worktree ]; then
+    if ! codex_app_startup_discard_safe; then
+      echo "error: codex-app startup cleanup found worktree changes or unverified git state; preserving worktree and state for manual recovery" >&2
+      codex_app_write_abort_meta
+      return "$status"
+    fi
     if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
       git -C "$WT" checkout --detach -q 2>/dev/null || true
       git -C "$PROJ_ABS" worktree remove --force "$WT" >/dev/null 2>&1 || cleanup_failed=1
@@ -767,6 +792,10 @@ codex_app_create_git_worktree() {
   WT=$(cd "$path" && pwd -P)
   WORKTREE_PROVIDER=git-worktree
   CODEX_ABORT_CLEANUP=1
+  CODEX_WORKTREE_BASE=$(git -C "$WT" rev-parse HEAD) || {
+    echo "error: git worktree base cannot be resolved for codex-app task $ID" >&2
+    exit 1
+  }
 }
 
 codex_app_goal_text() {
@@ -838,7 +867,7 @@ codex_app_start_initial_turn() {
 }
 
 codex_app_wait_return_channel() {
-  local status_file="$STATE_REAL/$ID.status" i polls sleep_s
+  local status_file="$STATE_REAL/$ID.status" polls sleep_s
   polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
   sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
   for _ in $(seq 1 "$polls"); do

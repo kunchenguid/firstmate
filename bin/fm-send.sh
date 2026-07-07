@@ -72,17 +72,25 @@ esac
 # explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
 TARGET_TASKTMP=""
+TARGET_CODEX_CWD=""
 TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
+TARGET_META=""
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
-    if [ -f "$meta" ]; then
-      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
-      TARGET_TASKTMP=$(fm_meta_get "$meta" tasktmp)
-    fi
+    [ -f "$meta" ] && TARGET_META=$meta
     ;;
 esac
+if [ -z "$TARGET_META" ]; then
+  TARGET_META=$(fm_backend_meta_for_window "$T" "$STATE" 2>/dev/null || true)
+fi
+if [ -n "$TARGET_META" ]; then
+  TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+  TARGET_TASKTMP=$(fm_meta_get "$TARGET_META" tasktmp)
+  TARGET_CODEX_CWD=$(fm_meta_get "$TARGET_META" codex_cwd)
+  [ -n "$TARGET_CODEX_CWD" ] || TARGET_CODEX_CWD=$(fm_meta_get "$TARGET_META" worktree)
+fi
 
 if [ "${1:-}" = "--key" ]; then
   fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"
@@ -106,8 +114,13 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  if [ "$TARGET_BACKEND" = codex-app ] && [ -n "$TARGET_TASKTMP" ]; then
-    verdict=$(GOTMPDIR="$TARGET_TASKTMP/gotmp" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+  if [ "$TARGET_BACKEND" = codex-app ]; then
+    [ -n "$TARGET_CODEX_CWD" ] || { echo "error: no codex-app cwd recorded for $RAW_TARGET; refusing to send without an isolated worktree" >&2; exit 1; }
+    if [ -n "$TARGET_TASKTMP" ]; then
+      verdict=$(GOTMPDIR="$TARGET_TASKTMP/gotmp" FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+    else
+      verdict=$(FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+    fi
   else
     verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
   fi
