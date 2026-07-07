@@ -140,7 +140,7 @@ the two never run their triage at the same time.
 Classify each wake this way:
 
 - `signal` whose status content has no captain-relevant verb
-  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
+  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged|unattributed-merge`)
   -> self-handle. Captain-relevant verb -> escalate.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:

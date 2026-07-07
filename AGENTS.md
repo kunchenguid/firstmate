@@ -93,8 +93,8 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, and x_followups= for an X-mention-originated task (section 14)
-  <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr=, GitHub's pr_head= when available, and pr_checks=; fm-pr-merge records the merged_by_firstmate=, merged_ts=, and best-effort merged_commit= merge-attribution fields (section 7); fm-x-link appends x_request=, x_request_ts=, and x_followups= for an X-mention-originated task (section 14)
+  <id>.check.sh      per-task slow poll; fm-pr-check generates the merge-attribution check for a ship PR, or write your own
   <id>.merge-seen <id>.merge-hb-surfaced   merge-attribution alarm dedupe markers (last check.sh outcome; heartbeat-surfaced PR URL); removed by teardown; never touch
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -578,8 +578,8 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 
 ### PR ready
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports the honest CI-posture done line from Validate after CI resolves, while `direct-PR` reports `done: PR <url>` after opening the PR.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=`, GitHub's `pr_head=` when available, and `pr_checks=` in the task's meta and arms the watcher's merge-attribution poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
