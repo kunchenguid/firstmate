@@ -34,7 +34,7 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A codex-app spawn requires the `codex` CLI, `node`, and `harness=codex`; it starts a Codex Desktop thread through `bin/fm-codex-bridge`, validates the returned thread cwd, and refuses to supervise the task unless the thread writes the expected status-file return-channel line.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
-When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it checks for `codex`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Codex Desktop owns the visible endpoint and Firstmate creates a git worktree itself.
+When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it checks for `codex` with `app-server` support, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Codex Desktop owns the visible endpoint and Firstmate creates a git worktree itself.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -144,7 +144,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
-When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it requires `codex`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
+When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it requires `codex` with `app-server` support, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.

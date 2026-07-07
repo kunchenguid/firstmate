@@ -201,6 +201,10 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+codex_supports_app_server() {
+  codex app-server --help >/dev/null 2>&1
+}
+
 tool_required() {
   case " $TOOLS " in
     *" $1 "*) return 0 ;;
@@ -409,6 +413,9 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
+if [ "$BACKEND" = codex-app ] && command -v codex >/dev/null 2>&1 && ! codex_supports_app_server; then
+  echo "MISSING: codex app-server (install: $(install_cmd codex))"
+fi
 if tool_required treehouse && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi

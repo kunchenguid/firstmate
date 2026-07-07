@@ -80,6 +80,19 @@ SH
   chmod +x "$fakebin/codex"
 }
 
+add_fake_codex_without_app_server() {
+  local fakebin=$1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = app-server ]; then
+  printf '%s\n' 'error: unrecognized subcommand app-server' >&2
+  exit 2
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
 add_real_jq() {
   local fakebin=$1 real_jq
   real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
@@ -203,8 +216,9 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
 }
 
 test_codex_app_backend_gates_codex_cli_only_when_selected() {
-  local case_dir fakebin out missing_codex
+  local case_dir fakebin out missing_codex missing_app_server
   missing_codex="MISSING: codex (install: brew install codex  # or install the Codex CLI from OpenAI)"
+  missing_app_server="MISSING: codex app-server (install: brew install codex  # or install the Codex CLI from OpenAI)"
 
   case_dir="$TMP_ROOT/codex-app-backend-missing-cli"
   mkdir -p "$case_dir/home/config"
@@ -214,6 +228,25 @@ test_codex_app_backend_gates_codex_cli_only_when_selected() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_codex" ] || fail "backend=codex-app should require the Codex CLI, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-backend-missing-app-server"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex_without_app_server "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_app_server" ] || fail "backend=codex-app should require Codex app-server support, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-env-backend-missing-app-server"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex_without_app_server "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=codex-app FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_app_server" ] || fail "FM_BACKEND=codex-app should require Codex app-server support, got: $out"
 
   case_dir="$TMP_ROOT/codex-app-backend-selected"
   mkdir -p "$case_dir/home/config"

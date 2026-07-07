@@ -258,7 +258,7 @@ FM_BACKEND=codex-app
 No runtime auto-detection in the first pass.
 Running inside Codex Desktop is common for the primary supervisor, but auto-selecting the backend would surprise users who still want tmux, herdr, zellij, or cmux from inside Codex.
 
-When `backend=codex-app` is selected, bootstrap requires `codex`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
+When `backend=codex-app` is selected, bootstrap requires `codex`, `codex app-server --help`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
 It intentionally skips `tmux` and `treehouse` for this backend because Codex Desktop owns the visible thread and Firstmate uses a plain git worktree.
 It also skips Treehouse compatibility probes when Treehouse is not in the selected required-tool set.
 
@@ -282,7 +282,7 @@ Implemented tests:
 - `fm-peek.sh` routes to recent thread turns.
 - Teardown archives only after existing safety checks pass.
 - Teardown archives before removing the git worktree and preserves state when archive fails.
-- Bootstrap requires the Codex CLI for `backend=codex-app` and does not require tmux or Treehouse.
+- Bootstrap requires a Codex CLI with `app-server` support for `backend=codex-app` and does not require tmux or Treehouse.
 
 ## Implementation touch points
 
@@ -299,7 +299,7 @@ The higher-risk implementation areas are:
 - `bin/fm-watch.sh`: rely on semantic `busy` and `idle` from `fm_backend_busy_state`; deeper notification integration is deferred.
 - `bin/fm-crew-state.sh`: keep using the backend dispatcher; richer Codex-specific state can be added later if needed.
 - `bin/fm-teardown.sh`: rely on existing landed-work checks, then map endpoint removal to thread archive.
-- `bin/fm-bootstrap.sh`: require the Codex CLI only when `backend=codex-app` is selected.
+- `bin/fm-bootstrap.sh`: require a Codex CLI with `app-server` support only when `backend=codex-app` is selected.
 
 The implementation should avoid adding `codex-app` special cases to `fm-send.sh` and `fm-peek.sh` unless the generic dispatcher proves insufficient.
 
