@@ -694,10 +694,14 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   case "$stripped" in
     '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
-  # Strip a leading prompt glyph before judging what remains.
+  # Strip a leading prompt glyph before judging what remains. '❯' and '›'
+  # are multi-byte, so strip them as literals: a ? glob counts bytes under
+  # a C/POSIX locale and would leave a stray byte behind. The trim below
+  # eats any space that followed the glyph.
+  stripped=${stripped#'❯'}
+  stripped=${stripped#'›'}
   case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
