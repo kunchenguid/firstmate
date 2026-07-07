@@ -17,12 +17,11 @@ The current supported shape is Desktop host-tool choreography plus an explicit s
 
 ## Boundary
 
-- Codex App visible threads are not a Firstmate shell backend unless Firstmate has a supported shell-callable Codex Desktop bridge for create, send, read, and archive.
-- Do not set `FM_BACKEND=codex-app`, write `config/backend=codex-app`, or pass `--backend codex-app` on upstream Firstmate.
-- Do not create a manual ledger and call it observation.
-- The Desktop thread transcript, `read_thread`, and the actual status file are the evidence.
-- If `docs/codex-app-backend.md` exists in this checkout, read it before proposing backend code.
-- If local/private helper scripts exist for Codex App, treat them as machine-local extensions and verify their `--help` before using them.
+Codex Desktop visible threads are companion host-tool workflows, not a selectable Firstmate backend.
+Read `docs/codex-app-backend.md` when it exists in this checkout; that document owns the acceptance contract, bridge requirement, status-return requirement, and staged rollout.
+
+If local helper scripts exist for Codex App work, use only helpers explicitly provided by the operator or maintained by Firstmate.
+For helpers outside `bin/`, inspect the source or header before running `--help`.
 
 ## Preflight
 
@@ -97,8 +96,8 @@ Summarize only the host-tool calls, the status-file result, and the archive resu
 Archive through the Desktop host tool: `archive` when that is the exposed primitive, or `set_thread_archived(threadId=<id>, archived=true)` when that is the exposed tool name.
 Archiving can remove the thread from normal sidebar/project views, but it should not erase the transcript or landed work.
 
-Do not run Firstmate teardown for a Codex App thread unless there is a real Firstmate task record and the work is landed under the normal teardown rules.
 For companion threads, archive the thread and report where the durable work landed.
+If there is a real Firstmate task record, leave teardown decisions to the normal Firstmate task flow instead of this skill.
 
 ## Failure Signals
 
@@ -106,4 +105,4 @@ For companion threads, archive the thread and report where the durable work land
 - Missing host tools: do not simulate them with shell files; use a terminal backend instead.
 - Status file not updated: treat the thread as unsupervised until the return channel is proven.
 - Worker editing the saved project checkout instead of its Desktop cwd: stop and decide whether to salvage the branch before continuing.
-- A request to implement `codex-app` as a backend without a shell-callable bridge: point to the bridge requirement and do not ship a fake adapter.
+- Production `codex-app` backend request: read `docs/codex-app-backend.md` and do not invent a local adapter.
