@@ -66,13 +66,17 @@ fm_backend_codex_app_capture() {  # <thread-id> <lines> [expected-label]
 }
 
 fm_backend_codex_app_send_text_submit() {  # <thread-id> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local thread_id=$1 text=$2 bridge tmp cwd args
+  local thread_id=$1 text=$2 bridge tmp cwd model effort args
   fm_backend_codex_app_tool_check || { printf 'send-failed'; return 0; }
   bridge=$(fm_backend_codex_app_bridge)
   cwd=${FM_CODEX_APP_CWD:-}
+  model=${FM_CODEX_APP_MODEL:-}
+  effort=${FM_CODEX_APP_EFFORT:-}
   tmp=$(fm_backend_codex_app_prompt_tmp "$text") || { printf 'send-failed'; return 0; }
   args=(send-turn --thread-id "$thread_id" --prompt-file "$tmp")
   [ -z "$cwd" ] || args+=(--cwd "$cwd")
+  [ -z "$model" ] || [ "$model" = default ] || args+=(--model "$model")
+  [ -z "$effort" ] || [ "$effort" = default ] || args+=(--effort "$effort")
   if "$bridge" "${args[@]}" >/dev/null; then
     rm -f "$tmp"
     printf 'empty'

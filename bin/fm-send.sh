@@ -73,6 +73,8 @@ esac
 TARGET_HARNESS=""
 TARGET_TASKTMP=""
 TARGET_CODEX_CWD=""
+TARGET_MODEL=""
+TARGET_EFFORT=""
 TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 TARGET_META=""
@@ -90,6 +92,8 @@ if [ -n "$TARGET_META" ]; then
   TARGET_TASKTMP=$(fm_meta_get "$TARGET_META" tasktmp)
   TARGET_CODEX_CWD=$(fm_meta_get "$TARGET_META" codex_cwd)
   [ -n "$TARGET_CODEX_CWD" ] || TARGET_CODEX_CWD=$(fm_meta_get "$TARGET_META" worktree)
+  TARGET_MODEL=$(fm_meta_get "$TARGET_META" model)
+  TARGET_EFFORT=$(fm_meta_get "$TARGET_META" effort)
 fi
 
 if [ "${1:-}" = "--key" ]; then
@@ -117,9 +121,9 @@ else
   if [ "$TARGET_BACKEND" = codex-app ]; then
     [ -n "$TARGET_CODEX_CWD" ] || { echo "error: no codex-app cwd recorded for $RAW_TARGET; refusing to send without an isolated worktree" >&2; exit 1; }
     if [ -n "$TARGET_TASKTMP" ]; then
-      verdict=$(GOTMPDIR="$TARGET_TASKTMP/gotmp" FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+      verdict=$(GOTMPDIR="$TARGET_TASKTMP/gotmp" FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" FM_CODEX_APP_MODEL="$TARGET_MODEL" FM_CODEX_APP_EFFORT="$TARGET_EFFORT" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
     else
-      verdict=$(FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
+      verdict=$(FM_CODEX_APP_CWD="$TARGET_CODEX_CWD" FM_CODEX_APP_MODEL="$TARGET_MODEL" FM_CODEX_APP_EFFORT="$TARGET_EFFORT" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")
     fi
   else
     verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL")

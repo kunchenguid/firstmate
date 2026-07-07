@@ -230,6 +230,25 @@ test_send_codex_app_uses_recorded_task_cwd() {
   pass "fm-send.sh: codex-app turns inherit the task cwd"
 }
 
+test_send_codex_app_uses_recorded_task_model_and_effort() {
+  local id case_dir out status log
+  id=codex-send-profile-x10
+  case_dir=$(make_case send-profile "$id")
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" --model gpt-5.5 --effort xhigh 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should succeed before send model/effort verification: $out"
+  : > "$case_dir/bridge.log"
+
+  out=$(run_send_case "$case_dir" "$id" "Use the recorded profile." 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm-send should submit with recorded model/effort to codex-app task: $out"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "fm-send should call bridge send-turn"
+  assert_contains "$log" $'--model\x1fgpt-5.5' "fm-send should pass the recorded codex-app model"
+  assert_contains "$log" $'--effort\x1fxhigh' "fm-send should pass the recorded codex-app effort"
+  pass "fm-send.sh: codex-app turns inherit the task model and effort"
+}
+
 test_spawn_codex_app_waits_past_old_return_channel_window() {
   local id case_dir out status meta
   id=codex-delayed-x5
@@ -402,6 +421,7 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 test_spawn_codex_app_records_thread_and_worktree
 test_send_codex_app_uses_recorded_task_gotmpdir
 test_send_codex_app_uses_recorded_task_cwd
+test_send_codex_app_uses_recorded_task_model_and_effort
 test_spawn_codex_app_waits_past_old_return_channel_window
 test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge

@@ -78,9 +78,21 @@ function numericOption(value, name, fallback) {
   return parsed;
 }
 
-function statusFileContainsLine(file, expectedLine) {
+function statusFileOffset(file) {
+  if (!file) return 0;
   try {
-    const text = fs.readFileSync(file, "utf8");
+    return fs.statSync(file).size;
+  } catch (err) {
+    if (err && err.code === "ENOENT") return 0;
+    throw new Error(`cannot stat status file ${file}: ${err.message}`);
+  }
+}
+
+function statusFileContainsLine(file, expectedLine, startOffset = 0) {
+  try {
+    const buffer = fs.readFileSync(file);
+    const offset = buffer.length < startOffset ? 0 : startOffset;
+    const text = buffer.subarray(offset).toString("utf8");
     return text.split(/\r?\n/).some(line => line === expectedLine);
   } catch (err) {
     if (err && err.code === "ENOENT") return false;
@@ -113,7 +125,7 @@ function statusWaitBudgetMs(opts) {
   return Math.max(0, polls - 1) * sleepMs;
 }
 
-async function waitForStatusFile(threadId, opts) {
+async function waitForStatusFile(threadId, opts, startOffset = 0) {
   const file = opts["wait-status-file"];
   if (!file) return;
   const expectedLine = opts["wait-status-line"] || "working: Codex thread started";
@@ -128,7 +140,7 @@ async function waitForStatusFile(threadId, opts) {
     process.env.FM_CODEX_APP_RETURN_CHANNEL_SLEEP || "0.25",
   ) * 1000);
   for (let i = 0; i < polls; i += 1) {
-    if (statusFileContainsLine(file, expectedLine)) return;
+    if (statusFileContainsLine(file, expectedLine, startOffset)) return;
     if (i + 1 < polls && sleepMs > 0) await delay(sleepMs);
   }
   throw new Error(`Codex thread ${threadId} did not write return-channel status to ${file}`);
@@ -485,8 +497,9 @@ async function sendTurnWorker(opts, readyFile) {
   let reportedReady = false;
   return withServer(async server => {
     try {
+      const statusStartOffset = statusFileOffset(opts["wait-status-file"]);
       const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
-      await waitForStatusFile(threadId, opts);
+      await waitForStatusFile(threadId, opts, statusStartOffset);
       const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };
       writeJsonFile(readyFile, ready);
       reportedReady = true;

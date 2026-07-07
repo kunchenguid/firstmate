@@ -291,6 +291,26 @@ test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
   pass "fm-codex-bridge: send-turn ready timeout covers slow pre-ready requests"
 }
 
+test_bridge_send_turn_rejects_stale_status_line() {
+  local dir fb log prompt status_file out status
+  dir="$TMP_ROOT/bridge-turn-stale-status"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  status_file="$dir/status.log"
+  printf 'Start from a stale status file, captain.\n' > "$prompt"
+  printf 'working: Codex thread started\n' > "$status_file"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_CODEX_APP_RETURN_CHANNEL_POLLS=3 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=1 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "bridge send-turn should reject a status line that predates the current turn"
+  assert_contains "$out" "did not write return-channel status" "stale status failure should name the missing fresh return-channel write"
+  assert_contains "$(cat "$log")" $'request\tturn/start\t' "stale status case should still start the current turn"
+  pass "fm-codex-bridge: send-turn ignores stale return-channel status lines"
+}
+
 test_bridge_start_thread_requires_reported_cwd() {
   local dir fb log out status
   dir="$TMP_ROOT/bridge-start-missing-cwd"
@@ -404,6 +424,7 @@ test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
+test_bridge_send_turn_rejects_stale_status_line
 test_bridge_start_thread_requires_reported_cwd
 test_bridge_turns_list_renders_chronological_text_from_desc_response
 test_bridge_start_thread_returns_id_when_metadata_calls_fail
