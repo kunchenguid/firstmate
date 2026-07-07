@@ -174,6 +174,32 @@ EOF
   pass "stays silent when only busy, future, blocked, or secondmate work exists"
 }
 
+test_pr_ready_task_not_flagged() {
+  local dir out capture
+  dir=$(make_case prready)
+  capture="$dir/capture.txt"
+  cat > "$dir/data/backlog.md" <<'EOF'
+## In flight
+- [ ] pr-ready-p1 - awaiting captain merge (repo: firstmate)
+
+## Queued
+
+## Done
+EOF
+  cat > "$dir/state/pr-ready-p1.meta" <<'EOF'
+window=fm-pr-ready-p1
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/9
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/9 checks green' > "$dir/state/pr-ready-p1.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/pr-ready-p1.status" 2>/dev/null || touch -t 200001010000 "$dir/state/pr-ready-p1.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "pr-ready check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for PR-ready parked task, got: $out"
+  pass "does not flag a task parked awaiting captain merge (pr= in meta)"
+}
+
 test_guard_surfaces_stall_pointer() {
   local dir err
   dir=$(make_case guard)
@@ -202,4 +228,5 @@ test_unblocked_parked_item
 test_date_gate_ready
 test_idle_stall_candidate
 test_silent_when_clear_and_secondmate_skip
+test_pr_ready_task_not_flagged
 test_guard_surfaces_stall_pointer

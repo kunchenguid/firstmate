@@ -148,6 +148,13 @@ kind_for_meta() {
   printf '%s\n' "$kind"
 }
 
+# A task whose meta records pr= is a PR-ready task parked awaiting the captain's
+# merge; its advancement is already tracked by the merge poll fm-pr-check armed,
+# so it is externally supervised, not dormant. Skip it in both stall checks.
+meta_has_pr() { # <id>
+  grep -q '^pr=' "$STATE/$1.meta" 2>/dev/null
+}
+
 check_finished_not_advanced() {
   local inflight terminal id
   inflight=$(in_flight_ids)
@@ -156,6 +163,7 @@ check_finished_not_advanced() {
   [ -n "$terminal" ] || return 0
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    meta_has_pr "$id" && continue
     if is_in_set "$id" "$inflight"; then
       printf 'advance: %s - done but still in-flight; next leg not triggered\n' "$id"
     fi
@@ -196,6 +204,7 @@ check_idle_stalls() {
     id=$(basename "$meta" .meta)
     kind=$(kind_for_meta "$meta")
     [ "$kind" = secondmate ] && continue
+    meta_has_pr "$id" && continue
     status="$STATE/$id.status"
     [ -f "$status" ] || continue
     m=$(stat_mtime "$status") || continue
@@ -213,7 +222,16 @@ check_idle_stalls() {
   done
 }
 
+# --fast skips check_idle_stalls, the only detection that spawns a tmux peek per
+# in-flight pane. fm-guard runs in this mode on the hot supervision path, where
+# it only needs the presence of a finding from the cheap backlog/state reads; a
+# full sweep (including the pane peeks) still runs at heartbeats and wakes.
+FAST=false
+case "${1:-}" in
+  --fast) FAST=true ;;
+esac
+
 check_finished_not_advanced
 check_unblocked_queued
 check_date_gates
-check_idle_stalls
+"$FAST" || check_idle_stalls
