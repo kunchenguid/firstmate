@@ -159,8 +159,9 @@ First pass spawn flow:
 9. Set the thread goal to the Firstmate task objective.
 10. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
 11. Start the initial prompt turn through `send-turn`.
-12. Verify the return channel before treating the thread as supervised.
-13. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
+12. Keep the app-server process alive inside `send-turn` until the return channel writes the expected status line.
+13. Verify the return channel before treating the thread as supervised.
+14. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`.
 
 The return-channel verification is load-bearing.
 The worker prompt must instruct the Codex thread to append:
@@ -172,6 +173,7 @@ working: Codex thread started
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits up to 60 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
+The startup `send-turn` call receives that same file, expected line, and timeout budget so the bridge does not close the Codex app-server stdio process while the first turn is still producing the handshake.
 If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
 
 ## Send and steer flow

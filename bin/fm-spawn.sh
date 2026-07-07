@@ -821,11 +821,15 @@ codex_app_start_thread() {
 }
 
 codex_app_start_initial_turn() {
-  local bridge
+  local bridge polls sleep_s status_file
   bridge=$(fm_backend_codex_app_bridge)
+  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
+  sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
+  status_file="$STATE_REAL/$ID.status"
   CODEX_TURN_ARGS=(send-turn --thread-id "$CODEX_THREAD_ID" --prompt-file "$CODEX_PROMPT_FILE" --cwd "$WT")
   [ -z "$MODEL" ] || CODEX_TURN_ARGS+=(--model "$MODEL")
   [ -z "$EFFORT" ] || CODEX_TURN_ARGS+=(--effort "$EFFORT")
+  CODEX_TURN_ARGS+=(--wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' --wait-status-polls "$polls" --wait-status-sleep "$sleep_s")
   "$bridge" "${CODEX_TURN_ARGS[@]}" >/dev/null || exit 1
 }
 

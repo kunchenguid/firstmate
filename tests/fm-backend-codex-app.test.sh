@@ -18,6 +18,8 @@ const log = process.env.FM_FAKE_CODEX_LOG;
 const threadId = process.env.FM_FAKE_CODEX_THREAD_ID || "thread-123";
 const turnId = process.env.FM_FAKE_CODEX_TURN_ID || "turn-456";
 const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
+const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
+const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
 function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -56,6 +58,11 @@ rl.on("line", line => {
     write({ id, result: {} });
   } else if (msg.method === "turn/start") {
     write({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } });
+    if (statusFile) {
+      setTimeout(() => {
+        fs.appendFileSync(statusFile, "working: Codex thread started\n");
+      }, statusDelayMs);
+    }
   } else if (msg.method === "thread/read") {
     write({ id, result: { thread: thread(cwd, process.env.FM_FAKE_CODEX_STATUS || "idle") } });
   } else if (msg.method === "thread/turns/list") {
@@ -187,6 +194,25 @@ test_bridge_start_thread_uses_app_server_stdio() {
   pass "fm-codex-bridge: start-thread normalizes thread cwd before send-turn starts the first turn"
 }
 
+test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
+  local dir fb log prompt status_file out status
+  dir="$TMP_ROOT/bridge-turn-lifecycle"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  status_file="$dir/status.log"
+  printf 'Write the return-channel line, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_STATUS_DELAY_MS=200 FM_CODEX_APP_RETURN_CHANNEL_POLLS=40 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.05 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should keep app-server alive until the status file handshake: $out"
+  assert_grep "working: Codex thread started" "$status_file" "bridge should wait for the app-server-driven status write"
+  assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
+  pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
+}
+
 test_backend_dispatch_accepts_codex_app() {
   local dir bridge log out status
   dir="$TMP_ROOT/backend-dispatch"
@@ -220,5 +246,6 @@ test_backend_capture_send_busy_exists_and_kill_route_to_bridge() {
 }
 
 test_bridge_start_thread_uses_app_server_stdio
+test_bridge_send_turn_keeps_app_server_alive_until_return_channel
 test_backend_dispatch_accepts_codex_app
 test_backend_capture_send_busy_exists_and_kill_route_to_bridge

@@ -17,7 +17,7 @@ function usage() {
   console.error(`usage:
   fm-codex-bridge ensure-running
   fm-codex-bridge start-thread --cwd <path> --name <name> --goal <text> [--model <model>]
-  fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>]
+  fm-codex-bridge send-turn --thread-id <id> --prompt-file <file> [--cwd <path>] [--model <model>] [--effort <effort>] [--wait-status-file <file>] [--wait-status-line <line>] [--wait-status-polls <n>] [--wait-status-sleep <seconds>]
   fm-codex-bridge read-thread --thread-id <id> [--include-turns]
   fm-codex-bridge thread-status --thread-id <id>
   fm-codex-bridge turns-list --thread-id <id> [--limit <n>] [--items-view summary|full|notLoaded]
@@ -65,6 +65,50 @@ function readPrompt(file) {
   } catch (err) {
     throw new Error(`cannot read prompt file ${file}: ${err.message}`);
   }
+}
+
+function numericOption(value, name, fallback) {
+  const raw = value == null || value === "" ? fallback : value;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative number`);
+  }
+  return parsed;
+}
+
+function statusFileContainsLine(file, expectedLine) {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    return text.split(/\r?\n/).some(line => line === expectedLine);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return false;
+    throw new Error(`cannot read status file ${file}: ${err.message}`);
+  }
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForStatusFile(threadId, opts) {
+  const file = opts["wait-status-file"];
+  if (!file) return;
+  const expectedLine = opts["wait-status-line"] || "working: Codex thread started";
+  const polls = Math.max(1, Math.floor(numericOption(
+    opts["wait-status-polls"],
+    "--wait-status-polls",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+  )));
+  const sleepMs = Math.round(numericOption(
+    opts["wait-status-sleep"],
+    "--wait-status-sleep",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_SLEEP || "0.25",
+  ) * 1000);
+  for (let i = 0; i < polls; i += 1) {
+    if (statusFileContainsLine(file, expectedLine)) return;
+    if (i + 1 < polls && sleepMs > 0) await delay(sleepMs);
+  }
+  throw new Error(`Codex thread ${threadId} did not write return-channel status to ${file}`);
 }
 
 function statusType(status) {
@@ -296,6 +340,7 @@ async function sendTurn(opts) {
   const prompt = readPrompt(requireOpt(opts, "prompt-file"));
   return withServer(async server => {
     const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
+    await waitForStatusFile(threadId, opts);
     return { ok: true, thread_id: threadId, turn };
   });
 }

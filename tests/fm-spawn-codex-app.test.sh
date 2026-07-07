@@ -147,6 +147,7 @@ test_spawn_codex_app_records_thread_and_worktree() {
   assert_contains "$log" "ensure-running" "spawn should verify the bridge before starting"
   assert_contains "$log" $'start-thread\x1f--cwd\x1f' "spawn should call start-thread with a cwd"
   assert_contains "$log" $'send-turn\x1f--thread-id\x1fthread-spawn-123' "spawn should start the prompt turn after thread validation"
+  assert_contains "$log" $'--wait-status-file\x1f' "spawn should keep the bridge alive for return-channel verification"
   prompt="$case_dir/bridge.log.prompt"
   assert_grep "working: Codex thread started" "$prompt" "spawn prompt should include the return-channel line"
   assert_contains "$out" "spawned $id harness=codex kind=ship" "spawn output should keep the normal summary shape"
