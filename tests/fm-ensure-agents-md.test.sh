@@ -59,6 +59,8 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
   agents="$repo/AGENTS.md"
   assert_grep "Run tests with make test." "$agents" \
     "newline-less promotion lost or mangled the last content line"
+  assert_grep "## Maintaining this file" "$agents" \
+    "newline-less promotion did not append the self-governance section"
   before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
   [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
   pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
