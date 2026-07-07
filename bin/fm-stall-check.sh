@@ -194,12 +194,12 @@ EOF
 }
 
 check_unblocked_queued() {
-  local done id blocker
-  done=$( done_ids; archive_done_ids )
-  [ -n "$done" ] || return 0
+  local done_set id blocker
+  done_set=$( done_ids; archive_done_ids )
+  [ -n "$done_set" ] || return 0
   queued_blockers | while IFS=$(printf '\t') read -r id blocker; do
     [ -n "$id" ] || continue
-    if is_in_set "$blocker" "$done"; then
+    if is_in_set "$blocker" "$done_set"; then
       printf 'ready: %s - blocker %s is done; dispatchable\n' "$id" "$blocker"
     fi
   done
