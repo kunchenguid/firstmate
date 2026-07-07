@@ -443,6 +443,7 @@ test_backend_name_explicit_beats_detection() {
 
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
+  fm_backend_validate wezterm 2>/dev/null || fail "fm_backend_validate should accept wezterm"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
   local out
   # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
@@ -484,6 +485,7 @@ test_backend_source_shell_portable() {
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
+  fm_backend_validate_spawn wezterm 2>/dev/null || fail "fm_backend_validate_spawn should accept wezterm"
   fm_backend_validate_spawn herdr 2>/dev/null || fail "fm_backend_validate_spawn should accept herdr"
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
@@ -514,35 +516,49 @@ test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
   fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
-
-  [ "$(fm_backend_resolve_selector 'sess:win' "$state")" = "sess:win" ] \
-    || fail "explicit session:window should be used as-is"
-
-  [ "$(fm_backend_resolve_selector 'fm-task1' "$state")" = "firstmate:fm-task1" ] \
-    || fail "fm-<id> should resolve through meta's window="
-
-  out=$(fm_backend_resolve_selector 'fm-missing' "$state" 2>&1) && fail "fm-<id> with no meta should fail"
-  assert_contains "$out" "no metadata for fm-missing" "missing-meta error text changed"
-
   fakebin="$TMP_ROOT/resolve-fakebin"; mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf 'firstmate:adhoc\nother:otherwin\n' ;;
+  list-windows)
+    printf '%s\n' 'firstmate:adhoc' 'firstmate:other'
+    exit 0
+    ;;
 esac
-exit 0
+exit 2
 SH
   chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'fm-adhoc' "$state" 2>&1) || true
+
+  [ "$(fm_backend_resolve_selector 'sess:win' "$state")" = "sess:win" ] \
+    || fail "explicit session:window should be used as-is"
+
+  [ "$(fm_backend_resolve_selector 'wezterm:main' "$state")" = "wezterm:main" ] \
+    || fail "explicit tmux session:window targets that start with wezterm: should be used as-is"
+
+  [ "$(fm_backend_resolve_selector 'fm-task1' "$state")" = "firstmate:fm-task1" ] \
+    || fail "fm-<id> should resolve through meta's window="
+
+  fm_write_meta "$state/tmux-wezterm-shaped.meta" "window=wezterm:main"
+  [ "$(fm_backend_resolve_selector 'fm-tmux-wezterm-shaped' "$state")" = "wezterm:main" ] \
+    || fail "tmux metadata targets that start with wezterm: should stay legal"
+
+  fm_write_meta "$state/bad-wezterm.meta" "window=wezterm:not-a-pane" "backend=wezterm"
+  out=$(fm_backend_resolve_selector 'fm-bad-wezterm' "$state" 2>&1) && fail "fm-<id> resolving to a malformed wezterm target should fail"
+  assert_contains "$out" "invalid WezTerm target" "malformed resolved wezterm target error text changed"
+
+  out=$(fm_backend_resolve_selector 'fm-missing' "$state" 2>&1) && fail "fm-<id> with no meta should fail"
+  assert_contains "$out" "no metadata for fm-missing" "missing-meta error text changed"
+
+  out=$(fm_backend_resolve_selector 'fm-adhoc' "$state" 2>&1) || true
   # fm-adhoc carries no meta file, so it is NOT the bare-name fallback path - it
   # is the fm-* meta-miss error path (a bare fm-* selector always routes through
-  # meta; only a NON fm-* bare name falls through to the live-window search).
+  # meta; non fm-* bare names use the tmux live-inventory fallback).
   assert_contains "$out" "no metadata for fm-adhoc" "an fm-* selector must always require meta, not silently fall back to a live search"
 
-  out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")
-  [ "$out" = "firstmate:adhoc" ] || fail "an ad hoc bare name should resolve via the tmux live-window fallback, got '$out'"
+  [ "$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")" = "firstmate:adhoc" ] \
+    || fail "ad hoc bare selector should resolve through the legacy tmux live inventory"
 
-  pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via tmux list-windows"
+  pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta, and ad hoc bare names use the tmux fallback"
 }
 
 test_backend_of_selector_matches_explicit_target_meta() {
@@ -552,6 +568,7 @@ test_backend_of_selector_matches_explicit_target_meta() {
   fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
   fm_write_meta "$state/custom-window-task.meta" "window=custom-window"
   fm_write_meta "$state/orca-task.meta" "window=fm-orca-task" "terminal=term-orca-task" "backend=orca"
+  fm_write_meta "$state/wezterm-task.meta" "window=wezterm:55" "backend=wezterm"
 
   [ "$(fm_backend_of_selector 'fm-herdr-task' 'default:w1:p2' "$state")" = herdr ] \
     || fail "bare fm-<id> selector should use its recorded backend"
@@ -565,12 +582,55 @@ test_backend_of_selector_matches_explicit_target_meta() {
     || fail "matching an explicit Orca terminal handle should inherit metadata backend"
   [ "$(fm_backend_of_selector 'default:w1:p2' 'default:w1:p2' "$state")" = herdr ] \
     || fail "explicit backend target matching metadata should use that task's backend"
+  [ "$(fm_backend_of_selector 'wezterm:55' 'wezterm:55' "$state")" = wezterm ] \
+    || fail "explicit WezTerm pane targets matching metadata should inherit the wezterm backend"
+  [ "$(fm_backend_of_selector 'wezterm:not-a-pane' 'wezterm:not-a-pane' "$state")" = tmux ] \
+    || fail "wezterm-shaped selectors without metadata should keep the tmux compatibility default"
+  [ "$(fm_backend_of_selector 'fm-tmux-task' 'wezterm:not-a-pane' "$state")" = tmux ] \
+    || fail "tmux metadata should allow wezterm-shaped resolved targets"
   [ "$(fm_backend_of_selector 'firstmate:fm-tmux-task' 'firstmate:fm-tmux-task' "$state")" = tmux ] \
     || fail "explicit tmux-shaped target with absent backend= should default to tmux"
   [ "$(fm_backend_of_selector 'manual:outside' 'manual:outside' "$state")" = tmux ] \
     || fail "explicit target with no matching metadata should keep the tmux compatibility default"
 
   pass "fm_backend_of_selector: fm-<id> and matching explicit targets inherit metadata backend"
+}
+
+test_wezterm_shaped_targets_keep_explicit_backend_namespace() {
+  local fb=$TMP_ROOT/wezterm-shaped-dispatch-fakebin log=$TMP_ROOT/wezterm-shaped-dispatch.log out status
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TMUX_LOG:?}"
+exit 0
+SH
+  chmod +x "$fb/tmux"
+
+  out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$log" fm_backend_send_key tmux 'wezterm:not-a-pane' Escape 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "explicit tmux send target that starts with wezterm: should pass through: $out"
+
+  out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$log" fm_backend_capture tmux 'wezterm:not-a-pane' 5 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "explicit tmux capture target that starts with wezterm: should pass through: $out"
+
+  out=$(PATH="$fb:$PATH" FM_TMUX_LOG="$log" fm_backend_kill tmux 'wezterm:not-a-pane' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "explicit tmux kill target that starts with wezterm: should pass through: $out"
+
+  assert_contains "$(cat "$log")" "send-keys -t wezterm:not-a-pane Escape" \
+    "explicit tmux send did not preserve the wezterm-shaped target"
+  assert_contains "$(cat "$log")" "capture-pane -p -t wezterm:not-a-pane -S -5" \
+    "explicit tmux capture did not preserve the wezterm-shaped target"
+  assert_contains "$(cat "$log")" "kill-window -t wezterm:not-a-pane" \
+    "explicit tmux kill did not preserve the wezterm-shaped target"
+
+  out=$(fm_backend_send_key wezterm 'wezterm:not-a-pane' Escape 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit WezTerm backend should reject malformed WezTerm targets"
+  assert_contains "$out" "invalid WezTerm target" "explicit WezTerm backend error text changed"
+
+  pass "wezterm-shaped targets preserve the explicit backend namespace"
 }
 
 # --- old vs new: fm-send.sh --------------------------------------------------
@@ -816,11 +876,18 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
   real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
   mkdir -p "$real_root"
-  ln -s "$real_root" "$link_root"
+  if ! ln -s "$real_root" "$link_root" 2>/dev/null || [ ! -d "$link_root" ]; then
+    pass "fm-spawn.sh: symlinked project prefix skipped for $label (directory symlinks unsupported)"
+    return
+  fi
   proj="$link_root/proj"
   wt="$TMP_ROOT/symlink-wt-$label"
   id="spawnsymlink$label"
   fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
+  if [ ! -d "$proj" ]; then
+    pass "fm-spawn.sh: symlinked project prefix skipped for $label (symlink children unsupported)"
+    return
+  fi
   # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
   # /var -> /private/var), so resolve the fakebin's "physical" reply with
   # pwd -P rather than string concatenation - it must match exactly what
@@ -1063,6 +1130,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
+test_wezterm_shaped_targets_keep_explicit_backend_namespace
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_conformance_old_vs_new

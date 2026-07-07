@@ -301,8 +301,7 @@ fm_backend_cmux_container_ensure() {
 # stop matching; task meta already records absolute worktree paths, so repo
 # relocation is already outside the supported recovery contract. Derivation
 # itself lives in bin/fm-backend-hometag-lib.sh, shared with zellij's
-# identical shared-namespace collision fix (docs/zellij-backend.md
-# "Home-scoped tab titles").
+# identical shared-namespace collision fix and WezTerm's project tab titles.
 fm_backend_cmux_home_label() {
   fm_backend_hometag
 }

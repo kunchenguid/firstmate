@@ -26,15 +26,18 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis.
+# P6 adds bin/backends/wezterm.sh as Tomas' explicit local session-provider
+# backend: one tab per firstmate project/home, one pane per direct report, no
+# runtime auto-detection; see docs/wezterm-backend.md.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
-# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh still omits
+# `backend=tmux` for default-backend tasks, so default-path metas stay
+# byte-identical. Only a task spawned on a non-tmux spawn-capable backend,
+# currently WezTerm, experimental herdr, zellij, orca, or cmux, carries an
+# explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -65,9 +68,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# WezTerm is an explicit spawn-capable session provider; it is verified by
+# fake-CLI adapter coverage and documented in
+# docs/wezterm-backend.md.
+FM_BACKEND_KNOWN="wezterm tmux herdr zellij orca cmux"
+FM_BACKEND_SPAWN="wezterm tmux herdr zellij orca cmux"
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -230,13 +236,13 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
 # explicit per-task override. Precedence: FM_BACKEND env, then config/backend
 # (a single word on its first non-empty line, mirroring config/crew-harness),
-# then runtime auto-detection (fm_backend_detect), then default tmux. A
+# then runtime auto-detection (fm_backend_detect), then tmux. A
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
 # always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
-# notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change. The cmux
+# notice (both are experimental); auto-detecting tmux stays silent because it is
+# an explicit legacy runtime signal, not the fallback default. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
@@ -303,8 +309,10 @@ fm_meta_get() {  # <meta-file> <key>
   grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-# fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
-# `tmux` when the field is absent - the P1 compatibility contract.
+# fm_backend_of_meta: the backend recorded in <meta-file>. Default tmux tasks
+# still omit backend= for compatibility. An absent backend= is tmux metadata,
+# not WezTerm; keep it routed to tmux so old state is never silently
+# reinterpreted.
 fm_backend_of_meta() {  # <meta-file>
   local v
   v=$(fm_meta_get "$1" backend)
@@ -335,17 +343,63 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
   return 1
 }
 
+fm_backend_of_prefixed_target() {
+  local target=$1 pane
+  case "$target" in
+    wezterm:*)
+      pane=${target#wezterm:}
+      case "$pane" in
+        ''|*[!0-9]*) echo "error: invalid WezTerm target '$target' (expected wezterm:<numeric-pane-id>)" >&2; return 2 ;;
+      esac
+      printf 'wezterm'
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+fm_backend_validate_target_for_backend() {  # <backend> <target>
+  local backend=$1 target=$2 status
+  case "$backend" in
+    wezterm)
+      if fm_backend_of_prefixed_target "$target" >/dev/null; then
+        return 0
+      else
+        status=$?
+      fi
+      [ "$status" -eq 2 ] && return 1
+      echo "error: invalid WezTerm target '$target' (expected wezterm:<numeric-pane-id>)" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
-  local raw=$1 resolved=$2 state=$3 meta
+  local raw=$1 resolved=$2 state=$3 meta backend target
   case "$raw" in
     fm-*)
       meta="$state/${raw#fm-}.meta"
-      [ -f "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+      if [ -f "$meta" ]; then
+        backend=$(fm_backend_of_meta "$meta")
+        target=$resolved
+        [ -n "$target" ] || target=$(fm_backend_target_of_meta "$meta")
+        if [ -n "$target" ]; then
+          fm_backend_validate_target_for_backend "$backend" "$target" || return 1
+        fi
+        printf '%s' "$backend"
+        return 0
+      fi
       ;;
   esac
   if [ -n "$resolved" ]; then
     meta=$(fm_backend_meta_for_window "$resolved" "$state" 2>/dev/null || true)
-    [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+    if [ -n "$meta" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      fm_backend_validate_target_for_backend "$backend" "$resolved" || return 1
+      printf '%s' "$backend"
+      return 0
+    fi
   fi
   printf 'tmux'
 }
@@ -400,6 +454,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    wezterm)
+      if [ -z "${_FM_BACKEND_WEZTERM_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/wezterm.sh
+        . "$FM_BACKEND_LIB_DIR/backends/wezterm.sh" || return 1
+        _FM_BACKEND_WEZTERM_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -417,7 +478,7 @@ fm_backend_source() {  # <name>
 #                      metadata, then treated as an ad hoc bare window name and
 #                      resolved by searching the legacy tmux live inventory.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta window
+  local raw=$1 state=$2 meta window backend
   case "$raw" in
     *:*)
       printf '%s' "$raw"
@@ -431,6 +492,8 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       fi
       window=$(fm_backend_target_of_meta "$meta")
       [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
+      backend=$(fm_backend_of_meta "$meta")
+      fm_backend_validate_target_for_backend "$backend" "$window" || return 1
       printf '%s' "$window"
       return 0
       ;;
@@ -439,6 +502,8 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       if [ -n "$meta" ]; then
         window=$(fm_backend_target_of_meta "$meta")
         [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
+        backend=$(fm_backend_of_meta "$meta")
+        fm_backend_validate_target_for_backend "$backend" "$window" || return 1
         printf '%s' "$window"
         return 0
       fi
@@ -459,6 +524,7 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || return 1
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
@@ -466,6 +532,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    wezterm) fm_backend_wezterm_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -474,6 +541,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || return 1
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
@@ -481,6 +549,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    wezterm) fm_backend_wezterm_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -491,6 +560,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || return 1
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
@@ -498,6 +568,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    wezterm) fm_backend_wezterm_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -508,6 +579,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || return 1
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
@@ -515,6 +587,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    wezterm) fm_backend_wezterm_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -549,6 +622,7 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || { printf 'unknown'; return 0; }
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
@@ -561,22 +635,22 @@ fm_backend_busy_state() {  # <backend> <target>
 # or an adapter's conservative submit fallback. It is exposed generically so a
 # caller other than the send path (the away-mode daemon's supervisor-pane
 # pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
-# without duplicating per-backend composer-reading logic. tmux and herdr both
-# expose a named classifier already (fm_tmux_composer_state,
-# fm_backend_herdr_composer_state), as do orca and cmux
-# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
-# submit path uses an internal content-diff approach with no separately named
-# classifier, so it reports unknown here - callers fall back to their own
-# policy, exactly as an unknown fm_backend_busy_state already does.
+# without duplicating per-backend composer-reading logic. tmux, herdr, orca,
+# cmux, and WezTerm expose named classifiers; zellij's submit path uses an
+# internal content-diff approach with no separately named classifier, so it
+# reports unknown here - callers fall back to their own policy, exactly as an
+# unknown fm_backend_busy_state already does.
 fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
   local backend=$1
   shift
+  fm_backend_validate_target_for_backend "$backend" "$1" || { printf 'unknown'; return 0; }
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
+    wezterm) fm_backend_wezterm_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -595,6 +669,7 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # digests, the session-start fleet digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
+  fm_backend_validate_target_for_backend "$backend" "$target" || return 1
   case "$backend" in
     tmux)
       tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
@@ -625,6 +700,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
     cmux)
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
+      ;;
+    wezterm)
+      fm_backend_source wezterm || return 1
+      fm_backend_wezterm_target_ready "$target" "$expected_label"
       ;;
     *)
       return 1

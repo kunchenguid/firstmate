@@ -21,7 +21,21 @@ TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux wezterm node gh-axi chrome-devtools-axi lavish-axi
+  cat > "$fakebin/wezterm" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = cli ]; then
+  case "${2:-}" in
+    list) printf '%s\n' '--format' ;;
+    get-text) printf '%s\n' '--start-line' ;;
+    send-text) printf '%s\n' '--no-paste' ;;
+    split-pane) printf '%s\n' '--percent' ;;
+    kill-pane) printf '%s\n' '--pane-id' ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$fakebin/wezterm"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -75,6 +89,18 @@ add_real_jq() {
 exec '$real_jq' "\$@"
 SH
   chmod +x "$fakebin/jq"
+}
+
+make_path_without_jq() {
+  local dir=$1 safe tool path
+  safe="$dir/safe-path"
+  mkdir -p "$safe"
+  for tool in bash env dirname grep sed head tail cut tr awk mktemp mv rm cat chmod mkdir git; do
+    path=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$path" ] || continue
+    case "$path" in /*) ln -s "$path" "$safe/$tool" ;; esac
+  done
+  printf '%s\n' "$safe"
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
@@ -179,6 +205,51 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_wezterm_backend_requires_wezterm_not_tmux() {
+  local case_dir fakebin out missing_wezterm
+  missing_wezterm="MISSING: wezterm (install: Install WezTerm from https://wezterm.org/install/ or set FM_WEZTERM_BIN to wezterm.exe)"
+
+  case_dir="$TMP_ROOT/wezterm-backend-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' wezterm > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/wezterm"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" FM_WEZTERM_BIN="$case_dir/no-such-wezterm" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_wezterm" ] || fail "backend=wezterm should report missing wezterm only, got: $out"
+  assert_not_contains "$out" "MISSING: tmux" "backend=wezterm must not require tmux"
+  pass "bootstrap: backend=wezterm requires WezTerm and not tmux"
+}
+
+test_wezterm_backend_reports_missing_jq_without_missing_wezterm() {
+  local case_dir fakebin safe out
+  case_dir="$TMP_ROOT/wezterm-backend-no-jq"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' wezterm > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  safe=$(make_path_without_jq "$case_dir")
+  out=$(PATH="$fakebin:$safe" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 bash "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING: jq (install: brew install jq  # or the platform's package manager)" ] \
+    || fail "backend=wezterm with missing jq should report jq only, got: $out"
+  pass "bootstrap: backend=wezterm reports missing jq separately from WezTerm"
+}
+
+test_install_wezterm_refuses_eval_prose() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/wezterm-install"
+  mkdir -p "$case_dir/home"
+  set +e
+  out=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" "$ROOT/bin/fm-bootstrap.sh" install wezterm 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "install wezterm should refuse manual-install tools"
+  assert_contains "$out" "error: wezterm requires manual installation" "install wezterm should print a clear manual-install refusal"
+  assert_not_contains "$out" "installing wezterm: Install WezTerm" "install wezterm must not eval prose"
+  pass "bootstrap install: wezterm refuses manual-install prose instead of evaling it"
+}
+
 test_crew_dispatch_active_rules_are_surfaced() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -229,5 +300,8 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_wezterm_backend_requires_wezterm_not_tmux
+test_wezterm_backend_reports_missing_jq_without_missing_wezterm
+test_install_wezterm_refuses_eval_prose
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

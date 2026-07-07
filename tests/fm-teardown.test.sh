@@ -1003,6 +1003,104 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_force_secondmate_teardown_kills_wezterm_children_in_child_home() {
+  local case_dir home log list child_wt rc
+  case_dir=$(make_case force-wezterm-child)
+  home="$case_dir/secondmate-home"
+  log="$case_dir/wezterm.log"
+  list="$case_dir/wezterm-list.json"
+  child_wt="$home/projects/child-worktree"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  git -C "$case_dir/project" worktree add -q -b fm/childw "$child_wt" main
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home"
+  fm_write_meta "$home/state/childw.meta" \
+    "window=wezterm:55" \
+    "kind=ship" \
+    "backend=wezterm" \
+    "worktree=$child_wt" \
+    "project=$case_dir/project" \
+    "wezterm_window_id=4" \
+    "wezterm_tab_id=8" \
+    "wezterm_pane_id=55"
+  jq -n --arg cwd "file://$child_wt" '[{window_id:4, tab_id:8, pane_id:55, title:"child", cwd:$cwd, size:{cols:80, rows:24}}]' > "$list"
+  cat > "$case_dir/fakebin/wezterm" <<'SH'
+#!/usr/bin/env bash
+{ printf 'wezterm'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_WEZTERM_LOG:?}"
+[ "${1:-}" = cli ] || exit 2
+shift
+case "${1:-}" in
+  list) cat "${FM_WEZTERM_LIST:?}" ;;
+  kill-pane) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/wezterm"
+
+  set +e
+  FM_WEZTERM_LOG="$log" FM_WEZTERM_LIST="$list" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "force-wezterm-child: forced secondmate teardown should succeed"
+  assert_contains "$(cat "$log")" $'wezterm\x1fcli\x1fkill-pane\x1f--pane-id\x1f55' \
+    "forced secondmate teardown did not kill the WezTerm child pane from the child home state"
+  pass "force teardown kills WezTerm children using the child home state"
+}
+
+test_wezterm_ship_teardown_kills_pane_before_treehouse_return() {
+  local case_dir log list rc
+  case_dir=$(make_case wezterm-kill-before-return)
+  log="$case_dir/wezterm.log"
+  list="$case_dir/wezterm-list.json"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=wezterm:55" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "backend=wezterm" \
+    "wezterm_window_id=4" \
+    "wezterm_tab_id=8" \
+    "wezterm_pane_id=55"
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  jq -n --arg cwd "file://$case_dir/wt" '[{window_id:4, tab_id:8, pane_id:55, title:"task", cwd:$cwd, size:{cols:80, rows:24}}]' > "$list"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+{ printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_WEZTERM_LOG:?}"
+jq -n --arg cwd "file://${FM_WEZTERM_OTHER:?}" '[{window_id:4, tab_id:8, pane_id:55, title:"task", cwd:$cwd, size:{cols:80, rows:24}}]' > "${FM_WEZTERM_LIST:?}"
+exit 0
+SH
+  cat > "$case_dir/fakebin/wezterm" <<'SH'
+#!/usr/bin/env bash
+{ printf 'wezterm'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_WEZTERM_LOG:?}"
+[ "${1:-}" = cli ] || exit 2
+shift
+case "${1:-}" in
+  list) cat "${FM_WEZTERM_LIST:?}" ;;
+  kill-pane) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/wezterm"
+  mkdir -p "$case_dir/other"
+
+  set +e
+  FM_WEZTERM_LOG="$log" FM_WEZTERM_LIST="$list" FM_WEZTERM_OTHER="$case_dir/other" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "wezterm-kill-before-return: teardown should succeed"
+  assert_contains "$(cat "$log")" $'wezterm\x1fcli\x1fkill-pane\x1f--pane-id\x1f55' \
+    "WezTerm ship teardown should kill the pane while cwd still validates inside the worktree"
+  pass "WezTerm ship teardown kills pane before treehouse return changes cwd validity"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1022,6 +1120,8 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_force_secondmate_teardown_kills_wezterm_children_in_child_home
+test_wezterm_ship_teardown_kills_pane_before_treehouse_return
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock

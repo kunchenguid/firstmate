@@ -795,53 +795,53 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   pass "fm-send exits non-zero when initial text send fails"
 }
 
-# --- herdr backend-awareness (fm-turnend-guard-h6-adjacent transport fix) ----
-# Discovery, busy/pending dispatch, and the full inject_msg guard chain must
-# work through the herdr backend, not just tmux. Env-var prefix assignments
-# (e.g. `TMUX_PANE= HERDR_ENV=1 ... discover_supervisor_target`) neutralize
-# whatever ambient TMUX_PANE/HERDR_ENV the CURRENT dev/CI shell happens to carry
-# for the duration of that one call only, so these tests are deterministic
-# regardless of what runtime backend is running this test suite itself.
+# --- backend-aware supervisor injection ------------------------------------
 
 test_discover_supervisor_backend_precedence() {
   local out
-  out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 WEZTERM_PANE=55 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND override was not honored: $out"
 
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 WEZTERM_PANE=55 discover_supervisor_backend)
   [ "$out" = tmux ] || fail "TMUX_PANE should win over HERDR_ENV (tmux nested in herdr resolves to tmux): $out"
 
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 WEZTERM_PANE=55 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
-  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' WEZTERM_PANE=55 discover_supervisor_backend)
+  [ "$out" = wezterm ] || fail "WEZTERM_PANE should resolve to wezterm after tmux/herdr markers: $out"
+
+  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' WEZTERM_PANE='' discover_supervisor_backend); then
     fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
   fi
   [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
 
-  pass "discover_supervisor_backend: override > TMUX_PANE > HERDR_ENV+HERDR_PANE_ID > tmux fallback"
+  pass "discover_supervisor_backend: override > TMUX_PANE > HERDR_ENV+HERDR_PANE_ID > WEZTERM_PANE > tmux fallback"
 }
 
 test_discover_supervisor_target_herdr() {
   local out
-  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 WEZTERM_PANE=55 discover_supervisor_target)
   [ "$out" = "explicit:target" ] || fail "explicit FM_SUPERVISOR_TARGET override was not honored: $out"
 
-  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 WEZTERM_PANE=55 discover_supervisor_target)
   [ "$out" = '%3' ] || fail "TMUX_PANE should win over herdr markers: $out"
 
-  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' WEZTERM_PANE=55 discover_supervisor_target)
   [ "$out" = "default:w1:p9" ] || fail "herdr target should default HERDR_SESSION to 'default': $out"
 
-  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 WEZTERM_PANE=55 discover_supervisor_target)
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
-  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' WEZTERM_PANE=55 discover_supervisor_target)
+  [ "$out" = "wezterm:55" ] || fail "WEZTERM_PANE should compose a wezterm target: $out"
+
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' WEZTERM_PANE='' discover_supervisor_target); then
     fail "bare fallback should return non-zero"
   fi
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
-  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > WEZTERM_PANE > firstmate:0 fallback"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -968,6 +968,27 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+test_inject_msg_wezterm_submits_through_backend_dispatch() {
+  local dir state
+  dir=$(make_supercase inject-wezterm-submit)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { [ "$1" = wezterm ] && [ "$2" = "wezterm:55" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_capture() { [ "$1" = wezterm ] && [ "$2" = "wezterm:55" ] || fail "unexpected capture args: $1 $2"; printf 'idle prompt\n'; }
+    fm_backend_composer_state() { [ "$1" = wezterm ] && [ "$2" = "wezterm:55" ] || fail "unexpected composer_state args: $1 $2"; printf 'empty'; }
+    fm_backend_send_text_submit() {
+      [ "$1" = wezterm ] && [ "$2" = "wezterm:55" ] || fail "unexpected send_text_submit args: $1 $2"
+      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISOR_BACKEND=wezterm FM_SUPERVISOR_TARGET="wezterm:55" inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when WezTerm send_text_submit confirms empty"
+  ) || fail "wezterm successful-submit inject_msg subshell failed"
+  pass "inject_msg: dispatches busy-guard/composer-guard/submit through the wezterm backend"
+}
+
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
@@ -1024,3 +1045,4 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_wezterm_submits_through_backend_dispatch

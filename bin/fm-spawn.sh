@@ -15,15 +15,16 @@
 #   $TMUX, HERDR_ENV=1, or cmux runtime signals; bin/fm-backend.sh's
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
-#   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   Spawn-capable backends are tmux, WezTerm, and experimental herdr, zellij,
+#   orca, and cmux. WezTerm, herdr, zellij, and cmux are session providers, so
+#   ship/scout spawns still run treehouse get. Orca owns both the task worktree
+#   and terminal, so ship/scout Orca spawns do not run treehouse get. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   auto-detected tmux stays silent; WezTerm, zellij, and orca are never
+#   auto-detected (always explicit).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. Orca and cmux do not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -93,6 +94,12 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+esac
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -148,11 +155,10 @@ esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
+# tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
 # non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# recorded in meta. fm_backend_of_meta still treats an absent backend= as
+# legacy tmux metadata so older tasks keep routing correctly.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
@@ -650,13 +656,12 @@ real_path_or_raw() {  # <path>
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
-# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-HOME,
-# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
-# docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
-# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
-# that every downstream operation (send/capture/kill) already treats as opaque
-# per-backend routing (fm_backend_resolve_selector).
+# left it (same session-name / new-window sequence, see bin/backends/tmux.sh).
+# WezTerm creates or reuses a project/home tab and splits one pane per task.
+# Herdr uses its version-gated, workspace-per-HOME, tab-per-task sequence
+# documented in docs/herdr-backend.md. Every branch converges on the same $T
+# ("target") string that downstream operations treat as opaque per-backend
+# routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
@@ -743,6 +748,18 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  wezterm)
+    fm_backend_wezterm_container_ensure || exit 1
+    WEZTERM_TASK_IDS=$(fm_backend_wezterm_create_task "$W" "$PROJ_ABS") || exit 1
+    read -r WEZTERM_WINDOW_ID WEZTERM_TAB_ID WEZTERM_PANE_ID WEZTERM_TAB_TITLE <<EOF
+$WEZTERM_TASK_IDS
+EOF
+    if [ -z "$WEZTERM_WINDOW_ID" ] || [ -z "$WEZTERM_TAB_ID" ] || [ -z "$WEZTERM_PANE_ID" ]; then
+      echo "error: wezterm did not return a window/tab/pane id for $W" >&2
+      exit 1
+    fi
+    T="wezterm:$WEZTERM_PANE_ID"
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -776,6 +793,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    wezterm) fm_backend_wezterm_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -784,6 +802,7 @@ spawn_current_path() {  # <target>
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+    wezterm) fm_backend_wezterm_current_path "$1" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
@@ -793,6 +812,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    wezterm) fm_backend_wezterm_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -802,6 +822,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    wezterm) fm_backend_wezterm_send_key "$1" "$2" ;;
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
@@ -990,6 +1011,12 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  if [ "$BACKEND" = wezterm ]; then
+    echo "wezterm_window_id=$WEZTERM_WINDOW_ID"
+    echo "wezterm_tab_id=$WEZTERM_TAB_ID"
+    echo "wezterm_pane_id=$WEZTERM_PANE_ID"
+    echo "wezterm_tab_title=$WEZTERM_TAB_TITLE"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1009,7 +1036,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_BACKEND= FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

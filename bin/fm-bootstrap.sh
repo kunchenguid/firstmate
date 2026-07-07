@@ -178,6 +178,7 @@ secondmate_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    wezterm) echo "Install WezTerm from https://wezterm.org/install/ or set FM_WEZTERM_BIN to wezterm.exe" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -189,6 +190,7 @@ install_cmd() {
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
   orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  wezterm) TOOLS="wezterm jq node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
   *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
@@ -389,6 +391,10 @@ if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
+    if [ "$t" = wezterm ]; then
+      echo "error: wezterm requires manual installation from https://wezterm.org/install/ or an explicit FM_WEZTERM_BIN path" >&2
+      exit 1
+    fi
     cmd=$(install_cmd "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
     cmd=${cmd%%  #*}
     echo "installing $t: $cmd"
@@ -398,7 +404,14 @@ if [ "${1:-}" = "install" ]; then
 fi
 
 for t in $TOOLS; do
-  command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+  if [ "$t" = wezterm ]; then
+    fm_backend_source wezterm >/dev/null 2>&1 \
+      && fm_backend_wezterm_bin >/dev/null 2>&1 \
+      && fm_backend_wezterm_feature_check >/dev/null 2>&1 \
+      || echo "MISSING: wezterm (install: $(install_cmd wezterm))"
+  else
+    command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+  fi
 done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
