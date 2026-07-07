@@ -108,7 +108,7 @@ fm_backend_codex_app_busy_state() {  # <thread-id> -> busy|idle|unknown
   out=$("$bridge" thread-status --thread-id "$thread_id" 2>/dev/null) || { printf 'unknown'; return 0; }
   status=$(printf '%s' "$out" | fm_backend_codex_app_json_field status 2>/dev/null || true)
   case "$status" in
-    active) printf 'busy' ;;
+    active|inProgress|running) printf 'busy' ;;
     idle) printf 'idle' ;;
     *) printf 'unknown' ;;
   esac

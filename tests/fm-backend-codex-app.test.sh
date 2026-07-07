@@ -402,6 +402,22 @@ test_backend_capture_send_busy_exists_and_kill_route_to_bridge() {
   pass "codex-app adapter: capture, send, busy-state, target-exists, and kill route through the bridge"
 }
 
+test_backend_busy_state_maps_active_lifecycle_statuses() {
+  local dir bridge log out status lifecycle_status
+  dir="$TMP_ROOT/backend-busy-lifecycle"
+  mkdir -p "$dir"
+  log="$dir/bridge.log"
+  bridge=$(make_fake_bridge "$dir")
+  for lifecycle_status in active inProgress running; do
+    out=$(FM_CODEX_BRIDGE="$bridge" FM_FAKE_BRIDGE_LOG="$log" FM_FAKE_BRIDGE_STATUS="$lifecycle_status" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state codex-app thread-abc' "$ROOT" 2>&1)
+    status=$?
+    expect_code 0 "$status" "codex-app busy-state should accept $lifecycle_status: $out"
+    [ "$out" = busy ] || fail "$lifecycle_status Codex thread should map to busy, got '$out'"
+  done
+  pass "codex-app adapter: busy-state maps active lifecycle statuses to busy"
+}
+
 test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
   local dir bridge log out status
   dir="$TMP_ROOT/backend-capture-limit"
@@ -430,4 +446,5 @@ test_bridge_turns_list_renders_chronological_text_from_desc_response
 test_bridge_start_thread_returns_id_when_metadata_calls_fail
 test_backend_dispatch_accepts_codex_app
 test_backend_capture_send_busy_exists_and_kill_route_to_bridge
+test_backend_busy_state_maps_active_lifecycle_statuses
 test_backend_capture_trims_to_requested_lines_with_separate_turn_limit
