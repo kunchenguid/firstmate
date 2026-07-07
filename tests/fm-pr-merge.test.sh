@@ -167,9 +167,54 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_no_grep 'merged_by_firstmate=' "$case_dir/state/task-x1.meta" \
+    "merge-fails: a failed merge must remove the attribution marker, or a later out-of-band merge would read as firstmate's"
+  assert_no_grep 'merged_ts=' "$case_dir/state/task-x1.meta" \
+    "merge-fails: a failed merge must remove the merged_ts it wrote"
+  pass "fm-pr-merge propagates a real merge failure and leaves no false attribution"
+}
+
+test_failed_remerge_keeps_preexisting_marker() {
+  local case_dir rc
+  case_dir=$(make_case remerge-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  # The marker earned by an earlier SUCCESSFUL merge of this same PR; a failed
+  # re-merge (e.g. "already merged") must not strip it, or firstmate's own merge
+  # would later alarm as unattributed.
+  printf 'merged_by_firstmate=%s\n' https://github.com/example/repo/pull/13 \
+    >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "remerge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'merged_by_firstmate=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
-    "merge-fails: the attribution marker must be written BEFORE the merge call, so it is present even when the merge fails"
-  pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+    "remerge-fails: a marker earned by an earlier successful merge must survive a failed re-merge"
+  pass "fm-pr-merge keeps a pre-existing attribution marker when a re-merge fails"
+}
+
+test_retry_does_not_accumulate_merged_ts() {
+  local case_dir
+  case_dir=$(make_case retry-dedupe)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "retry-dedupe: first merge failed"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "retry-dedupe: second merge failed"
+
+  [ "$(grep -c '^merged_ts=' "$case_dir/state/task-x1.meta")" = 1 ] \
+    || fail "retry-dedupe: repeated merges must replace merged_ts, not accumulate it"
+  [ "$(grep -c '^merged_by_firstmate=' "$case_dir/state/task-x1.meta")" = 1 ] \
+    || fail "retry-dedupe: repeated merges must not duplicate the attribution marker"
+  pass "fm-pr-merge replaces merged_ts and keeps one attribution marker across retries"
 }
 
 test_extra_merge_args_forwarded() {
@@ -406,6 +451,8 @@ test_yolo_off_zero_checks_proceeds() {
 
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_failed_remerge_keeps_preexisting_marker
+test_retry_does_not_accumulate_merged_ts
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

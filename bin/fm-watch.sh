@@ -370,39 +370,43 @@ mark_all_captain_relevant_surfaced() {
 }
 
 # Merge-attribution surfaced-marker: like .hb-surfaced-*, this records the
-# unattributed-merge the heartbeat backstop already woke firstmate for (keyed by
-# the PR URL), so the same anomaly is not re-surfaced every heartbeat while
-# firstmate is confirming and reconciling it.
-_merge_hb_surfaced_path() { printf '%s/.merge-hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+# unattributed-merge the heartbeat backstop already woke firstmate for, so the
+# same anomaly is not re-surfaced every heartbeat while firstmate is confirming
+# and reconciling it. Keyed by task id (state/<id>.merge-hb-surfaced, removed by
+# teardown) with the PR URL as its content, so a later different PR on the same
+# task still fires.
+_merge_hb_surfaced_path() { printf '%s/%s.merge-hb-surfaced' "$STATE" "$1"; }
 
 # Merge-attribution fleet backstop: 0 if any in-flight ship task's PR is observed
 # MERGED without a firstmate-merge marker (an out-of-band merge) that has NOT
 # already been surfaced. Independent of the per-task check cadence, so it re-catches
-# an out-of-band merge even if a task's check.sh was removed or corrupted. Reuses
-# fm_merge_scan_unattributed so the attribution rule is not duplicated here. This
-# covers PRs firstmate has recorded (pr= in meta); a PR firstmate never observed at
-# all is caught once firstmate arms the attributing watch for it (AGENTS.md section
-# 7 Validate: arm as soon as a tracked ship task has an open PR). Pure detect, no
+# an out-of-band merge even if a task's check.sh was removed or corrupted. Takes
+# the caller's once-per-heartbeat fm_merge_scan_unattributed snapshot, so the gh
+# probes run once and detect and mark act on the same state. This covers PRs
+# firstmate has recorded (pr= in meta); a PR firstmate never observed at all is
+# caught once firstmate arms the attributing watch for it (AGENTS.md section 7
+# Validate: arm as soon as a tracked ship task has an open PR). Pure detect, no
 # side effects: the caller enqueues first, then marks surfaced.
 heartbeat_finds_unattributed_merge() {
-  local task url surfaced
+  local scan=$1 task url surfaced
   while IFS=$(printf '\t') read -r task url; do
     [ -n "$task" ] || continue
-    surfaced=$(cat "$(_merge_hb_surfaced_path "$url")" 2>/dev/null || true)
+    surfaced=$(cat "$(_merge_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$url" ] && continue
     return 0
-  done < <(fm_merge_scan_unattributed "$STATE")
+  done <<< "$scan"
   return 1
 }
 
-# Mark every current unattributed merge surfaced. Called after the heartbeat
-# backstop enqueues its wake, so the same anomaly is not re-fired next heartbeat.
+# Mark every unattributed merge in the caller's scan snapshot surfaced. Called
+# after the heartbeat backstop enqueues its wake, so the same anomaly is not
+# re-fired next heartbeat.
 mark_unattributed_merges_surfaced() {
-  local task url
+  local scan=$1 task url
   while IFS=$(printf '\t') read -r task url; do
     [ -n "$task" ] || continue
-    printf '%s' "$url" > "$(_merge_hb_surfaced_path "$url")"
-  done < <(fm_merge_scan_unattributed "$STATE")
+    printf '%s' "$url" > "$(_merge_hb_surfaced_path "$task")"
+  done <<< "$scan"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -647,21 +651,26 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable || heartbeat_finds_unattributed_merge; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake,
-      # or an in-flight ship task whose PR merged without a firstmate-merge marker
-      # (an out-of-band merge firstmate must confirm and reconcile, never silently
-      # proceed). Enqueue first, then mark both kinds surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
-      mark_unattributed_merges_surfaced
-      wake "heartbeat"
     else
-      touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      # One merge scan per heartbeat: the gh probes run once, and detect and
+      # mark below act on the same snapshot.
+      merge_scan=$(fm_merge_scan_unattributed "$STATE")
+      if heartbeat_scan_finds_actionable || heartbeat_finds_unattributed_merge "$merge_scan"; then
+        # Backstop: a captain-relevant status the per-wake path absorbed by mistake,
+        # or an in-flight ship task whose PR merged without a firstmate-merge marker
+        # (an out-of-band merge firstmate must confirm and reconcile, never silently
+        # proceed). Enqueue first, then mark both kinds surfaced so the next
+        # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        mark_all_captain_relevant_surfaced
+        mark_unattributed_merges_surfaced "$merge_scan"
+        wake "heartbeat"
+      else
+        touch "$STATE/.last-heartbeat"
+        echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+        triage_log "absorbed heartbeat (no captain-relevant change)"
+      fi
     fi
   fi
 

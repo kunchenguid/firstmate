@@ -15,6 +15,13 @@
 # reconcile (never fight - prime directive 4). An unreadable PR state emits a
 # merge-state-unknown: warning rather than assuming the PR is still open.
 #
+# Each alarm fires once per distinct outcome, not once per poll interval: the
+# last emitted line is recorded in state/<id>.merge-seen (removed by teardown)
+# and an unchanged outcome stays silent, so an unreconciled anomaly does not burn
+# a wake every FM_CHECK_INTERVAL while firstmate confirms it with the captain. A
+# benign outcome (open, or attributed) clears the record, so a later new anomaly
+# episode alarms again.
+#
 # Arm this as soon as a tracked ship task has an open PR (see AGENTS.md section 7
 # Validate), not only at checks-green, so an out-of-band merge is caught for the
 # PR's whole lifetime.
@@ -74,15 +81,24 @@ fi
   printf '. %s\n' "$(shell_quote "$ATTRIB_LIB")"
   printf 'url=%s\n' "$(shell_quote "$URL")"
   printf 'meta=%s\n' "$(shell_quote "$META")"
+  printf 'seen=%s\n' "$(shell_quote "$STATE/$ID.merge-seen")"
   cat <<'EOF'
 case "$(fm_merge_attribution "$url" "$meta")" in
   unattributed)
     by=$(fm_merge_probe_mergedby "$url")
-    echo "unattributed-merge: PR $url merged${by:+ by $by}, no firstmate merge on record" ;;
+    line="unattributed-merge: PR $url merged${by:+ by $by}, no firstmate merge on record" ;;
   unknown)
-    echo "merge-state-unknown: could not read PR state for $url (gh empty or unreadable); not assuming unmerged" ;;
+    line="merge-state-unknown: could not read PR state for $url (gh empty or unreadable); not assuming unmerged" ;;
   # attributed (firstmate merged it) and open/closed-unmerged: silent, nothing to wake for.
+  *)
+    line= ;;
 esac
+if [ -z "$line" ]; then
+  rm -f "$seen"
+elif [ "$line" != "$(cat "$seen" 2>/dev/null)" ]; then
+  echo "$line"
+  printf '%s' "$line" > "$seen"
+fi
 EOF
 } > "$STATE/$ID.check.sh"
 echo "armed: state/$ID.check.sh attributes merges of $URL"

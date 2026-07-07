@@ -119,7 +119,44 @@ test_unattributed_merge_wakes_once() {
   assert_contains "$out" "by kevin" "unattributed wake should name the merger"
   n=$(printf '%s\n' "$out" | grep -c 'unattributed-merge:')
   [ "$n" = 1 ] || fail "expected exactly one unattributed-merge line, got $n"
-  pass "generated check.sh emits unattributed-merge exactly once for an out-of-band merge"
+  out=$(run_check_sh "$case_dir")
+  [ -z "$out" ] || fail "an unchanged unattributed outcome must not re-fire every poll, got: $out"
+  pass "generated check.sh emits unattributed-merge once, not once per poll interval"
+}
+
+test_check_alarm_refires_on_distinct_outcome() {
+  local case_dir url out
+  case_dir=$(make_check_case outcome-change)
+  url="https://github.com/example/repo/pull/13"
+  arm "$case_dir" "$url" 2
+  write_gh_state_stub "$case_dir" ""   # unreadable PR state
+  out=$(run_check_sh "$case_dir")
+  assert_contains "$out" "merge-state-unknown:" "first unknown outcome must alarm"
+  out=$(run_check_sh "$case_dir")
+  [ -z "$out" ] || fail "an unchanged unknown outcome must stay silent, got: $out"
+  write_gh_state_stub "$case_dir" MERGED kevin
+  out=$(run_check_sh "$case_dir")
+  assert_contains "$out" "unattributed-merge:" \
+    "a distinct outcome (unknown -> unattributed) must alarm again"
+  pass "generated check.sh re-alarms when the outcome changes, once per distinct outcome"
+}
+
+test_benign_outcome_resets_alarm_dedupe() {
+  local case_dir url out
+  case_dir=$(make_check_case benign-reset)
+  url="https://github.com/example/repo/pull/13"
+  arm "$case_dir" "$url" 2
+  write_gh_state_stub "$case_dir" ""   # unreadable PR state: first episode
+  out=$(run_check_sh "$case_dir")
+  assert_contains "$out" "merge-state-unknown:" "first unknown episode must alarm"
+  write_gh_state_stub "$case_dir" OPEN  # readable again: benign, clears the record
+  out=$(run_check_sh "$case_dir")
+  [ -z "$out" ] || fail "a benign outcome should be silent, got: $out"
+  write_gh_state_stub "$case_dir" ""   # second distinct episode
+  out=$(run_check_sh "$case_dir")
+  assert_contains "$out" "merge-state-unknown:" \
+    "a new anomaly episode after a benign read must alarm again"
+  pass "a benign outcome resets the dedupe so a later anomaly episode alarms again"
 }
 
 test_sibling_marker_does_not_attribute_other_pr() {
@@ -217,16 +254,23 @@ test_scan_reports_only_unattributed_ship_prs() {
     "merged_by_firstmate=https://github.com/example/repo/pull/15"
   fm_write_meta "$state/task-scout.meta" "kind=scout"   "pr=https://github.com/example/repo/pull/16"
   fm_write_meta "$state/task-nopr.meta"  "kind=ship"
+  # A marker for a SIBLING PR must not shield this task's own pr= from the scan:
+  # the backstop uses the same exact-URL attribution rule as the per-task check.
+  fm_write_meta "$state/task-sib.meta"   "kind=ship"    "pr=https://github.com/example/repo/pull/17" \
+    "merged_by_firstmate=https://github.com/example/repo/pull/18"
   out=$(PATH="$case_dir/fakebin:$PATH" bash -c '. "'"$ROOT"'/bin/fm-merge-attribution-lib.sh"; fm_merge_scan_unattributed "'"$state"'"')
   assert_contains "$out" "task-un" "scan must report the unattributed ship PR"
+  assert_contains "$out" "task-sib" "a sibling-PR marker must not attribute this PR in the scan"
   assert_not_contains "$out" "task-attr" "scan must not report a firstmate-attributed merge"
   assert_not_contains "$out" "task-scout" "scan must skip scout tasks"
   assert_not_contains "$out" "task-nopr" "scan must skip tasks with no recorded PR"
-  pass "fm_merge_scan_unattributed reports only unattributed ship-task merges"
+  pass "fm_merge_scan_unattributed reports only unattributed ship-task merges, keyed by exact PR URL"
 }
 
 test_attributed_merge_is_silent
 test_unattributed_merge_wakes_once
+test_check_alarm_refires_on_distinct_outcome
+test_benign_outcome_resets_alarm_dedupe
 test_sibling_marker_does_not_attribute_other_pr
 test_unknown_state_warns_never_assumes_unmerged
 test_open_pr_is_silent

@@ -94,7 +94,6 @@ fm_merge_scan_unattributed() {
     case "$kind" in scout|secondmate) continue ;; esac
     url=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$url" ] || continue
-    grep -q '^merged_by_firstmate=' "$meta" 2>/dev/null && continue
     [ "$(fm_merge_attribution "$url" "$meta")" = unattributed ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     printf '%s\t%s\n' "$task" "$url"

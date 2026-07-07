@@ -30,7 +30,10 @@
 # (via the unique URL) and never by branch name, so the merge-attribution watch
 # (bin/fm-pr-check.sh's generated check.sh) can tell firstmate's own merges apart
 # from an out-of-band merge. The write PRECEDES the merge call so firstmate's own
-# merges can never race into a false unattributed reading. A best-effort
+# merges can never race into a false unattributed reading. A definite merge
+# failure removes what this attempt wrote (preserving a marker earned by an
+# earlier successful merge), so a failed attempt never leaves a false attribution
+# that would silence a later out-of-band merge of the PR. A best-effort
 # merged_commit=<sha> is recorded after a successful merge so teardown containment
 # and the attribution record agree on the sha.
 #
@@ -128,7 +131,13 @@ fi
 # race into a false unattributed reading. Keyed by the unique PR URL (number),
 # never by branch name.
 MERGED_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-grep -qxF "merged_by_firstmate=$URL" "$META" || echo "merged_by_firstmate=$URL" >> "$META"
+MARKER_PREEXISTED=0
+if grep -qxF "merged_by_firstmate=$URL" "$META"; then
+  MARKER_PREEXISTED=1
+fi
+PREV_MERGED_TS=$(grep '^merged_ts=' "$META" | tail -1 || true)
+[ "$MARKER_PREEXISTED" = 1 ] || echo "merged_by_firstmate=$URL" >> "$META"
+{ grep -v '^merged_ts=' "$META" || true; } > "$META.tmp" && mv "$META.tmp" "$META"
 echo "merged_ts=$MERGED_TS" >> "$META"
 
 merge_args=()
@@ -136,9 +145,21 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+MERGE_RC=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" || MERGE_RC=$?
+if [ "$MERGE_RC" -ne 0 ]; then
+  {
+    if [ "$MARKER_PREEXISTED" = 1 ]; then
+      grep -v '^merged_ts=' "$META" || true
+    else
+      { grep -vxF "merged_by_firstmate=$URL" "$META" || true; } | grep -v '^merged_ts=' || true
+    fi
+    if [ -n "$PREV_MERGED_TS" ]; then printf '%s\n' "$PREV_MERGED_TS"; fi
+  } > "$META.tmp" && mv "$META.tmp" "$META"
+  exit "$MERGE_RC"
+fi
 
-# The merge succeeded (set -e would have exited otherwise). Record the merge
+# The merge succeeded (the failure path above exited otherwise). Record the merge
 # commit best-effort so teardown containment and the attribution record agree on
 # the sha; its absence never affects authorship (the pre-merge marker owns that).
 if command -v gh >/dev/null 2>&1 && MC=$(gh pr view "$URL" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null) && [ -n "$MC" ]; then
