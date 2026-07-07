@@ -582,7 +582,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # rows for a default-sized pane), instead of clamping to the last N lines - it
 # does not merely ignore the bound, it drops the read entirely. This silently
 # broke exactly the small bounded reads this adapter relies on most (including
-# the composer-state verification read used by send_text_submit). Workaround:
+# the composer-state guard/fallback reads around submit and injection). Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
