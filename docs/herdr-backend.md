@@ -371,6 +371,29 @@ A composer redraw that trusts `tput cols` for its own line-wrapping math can the
 The test's composer script works around this with a hardcoded conservative width rather than trusting `tput cols` in this execution context.
 This is a test-harness-only concern - `fm_backend_herdr_composer_state` and `fm_backend_herdr_send_text_submit` themselves are unchanged and were reverified correct once the test's own composer script stayed within the pane's real width - but it is a sharp edge for any future herdr-launched interactive script that computes its own layout from `tput`.
 
+## Incident (2026-07-07): away-mode escalation redelivery loop on herdr
+
+While `state/.afk` was set on a herdr-backed fleet, `bin/fm-supervise-daemon.sh` re-injected the SAME buffered escalation digest into the primary's own supervisor pane every housekeeping cycle instead of clearing `state/.subsuper-escalations` once delivery landed.
+Observed twice: 2026-07-06 (three byte-identical digests in a row) and 2026-07-07 (two byte-identical catch-all-scan digests), each redelivery waking the primary's LLM turn for an escalation it had already handled - defeating away-mode's whole point.
+
+Reproduced live against a real, isolated `HERDR_SESSION`, a real `claude` process (the primary's own harness) as the supervisor pane, and the real `fm-supervise-daemon.sh` (not a synthetic composer script): with one buffered `stale persisted 241s` escalation and `FM_HOUSEKEEPING_TICK=1`, the daemon delivered the identical digest to the live pane at least 5 times in 40 seconds, and the agent itself eventually replied "The message is identical again and my position hasn't changed... I'll treat further identical escalations as noise" - an exact live match for the reported symptom.
+
+Root cause: `fm_backend_herdr_composer_state`'s structural composer-row read (added for the 2026-07-03 incident above) recognizes only BORDERED composer rows - a line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, `|`).
+Real `claude`'s live input row is a BARE, unbordered `❯ …` - no border glyph anywhere around it - flanked by plain horizontal-rule separator lines, not a box.
+Claude's own startup welcome banner IS bordered, so immediately after launch the classifier's "last bordered row wins" scan locks onto the banner's own blank interior spacer row and misreads it as the composer (a coincidental, and wrong, "empty").
+Once ordinary conversation scrolls that banner out of the 20-line capture window - true of any real supervisor pane with any history at all, which is every production case - NO bordered row exists anywhere in view, so the classifier reports `unknown` for a genuinely empty composer, forever.
+`fm_backend_herdr_send_text_submit` treats only `empty` as a confirmed submit; `unknown` counts as failure, so `escalate_flush` never clears the buffer even though the real Enter genuinely submitted the digest to the real pane.
+Because `pane_input_pending`'s pre-type guard only defers on `pending` (never `unknown`), the next housekeeping tick's flush attempt retypes and resubmits the SAME unmodified buffer content - the redelivery loop.
+
+Also discovered while reproducing: real `codex` (0.142.x) has the identical unbordered-live-row shape, using `›` instead of claude's `❯`, confirming this is not claude-specific.
+Codex additionally shows dynamic tip/hint text in its idle composer (e.g. "Use /skills to list available skills") rather than a fixed placeholder string or a blank row, so no static regex can safely tell a genuinely idle codex composer apart from real pending text.
+This narrower gap is NOT fixed here: an idle real-codex supervisor pane under herdr now classifies as `pending` rather than `unknown`, which makes injection defer indefinitely instead of redelivering - a strictly safer failure mode (the buffer is preserved, never silently dropped, and the existing max-defer wedge alarm still fires) but still not a correct read of the composer.
+A real fix needs either an upstream herdr cursor-row/style primitive or a codex-specific signal; neither exists today.
+
+**Fix:** `fm_backend_herdr_composer_state` now recognizes TWO composer-row shapes in one scan - the existing bordered shape, and a new bare (unbordered) shape: a trimmed line that STARTS with a known prompt glyph (`❯` claude, `›` codex, plus the generic `>`/`$`/`%`/`#` already recognized post-border-strip) with no closing border required at all.
+Both shapes are checked in the SAME forward scan, keeping whichever match comes LAST (bottom-most on screen), rather than trying bordered-only first and falling back to bare-only when nothing bordered is found: a bordered decorative box (a welcome banner, an update notice) is always rendered ABOVE the live composer, never below it, in every harness observed, so "last match of either shape wins" always resolves to the genuinely live, bottom-most row instead of a stale decorative box still sitting in the capture window.
+See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s "unbordered (bare) composer rows" section (fixtures captured verbatim from real `claude`/`codex` panes) for the regression coverage - each of those tests read `unknown` before this fix and reads the correct verdict after.
+
 ## Known gaps and follow-up notes
 
 - **No `events.subscribe` native push.** The busy-state semantic read (`agent.get`) is consumed through the EXISTING `fm-watch.sh` poll loop (same 15-second cadence as every other window), not a persistent async subscriber pushing events directly into the wake queue.
@@ -389,3 +412,9 @@ This is a test-harness-only concern - `fm_backend_herdr_composer_state` and `fm_
 - **RESOLVED: a restart's restored-layout husk no longer needs a manual pane close before respawn.** See "Respawn idempotency: a restored task tab is a husk, not a duplicate" above for the fix (`fm_backend_herdr_pane_agent_state`, `fm_backend_herdr_create_task`'s close-and-replace).
   Left over from that fix: the `dead` (`pane_not_found`) husk classification is exercised only at the unit level, never against the real binary - killing a pane's process on a live server was observed to make herdr reap the whole tab immediately (never leaving a dead-but-still-listed pane for the duplicate check to find), and a real session restart was never observed to produce one either.
   It remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) nobody has reproduced against the real binary yet.
+- **Codex's dynamic idle-composer tip text still misreads as `pending`.** See "Incident (2026-07-07)" above.
+  A real, genuinely idle codex composer under herdr shows rotating hint text instead of a blank row or a fixed placeholder, so `fm_backend_herdr_composer_state` cannot tell it apart from real unsubmitted input by pattern matching.
+  The practical effect is a safe-but-wrong deferral (the max-defer wedge alarm still fires, the buffer is never lost), not a redelivery loop, so it was left as a follow-up rather than folded into that fix.
+  A real fix needs either an upstream herdr cursor-row/style primitive or a codex-specific idle signal.
+- **Not implemented: a "paused / awaiting-external" crew state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crew intentionally idling on a known external wait (a vendor rate limit, say) still trips `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crew, with no way to mark the wait as expected.
+  Deferred as a separate item - it changes the stale-classification/status vocabulary shared with `bin/fm-watch.sh` and `bin/fm-classify-lib.sh`, which is a bigger surface than this redelivery-loop fix should carry.

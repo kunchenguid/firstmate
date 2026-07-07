@@ -595,19 +595,35 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
-# fm_backend_herdr_composer_state: classify the composer's own row - the
-# interior line of its rounded-corner box - as empty|pending|unknown, scanning
-# a generous tail-window capture of <target>. herdr's CLI exposes no
-# cursor-row primitive (unlike tmux's #{cursor_y}), so this locates the
-# composer row structurally: it is the only captured line whose TRIMMED
-# content both STARTS and ENDS with the same border glyph (│, ┃, or a plain
-# ASCII |). The box's own top/bottom rows use rounded corners (╭─…─╮ / ╰─…─╯),
-# which never match; popup item rows and horizontal separator rows carry no
-# border glyph at all; the footer help line ("Enter:send │ … │ …", verified
-# grok 0.2.82) uses │ only as an INTERIOR separator and does not start with
-# one, so it never matches either. Scans forward and keeps the LAST match, so
-# a border-shaped line earlier in scrollback/a popup can never outrank the
-# real (bottom-anchored) composer row.
+# fm_backend_herdr_composer_state: classify the composer's own row as
+# empty|pending|unknown, scanning a generous tail-window capture of <target>.
+# herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
+# this locates the composer row structurally, recognizing TWO row shapes and
+# keeping whichever match comes LAST (scanning forward), so a shape earlier in
+# scrollback/a popup can never outrank the real (bottom-anchored) composer row:
+#
+#   bordered - a boxed composer (verified grok 0.2.82): the row's TRIMMED
+#              content both STARTS and ENDS with the same border glyph (│, ┃,
+#              or a plain ASCII |). The box's own top/bottom rows use rounded
+#              corners (╭─…─╮ / ╰─…─╯), which never match; popup item rows and
+#              horizontal separator rows carry no border glyph at all; the
+#              footer help line ("Enter:send │ … │ …") uses │ only as an
+#              INTERIOR separator and does not start with one, so it never
+#              matches either.
+#   bare     - an UNBORDERED composer (verified real claude 2.x and codex
+#              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
+#              "Incident (2026-07-07)"): the row's TRIMMED content starts with
+#              a known prompt glyph but carries no closing border at all -
+#              claude's own live input row is a bare "❯ …" with no
+#              surrounding │, and codex's is a bare "› …". Both harnesses ALSO
+#              render bordered decorative boxes elsewhere (a startup welcome
+#              banner, an update-available notice) that satisfy the bordered
+#              shape above; requiring a match on EITHER shape and keeping the
+#              last (bottom-most) one is what keeps the live composer winning
+#              over a stale decorative box still sitting in the same capture
+#              window - a bordered box is only ever followed later on screen
+#              by the actual live composer, never the reverse, in every
+#              harness observed so far.
 #
 #   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -618,42 +634,67 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #             composer (e.g. "/compact" -> "/compact compaction
 #             instructions", verified live against real grok 0.2.82) - that
 #             first Enter is a SELECTION, not a submission.
-#   unknown - the pane could not be read, or no composer row was found in the
-#             captured window.
+#   unknown - the pane could not be read, or no composer row (of either shape)
+#             was found in the captured window.
+#
+# KNOWN REMAINING GAP (docs/herdr-backend.md "Incident (2026-07-07)"): codex's
+# idle composer shows dynamic tip/hint text ("Use /skills to list available
+# skills") rather than blank or a fixed placeholder string, so it cannot be
+# told apart from real pending input by pattern matching alone - a genuinely
+# idle codex composer under herdr classifies as "pending", not "empty". This
+# makes injection defer forever rather than redeliver, which is a narrower,
+# already-safe failure mode (the buffer is preserved, never silently lost, and
+# the max-defer wedge alarm still fires) - not fixed here; a real fix needs
+# either an upstream herdr cursor-row/style primitive or a codex-specific
+# signal, neither available today.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
+# Known bare (unbordered) prompt glyphs a composer row may start with: ❯
+# (claude), › (codex), plus the generic shell-style glyphs > $ % # already
+# recognized inside a bordered composer.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›>$%#]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed stripped="" found=0
+  local target=$1 cap line trimmed stripped="" found=0 shape=""
   cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
-      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
-      *) continue ;;
+      '│'*'│'|'┃'*'┃'|'|'*'|')
+        stripped=$trimmed
+        shape=bordered
+        found=1
+        ;;
+      *)
+        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+          stripped=$trimmed
+          shape=bare
+          found=1
+        fi
+        ;;
     esac
-    stripped=$trimmed
-    found=1
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
-  # Strip the border glyphs, then trim again.
-  stripped=${stripped//│/}
-  stripped=${stripped//┃/}
-  stripped=${stripped//|/}
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  if [ "$shape" = bordered ]; then
+    # Strip the border glyphs, then trim again.
+    stripped=${stripped//│/}
+    stripped=${stripped//┃/}
+    stripped=${stripped//|/}
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fi
   # A bare prompt glyph = empty composer.
   case "$stripped" in
-    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
   # Strip a leading prompt glyph before judging what remains.
   case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
