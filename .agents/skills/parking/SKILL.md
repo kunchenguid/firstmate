@@ -100,3 +100,27 @@ This is idempotent: never create a duplicate of a cron that is still live and ou
 
 If no firstmate session opens for more than 7 days, all three crons lapse; the next ritual or `/parking` re-arms them.
 This lapse-then-self-heal behavior is the accepted tradeoff documented in `README.md`.
+
+## Refinement and promotion
+
+Refine in place until an idea is `ready`: during a ritual or on demand, append dated notes, add sub-ideas, and bump `raw -> refining -> ready`. `last-touched` updates on every change.
+
+**Promote (`ready` -> `promoted`).**
+When the captain wants a `ready` idea promoted:
+
+1. Load the `jira-connect` skill and create a Jira issue: title is the distilled one-liner, body is the refinement notes, and add the deadline when the idea is time-sensitive. Record the returned Jira issue key.
+2. Flip the parking entry to `status: promoted` with a pointer to the Jira key, and update `last-touched`.
+3. When the idea is also fleet software work firstmate should execute, ALSO run firstmate's normal intake (AGENTS.md section 7): resolve the project, classify ship versus scout, and spawn the crewmate. Record both the Jira key and the resulting backlog id / PR / report on the parking entry.
+
+**Promote-to-scout.**
+An idea that is really a question ("would X work?") promotes straight to a firstmate scout task: firstmate investigates and reports, no commitment.
+Still file the Jira issue when the captain wants it tracked there.
+
+**Fallback when `jira-connect` is unavailable.**
+Create a local `data/backlog.md` entry instead, and warn the captain that the idea was queued locally rather than filed in Jira.
+Still flip the parking entry to `promoted` with a pointer to the backlog id.
+
+**Drop (`dropped`).**
+A killed idea is retained for record, not deleted immediately.
+Prune `dropped` (and old `promoted`) entries periodically to keep the lot scannable.
+Non-software ideas have no promote target; they live, refine, and drop in the lot, which is fine.
