@@ -208,7 +208,7 @@ fmx_image_payload_file() {
     echo "$client: cannot read image file: $path" >&2
     return 1
   fi
-  jq -cn \
+  MSYS2_ARG_CONV_EXCL='*' jq -cn \
     --arg media_type "$media_type" \
     --arg source_path "$path" \
     --argjson bytes "$bytes" \

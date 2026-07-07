@@ -8,6 +8,11 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+if ! fm_test_supports_symlinks; then
+  echo "skip: symlinks not supported by this checkout"
+  exit 0
+fi
+
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"

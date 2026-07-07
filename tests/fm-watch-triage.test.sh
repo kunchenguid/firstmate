@@ -22,6 +22,11 @@ set -u
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
 
+if ! fm_test_supports_symlinks; then
+  echo "skip: symlinks not supported by this checkout"
+  exit 0
+fi
+
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 

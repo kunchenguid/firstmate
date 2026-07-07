@@ -290,7 +290,7 @@ if [ "${1:-}" = return ]; then
   done
   lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
-    /*|'') ;;
+    /*|[A-Za-z]:/*|'') ;;
     *) lock="$wt/$lock" ;;
   esac
   if [ -n "$lock" ] && [ -e "$lock" ]; then
@@ -309,6 +309,9 @@ git_index_lock_path() {
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
   case "$lock" in
     /*) printf '%s\n' "$lock" ;;
+    [A-Za-z]:/*)
+      ( cd "$(dirname "$lock")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$lock")" )
+      ;;
     *)
       abs_dir=$(cd "$dir" && pwd -P)
       printf '%s/%s\n' "$abs_dir" "$lock"
@@ -381,7 +384,7 @@ done
 if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
-    /*|'') ;;
+    /*|[A-Za-z]:/*|'') ;;
     *) lock="$dir/$lock" ;;
   esac
   if [ -n "$lock" ] && [ -e "$lock" ]; then

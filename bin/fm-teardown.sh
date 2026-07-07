@@ -402,6 +402,9 @@ worktree_git_lock_path() {
   [ -n "$lock" ] || return 1
   case "$lock" in
     /*) printf '%s\n' "$lock" ;;
+    [A-Za-z]:/*)
+      ( cd "$(dirname "$lock")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$lock")" ) || return 1
+      ;;
     *)
       abs_dir=$(canonical_existing_dir "$dir") || return 1
       printf '%s/%s\n' "$abs_dir" "$lock"

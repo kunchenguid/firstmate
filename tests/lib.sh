@@ -30,6 +30,28 @@ FM_TEST_LIB_SOURCED=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Git refuses to inspect this no-mistakes worktree in some sandboxed Windows
+# runs because the worktree owner differs from the test process owner. Keep the
+# trust exception process-local so tests never write user/global git config.
+fm_test_ensure_safe_directory_config() {
+  local count=${GIT_CONFIG_COUNT:-0} i key value
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    key_var="GIT_CONFIG_KEY_$i"
+    value_var="GIT_CONFIG_VALUE_$i"
+    eval "key=\${$key_var:-}"
+    eval "value=\${$value_var:-}"
+    if [ "$key" = safe.directory ] && [ "$value" = '*' ]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  export GIT_CONFIG_COUNT=$((count + 1))
+  export "GIT_CONFIG_KEY_$count=safe.directory"
+  export "GIT_CONFIG_VALUE_$count=*"
+}
+fm_test_ensure_safe_directory_config
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -49,21 +71,35 @@ pass() {
 # call fm_test_cleanup from inside it so registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_PARENT_PID=${BASHPID:-$$}
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
 
 fm_test_cleanup() {
-  local d
+  local d seen
+  [ "${BASHPID:-$$}" = "${FM_TEST_CLEANUP_PARENT_PID:-}" ] || return 0
+  seen=
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] || continue
+    case "$seen" in *"$d"$'\n'*) continue ;; esac
+    seen="${seen}${d}"$'\n'
+    rm -rf "$d"
   done
+  if [ -f "${FM_TEST_CLEANUP_REGISTRY:-}" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      case "$seen" in *"$d"$'\n'*) continue ;; esac
+      seen="${seen}${d}"$'\n'
+      rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
   FM_TEST_CLEANUP_DIRS+=("$root")
+  [ -z "${FM_TEST_CLEANUP_REGISTRY:-}" ] || printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   printf '%s\n' "$root"
 }
 
@@ -89,6 +125,20 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+fm_test_supports_symlinks() {
+  local dir target link
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-symlink-probe.XXXXXX") || return 1
+  target="$dir/target"
+  link="$dir/link"
+  printf 'target\n' > "$target"
+  if ln -s "$target" "$link" 2>/dev/null && [ -L "$link" ]; then
+    rm -rf "$dir"
+    return 0
+  fi
+  rm -rf "$dir"
+  return 1
 }
 
 # --- deterministic git identity and fixtures --------------------------------

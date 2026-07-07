@@ -310,13 +310,18 @@ test_hook_silent_in_crewmate_worktree() {
 }
 
 test_hook_silent_without_jq() {
-  local dir out status fakebin tool tool_path
+  local dir out status fakebin tool tool_path bash_path
   dir=$(make_primary_dir "$TMP_ROOT/hook-nojq")
   : > "$dir/state/task1.meta"
   fakebin=$(fm_fakebin "$TMP_ROOT/hook-nojq-fake")
-  for tool in bash sh git cat printf date uname stat mkdir dirname; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
+  bash_path=$(type -P bash) || fail "test host must provide bash"
+  for tool in bash sh git cat printf date uname stat mkdir dirname pwd; do
+    tool_path=$(type -P "$tool") || fail "test host must provide $tool"
+    {
+      printf '#!%s\n' "$bash_path"
+      printf 'exec "%s" "$@"\n' "$tool_path"
+    } > "$fakebin/$tool"
+    chmod +x "$fakebin/$tool"
   done
   out=$(printf '{"stop_hook_active":false}' | PATH="$fakebin" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
   status=$?

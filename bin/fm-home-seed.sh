@@ -127,6 +127,7 @@ canonical_path_for_check() {
   local path=$1 probe tail prefix parent base
   case "$path" in
     /*) probe=$path ;;
+    [A-Za-z]:/*) probe=$path ;;
     *) probe="$(pwd -P)/$path" ;;
   esac
   while [ "$probe" != "/" ] && [ "${probe%/}" != "$probe" ]; do
@@ -429,6 +430,10 @@ normalize_origin_url() {
   case "$url" in
     file://*|*://*)
       printf '%s\n' "$url"
+      return
+      ;;
+    [A-Za-z]:/*)
+      canonical_path_for_check "$url"
       return
       ;;
     *:*)

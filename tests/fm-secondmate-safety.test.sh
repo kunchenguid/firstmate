@@ -667,6 +667,7 @@ test_home_seed_resolves_relative_source_origins() {
   printf '%s\n' "$out" | grep -F "home=$subhome_abs" >/dev/null || fail "seed did not report relative-origin subhome"
   [ -d "$subhome/projects/alpha/.git" ] || fail "relative source origin was not cloned"
   actual=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  actual=$(cd "$actual" && pwd -P)
   [ "$actual" = "$expected" ] || fail "relative source origin was not cloned through the resolved path"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
     || fail "relative source origin did not compare equal on reseed"
@@ -739,6 +740,10 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
 
 test_home_seed_refuses_project_destinations_outside_subhome() {
   local home subhome sink err
+  if ! fm_test_supports_symlinks; then
+    pass "home seeding refuses project destinations outside the subhome skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/symlink-project-home"
   subhome="$TMP_ROOT/symlink-project-subhome"
   sink="$home/data/symlink-projects"
@@ -764,6 +769,10 @@ test_home_seed_refuses_project_destinations_outside_subhome() {
 
 test_home_seed_refuses_operational_dirs_outside_subhome() {
   local home subhome sink err opdir
+  if ! fm_test_supports_symlinks; then
+    pass "home seeding refuses operational dirs outside the subhome skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/symlink-opdir-home"
   err="$TMP_ROOT/symlink-opdir.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -792,6 +801,10 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
 
 test_home_seed_refuses_symlinked_leaf_files() {
   local home subhome sink err leaf target expected
+  if ! fm_test_supports_symlinks; then
+    pass "home seeding refuses symlinked leaf files skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/symlink-leaf-home"
   err="$TMP_ROOT/symlink-leaf.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -935,6 +948,10 @@ SH
 
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   local home subhome sink fakebin log err opdir
+  if ! fm_test_supports_symlinks; then
+    pass "secondmate spawn refuses operational dirs outside the subhome skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/spawn-opdir-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-opdir-fake")
   log="$TMP_ROOT/spawn-opdir-fake/tmux.log"
@@ -1152,7 +1169,7 @@ EOF
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
-  local home subhome childproj childwt fakebin log err rc lock
+  local home subhome childproj childwt fakebin log err rc lock lock_dir
   home="$TMP_ROOT/force-lock-home"
   subhome="$TMP_ROOT/force-lock-subhome"
   childproj="$subhome/projects/alpha"
@@ -1200,6 +1217,10 @@ case "${1:-}" in
       shift
     done
     lock=$(git -C "$target" rev-parse --git-path index.lock 2>/dev/null || true)
+    if [ -n "$lock" ]; then
+      lock_dir=$(cd "$(dirname "$lock")" 2>/dev/null && pwd -P) || lock_dir=
+      [ -z "$lock_dir" ] || lock="$lock_dir/$(basename "$lock")"
+    fi
     if [ -n "$lock" ] && [ -e "$lock" ]; then
       echo "fatal: Unable to create '$lock': File exists." >&2
       exit 128
@@ -1216,6 +1237,8 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/lsof"
   lock=$(git -C "$childwt" rev-parse --git-path index.lock)
+  lock_dir=$(cd "$(dirname "$lock")" && pwd -P)
+  lock="$lock_dir/$(basename "$lock")"
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
@@ -1238,6 +1261,10 @@ SH
 
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
+  if ! fm_test_supports_symlinks; then
+    pass "force teardown allows operational directory symlinks inside the subhome skipped (symlinks unsupported)"
+    return 0
+  fi
   for opdir in data state config projects; do
     home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
     subhome="$TMP_ROOT/symlink-inside-teardown-subhome-$opdir"
@@ -1273,6 +1300,10 @@ EOF
 
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   local home subhome external_state fakebin err log
+  if ! fm_test_supports_symlinks; then
+    pass "force teardown refuses operational directory symlinks outside the subhome skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/symlink-state-teardown-home"
   subhome="$TMP_ROOT/symlink-state-teardown-subhome"
   external_state="$home/data/external-state"
@@ -1643,6 +1674,10 @@ EOF
 
 test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
+  if ! fm_test_supports_symlinks; then
+    pass "idle kind=secondmate pane is healthy and not stale skipped (symlinks unsupported)"
+    return 0
+  fi
   home="$TMP_ROOT/watch-home"
   mkdir -p "$home/state"
   window="firstmate:fm-domain"
@@ -1663,7 +1698,7 @@ EOF
   if ! wait_live "$pid" 25; then
     wait "$pid" || true
     grep -F "stale: $window" "$out" >/dev/null && fail "idle secondmate pane triggered stale wake"
-    fail "watcher exited unexpectedly while supervising idle secondmate"
+    fail "watcher exited unexpectedly while supervising idle secondmate"$'\n'"--- output ---"$'\n'"$(cat "$out")"
   fi
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -1794,21 +1829,23 @@ EOF
   [ ! -e "$markerhome/data/backlog.md" ] || fail "handoff wrote into a marker-only directory"
   grep -F 'marker-task' "$home/data/backlog.md" >/dev/null || fail "marker-only refusal lost the main backlog item"
 
-  seed_secondmate_home_marker "$symlinkhome" symlink-sm
-  symlinkhome_abs=$(cd "$symlinkhome" && pwd -P)
-  mkdir -p "$outside"
-  rm -rf "$symlinkhome/data"
-  ln -s "$outside" "$symlinkhome/data"
-  printf -- '- symlink-sm - bogus (home: %s; scope: bogus; projects: alpha; added 2026-06-22)\n' "$symlinkhome_abs" >> "$home/data/secondmates.md"
-  cat > "$home/data/backlog.md" <<'EOF'
+  if fm_test_supports_symlinks; then
+    seed_secondmate_home_marker "$symlinkhome" symlink-sm
+    symlinkhome_abs=$(cd "$symlinkhome" && pwd -P)
+    mkdir -p "$outside"
+    rm -rf "$symlinkhome/data"
+    ln -s "$outside" "$symlinkhome/data"
+    printf -- '- symlink-sm - bogus (home: %s; scope: bogus; projects: alpha; added 2026-06-22)\n' "$symlinkhome_abs" >> "$home/data/secondmates.md"
+    cat > "$home/data/backlog.md" <<'EOF'
 ## Queued
 - [ ] symlink-task - should not move (repo: alpha)
 EOF
-  if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" symlink-sm symlink-task >/dev/null 2>&1; then
-    fail "handoff accepted a secondmate home with data outside the home"
+    if FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" symlink-sm symlink-task >/dev/null 2>&1; then
+      fail "handoff accepted a secondmate home with data outside the home"
+    fi
+    [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
+    grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
   fi
-  [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
-  grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
   pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
 }
 

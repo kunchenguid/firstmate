@@ -434,13 +434,18 @@ test_bootstrap_activates_on_env_token() {
 }
 
 test_bootstrap_reports_missing_x_dependency() {
-  local home fakebin out tool tool_path
+  local home fakebin out tool tool_path bash_path
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi curl
+  bash_path=$(type -P bash) || fail "test host must provide bash"
   for tool in dirname grep tail; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
+    tool_path=$(type -P "$tool") || fail "test host must provide $tool"
+    {
+      printf '#!%s\n' "$bash_path"
+      printf 'exec "%s" "$@"\n' "$tool_path"
+    } > "$fakebin/$tool"
+    chmod +x "$fakebin/$tool"
   done
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash

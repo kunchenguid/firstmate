@@ -25,6 +25,11 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+if ! fm_test_supports_symlinks; then
+  echo "skip: symlinks not supported by this checkout"
+  exit 0
+fi
+
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)

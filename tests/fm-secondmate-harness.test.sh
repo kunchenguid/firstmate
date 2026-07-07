@@ -175,7 +175,9 @@ test_propagate_lib() {
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
+  printf 'temporary\n' > "$d/missing-target"
   ln -s "$d/missing-target" "$dest/crew-harness"
+  rm -f "$d/missing-target"
   propagate_inheritable_config "$src" "$dest"
   [ -L "$dest/crew-harness" ] && fail "broken destination symlink not removed on absence mirror"
 
@@ -658,12 +660,14 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+  if ! PATH="$fakebin:$BASE_PATH:$PATH" TMUX="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >"$w/crew-spawn.out" 2>"$w/crew-spawn.err"; then
+    fail "crew-unaffected: spawn failed"$'\n'"--- stderr ---"$'\n'"$(cat "$w/crew-spawn.err")"
+  fi
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
@@ -749,13 +753,13 @@ SH
 run_bootstrap() {
   local w=$1 fakebin
   fakebin=$(make_fake_toolchain "$w")
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  PATH="$fakebin:$BASE_PATH:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
 run_config_push() {
   local w=$1
-  PATH="$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  PATH="$BASE_PATH:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-config-push.sh"
 }
 
@@ -773,9 +777,9 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
-  run_bootstrap "$w" >/dev/null
+  run_bootstrap "$w" >"$w/bootstrap.out" 2>"$w/bootstrap.err"
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
-    || fail "sweep: crew-harness not pushed into the live home"
+    || fail "sweep: crew-harness not pushed into the live home"$'\n'"--- stdout ---"$'\n'"$(cat "$w/bootstrap.out")"$'\n'"--- stderr ---"$'\n'"$(cat "$w/bootstrap.err")"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "sweep: crew-dispatch.json not pushed into the live home"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \

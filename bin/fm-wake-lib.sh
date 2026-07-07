@@ -31,7 +31,11 @@ fm_pid_identity() {
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || {
+    [ -r "/proc/$pid/stat" ] || return 1
+    out=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    out="procfs:$out"
+  }
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
