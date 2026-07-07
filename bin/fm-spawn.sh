@@ -831,7 +831,7 @@ codex_app_start_initial_turn() {
 
 codex_app_wait_return_channel() {
   local status_file="$STATE_REAL/$ID.status" i polls sleep_s
-  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-20}
+  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
   sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
   for i in $(seq 1 "$polls"); do
     if grep -Fx 'working: Codex thread started' "$status_file" >/dev/null 2>&1; then

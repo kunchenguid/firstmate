@@ -170,7 +170,8 @@ working: Codex thread started
 ```
 
 to the absolute Firstmate status file before doing substantive work.
-Firstmate then waits briefly for that line to appear.
+Firstmate then waits up to 60 seconds by default for that line to appear.
+The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
 If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
 
 ## Send and steer flow
@@ -262,6 +263,7 @@ Implemented tests:
 - `fm-spawn.sh --backend codex-app` refuses `--secondmate`.
 - Spawn records `backend=codex-app`, `thread_id=`, and `codex_cwd=`.
 - Spawn refuses when the returned `codex_cwd` equals the primary checkout.
+- Spawn accepts a status-file return-channel write that arrives after the old five-second startup window.
 - Spawn refuses when the status-file return channel is not verified.
 - `fm-send.sh` routes to `send-turn`.
 - `fm-peek.sh` routes to recent thread turns.

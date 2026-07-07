@@ -48,6 +48,12 @@ case "$verb" in
     if [ "${FM_FAKE_BRIDGE_WRITE_STATUS:-0}" = 1 ]; then
       printf 'working: Codex thread started\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
     fi
+    if [ -n "${FM_FAKE_BRIDGE_WRITE_STATUS_AFTER_SLEEP:-}" ]; then
+      (
+        sleep "$FM_FAKE_BRIDGE_WRITE_STATUS_AFTER_SLEEP"
+        printf 'working: Codex thread started\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
+      ) >/dev/null 2>&1 &
+    fi
     if [ -n "$prompt" ]; then
       printf 'prompt-file\x1f%s\n' "$prompt" >> "$LOG"
       sed -n '1,220p' "$prompt" > "$LOG.prompt"
@@ -147,6 +153,19 @@ test_spawn_codex_app_records_thread_and_worktree() {
   pass "fm-spawn.sh --backend codex-app: creates an isolated git worktree, starts a Codex thread, verifies status, and records metadata"
 }
 
+test_spawn_codex_app_waits_past_old_return_channel_window() {
+  local id case_dir out status meta
+  id=codex-delayed-x5
+  case_dir=$(make_case delayed-status "$id")
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS_AFTER_SLEEP=6 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should tolerate a delayed status handshake: $out"
+  meta="$case_dir/home/state/$id.meta"
+  assert_present "$meta" "delayed handshake spawn should write meta"
+  assert_grep "working: Codex thread started" "$case_dir/home/state/$id.status" "delayed handshake should be accepted"
+  pass "fm-spawn.sh --backend codex-app: waits past the old five-second return-channel window"
+}
+
 test_spawn_codex_app_refuses_secondmate() {
   local case_dir out status
   case_dir="$TMP_ROOT/secondmate-refusal"
@@ -185,7 +204,7 @@ test_spawn_codex_app_requires_return_channel_status() {
   id=codex-no-status-x3
   case_dir=$(make_case no-status "$id")
   project="$case_dir/home/projects/app"
-  out=$(run_spawn_case "$case_dir" "$id" 2>&1)
+  out=$(FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 run_spawn_case "$case_dir" "$id" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn should fail without the Codex status handshake"
   assert_contains "$out" "did not write return-channel status" "missing handshake refusal should explain the missing status line"
@@ -226,6 +245,7 @@ test_teardown_codex_app_archives_and_removes_git_worktree() {
 }
 
 test_spawn_codex_app_records_thread_and_worktree
+test_spawn_codex_app_waits_past_old_return_channel_window
 test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge
 test_spawn_codex_app_requires_return_channel_status
