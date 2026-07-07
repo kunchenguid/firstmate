@@ -62,13 +62,13 @@ A non-urgent capture is a single turn with no questions.
 
 ## Rituals
 
-Three durable crons fire the rituals. Create them with `CronCreate`, each `durable: true`, local time, with a prompt that invokes this skill's ritual (for example "Run the parking-lot morning ritual: review data/parking.md"):
+Three durable crons fire the rituals. Create them with `CronCreate`, each `durable: true`, local time, with a prompt that invokes this skill's ritual and includes the literal marker string `[parking-lot ritual]` so the cron is identifiable in `CronList` output (for example "[parking-lot ritual] Run the parking-lot morning ritual: review data/parking.md"):
 
 - Morning: `57 8 * * *` (~8:57am).
 - Afternoon: `30 15 * * *` (3:30pm exact; the scheduler's small jitter still applies).
 - Weekly digest: `7 17 * * 5` (~Friday 5:07pm).
 
-The off-minute times avoid the fleet-wide :00/:30 pileup.
+The off-minute morning (8:57) and Friday (5:07) times avoid the fleet-wide :00/:30 pileup; the 3:30pm afternoon time is the captain's deliberate exact choice (documented in `README.md`) and lands on :30 by design.
 These crons auto-expire after 7 days, so they are self-re-armed (see below).
 
 **Morning and afternoon.**
@@ -96,7 +96,8 @@ Clustering is a suggestion, not an automatic merge; the captain decides.
 
 Harness recurring crons fire a final time and delete themselves after 7 days.
 The skill keeps its own schedule alive rather than relying on a core-script change: whenever a ritual runs (a cron fire or an on-demand `/parking`), first run `CronList`, and for each of the three parking crons that is absent or within the 7-day expiry window, re-create it with `CronCreate` using the exact expression above.
-This is idempotent: never create a duplicate of a cron that is still live and outside the window, and re-create only the missing or near-expiry ones.
+Identify a parking cron in `CronList` output by a stable match key: BOTH its exact cron expression (one of `57 8 * * *`, `30 15 * * *`, `7 17 * * 5`) AND the literal marker string `[parking-lot ritual]` in its prompt text.
+This is idempotent: never create a duplicate of a cron whose expression+marker match key is still live and outside the window, and re-create only the missing or near-expiry ones.
 
 If no firstmate session opens for more than 7 days, all three crons lapse; the next ritual or `/parking` re-arms them.
 This lapse-then-self-heal behavior is the accepted tradeoff documented in `README.md`.
