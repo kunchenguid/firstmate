@@ -95,9 +95,15 @@ Clustering is a suggestion, not an automatic merge; the captain decides.
 ### Self-re-arm against the 7-day expiry
 
 Harness recurring crons fire a final time and delete themselves after 7 days.
-The skill keeps its own schedule alive rather than relying on a core-script change: whenever a ritual runs (a cron fire or an on-demand `/parking`), first run `CronList`, and for each of the three parking crons that is absent or within the 7-day expiry window, re-create it with `CronCreate` using the exact expression above.
+The skill keeps its own schedule alive rather than relying on a core-script change: whenever a ritual runs (a cron fire or an on-demand `/parking`), first run `CronList`, then for each of the three parking crons decide by its match-key state.
 Identify a parking cron in `CronList` output by a stable match key: BOTH its exact cron expression (one of `57 8 * * *`, `30 15 * * *`, `7 17 * * 5`) AND the literal marker string `[parking-lot ritual]` in its prompt text.
-This is idempotent: never create a duplicate of a cron whose expression+marker match key is still live and outside the window, and re-create only the missing or near-expiry ones.
+For each of the three crons:
+
+- If NO live cron matches its key, `CronCreate` it with the exact expression above.
+- If a matching cron IS live but within the 7-day expiry window, `CronDelete` that near-expiry cron FIRST, then `CronCreate` a fresh one, so there is never an overlap where both fire.
+- If a matching cron is live and outside the expiry window, do nothing.
+
+This is idempotent because it either creates an absent cron or replaces (delete-then-create) a near-expiry one, never adding a second cron alongside a live one.
 
 If no firstmate session opens for more than 7 days, all three crons lapse; the next ritual or `/parking` re-arms them.
 This lapse-then-self-heal behavior is the accepted tradeoff documented in `README.md`.
