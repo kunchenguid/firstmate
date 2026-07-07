@@ -178,6 +178,7 @@ secondmate_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    codex) echo "brew install codex  # or install the Codex CLI from OpenAI" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -189,6 +190,7 @@ install_cmd() {
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
   orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  codex-app) TOOLS="codex node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
   *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
@@ -197,6 +199,17 @@ NO_MISTAKES_MIN_PATCH=2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+}
+
+codex_supports_app_server() {
+  codex app-server --help >/dev/null 2>&1
+}
+
+tool_required() {
+  case " $TOOLS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 no_mistakes_version_parts() {
@@ -400,7 +413,10 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
-if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+if [ "$BACKEND" = codex-app ] && command -v codex >/dev/null 2>&1 && ! codex_supports_app_server; then
+  echo "MISSING: codex app-server (install: $(install_cmd codex))"
+fi
+if tool_required treehouse && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then

@@ -67,6 +67,32 @@ SH
   chmod +x "$fakebin/tasks-axi"
 }
 
+add_fake_codex() {
+  local fakebin=$1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = app-server ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: codex app-server --listen <url>'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
+add_fake_codex_without_app_server() {
+  local fakebin=$1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = app-server ]; then
+  printf '%s\n' 'error: unrecognized subcommand app-server' >&2
+  exit 2
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
 add_real_jq() {
   local fakebin=$1 real_jq
   real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
@@ -176,7 +202,73 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
+
+  case_dir="$TMP_ROOT/orca-backend-selected-old-treehouse"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_fake_exit0 "$fakebin" orca
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=orca should ignore an old treehouse when treehouse is not required, got: $out"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
+}
+
+test_codex_app_backend_gates_codex_cli_only_when_selected() {
+  local case_dir fakebin out missing_codex missing_app_server
+  missing_codex="MISSING: codex (install: brew install codex  # or install the Codex CLI from OpenAI)"
+  missing_app_server="MISSING: codex app-server (install: brew install codex  # or install the Codex CLI from OpenAI)"
+
+  case_dir="$TMP_ROOT/codex-app-backend-missing-cli"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_codex" ] || fail "backend=codex-app should require the Codex CLI, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-backend-missing-app-server"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex_without_app_server "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_app_server" ] || fail "backend=codex-app should require Codex app-server support, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-env-backend-missing-app-server"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex_without_app_server "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=codex-app FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_app_server" ] || fail "FM_BACKEND=codex-app should require Codex app-server support, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-backend-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=codex-app should ignore an old treehouse when treehouse is not required, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-backend-selected-no-treehouse"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex "$fakebin"
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=codex-app with Codex CLI present should not require tmux/treehouse, got: $out"
+  pass "bootstrap: backend=codex-app gates the Codex CLI without requiring tmux or treehouse"
 }
 
 test_crew_dispatch_active_rules_are_surfaced() {
@@ -229,5 +321,6 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_codex_app_backend_gates_codex_cli_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

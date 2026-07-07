@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# Tear down a finished task: return the treehouse worktree, remove a git
+# worktree, release the Orca worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
@@ -100,7 +100,10 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
+WORKTREE_PROVIDER=$(fm_meta_get "$META" worktree_provider)
+[ -n "$WORKTREE_PROVIDER" ] || WORKTREE_PROVIDER=treehouse
 ORCA_PATH_MATCH_VERIFIED=0
+BACKEND_ENDPOINT_REMOVED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -126,6 +129,18 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+remove_backend_endpoint_or_fail() {
+  local backend=$1 target=$2 zellij_tab_id=${3:-} label=${4:-endpoint}
+  if [ -z "$target" ]; then
+    echo "error: missing $backend endpoint for $label; teardown aborted" >&2
+    return 1
+  fi
+  if ! fm_backend_kill "$backend" "$target" "$zellij_tab_id" "$label"; then
+    echo "error: failed to remove $backend endpoint $target for $label; teardown aborted" >&2
+    return 1
+  fi
 }
 
 require_orca_worktree_id() {
@@ -777,6 +792,15 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+remove_git_worktree() {
+  local dir=$1 project=$2 label=$3
+  if [ -z "$project" ] || [ ! -d "$project" ]; then
+    echo "error: cannot remove $label $dir; project path is missing" >&2
+    return 1
+  fi
+  git -C "$project" worktree remove --force "$dir"
+}
+
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
@@ -859,7 +883,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_provider child_return_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -870,6 +894,8 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_provider=$(meta_value "$child_meta" worktree_provider)
+    [ -n "$child_provider" ] || child_provider=treehouse
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -886,6 +912,8 @@ cleanup_firstmate_home_children() {
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+      elif [ "$child_backend" = codex-app ]; then
+        remove_backend_endpoint_or_fail "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" || return 1
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
@@ -906,7 +934,9 @@ cleanup_firstmate_home_children() {
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if [ "$child_provider" = git-worktree ]; then
+        remove_git_worktree "$child_wt" "$child_proj" "child worktree" || return 1
+      elif [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
         else
@@ -990,6 +1020,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if [ "$BACKEND" = codex-app ] && [ "$KIND" != secondmate ]; then
+  remove_backend_endpoint_or_fail "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" || exit 1
+  BACKEND_ENDPOINT_REMOVED=1
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1024,13 +1059,20 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  if [ "$WORKTREE_PROVIDER" = git-worktree ]; then
+    remove_git_worktree "$WT" "$PROJ" "worktree" || {
+      echo "error: git worktree remove failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  else
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  fi
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] && [ "$BACKEND_ENDPOINT_REMOVED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
