@@ -71,6 +71,14 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Numeric session names (verified 2026-07-06, tmux 3.6a)
+
+tmux parses a bare numeric `-t` target as a window index, not a session name, so the unnamed default session `0` needs a trailing colon to be addressed unambiguously as a session.
+Observed on a private `-L` socket with a session named `0`: `tmux new-window -d -t "0"` fails with `create window failed: index 0 in use`, and with a free numeric index (`-t "5"`, no session named `5`) it silently creates the window at that index in the current session instead.
+The colon form `tmux new-window -d -t "0:"` creates the window in session `0` at the next free index, which is why `bin/backends/tmux.sh` targets sessions as `"$ses:"`.
+`tests/fm-backend-tmux-smoke.test.sh` covers this against a real private-socket server.
+If your session has a numeric name, use the same trailing-colon form in the manual commands above (`tmux list-windows -t "0:"`).
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
