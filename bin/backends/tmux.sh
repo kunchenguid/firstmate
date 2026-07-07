@@ -69,13 +69,22 @@ fm_backend_tmux_container_ensure() {
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
 # (session:window, matching how fm-spawn.sh composed its own $T).
+#
+# The session is addressed as "<session>:" (trailing colon), never bare
+# "<session>". A bare target whose text is a plain integer - which happens when
+# firstmate runs inside a tmux session with a numeric name (e.g. "58") - is
+# parsed by tmux as a WINDOW INDEX in the current session, not a session name,
+# so `new-window -t 58` targets index 58 and a second task collides with
+# "index 58 in use". The trailing colon forces session interpretation and lets
+# tmux pick the next free index; it is equally correct for a named session
+# like "firstmate:".
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
   local ses=$1 wname=$2 proj_abs=$3
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  if tmux list-windows -t "$ses:" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  tmux new-window -d -t "$ses:" -n "$wname" -c "$proj_abs"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

@@ -630,24 +630,12 @@ fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
+# validate_spawn_worktree's isolation guard resolves the leased worktree with
+# `pwd -P` and compares it against the primary; a still-symlinked PROJ_ABS could
+# false-positive (the guard refusing a spawn that never actually tangled).
+# Canonicalize once here so that comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
-
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
@@ -778,14 +766,6 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
-spawn_current_path() {  # <target>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
-    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
-}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -805,26 +785,28 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$T" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  # Durably lease a worktree from the pool as a subprocess, exactly as
+  # fm-home-seed.sh's acquire_treehouse_home does. treehouse prints only the
+  # worktree path to stdout (banners go to stderr), so command substitution
+  # captures the path directly. This replaces the old interactive `treehouse
+  # get` + pane-cwd poll: treehouse v2.0.0's `get` opens a subshell whose cwd
+  # the multiplexer's own current-path read (tmux's pane_current_path, etc.)
+  # does not observe, so the poll timed out at 60s even though the worktree was
+  # created. A lease is non-interactive, deterministic, and never handed out or
+  # pruned while held; fm-teardown returns it by path via `treehouse return`
+  # identically to the old path. The lease holder is the task id.
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID; inspect window $T" >&2
     exit 1
-  fi
+  }
+  [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID; inspect window $T" >&2; exit 1; }
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "treehouse get --lease" "$T"
+
+  # Move the task pane into the leased worktree so the harness launches there
+  # and every worktree-resident turn-end hook lands in $WT. The window was
+  # created in $PROJ_ABS; a plain cd is enough because the lease already exists.
+  spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

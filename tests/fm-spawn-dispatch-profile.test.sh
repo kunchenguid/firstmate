@@ -19,9 +19,6 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -42,7 +39,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # treehouse stub: `get --lease` prints the worktree path to stdout (banners to
+  # stderr), exactly as the real treehouse does; fm-spawn captures that path via
+  # command substitution. Any other subcommand is a trivial exit-0.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -87,7 +95,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -346,6 +354,25 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_scout_worktree_comes_from_lease() {
+  # Regression: treehouse v2.0.0's interactive `get` opens a subshell whose cwd
+  # the multiplexer does not report, so the old pane_current_path poll timed out
+  # at 60s. fm-spawn now leases the worktree via `treehouse get --lease` and
+  # reads the path from stdout. The fakebin tmux stub answers no pane-cwd probe
+  # at all, so this spawn succeeds only via the lease path.
+  local rec id out status
+  id=lease-worktree-z17
+  rec=$(make_spawn_case lease-worktree claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" --scout "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "scout spawn should succeed from the lease path"
+  assert_contains "$out" "spawned $id" "lease-based spawn did not report success"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "meta did not record the leased worktree from stdout"
+  pass "scout worktree is acquired via treehouse --lease, independent of pane-cwd polling"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -378,6 +405,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
+test_scout_worktree_comes_from_lease
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
