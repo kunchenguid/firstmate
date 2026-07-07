@@ -31,6 +31,9 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
+#   ratelimited: <window>  a pane is parked on a footer-rendered quota or overload
+#                          message; stale detection is suppressed until the
+#                          token-free resume scan can submit "continue"
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -47,6 +50,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
 # predicates), the SAME library the away-mode daemon uses, so the triage policy
 # has one definition.
@@ -216,6 +221,18 @@ window_backend() {
     return 0
   fi
   echo tmux
+}
+
+window_harness() {
+  local w=$1 meta harness
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    harness=$(fm_meta_get "$meta" harness)
+    [ -n "$harness" ] || harness=unknown
+    echo "$harness"
+    return 0
+  fi
+  echo unknown
 }
 
 window_label() {
@@ -626,6 +643,15 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  resume_reason=""
+  resume_rc=0
+  resume_reason=$(fm_ratelimit_resume_scan "$STATE") || resume_rc=$?
+  case "$resume_rc" in
+    0) ;;
+    2) [ -n "$resume_reason" ] && wake "$resume_reason" ;;
+    *) triage_log "ratelimit resume scan error rc=$resume_rc" ;;
+  esac
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -739,6 +765,24 @@ EOF
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+        limit_match=$(fm_ratelimit_render_match "$tail40" || true)
+        if [ -n "$limit_match" ]; then
+          IFS=$(printf '\t') read -r reset_epoch limit_kind <<EOF
+$limit_match
+EOF
+          task=$(window_to_task "$w" "$STATE")
+          if [ -n "$task" ] && fm_ratelimit_marker_write "$STATE" "$task" "$reset_epoch" "$w" "$(window_harness "$w")"; then
+            reason="ratelimited: $w until $reset_epoch ($limit_kind)"
+            fm_wake_append ratelimited "$task" "$reason" || exit 1
+            printf '%s' "$h" > "$sf"
+            rm -f "$ssf" "$ewf"
+            wake "$reason"
+          fi
+          printf '%s' "$h" > "$sf"
+          rm -f "$ssf" "$ewf"
+          triage_log "absorbed ratelimited stale: $w until $reset_epoch ($limit_kind)"
+          continue
+        fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then

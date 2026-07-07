@@ -911,17 +911,30 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
-#  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
+#  2) rate-limit resume: after the reset margin, submit "continue" to a still
+#     idle limit/empty pane; successful resumes are silent, exhausted retries
+#     escalate.
+#  3) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
-#  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
+#  3b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
 #     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
 #     digest and reset the window (repeating bounded re-surface, never a wedge).
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
+#  4) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest resume_reason resume_rc pause_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+
+  detect_supervisor_ratelimit "$state"
+  resume_reason=""
+  resume_rc=0
+  resume_reason=$(fm_ratelimit_resume_scan "$state") || resume_rc=$?
+  if [ "$resume_rc" = 2 ] && [ -n "$resume_reason" ]; then
+    escalate_add "$state" "$resume_reason"
+  elif [ "$resume_rc" != 0 ]; then
+    log "ratelimit resume scan error rc=$resume_rc"
+  fi
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -1033,6 +1046,24 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
+  fi
+}
+
+detect_supervisor_ratelimit() {  # <state>
+  local state=$1 target backend tail match reset kind
+  target="${FM_SUPERVISOR_TARGET:-}"
+  backend="${FM_SUPERVISOR_BACKEND:-}"
+  [ -n "$target" ] && [ -n "$backend" ] || return 0
+  fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1 || return 0
+  tail=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 0
+  match=$(fm_ratelimit_render_match "$tail" || true)
+  [ -n "$match" ] || return 0
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  if fm_ratelimit_marker_write "$state" firstmate "$reset" "$target" firstmate; then
+    fm_wake_append ratelimited firstmate "ratelimited: $target until $reset ($kind)" >/dev/null 2>&1 || true
+    log "self-handle: ratelimited supervisor pane $target until $reset ($kind)"
   fi
 }
 
@@ -1154,7 +1185,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|check:*|heartbeat|heartbeat:*|ratelimited:*) return 0 ;;
   esac
   return 1
 }
@@ -1173,6 +1204,7 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
               decision=$(classify_stale "$arg" "$state") ;;
+    ratelimited:*) decision="self|$reason" ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;

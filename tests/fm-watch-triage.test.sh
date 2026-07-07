@@ -393,6 +393,50 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+test_ratelimit_stale_is_parked_not_wedged() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid marker_line reset marker_window marker_harness
+  dir=$(make_case ratelimit-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limited"
+  printf 'Claude usage limit reached\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/limited.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Claude usage limit reached")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not emit the first ratelimited wake"
+  grep -F "ratelimited: $window" "$out" >/dev/null || fail "watcher did not print a ratelimited wake: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null && fail "ratelimited pane was mislabeled stale"
+  marker_line=$(cat "$state/limited.ratelimit" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r reset marker_window marker_harness <<EOF
+$marker_line
+EOF
+  case "$reset" in ''|*[!0-9]*) fail "ratelimit marker did not start with reset epoch: $marker_line" ;; esac
+  [ "$marker_window" = "$window" ] || fail "ratelimit marker window mismatch: $marker_line"
+  [ "$marker_harness" = claude ] || fail "ratelimit marker harness mismatch: $marker_line"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after ratelimited wake failed"
+  grep "$(printf '\tratelimited\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "ratelimited wake was not queued"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced a stale wake for an already parked ratelimit pane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "parked ratelimit pane printed another wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "parked ratelimit pane enqueued another wake"; }
+  reap "$pid"
+  pass "a stale pane with a quota footer is parked as ratelimited, not wedged"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1132,6 +1176,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_ratelimit_stale_is_parked_not_wedged
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

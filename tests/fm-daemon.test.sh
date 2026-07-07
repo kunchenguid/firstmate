@@ -125,6 +125,17 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+test_ratelimited_wake_self_handles() {
+  local dir state
+  dir=$(make_supercase ratelimited-self)
+  state="$dir/state"
+  is_wake_reason "ratelimited: sess:fm-task until 123 (ratelimit)" \
+    || fail "ratelimited reason was not recognized as a watcher wake"
+  handle_wake "ratelimited: sess:fm-task until 123 (ratelimit)" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "ratelimited wake was escalated in away mode"
+  pass "ratelimited watcher wake self-handles in the away-mode daemon"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1660,6 +1671,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_ratelimited_wake_self_handles
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
