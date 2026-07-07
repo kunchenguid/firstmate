@@ -82,6 +82,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+For non-orca spawns, `fm-spawn.sh`'s worktree-discovery poll adds one more guard: a freshly created pane can transiently report its parent `FM_ROOT`, so a departure is only accepted once the pane has first been seen at the project path, and `FM_ROOT` is rejected as a destination unconditionally (a departure to it would tangle the primary, which the distinct-worktree-root check cannot catch since `FM_ROOT` is itself a valid worktree root).
 
 ## Two task shapes
 
