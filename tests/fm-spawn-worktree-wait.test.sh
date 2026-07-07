@@ -107,5 +107,25 @@ EOF
   pass "FM_SPAWN_WORKTREE_TIMEOUT overrides the wait bound and error message"
 }
 
+# Even after the project has been seen, a later FM_ROOT read must be rejected:
+# FM_ROOT is never a valid worktree and accepting it would launch the crewmate
+# into the primary checkout (the tangle this loop guards). The loop must keep
+# waiting past the FM_ROOT read and accept only the real worktree that follows.
+test_fm_root_rejected_after_project_seen() {
+  local id=fm-root-after-proj-w1 rec case_dir home proj wt seqfile out status
+  rec=$(make_case "$id")
+  IFS='|' read -r case_dir home proj wt <<EOF
+$rec
+EOF
+  seqfile="$case_dir/pane.seq"
+  printf '%s\n' "$proj" "$ROOT" "$wt" > "$seqfile"
+  out=$(run_spawn "$home" "$(make_fakebin "$case_dir/fake")" "$seqfile" "$id" "$proj")
+  status=$?
+  expect_code 0 "$status" "spawn should skip the post-project FM_ROOT read and accept the real worktree"
+  assert_contains "$out" "worktree=$wt" "spawn accepted FM_ROOT instead of the real worktree ($out)"
+  pass "FM_ROOT read after the project is rejected, not accepted as the worktree"
+}
+
 test_seen_proj_gate_skips_transient_fm_root
 test_configurable_timeout_used_in_error
+test_fm_root_rejected_after_project_seen

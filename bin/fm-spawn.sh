@@ -822,7 +822,9 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   # Right after the pane is created it may transiently report its parent
   # (FM_ROOT), so only accept a departure once the pane has been seen at the
-  # project, or to a path that is not that transient FM_ROOT.
+  # project. FM_ROOT is never a valid worktree (a departure to it would tangle
+  # the primary checkout, which validate_spawn_worktree cannot catch because
+  # FM_ROOT is a distinct worktree root), so reject it unconditionally.
   FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL="$FM_ROOT"
   WT_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-60}"
   seen_proj=
@@ -832,7 +834,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       pr=$(real_path_or_raw "$p")
       if [ "$pr" = "$PROJ_ABS_REAL" ]; then
         seen_proj=1
-      elif [ -n "$seen_proj" ] || [ "$pr" != "$FM_ROOT_REAL" ]; then
+      elif [ -n "$seen_proj" ] && [ "$pr" != "$FM_ROOT_REAL" ]; then
         WT="$p"
         break
       fi
