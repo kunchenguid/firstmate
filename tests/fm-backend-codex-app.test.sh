@@ -21,6 +21,8 @@ const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
 const omitCwd = process.env.FM_FAKE_CODEX_OMIT_CWD === "1";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
 const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
+const initializeDelayMs = Number(process.env.FM_FAKE_CODEX_INITIALIZE_DELAY_MS || "0");
+const turnStartDelayMs = Number(process.env.FM_FAKE_CODEX_TURN_START_DELAY_MS || "0");
 const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
 const substantiveDelayMs = Number(process.env.FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS || "0");
 const holdActiveUntilSubstantive = process.env.FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE === "1";
@@ -28,6 +30,14 @@ const metadataFail = process.env.FM_FAKE_CODEX_METADATA_FAIL === "1";
 let substantiveDone = false;
 function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
+}
+function respond(msg, delayMs = 0, after = null) {
+  const send = () => {
+    write(msg);
+    if (after) after();
+  };
+  if (delayMs > 0) setTimeout(send, delayMs);
+  else send();
 }
 function record(msg) {
   fs.appendFileSync(log, "request\t" + (msg.method || "") + "\t" + JSON.stringify(msg.params || {}) + "\n");
@@ -63,7 +73,7 @@ rl.on("line", line => {
   const params = msg.params || {};
   const cwd = forcedCwd || params.cwd || "/tmp/fake-cwd";
   if (msg.method === "initialize") {
-    write({ id, result: { userAgent: "Codex Desktop/fake", codexHome: "/tmp/fake-codex-home", platformFamily: "unix", platformOs: "macos" } });
+    respond({ id, result: { userAgent: "Codex Desktop/fake", codexHome: "/tmp/fake-codex-home", platformFamily: "unix", platformOs: "macos" } }, initializeDelayMs);
   } else if (msg.method === "thread/start") {
     const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
     if (!omitCwd) result.cwd = cwd;
@@ -78,18 +88,19 @@ rl.on("line", line => {
       write({ id, error: { code: -32602, message: "turn/start text input missing text_elements" } });
       return;
     }
-    write({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } });
-    if (statusFile) {
-      setTimeout(() => {
-        fs.appendFileSync(statusFile, "working: Codex thread started\n");
-      }, statusDelayMs);
-    }
-    if (substantiveFile) {
-      setTimeout(() => {
-        fs.appendFileSync(substantiveFile, "substantive: bridge still alive\n");
-        substantiveDone = true;
-      }, substantiveDelayMs);
-    }
+    respond({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } }, turnStartDelayMs, () => {
+      if (statusFile) {
+        setTimeout(() => {
+          fs.appendFileSync(statusFile, "working: Codex thread started\n");
+        }, statusDelayMs);
+      }
+      if (substantiveFile) {
+        setTimeout(() => {
+          fs.appendFileSync(substantiveFile, "substantive: bridge still alive\n");
+          substantiveDone = true;
+        }, substantiveDelayMs);
+      }
+    });
   } else if (msg.method === "thread/read") {
     const status = holdActiveUntilSubstantive && !substantiveDone ? "active" : (process.env.FM_FAKE_CODEX_STATUS || "idle");
     write({ id, result: { thread: thread(cwd, status) } });
@@ -260,6 +271,26 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
 }
 
+test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
+  local dir fb log prompt status_file out status
+  dir="$TMP_ROOT/bridge-turn-ready-timeout"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  status_file="$dir/status.log"
+  printf 'Start slowly but within budget, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_INITIALIZE_DELAY_MS=6400 FM_FAKE_CODEX_TURN_START_DELAY_MS=6400 FM_FAKE_CODEX_STATUS_DELAY_MS=50 FM_CODEX_BRIDGE_TIMEOUT_MS=7000 FM_CODEX_APP_RETURN_CHANNEL_POLLS=5 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.05 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=1 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should wait for initialize, turn/start, and status-file budgets before worker ready: $out"
+  assert_grep "working: Codex thread started" "$status_file" "bridge should see the delayed status-file handshake"
+  assert_contains "$(cat "$log")" $'request\tinitialize\t' "bridge did not initialize before delayed ready"
+  assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start turn before delayed ready"
+  pass "fm-codex-bridge: send-turn ready timeout covers slow pre-ready requests"
+}
+
 test_bridge_start_thread_requires_reported_cwd() {
   local dir fb log out status
   dir="$TMP_ROOT/bridge-start-missing-cwd"
@@ -372,6 +403,7 @@ test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
 test_bridge_start_thread_requires_reported_cwd
 test_bridge_turns_list_renders_chronological_text_from_desc_response
 test_bridge_start_thread_returns_id_when_metadata_calls_fail

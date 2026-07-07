@@ -391,7 +391,7 @@ async function sendTurnDetached(opts) {
     detached: true,
     stdio: "ignore",
   });
-  const readyTimeoutMs = DEFAULT_TIMEOUT_MS + statusWaitBudgetMs(opts) + 5000;
+  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 2) + statusWaitBudgetMs(opts) + 5000;
   let ready;
   try {
     ready = await waitForReadyFile(readyFile, child, readyTimeoutMs);
