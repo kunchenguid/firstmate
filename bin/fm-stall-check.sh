@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# Pull-based stall detector for firstmate supervision.
+# Sweeps backlog/state/tmux and prints one line per stalled or ready workstream.
+# Silent exit means all clear. Read-only: never mutates backlog or state.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="$FM_HOME/data"
+BACKLOG="$DATA/backlog.md"
+IDLE_SECS=${FM_STALL_IDLE_SECS:-600}
+
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
+
+if [ "$(uname)" = Darwin ]; then
+  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
+else
+  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
+
+now_epoch() {
+  date +%s
+}
+
+date_epoch() {
+  local s=$1 out
+  [ -n "$s" ] || return 1
+  s=${s/T/ }
+  if [ "$(uname)" = Darwin ]; then
+    out=$(date -j -f '%Y-%m-%d %H:%M' "$s" +%s 2>/dev/null) \
+      || out=$(date -j -f '%Y-%m-%d' "$s" +%s 2>/dev/null) \
+      || out=$(date -j -f '%Y/%m/%d %H:%M' "$s" +%s 2>/dev/null) \
+      || out=$(date -j -f '%Y/%m/%d' "$s" +%s 2>/dev/null) \
+      || return 1
+  else
+    out=$(date -d "$s" +%s 2>/dev/null) || return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+awk_ids_in_section() { # <section>
+  local section=$1
+  [ -f "$BACKLOG" ] || return 0
+  awk -v want="$section" '
+    /^## / { section = $0; next }
+    section == want && /^- / {
+      line = $0
+      sub(/^- /, "", line)
+      sub(/^\[[ xX]\][[:space:]]+/, "", line)
+      if (match(line, /^\*\*[^*]+\*\*/)) {
+        id = substr(line, RSTART + 2, RLENGTH - 4)
+        print id
+      } else if (match(line, /^[^[:space:]]+/)) {
+        print substr(line, RSTART, RLENGTH)
+      }
+    }
+  ' "$BACKLOG"
+}
+
+in_flight_ids() {
+  awk_ids_in_section "## In flight"
+}
+
+done_ids() {
+  awk_ids_in_section "## Done"
+}
+
+queued_blockers() {
+  [ -f "$BACKLOG" ] || return 0
+  awk '
+    /^## / { section = $0; next }
+    section == "## Queued" && /^- / && /blocked-by:[[:space:]]*/ {
+      line = $0
+      sub(/^- /, "", line)
+      sub(/^\[[ xX]\][[:space:]]+/, "", line)
+      if (match(line, /^\*\*[^*]+\*\*/)) {
+        id = substr(line, RSTART + 2, RLENGTH - 4)
+      } else if (match(line, /^[^[:space:]]+/)) {
+        id = substr(line, RSTART, RLENGTH)
+      } else {
+        next
+      }
+      rest = $0
+      sub(/^.*blocked-by:[[:space:]]*/, "", rest)
+      if (match(rest, /^[A-Za-z0-9_.-]+/)) {
+        blocker = substr(rest, RSTART, RLENGTH)
+        print id "\t" blocker
+      }
+    }
+  ' "$BACKLOG"
+}
+
+queued_date_gates() {
+  [ -f "$BACKLOG" ] || return 0
+  awk '
+    /^## / { section = $0; next }
+    section == "## Queued" && /^- / {
+      line = $0
+      sub(/^- /, "", line)
+      sub(/^\[[ xX]\][[:space:]]+/, "", line)
+      if (match(line, /^\*\*[^*]+\*\*/)) {
+        id = substr(line, RSTART + 2, RLENGTH - 4)
+      } else if (match(line, /^[^[:space:]]+/)) {
+        id = substr(line, RSTART, RLENGTH)
+      } else {
+        next
+      }
+      gate = ""
+      if (match($0, /\[REMIND[[:space:]][^]]+\]/)) {
+        gate = substr($0, RSTART + 8, RLENGTH - 9)
+      } else if (match($0, /(run-on|run on|run_at|run-at|date-gate|date gate|due):?[[:space:]]+[0-9][0-9][0-9][0-9][-\/][0-9][0-9][-\/][0-9][0-9]([ T][0-9][0-9]:[0-9][0-9])?/)) {
+        gate = substr($0, RSTART, RLENGTH)
+        sub(/^[^0-9]*/, "", gate)
+      }
+      if (gate != "") print id "\t" gate
+    }
+  ' "$BACKLOG"
+}
+
+is_in_set() { # <needle> <newline-set>
+  local needle=$1 set=$2
+  printf '%s\n' "$set" | grep -Fx "$needle" >/dev/null 2>&1
+}
+
+terminal_status_ids() {
+  local f id last
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    id=$(basename "$f" .status)
+    last=$(awk 'NF { line = $0 } END { print line }' "$f" 2>/dev/null || true)
+    case "$last" in
+      done:*|failed:*) printf '%s\n' "$id" ;;
+    esac
+  done
+}
+
+window_for_meta() {
+  grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+kind_for_meta() {
+  local kind
+  kind=$(grep '^kind=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$kind" ] || kind=ship
+  printf '%s\n' "$kind"
+}
+
+check_finished_not_advanced() {
+  local inflight terminal id
+  inflight=$(in_flight_ids)
+  [ -n "$inflight" ] || return 0
+  terminal=$(terminal_status_ids)
+  [ -n "$terminal" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if is_in_set "$id" "$inflight"; then
+      printf 'advance: %s - done but still in-flight; next leg not triggered\n' "$id"
+    fi
+  done <<EOF
+$terminal
+EOF
+}
+
+check_unblocked_queued() {
+  local done id blocker
+  done=$(done_ids)
+  [ -n "$done" ] || return 0
+  queued_blockers | while IFS=$(printf '\t') read -r id blocker; do
+    [ -n "$id" ] || continue
+    if is_in_set "$blocker" "$done"; then
+      printf 'ready: %s - blocker %s is done; dispatchable\n' "$id" "$blocker"
+    fi
+  done
+}
+
+check_date_gates() {
+  local id gate due now
+  now=$(now_epoch)
+  queued_date_gates | while IFS=$(printf '\t') read -r id gate; do
+    [ -n "$id" ] || continue
+    due=$(date_epoch "$gate" 2>/dev/null || true)
+    [ -n "$due" ] || continue
+    if [ "$due" -le "$now" ]; then
+      printf 'ready: %s - date gate %s reached\n' "$id" "$gate"
+    fi
+  done
+}
+
+check_idle_stalls() {
+  local meta id kind status m age window
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] && continue
+    status="$STATE/$id.status"
+    [ -f "$status" ] || continue
+    m=$(stat_mtime "$status") || continue
+    age=$(( $(now_epoch) - m ))
+    [ "$age" -ge "$IDLE_SECS" ] || continue
+    window=$(window_for_meta "$meta")
+    [ -n "$window" ] || continue
+    # Confirm the pane is readable. fm_pane_is_busy returns non-zero both for
+    # "not busy" and unreadable panes, so capture a bounded peek first to avoid
+    # reporting missing/dead tmux targets as idle work.
+    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
+    if ! fm_pane_is_busy "$window"; then
+      printf 'stall?: %s - idle %ss, no status advance\n' "$id" "$age"
+    fi
+  done
+}
+
+check_finished_not_advanced
+check_unblocked_queued
+check_date_gates
+check_idle_stalls
