@@ -544,6 +544,7 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   check_file="$state/task.check.sh"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash

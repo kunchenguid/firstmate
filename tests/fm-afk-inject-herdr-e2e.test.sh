@@ -92,14 +92,20 @@ EOF
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
 
 # A second, independent live task tab in the same workspace, mirroring the tmux
-# e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
-# only watches state/*.status mtimes, no window/pane dependency), but kept for
-# parity so this test's shape matches the tmux e2e's.
+# e2e's fake fm-fake-c1 crewmate window, kept for parity so this test's shape
+# matches the tmux e2e's.
 FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
   || fail "could not create the fake crewmate scratch tab"
 read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
 $FAKE_CREW_IDS
 EOF
+
+# A live task always has a matching state/<id>.meta (fm-teardown.sh removes
+# .status/.turn-ended/.meta together); the watcher's orphan guard absorbs and
+# deletes any *.status/*.turn-ended with no matching .meta before it can ever
+# become a signal, so fake-c1's escalations below need this fixture to be seen
+# as a live task's status. Written once; reset_state() never clears *.meta.
+printf 'window=%s:%s\nkind=ship\n' "$SESSION" "$_FAKE_TAB_ID" > "$STATE_DIR/fake-c1.meta"
 
 # --- deterministic bordered-composer loop, drawn in the scratch pane ---------
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
