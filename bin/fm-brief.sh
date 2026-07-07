@@ -41,6 +41,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 KIND=ship
 POS=()
 for a in "$@"; do
@@ -225,6 +226,26 @@ EOF
     ;;
 esac
 
+# config/validation-skill (gitignored): when set, the crewmate must run this
+# skill (e.g. check-work) and paste its artifacts before reporting done. Skipped
+# for no-mistakes mode, which carries its own gate. Absent = no gate (default).
+VALIDATION_GATE=""
+if [ -f "$CONFIG/validation-skill" ] && [ "$MODE" != no-mistakes ]; then
+  VALIDATION_SKILL=$(tr -d '[:space:]' < "$CONFIG/validation-skill")
+  if [ -n "$VALIDATION_SKILL" ] && printf '%s' "$VALIDATION_SKILL" | grep -qE '^[A-Za-z0-9._-]+$'; then
+    VALIDATION_GATE=$(cat <<EOF
+
+# Validation gate (MANDATORY)
+Before you report done, and before you push or open any PR, run \`/$VALIDATION_SKILL\` and follow it in full.
+Paste its required artifacts (test-run output, the adversarial review block, the smoke-test evidence, the type/lint result) into your status.
+You may not report done without them: a claim of testing with no artifact is a failed check.
+EOF
+)
+  elif [ -n "$VALIDATION_SKILL" ]; then
+    echo "warn: config/validation-skill has an invalid skill name; ignoring" >&2
+  fi
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -261,6 +282,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$VALIDATION_GATE
 
 $DOD
 EOF

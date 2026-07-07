@@ -93,7 +93,58 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The gitignored config/validation-skill knob inserts a mandatory validation
+# gate into direct-PR and local-only ship briefs: the crewmate must run the
+# named skill (e.g. check-work) and paste its artifacts before reporting done.
+# Absent knob = no gate, so upstream behavior is unchanged.
+test_validation_skill_knob_adds_gate() {
+  local home id brief
+  home="$TMP_ROOT/valskill-home"
+  write_registry "$home"
+  mkdir -p "$home/config"
+  printf 'check-work\n' > "$home/config/validation-skill"
+  id="brief-valskill-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "Validation gate" "$brief" "direct-PR brief missing validation gate with knob set"
+  assert_grep "/check-work" "$brief" "direct-PR brief missing the /check-work invocation"
+  pass "fm-brief.sh: config/validation-skill inserts the named gate for direct-PR"
+}
+
+# With no knob file, the brief must be exactly the current behavior: no gate.
+test_validation_skill_absent_no_gate() {
+  local home id brief
+  home="$TMP_ROOT/valskill-absent-home"
+  write_registry "$home"
+  id="brief-valskill-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "Validation gate" "$brief" "brief gained a validation gate with no knob set"
+  pass "fm-brief.sh: no validation gate when config/validation-skill is absent"
+}
+
+# no-mistakes mode carries its own gate, so the knob is skipped there to avoid a
+# contradictory double gate. no-registry-proj defaults to no-mistakes mode.
+test_validation_skill_skipped_for_no_mistakes() {
+  local home id brief
+  home="$TMP_ROOT/valskill-nm-home"
+  write_registry "$home"
+  mkdir -p "$home/config"
+  printf 'check-work\n' > "$home/config/validation-skill"
+  id="brief-valskill-d3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "Validation gate" "$brief" "no-mistakes brief wrongly gained the validation gate"
+  pass "fm-brief.sh: validation gate is skipped for no-mistakes mode"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_validation_skill_knob_adds_gate
+test_validation_skill_absent_no_gate
+test_validation_skill_skipped_for_no_mistakes
