@@ -719,11 +719,12 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 #
 # Confirmation signal (rewritten for the 2026-07-07 incident below;
 # superseded a composer-content read that itself replaced a delta-based check
-# for the 2026-07-03 incident): submission is now confirmed by
-# fm_backend_herdr_wait_for_working observing agent_status "working" at least
-# once after Enter, NOT by reading the composer's own row. This makes
-# confirmation cross-agent: it is the same semantic signal regardless of what
-# text a harness's idle composer happens to display.
+# for the 2026-07-03 incident): when the target is legibly idle before Enter,
+# submission is confirmed by fm_backend_herdr_wait_for_working observing a
+# submit-active agent_status after Enter, NOT by reading the composer's own
+# row. This makes the normal confirmation path cross-agent: it is the same
+# semantic signal regardless of what text a harness's idle composer happens
+# to display.
 #
 # Incident (2026-07-07): a redelivery loop in the away-mode daemon. Root
 # cause: fm_backend_herdr_composer_state's structural row classifier
@@ -734,8 +735,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # landed submit as still-"pending" forever - see docs/herdr-backend.md for
 # the full account. Composer content is retained for other callers (the
 # away-mode daemon's PRE-injection empty-box guard, still dispatched via
-# fm_backend_composer_state / fm_backend_herdr_composer_state, unchanged) but
-# is no longer used here.
+# fm_backend_composer_state / fm_backend_herdr_composer_state, unchanged) and
+# for submit attempts whose pre-Enter agent-state baseline is not legibly
+# idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a
@@ -769,16 +771,24 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  baseline=$(fm_backend_herdr_classify_submit_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
-    verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$sleep_s" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+    if [ "$baseline" = idle ]; then
+      verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+        "$sleep_s" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+    else
+      sleep "$sleep_s"
+      verdict=$(fm_backend_herdr_composer_state "$target")
+    fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
+      empty) printf 'empty'; return 0 ;;
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
@@ -795,19 +805,25 @@ fm_backend_herdr_kill() {  # <target>
 }
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status
-# value to the adapter's busy|idle|unknown vocabulary. working -> busy
-# (actively generating); idle/done -> idle; blocked -> idle (a blocked agent
-# is stuck waiting on the human, not grinding - the watcher should treat it
-# like a stale pane needing attention, not suppress it as busy);
+# value to the adapter's watcher busy|idle|unknown vocabulary. working ->
+# busy (actively generating); idle/done -> idle; blocked -> idle (a blocked
+# agent is stuck waiting on the human, not grinding - the watcher should
+# treat it like a stale pane needing attention, not suppress it as busy);
 # unknown/unparseable/empty -> unknown, the caller's cue to fall back to
-# pane-regex detection. Shared by fm_backend_herdr_busy_state (one read) and
-# fm_backend_herdr_wait_for_working (a poll loop over repeated reads), so the
-# mapping is never duplicated.
+# pane-regex detection.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
     idle|done) printf 'idle' ;;
     blocked) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
+  case "$1" in
+    working|blocked) printf 'busy' ;;
+    idle|done) printf 'idle' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -842,8 +858,9 @@ fm_backend_herdr_busy_state() {  # <target>
 # agent-state (agent get) up to <polls> times spread evenly across
 # <budget-seconds>, returning on stdout the STRONGEST signal observed:
 #
-#   busy    - "working" was observed at least once. This is confirmation that
-#             a real turn started - the submit landed - independent of
+#   busy    - a submit-active status was observed at least once. This is
+#             confirmation that a real turn started or reached a prompt -
+#             the submit landed - independent of
 #             whatever the composer's own text happens to show (docs/
 #             herdr-backend.md "Incident (2026-07-07)": composer content is
 #             what fooled the OLD confirmation on codex's dynamic idle-tip
@@ -882,16 +899,18 @@ FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
 fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
   local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0
   case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
-  interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { v = b / p; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
+  interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
   for ((i = 0; i < polls; i++)); do
+    if [ "$polls" -eq 1 ] || [ "$i" -gt 0 ]; then
+      sleep "$interval"
+    fi
     raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    bs=$(fm_backend_herdr_classify_agent_status "$raw")
+    bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
     case "$bs" in
       busy) printf 'busy'; return 0 ;;
       idle) saw_idle=1 ;;
     esac
-    sleep "$interval"
   done
   if [ "$saw_idle" -eq 1 ]; then
     printf 'idle'
