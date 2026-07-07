@@ -120,6 +120,12 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
+Verified on codex-cli 0.142.5 (newer than this section's 0.139.0 baseline): a second dialog can follow the directory trust dialog on first launch in a fresh worktree, "Hooks need review - N hooks are new or changed. Hooks can run outside the sandbox after you trust them.", with options "1. Review hooks", "2. Trust all and continue", "3. Continue without trusting (hooks won't run)".
+It appears because firstmate's own turn-end notify hook (installed via `-c notify=[...]` in the launch command) is new or changed for that worktree.
+Select option 2, "Trust all and continue".
+Option 3 silently disables the notify hook for that task, so firstmate's turn-end wake signal is lost even though the crewmate itself keeps working correctly.
+Verified 2026-07-07 via a real scout smoke-test spawn (`codex-smoke-9p`, fourfront): the trust dialog appeared and was accepted, the hooks-review dialog then appeared, option 2 was selected, and the turn-end hook file was confirmed touched afterward.
+
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 
