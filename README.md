@@ -149,6 +149,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified Claude Code Stop-hook mechanism, scoping, and known gaps.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [docs/engineering-health.md](docs/engineering-health.md) - the agent-context surface audit: method, measured before/after token counts, and expected behavior impact.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 

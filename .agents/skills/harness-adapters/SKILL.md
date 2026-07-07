@@ -10,37 +10,15 @@ metadata:
 
 Use this reference before any harness-specific firstmate operation: spawn, recovery, trust-dialog handling, skill invocation, interrupt, exit, resume, or adapter verification.
 
-Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
-Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
-The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
-`default` means mirror firstmate's own harness.
+Harness resolution policy - the static `config/crew-harness` override, dispatch profiles, precedence, the secondmate fallback chain, and config inheritance into secondmate homes - is AGENTS.md section 4's contract; this skill owns the per-adapter operational knowledge (busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks), while the launch mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`.
 
-Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
-`config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
-An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited by secondmate homes.
-This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
-Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
-If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
-Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
-
-Each adapter splits into mechanics and knowledge.
-The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
-The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
-
-Never dispatch a crewmate or secondmate on an unverified adapter.
-If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
+Never dispatch a crewmate or secondmate on an unverified adapter (section 4's rule).
+When the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, the env marker and command name in `bin/fm-harness.sh`, and the verified knowledge here.
 
 ## Detection
 
-`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
-`bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
-`bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
-`bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
-On `unknown`, ask the captain instead of guessing.
-A captain override always beats detection.
-When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry; `crew` and `secondmate` modes resolve the effective launch harness per AGENTS.md section 4.
+On `unknown`, ask the captain instead of guessing; a captain override always beats detection.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
@@ -48,7 +26,6 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 ## Launch profile axes
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
-Do not make the shell scripts parse or match natural-language dispatch rules.
 The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path.
 
 | Harness | Model flag | Effort flag | Notes |
@@ -71,7 +48,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
-- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- grok: `/<skill>`, for example `/no-mistakes` (same form as claude); verified end to end against a real `no-mistakes axi run`. Slash-popup submit hazard and the 2026-07-03 herdr incident: see the grok section below.
 
 ## claude (VERIFIED)
 
