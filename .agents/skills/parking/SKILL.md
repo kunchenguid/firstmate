@@ -91,3 +91,12 @@ Acting on it (a note append, a status change, or a drop) resets `last-touched`.
 During a ritual, group related parked ideas and suggest combining them: "3 ideas here all touch Redshift access - combine into one effort?"
 This turns scattered sparks into a single deliberate effort.
 Clustering is a suggestion, not an automatic merge; the captain decides.
+
+### Self-re-arm against the 7-day expiry
+
+Harness recurring crons fire a final time and delete themselves after 7 days.
+The skill keeps its own schedule alive rather than relying on a core-script change: whenever a ritual runs (a cron fire or an on-demand `/parking`), first run `CronList`, and for each of the three parking crons that is absent or within the 7-day expiry window, re-create it with `CronCreate` using the exact expression above.
+This is idempotent: never create a duplicate of a cron that is still live and outside the window, and re-create only the missing or near-expiry ones.
+
+If no firstmate session opens for more than 7 days, all three crons lapse; the next ritual or `/parking` re-arms them.
+This lapse-then-self-heal behavior is the accepted tradeoff documented in `README.md`.

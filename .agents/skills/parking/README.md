@@ -25,7 +25,7 @@ Rituals fire via harness `CronCreate` recurring jobs (`durable: true`, local tim
 
 Two constraints are designed around, not hidden:
 
-1. **7-day auto-expiry.** Harness recurring crons fire a final time and delete themselves after 7 days. The rituals are therefore **self-re-arming**: whenever a ritual runs (or at session start), the skill checks `CronList` and re-creates any parking cron that is missing or within the expiry window. If the captain opens no firstmate session for more than 7 days, the schedule lapses and then self-heals on the next session.
+1. **7-day auto-expiry.** Harness recurring crons fire a final time and delete themselves after 7 days. The rituals are therefore **self-re-arming**: whenever a ritual runs (a cron fire or an on-demand `/parking`), the skill checks `CronList` and re-creates any parking cron that is missing or within the expiry window - no core-script change needed. If the captain opens no firstmate session for more than 7 days, all three crons lapse and then self-heal on the next ritual or `/parking`.
 2. **Fires only while a session is live.** A cron fire is missed if no firstmate session is open; recurring crons get no catch-up. This is accepted: the ritual fires when the captain is actually working. The weekly digest and the decay nudge provide backstop coverage for ideas missed on a quiet day.
 
 ## Sample entry
