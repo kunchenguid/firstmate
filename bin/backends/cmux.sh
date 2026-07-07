@@ -573,12 +573,16 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until the composer's own row reads empty.
-# Mirrors fm_backend_herdr_send_text_submit's verification strategy exactly:
-# a slash-command popup's first Enter can close the popup and fill an
-# argument-hint placeholder into the composer rather than submitting, which a
-# raw-diff check would misread as "submitted" - classifying the composer row
-# specifically avoids that false positive, so the retry loop correctly sends
-# a second Enter when needed. Echoes empty|pending|unknown|send-failed, the
+# Mirrors fm_backend_herdr_send_text_submit's ORIGINAL (composer-row)
+# verification strategy: a slash-command popup's first Enter can close the
+# popup and fill an argument-hint placeholder into the composer rather than
+# submitting, which a raw-diff check would misread as "submitted" -
+# classifying the composer row specifically avoids that false positive, so
+# the retry loop correctly sends a second Enter when needed. Herdr's adapter
+# has since moved its own confirmation to a native agent-state read instead
+# (docs/herdr-backend.md "Native agent-state submit confirmation"); cmux has
+# no analogous native primitive, so this composer-row approach remains
+# cmux's own confirmation strategy. Echoes empty|pending|unknown|send-failed, the
 # SAME vocabulary every existing backend already speaks.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} i=0 state
