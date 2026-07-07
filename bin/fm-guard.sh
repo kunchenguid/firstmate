@@ -39,6 +39,13 @@ if [ -s "$FM_WAKE_QUEUE" ]; then
   echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
 fi
 
+if [ "${FM_GUARD_STALL_CHECK:-1}" != "0" ]; then
+  stall_signal=$("$SCRIPT_DIR/fm-stall-check.sh" --fast 2>/dev/null | sed -n '1p' || true)
+  if [ -n "$stall_signal" ]; then
+    echo "WARNING: stall detector has findings - run bin/fm-stall-check.sh and act on each line." >&2
+  fi
+fi
+
 BEAT="$STATE/.last-watcher-beat"
 if [ -e "$BEAT" ]; then
   m=$(stat_mtime "$BEAT") || exit 0

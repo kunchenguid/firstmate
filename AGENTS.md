@@ -512,6 +512,11 @@ On wake, in order of cheapness:
 5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
+Run `bin/fm-stall-check.sh` at every heartbeat and every wake-handling turn, immediately after draining queued wakes and before deciding the fleet is quiet.
+It is a read-only, pull-based sweep over the same backlog/state/tmux surfaces firstmate already consumes, and prints nothing when all clear.
+Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling, dispatch queued items whose blockers or date gates have cleared, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed.
+`bin/fm-guard.sh` also warns when the stall detector has any finding, so the next supervision script invocation surfaces dormant work mechanically.
+
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
