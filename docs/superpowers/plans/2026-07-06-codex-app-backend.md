@@ -31,7 +31,7 @@ Expected: FAIL because `bin/fm-codex-bridge` does not exist.
 
 Create an executable Node script with verbs `ensure-running`, `start-thread`, `send-turn`, `read-thread`, `thread-status`, `turns-list`, `archive-thread`, and `list-live`.
 Use `codex app-server --listen stdio://`, send `initialize` first, then send bare newline JSON request objects with `id`, `method`, and `params`.
-For turns, send `input: [{type:"text", text}]`, `cwd`, optional `model`, optional `effort`, `approvalPolicy:"never"`, `approvalsReviewer:"user"`, and `sandboxPolicy:{type:"dangerFullAccess"}`.
+For turns, send `input: [{type:"text", text, text_elements:[]}]`, `cwd`, optional `model`, optional `effort`, `approvalPolicy:"never"`, `approvalsReviewer:"user"`, and `sandboxPolicy:{type:"dangerFullAccess"}`.
 For `start-thread`, start an empty thread, set the name and goal when present, then start the first turn with the prompt file.
 
 - [x] **Step 3: Verify the bridge test passes**

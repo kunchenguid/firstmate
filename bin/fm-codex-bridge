@@ -275,7 +275,7 @@ class AppServer {
 function turnParams(threadId, prompt, opts) {
   const params = {
     threadId,
-    input: [{ type: "text", text: prompt }],
+    input: [{ type: "text", text: prompt, text_elements: [] }],
     approvalPolicy: "never",
     approvalsReviewer: "user",
     sandboxPolicy: { type: "dangerFullAccess" },

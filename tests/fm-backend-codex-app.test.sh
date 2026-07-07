@@ -43,6 +43,11 @@ function thread(cwd, status = "idle") {
     turns: []
   };
 }
+function hasSchemaNativeTextInput(params) {
+  return Array.isArray(params.input) && params.input.some(item =>
+    item && item.type === "text" && typeof item.text === "string" && Array.isArray(item.text_elements)
+  );
+}
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", line => {
   if (!line.trim()) return;
@@ -61,6 +66,10 @@ rl.on("line", line => {
   } else if (msg.method === "thread/archive") {
     write({ id, result: {} });
   } else if (msg.method === "turn/start") {
+    if (!hasSchemaNativeTextInput(params)) {
+      write({ id, error: { code: -32602, message: "turn/start text input missing text_elements" } });
+      return;
+    }
     write({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } });
     if (statusFile) {
       setTimeout(() => {
@@ -199,6 +208,7 @@ test_bridge_start_thread_uses_app_server_stdio() {
   status=$?
   expect_code 0 "$status" "bridge send-turn should start the initial turn after validation"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the initial turn"
+  assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input"
   pass "fm-codex-bridge: start-thread normalizes thread cwd before send-turn starts the first turn"
 }
 
@@ -218,6 +228,7 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   expect_code 0 "$status" "bridge send-turn should keep app-server alive until the status file handshake: $out"
   assert_grep "working: Codex thread started" "$status_file" "bridge should wait for the app-server-driven status write"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
+  assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
 }
 
