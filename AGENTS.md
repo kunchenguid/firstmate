@@ -83,6 +83,7 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
+  parking.md         parked-ideas queue; LOCAL, gitignored; created lazily on first capture, one entry per idea (status/parked/last-touched/time-sensitive/context+ref/verbatim/notes), format and lifecycle owned by the parking skill (section 6)
   captain.md         captain's personal preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
