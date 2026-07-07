@@ -47,16 +47,22 @@ fm_backend_codex_app_prompt_tmp() {  # <text> -> echoes temp path
 }
 
 fm_backend_codex_app_capture() {  # <thread-id> <lines> [expected-label]
-  local thread_id=$1 lines=${2:-40} bridge out text
+  local thread_id=$1 lines=${2:-40} bridge out text turn_limit payload
+  case "$lines" in ''|*[!0-9]*) lines=40 ;; esac
+  [ "$lines" -gt 0 ] || return 0
+  turn_limit=${FM_CODEX_APP_CAPTURE_TURN_LIMIT:-20}
+  case "$turn_limit" in ''|*[!0-9]*) turn_limit=20 ;; esac
+  [ "$turn_limit" -gt 0 ] || turn_limit=1
   fm_backend_codex_app_tool_check || return 1
   bridge=$(fm_backend_codex_app_bridge)
-  out=$("$bridge" turns-list --thread-id "$thread_id" --limit "$lines" --items-view summary) || return 1
+  out=$("$bridge" turns-list --thread-id "$thread_id" --limit "$turn_limit" --items-view summary) || return 1
   text=$(printf '%s' "$out" | fm_backend_codex_app_json_field text 2>/dev/null || true)
   if [ -n "$text" ]; then
-    printf '%s' "$text"
+    payload=$text
   else
-    printf '%s' "$out"
+    payload=$out
   fi
+  printf '%s' "$payload" | tail -n "$lines"
 }
 
 fm_backend_codex_app_send_text_submit() {  # <thread-id> <text> <retries> <enter-sleep> <settle> [expected-label]

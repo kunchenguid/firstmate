@@ -48,6 +48,9 @@ case "$verb" in
     if [ "${FM_FAKE_BRIDGE_WRITE_STATUS:-0}" = 1 ]; then
       printf 'working: Codex thread started\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
     fi
+    if [ "${FM_FAKE_BRIDGE_WRITE_OTHER_STATUS:-0}" = 1 ]; then
+      printf 'working: wrong startup line\n' >> "${FM_FAKE_BRIDGE_STATUS_FILE:?}"
+    fi
     if [ -n "${FM_FAKE_BRIDGE_WRITE_STATUS_AFTER_SLEEP:-}" ]; then
       (
         sleep "$FM_FAKE_BRIDGE_WRITE_STATUS_AFTER_SLEEP"
@@ -232,6 +235,33 @@ test_spawn_codex_app_requires_return_channel_status() {
   pass "fm-spawn.sh --backend codex-app: refuses when the Codex thread does not verify the status return channel"
 }
 
+test_spawn_codex_app_preserves_startup_state_when_archive_fails() {
+  local id case_dir out status wt logical_wt project meta log status_file
+  id=codex-startup-archive-fail-x7
+  case_dir=$(make_case startup-archive-fail "$id")
+  project="$case_dir/home/projects/app"
+  status_file="$case_dir/home/state/$id.status"
+  out=$(FM_FAKE_BRIDGE_WRITE_OTHER_STATUS=1 FM_FAKE_BRIDGE_ARCHIVE_FAIL=1 FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 run_spawn_case "$case_dir" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail when the status handshake is missing and archive also fails"
+  assert_contains "$out" "startup cleanup failed to archive thread thread-spawn-123" "archive failure should explain preserved startup resources"
+  logical_wt="$case_dir/home/projects/.firstmate-worktrees/$id"
+  meta="$case_dir/home/state/$id.meta"
+  assert_present "$logical_wt" "archive failure should preserve the startup git worktree"
+  wt=$(cd "$logical_wt" && pwd -P)
+  git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
+    || fail "archive failure should preserve the project worktree registration"
+  git -C "$project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "archive failure should preserve the task branch"
+  assert_present "$meta" "archive failure should write recovery metadata"
+  [ "$(meta_value "$meta" thread_id)" = thread-spawn-123 ] || fail "recovery meta should retain thread_id"
+  assert_present "$status_file" "archive failure should preserve the startup status file"
+  assert_grep "working: wrong startup line" "$status_file" "archive failure should leave existing status content intact"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "startup cleanup should try to archive the Codex thread"
+  pass "fm-spawn.sh --backend codex-app: preserves startup resources when archive fails"
+}
+
 test_teardown_codex_app_archives_and_removes_git_worktree() {
   local id case_dir out status meta wt project log
   id=codex-teardown-x4
@@ -289,5 +319,6 @@ test_spawn_codex_app_waits_past_old_return_channel_window
 test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge
 test_spawn_codex_app_requires_return_channel_status
+test_spawn_codex_app_preserves_startup_state_when_archive_fails
 test_teardown_codex_app_archives_and_removes_git_worktree
 test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails

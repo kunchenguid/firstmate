@@ -20,6 +20,7 @@ const turnId = process.env.FM_FAKE_CODEX_TURN_ID || "turn-456";
 const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
 const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
+const metadataFail = process.env.FM_FAKE_CODEX_METADATA_FAIL === "1";
 function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -54,7 +55,10 @@ rl.on("line", line => {
     write({ id, result: { userAgent: "Codex Desktop/fake", codexHome: "/tmp/fake-codex-home", platformFamily: "unix", platformOs: "macos" } });
   } else if (msg.method === "thread/start") {
     write({ id, result: { thread: thread(cwd), cwd, model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } } });
-  } else if (msg.method === "thread/name/set" || msg.method === "thread/goal/set" || msg.method === "thread/archive") {
+  } else if (msg.method === "thread/name/set" || msg.method === "thread/goal/set") {
+    if (metadataFail) write({ id, error: { code: -32000, message: "metadata failed" } });
+    else write({ id, result: {} });
+  } else if (msg.method === "thread/archive") {
     write({ id, result: {} });
   } else if (msg.method === "turn/start") {
     write({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } });
@@ -123,7 +127,11 @@ case "$verb" in
     printf '{"ok":true,"turn":{"id":"turn-from-bridge","status":"inProgress"}}\n'
     ;;
   turns-list)
-    printf '{"ok":true,"text":"user: hello captain\\nassistant: aye captain","turns":[{"id":"turn-from-bridge","status":"completed"}]}\n'
+    if [ "${FM_FAKE_BRIDGE_LONG_TEXT:-0}" = 1 ]; then
+      printf '{"ok":true,"text":"line 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6","turns":[{"id":"turn-from-bridge","status":"completed"}]}\n'
+    else
+      printf '{"ok":true,"text":"user: hello captain\\nassistant: aye captain","turns":[{"id":"turn-from-bridge","status":"completed"}]}\n'
+    fi
     ;;
   read-thread)
     printf '{"ok":true,"thread":{"id":"thread-from-bridge","status":{"type":"%s"}}}\n' "${FM_FAKE_BRIDGE_STATUS:-idle}"
@@ -213,6 +221,28 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
 }
 
+test_bridge_start_thread_returns_id_when_metadata_calls_fail() {
+  local dir fb log out status thread_id cwd
+  dir="$TMP_ROOT/bridge-metadata-fail"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_METADATA_FAIL=1 \
+    "$ROOT/bin/fm-codex-bridge" start-thread --cwd "$dir/wt" --name "fm-task" --goal "ship it")
+  status=$?
+  expect_code 0 "$status" "bridge start-thread should still return the thread id when name or goal metadata fails"
+  thread_id=$(printf '%s' "$out" | json_field thread_id)
+  cwd=$(printf '%s' "$out" | json_field cwd)
+  [ "$thread_id" = thread-123 ] || fail "bridge should preserve thread_id after metadata failure, got '$thread_id'"
+  [ "$cwd" = "$dir/wt" ] || fail "bridge should preserve cwd after metadata failure, got '$cwd'"
+  assert_contains "$out" "metadata_errors" "bridge should report best-effort metadata failures without hiding the thread id"
+  assert_contains "$(cat "$log")" $'request\tthread/name/set\t' "metadata-failure case should attempt to set the thread name"
+  assert_contains "$(cat "$log")" $'request\tthread/goal/set\t' "metadata-failure case should attempt to set the thread goal"
+  assert_not_contains "$(cat "$log")" $'request\tturn/start\t' "metadata-failure start-thread should not start the first turn before cwd validation"
+  pass "fm-codex-bridge: start-thread returns the created thread id when metadata calls fail"
+}
+
 test_backend_dispatch_accepts_codex_app() {
   local dir bridge log out status
   dir="$TMP_ROOT/backend-dispatch"
@@ -245,7 +275,28 @@ test_backend_capture_send_busy_exists_and_kill_route_to_bridge() {
   pass "codex-app adapter: capture, send, busy-state, target-exists, and kill route through the bridge"
 }
 
+test_backend_capture_trims_to_requested_lines_with_separate_turn_limit() {
+  local dir bridge log out status
+  dir="$TMP_ROOT/backend-capture-limit"
+  mkdir -p "$dir"
+  log="$dir/bridge.log"
+  bridge=$(make_fake_bridge "$dir")
+  out=$(FM_CODEX_BRIDGE="$bridge" FM_FAKE_BRIDGE_LOG="$log" FM_FAKE_BRIDGE_LONG_TEXT=1 FM_CODEX_APP_CAPTURE_TURN_LIMIT=7 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture codex-app thread-abc 3' "$ROOT" 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app capture should succeed with a line budget: $out"
+  assert_not_contains "$out" "line 1" "capture should trim older transcript lines"
+  assert_not_contains "$out" "line 3" "capture should trim to the requested line count"
+  assert_contains "$out" "line 4" "capture should include the recent tail"
+  assert_contains "$out" "line 6" "capture should include the newest line"
+  assert_contains "$(cat "$log")" $'--limit\x1f7' "capture should use the separate Codex turn fetch limit"
+  assert_not_contains "$(cat "$log")" $'--limit\x1f3' "capture should not use the line budget as the turn fetch limit"
+  pass "codex-app adapter: capture trims output lines separately from turn fetch limit"
+}
+
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_start_thread_returns_id_when_metadata_calls_fail
 test_backend_dispatch_accepts_codex_app
 test_backend_capture_send_busy_exists_and_kill_route_to_bridge
+test_backend_capture_trims_to_requested_lines_with_separate_turn_limit

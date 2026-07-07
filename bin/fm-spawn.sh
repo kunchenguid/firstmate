@@ -258,7 +258,11 @@ codex_app_spawn_abort_cleanup() {
   [ "$CODEX_ABORT_CLEANUP" = 1 ] || return "$status"
   CODEX_ABORT_CLEANUP=0
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
-    fm_backend_kill codex-app "$CODEX_THREAD_ID" 2>/dev/null || cleanup_failed=1
+    if ! fm_backend_kill codex-app "$CODEX_THREAD_ID" 2>/dev/null; then
+      echo "error: codex-app startup cleanup failed to archive thread $CODEX_THREAD_ID; preserving worktree and state for manual recovery" >&2
+      codex_app_write_abort_meta
+      return "$status"
+    fi
   fi
   if [ "$WORKTREE_PROVIDER" = git-worktree ] && [ -n "${PROJ_ABS:-}" ] && [ -d "$PROJ_ABS" ]; then
     if [ -n "${WT:-}" ] && [ -d "$WT" ]; then

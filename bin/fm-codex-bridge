@@ -307,6 +307,25 @@ async function ensureRunning() {
   }));
 }
 
+async function setThreadMetadata(server, threadId, opts) {
+  const errors = [];
+  if (opts.name) {
+    try {
+      await server.request("thread/name/set", { threadId, name: opts.name });
+    } catch (err) {
+      errors.push({ field: "name", error: err.message });
+    }
+  }
+  if (opts.goal) {
+    try {
+      await server.request("thread/goal/set", { threadId, objective: opts.goal, status: "active" });
+    } catch (err) {
+      errors.push({ field: "goal", error: err.message });
+    }
+  }
+  return errors;
+}
+
 async function startThread(opts) {
   const cwd = requireOpt(opts, "cwd");
   return withServer(async server => {
@@ -321,17 +340,14 @@ async function startThread(opts) {
     const started = await server.request("thread/start", threadParams);
     const normalized = normalizeThread(started, cwd);
     const threadId = normalized.thread_id;
-    if (opts.name) {
-      await server.request("thread/name/set", { threadId, name: opts.name });
-    }
-    if (opts.goal) {
-      await server.request("thread/goal/set", { threadId, objective: opts.goal, status: "active" });
-    }
-    return {
+    const metadataErrors = await setThreadMetadata(server, threadId, opts);
+    const result = {
       ok: true,
       ...normalized,
       response: started,
     };
+    if (metadataErrors.length > 0) result.metadata_errors = metadataErrors;
+    return result;
   });
 }
 

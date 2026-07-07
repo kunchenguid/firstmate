@@ -84,6 +84,7 @@ Managed remote-control can become a later optimization after bootstrap can verif
 The bridge exposes a small CLI vocabulary.
 All successful commands print one JSON object to stdout.
 All failures print a short human-readable diagnostic to stderr and return non-zero.
+After a thread is created, name and goal updates are best-effort metadata calls; failures are reported in the successful `start-thread` JSON instead of hiding the created thread id.
 
 Implemented verbs:
 
@@ -175,6 +176,7 @@ Firstmate then waits up to 60 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
 The startup `send-turn` call receives that same file, expected line, and timeout budget so the bridge does not close the Codex app-server stdio process while the first turn is still producing the handshake.
 If it does not appear, the spawn archives the thread, removes the startup worktree, and fails with a diagnostic naming the thread id and the missing status file write.
+If the archive attempt fails, startup cleanup stops before removing the worktree, task branch, status file, or metadata so the live thread can be recovered manually.
 
 ## Send and steer flow
 
@@ -192,6 +194,7 @@ A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt
 `fm-peek.sh` uses `thread/turns/list` through the backend dispatcher.
 For the first implementation, `capture` returns a bounded text summary assembled from recent user and agent message items.
 It should not dump entire thread history.
+The requested capture line count is applied to the returned text tail, while `FM_CODEX_APP_CAPTURE_TURN_LIMIT` controls the separate bounded `thread/turns/list` fetch size and defaults to 20 turns.
 
 The bridge supports both summary and full item views, but the backend default uses summary.
 
