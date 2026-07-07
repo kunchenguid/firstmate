@@ -54,6 +54,7 @@ run_check() {
   FM_FAKE_TMUX_CAPTURE="${FM_FAKE_TMUX_CAPTURE:-}" \
   FM_HOME="$dir" \
   FM_STALL_IDLE_SECS="${FM_STALL_IDLE_SECS:-600}" \
+  FM_ADVISOR_IDLE_STALL_SECS="${FM_ADVISOR_IDLE_STALL_SECS:-1800}" \
     "$CHECK"
 }
 
@@ -223,6 +224,93 @@ EOF
   pass "does not flag a task parked awaiting captain merge (pr= in meta)"
 }
 
+test_advisor_idle_terminal_no_children_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_idle)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/learn-advisor.meta" <<EOF
+window=fm-learn-advisor
+kind=secondmate
+EOF
+  cat > "$dir/data/secondmates.md" <<EOF
+- learn-advisor - learning domain advisor (home: $home; scope: learning program; projects: firstmate; added 2026-07-07)
+EOF
+  printf '%s\n' 'working: routed task' 'done: route next program step' > "$dir/state/learn-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/learn-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/learn-advisor.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor idle check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: learn-advisor - idle [0-9]+s, no active child work, route its next program step or confirm intentionally parked' >/dev/null \
+    || fail "advisor idle finding missing: $out"
+  pass "detects idle terminal advisor with no child work"
+}
+
+test_advisor_needs_decision_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_needs_decision)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'needs-decision: pick a routing option' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor needs-decision check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for captain-gated advisor, got: $out"
+  pass "does not flag advisor parked on needs-decision"
+}
+
+test_advisor_with_child_work_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_child_work)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/strat-advisor.meta" <<EOF
+window=fm-strat-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'done: routed work complete' > "$dir/state/strat-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/strat-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/strat-advisor.status"
+  cat > "$home/state/child-a1.meta" <<'EOF'
+window=fm-child-a1
+kind=ship
+EOF
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor child-work check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for advisor with child work, got: $out"
+  pass "does not flag advisor with active child meta in its home"
+}
+
+test_advisor_busy_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_busy)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/busy-advisor.meta" <<EOF
+window=fm-busy-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'result: routed work complete' > "$dir/state/busy-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/busy-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/busy-advisor.status"
+  printf '%s\n' 'thinking' '• Working (10s • esc to interrupt)' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor busy check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for busy advisor, got: $out"
+  pass "does not flag advisor with a busy pane"
+}
+
 test_guard_surfaces_stall_pointer() {
   local dir err
   dir=$(make_case guard)
@@ -253,4 +341,8 @@ test_date_gate_ready
 test_idle_stall_candidate
 test_silent_when_clear_and_secondmate_skip
 test_pr_ready_task_not_flagged
+test_advisor_idle_terminal_no_children_flagged
+test_advisor_needs_decision_not_flagged
+test_advisor_with_child_work_not_flagged
+test_advisor_busy_not_flagged
 test_guard_surfaces_stall_pointer

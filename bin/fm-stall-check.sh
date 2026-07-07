@@ -12,6 +12,7 @@ DATA="$FM_HOME/data"
 BACKLOG="$DATA/backlog.md"
 DONE_ARCHIVE="$DATA/done-archive.md"
 IDLE_SECS=${FM_STALL_IDLE_SECS:-600}
+ADVISOR_IDLE_SECS=${FM_ADVISOR_IDLE_STALL_SECS:-1800}
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
@@ -169,6 +170,46 @@ kind_for_meta() {
   printf '%s\n' "$kind"
 }
 
+home_for_secondmate_meta() { # <id> <meta>
+  local id=$1 meta=$2 home
+  home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n "$home" ]; then
+    printf '%s\n' "$home"
+    return 0
+  fi
+  [ -f "$DATA/secondmates.md" ] || return 1
+  awk -v id="$id" '
+    index($0, "- " id " - ") == 1 {
+      start = index($0, "(home: ")
+      if (start == 0) next
+      rest = substr($0, start + 7)
+      end = index(rest, ";")
+      if (end == 0) next
+      print substr(rest, 1, end - 1)
+      exit
+    }
+  ' "$DATA/secondmates.md"
+}
+
+secondmate_has_child_work() { # <home>
+  local child_state=$1/state meta
+  [ -d "$child_state" ] || return 1
+  for meta in "$child_state"/*.meta; do
+    [ -e "$meta" ] || continue
+    return 0
+  done
+  return 1
+}
+
+advisor_terminal_status() { # <status-file>
+  local last
+  last=$(awk 'NF { line = $0 } END { print line }' "$1" 2>/dev/null || true)
+  case "$last" in
+    done:*|result:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # A task whose meta records pr= is a PR-ready task parked awaiting the captain's
 # merge; its advancement is already tracked by the merge poll fm-pr-check armed,
 # so it is externally supervised, not dormant. Skip it in both stall checks.
@@ -243,10 +284,36 @@ check_idle_stalls() {
   done
 }
 
-# --fast skips check_idle_stalls, the only detection that spawns a tmux peek per
-# in-flight pane. fm-guard runs in this mode on the hot supervision path, where
-# it only needs the presence of a finding from the cheap backlog/state reads; a
-# full sweep (including the pane peeks) still runs at heartbeats and wakes.
+check_advisor_idle_stalls() {
+  local meta id kind status m age window home
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] || continue
+    status="$STATE/$id.status"
+    [ -f "$status" ] || continue
+    advisor_terminal_status "$status" || continue
+    m=$(stat_mtime "$status") || continue
+    age=$(( $(now_epoch) - m ))
+    [ "$age" -ge "$ADVISOR_IDLE_SECS" ] || continue
+    window=$(window_for_meta "$meta")
+    [ -n "$window" ] || continue
+    home=$(home_for_secondmate_meta "$id" "$meta" || true)
+    [ -n "$home" ] || continue
+    secondmate_has_child_work "$home" && continue
+    # Confirm the pane is readable before treating a non-busy result as idle.
+    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
+    if ! fm_pane_is_busy "$window"; then
+      printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
+    fi
+  done
+}
+
+# --fast skips checks that spawn a tmux peek per pane. fm-guard runs in this
+# mode on the hot supervision path, where it only needs the presence of a
+# finding from the cheap backlog/state reads; a full sweep (including the pane
+# peeks) still runs at heartbeats and wakes.
 FAST=false
 case "${1:-}" in
   --fast) FAST=true ;;
@@ -255,4 +322,7 @@ esac
 check_finished_not_advanced
 check_unblocked_queued
 check_date_gates
-"$FAST" || check_idle_stalls
+if ! "$FAST"; then
+  check_idle_stalls
+  check_advisor_idle_stalls
+fi
