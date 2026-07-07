@@ -54,7 +54,7 @@
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_RATELIMIT_REGEX_DEFAULT='(Claude[[:space:]]+)?((AI[[:space:]]+)?usage[[:space:]-]+limit|rate[[:space:]-]+limit|quota)[^[:cntrl:]]*(reached|exceeded|reset|try again)|limit[[:space:]-]+reached'
-FM_OVERLOAD_REGEX_DEFAULT='overload(ed)?|temporarily unavailable|try again later'
+FM_OVERLOAD_REGEX_DEFAULT='API Error: 529'
 
 fm_ratelimit_numeric_or_default() {  # <value> <default>
   case "${1:-}" in
@@ -257,7 +257,7 @@ fm_ratelimit_render_match() {  # <tail-text> [now-epoch]
 }
 
 fm_ratelimit_marker_write() {  # <state> <id> <reset-epoch> <window> <harness>
-  local state=$1 id=$2 reset=$3 window=$4 harness=$5 marker old old_reset old_window old_harness tmp now
+  local state=$1 id=$2 reset=$3 window=$4 harness=$5 marker old old_reset old_window old_harness tmp
   marker="$state/$id.ratelimit"
   old=$(cat "$marker" 2>/dev/null || true)
   if [ "$old" = "$(printf '%s\t%s\t%s' "$reset" "$window" "$harness")" ]; then
@@ -266,11 +266,10 @@ fm_ratelimit_marker_write() {  # <state> <id> <reset-epoch> <window> <harness>
   IFS=$(printf '\t') read -r old_reset old_window old_harness <<EOF
 $old
 EOF
-  now=$(date +%s)
   case "$old_reset" in
     ''|*[!0-9]*) ;;
     *)
-      if [ "$old_window" = "$window" ] && [ "$old_harness" = "$harness" ] && [ "$old_reset" -gt "$now" ]; then
+      if [ "$old_window" = "$window" ] && [ "$old_harness" = "$harness" ]; then
         return 1
       fi
       ;;
@@ -313,7 +312,7 @@ fm_ratelimit_label_for_marker() {  # <state> <id>
   printf '%s' "$id"
 }
 
-fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label>
+fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label> -> prints limited|recovered
   local backend=$1 window=$2 label=$3 bs tail state
   command -v fm_backend_target_exists >/dev/null 2>&1 || return 1
   fm_backend_target_exists "$backend" "$window" "$label" || return 1
@@ -322,13 +321,20 @@ fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label>
   tail=$(fm_backend_capture "$backend" "$window" 40 "$label" 2>/dev/null) || return 1
   printf '%s' "$tail" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}" && return 1
-  fm_ratelimit_render_match "$tail" >/dev/null && return 0
+  if fm_ratelimit_render_match "$tail" >/dev/null; then
+    printf 'limited'
+    return 0
+  fi
   state=$(fm_backend_composer_state "$backend" "$window" 2>/dev/null)
-  [ "$state" = empty ]
+  if [ "$state" = empty ]; then
+    printf 'recovered'
+    return 0
+  fi
+  return 1
 }
 
 fm_ratelimit_resume_scan() {  # <state> -> prints escalation reason on exhausted failure
-  local state=$1 now margin max marker id line reset window harness backend label due attempts_file attempts verdict reason
+  local state=$1 now margin max marker id line reset window harness backend label due attempts_file attempts verdict reason ready
   now=$(date +%s)
   margin=$(fm_ratelimit_numeric_or_default "${FM_RATELIMIT_MARGIN:-60}" 60)
   max=$(fm_ratelimit_numeric_or_default "${FM_RATELIMIT_MAX_RESUMES:-3}" 3)
@@ -345,8 +351,16 @@ EOF
     id=$(fm_ratelimit_id_from_marker "$marker")
     backend=$(fm_ratelimit_backend_for_marker "$state" "$id" "$window")
     label=$(fm_ratelimit_label_for_marker "$state" "$id")
-    fm_ratelimit_target_ready_for_resume "$backend" "$window" "$label" || continue
     attempts_file="$marker.attempts"
+    ready=$(fm_ratelimit_target_ready_for_resume "$backend" "$window" "$label") || continue
+    if [ "$ready" = recovered ]; then
+      rm -f "$marker" "$attempts_file" "$marker.failed" 2>/dev/null || true
+      if command -v fm_wake_append >/dev/null 2>&1; then
+        STATE="$state" FM_WAKE_QUEUE="$state/.wake-queue" FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock" \
+          fm_wake_append ratelimited-resumed "$id" "ratelimited-resumed: $id $window" >/dev/null 2>&1 || true
+      fi
+      continue
+    fi
     attempts=$(( $(cat "$attempts_file" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$attempts" > "$attempts_file" 2>/dev/null || true
     verdict=$(fm_backend_send_text_submit "$backend" "$window" continue "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed

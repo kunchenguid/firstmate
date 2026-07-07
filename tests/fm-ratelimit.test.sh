@@ -115,8 +115,69 @@ test_resume_exhaustion_escalates_and_leaves_marker() {
   pass "ratelimit auto-resume exhaustion escalates and leaves a durable marker"
 }
 
+test_marker_write_preserves_active_episode_reset() {
+  local dir state marker got
+  dir="$TMP_ROOT/marker-preserve"
+  state="$dir/state"
+  mkdir -p "$state"
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' 1000 > "$marker"
+  if fm_ratelimit_marker_write "$state" task 2000 "test:fm-task" claude; then
+    fail "marker_write overwrote an active episode for the same window+harness"
+  fi
+  got=$(cat "$marker")
+  [ "$got" = "$(printf '1000\ttest:fm-task\tclaude')" ] \
+    || fail "marker_write did not preserve the original reset epoch: $got"
+  fm_ratelimit_marker_write "$state" task 3000 "test:fm-other" claude \
+    || fail "marker_write refused a genuinely new episode on a different window"
+  pass "marker_write preserves an active episode's reset and writes new episodes"
+}
+
+test_resume_self_recovered_clears_without_submit() {
+  local dir state marker submitted now
+  dir="$TMP_ROOT/resume-recovered"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  submitted="$dir/submitted"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'a healthy idle prompt with no limit in sight\n'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf 'sent' > "$submitted"; printf 'empty'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 fm_ratelimit_resume_scan "$state" >/dev/null \
+    || fail "self-recovered resume scan returned non-zero"
+  [ ! -e "$marker" ] || fail "self-recovered pane did not clear its marker"
+  [ ! -e "$submitted" ] || fail "self-recovered idle pane received an unsolicited continue"
+  grep "$(printf '\tratelimited-resumed\t')" "$state/.wake-queue" >/dev/null \
+    || fail "self-recovered resume did not append a ratelimited-resumed trail wake"
+  pass "a self-recovered idle pane clears its marker without submitting continue"
+}
+
+test_overload_regex_matches_only_529() {
+  local match
+  if fm_ratelimit_render_match 'ordinary line
+the model is overloaded right now
+please try again later' >/dev/null; then
+    fail "tightened overload regex still matched generic retry phrasing"
+  fi
+  match=$(fm_ratelimit_render_match 'ordinary line
+another line
+API Error: 529 overloaded_error')
+  case "$match" in
+    *"$(printf '\t')"overload) ;;
+    *) fail "API Error: 529 footer did not match as overload: $match" ;;
+  esac
+  pass "overload matcher fires only on API Error: 529, not generic retry text"
+}
+
 test_reset_parser_handles_iana_timezone_and_dst
 test_reset_parser_handles_utc_24h_and_fallback
 test_footer_match_is_tail_anchored
 test_resume_success_is_silent_and_records_trail
 test_resume_exhaustion_escalates_and_leaves_marker
+test_marker_write_preserves_active_episode_reset
+test_resume_self_recovered_clears_without_submit
+test_overload_regex_matches_only_529

@@ -645,12 +645,14 @@ while :; do
 
   resume_reason=""
   resume_rc=0
-  resume_reason=$(fm_ratelimit_resume_scan "$STATE") || resume_rc=$?
-  case "$resume_rc" in
-    0) ;;
-    2) [ -n "$resume_reason" ] && wake "$resume_reason" ;;
-    *) triage_log "ratelimit resume scan error rc=$resume_rc" ;;
-  esac
+  if ! afk_present; then
+    resume_reason=$(fm_ratelimit_resume_scan "$STATE") || resume_rc=$?
+    case "$resume_rc" in
+      0) ;;
+      2) [ -n "$resume_reason" ] && wake "$resume_reason" ;;
+      *) triage_log "ratelimit resume scan error rc=$resume_rc" ;;
+    esac
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
