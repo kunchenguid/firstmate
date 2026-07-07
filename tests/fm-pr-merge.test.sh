@@ -84,6 +84,39 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# gh-axi mock recording invocations, plus a gh mock answering headRefOid AND a
+# configurable statusCheckRollup length, so fm-pr-check records pr_checks=<count>
+# and the unattended-yolo no-CI gate can branch on it. Args: case_dir head checks
+add_gh_mocks_checks() {
+  local case_dir=$1 head=$2 checks=$3
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *statusCheckRollup*) printf '%s\n' '$checks' ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Like make_case, but appends yolo=<on|off> so the no-CI merge gate can be tested.
+make_case_yolo() {
+  local name=$1 yolo=$2 case_dir
+  case_dir=$(make_case "$name")
+  printf 'yolo=%s\n' "$yolo" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "$case_dir"
+}
+
 run_pr_merge() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -111,9 +144,11 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
+  assert_grep 'merged_by_firstmate=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "records-before-merge: the attribution marker was not recorded on a firstmate merge"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  pass "fm-pr-merge records pr=, pr_head=, and the attribution marker before invoking gh-axi pr merge"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -132,6 +167,8 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_grep 'merged_by_firstmate=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
+    "merge-fails: the attribution marker must be written BEFORE the merge call, so it is present even when the merge fails"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -295,6 +332,78 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_yolo_zero_checks_refuses_and_escalates() {
+  local case_dir rc
+  case_dir=$(make_case_yolo yolo-zero-checks on)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_checks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/40 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "yolo-zero-checks: an unattended yolo merge on a 0-check PR should refuse"
+  assert_grep 'unattended yolo merge refused' "$case_dir/stderr" \
+    "yolo-zero-checks: refusal did not explain the missing CI validation"
+  assert_grep 'pr_checks=0' "$case_dir/state/task-x1.meta" \
+    "yolo-zero-checks: the zero check count should be recorded"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "yolo-zero-checks: gh-axi pr merge must not run when the gate refuses"
+  assert_no_grep 'merged_by_firstmate=' "$case_dir/state/task-x1.meta" \
+    "yolo-zero-checks: no attribution marker should be written when the merge is refused"
+  pass "fm-pr-merge refuses an unattended yolo merge on a zero-CI-check PR and escalates"
+}
+
+test_yolo_positive_checks_proceeds() {
+  local case_dir
+  case_dir=$(make_case_yolo yolo-positive on)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_checks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 2
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "yolo-positive: fm-pr-merge should proceed with passing CI"
+
+  grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "yolo-positive: a yolo merge with real passing checks should proceed"
+  assert_grep 'merged_by_firstmate=https://github.com/example/repo/pull/41' "$case_dir/state/task-x1.meta" \
+    "yolo-positive: the attribution marker should be recorded on the merge"
+  pass "fm-pr-merge proceeds with an unattended yolo merge when CI checks passed"
+}
+
+test_yolo_zero_checks_captain_approved_proceeds() {
+  local case_dir
+  case_dir=$(make_case_yolo yolo-approved on)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_checks "$case_dir" cccccccccccccccccccccccccccccccccccccccc 0
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/42 --captain-approved \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "yolo-approved: an explicit captain merge should proceed on a no-CI PR"
+
+  grep -qxF 'pr merge 42 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "yolo-approved: --captain-approved should allow a no-CI merge"
+  pass "fm-pr-merge allows a no-CI merge under --captain-approved even when yolo is on"
+}
+
+test_yolo_off_zero_checks_proceeds() {
+  local case_dir
+  case_dir=$(make_case_yolo yolo-off off)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_checks "$case_dir" dddddddddddddddddddddddddddddddddddddddd 0
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "yolo-off: a captain-in-the-loop merge should proceed on a no-CI PR"
+
+  grep -qxF 'pr merge 43 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "yolo-off: the no-CI gate must not apply when yolo is off (captain approves each merge)"
+  pass "fm-pr-merge does not gate a yolo=off merge on the CI check count"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -305,3 +414,7 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_yolo_zero_checks_refuses_and_escalates
+test_yolo_positive_checks_proceeds
+test_yolo_zero_checks_captain_approved_proceeds
+test_yolo_off_zero_checks_proceeds

@@ -54,7 +54,7 @@ test_classify_terminal_signal_escalates() {
   state="$dir/state"
   for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
             "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
-            "ready in branch fm/t1" "merged"; do
+            "ready in branch fm/t1" "merged" "unattributed-merge: PR https://x/y/pull/3"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"
     out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
     case "$out" in escalate\|*) ;; *) fail "captain verb did not escalate ($kw): $out" ;; esac

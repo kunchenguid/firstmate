@@ -214,12 +214,15 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
 - ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+- Do not fight a merge on your own theory. If you observe your own PR already merged, or believe a merge is imminent, take NO corrective GitHub action: no abort-to-prevent-merge, no draft conversion, no merge, no \`--yes\`. Report \`needs-decision: PR appears merged or at merge risk and I did not merge it\` and STOP. A merge-state anomaly is for firstmate to reconcile, not for you to act on.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append the done line that honestly reflects CI posture and stop. You are finished.
+If real PR CI checks ran and passed, report \`done: PR {url} checks green (<N> checks)\`.
+If the repo runs NO PR CI checks (a legitimate posture for repos that gate CI only on the default branch), a green validated nothing, so report \`done: PR {url} NO CI CHECKS CONFIGURED - not CI-validated\` instead of claiming checks passed.
 EOF
 )
     ;;

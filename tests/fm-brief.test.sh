@@ -93,7 +93,35 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The no-mistakes ship brief must carry the merge-safety contract: the never-merge
+# rule, an honest CI-posture done line (real CI vs a repo with no PR CI), and the
+# do-not-fight-a-merge rule so a crew never takes corrective GitHub action on its
+# own merge theory (the automerge-k8 incident). All of this lives inside the
+# no-mistakes DOD heredoc, which is built with $(cat <<EOF ...), so it must also
+# stay apostrophe-free - test_script_parses is the paired regression guard.
+test_no_mistakes_merge_safety_contract() {
+  local home id brief
+  home="$TMP_ROOT/merge-safety-home"
+  mkdir -p "$home/data"
+  id="brief-mergesafety-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "Never merge a PR." "$brief" \
+    "no-mistakes brief lost the never-merge rule"
+  assert_grep "NO CI CHECKS CONFIGURED - not CI-validated" "$brief" \
+    "no-mistakes brief lost the honest no-CI done line"
+  assert_grep "checks green (<N> checks)" "$brief" \
+    "no-mistakes brief lost the real-CI done line"
+  assert_grep "Do not fight a merge on your own theory." "$brief" \
+    "no-mistakes brief lost the do-not-fight-a-merge rule"
+  assert_grep "take NO corrective GitHub action" "$brief" \
+    "no-mistakes brief lost the no-corrective-action rule"
+  pass "fm-brief.sh: no-mistakes brief carries the never-merge, honest-CI, and do-not-fight-merge contract"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_no_mistakes_merge_safety_contract

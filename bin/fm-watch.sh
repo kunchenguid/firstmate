@@ -48,6 +48,12 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# Merge attribution: the single source of truth for telling a merge firstmate
+# performed apart from an out-of-band merge. Used by the heartbeat fleet-scan
+# backstop below and, separately, by the per-task check.sh that fm-pr-check.sh
+# generates, so the attribution rule lives in exactly one place.
+# shellcheck source=bin/fm-merge-attribution-lib.sh
+. "$SCRIPT_DIR/fm-merge-attribution-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
 # (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
 # synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
@@ -363,6 +369,42 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
+# Merge-attribution surfaced-marker: like .hb-surfaced-*, this records the
+# unattributed-merge the heartbeat backstop already woke firstmate for (keyed by
+# the PR URL), so the same anomaly is not re-surfaced every heartbeat while
+# firstmate is confirming and reconciling it.
+_merge_hb_surfaced_path() { printf '%s/.merge-hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+
+# Merge-attribution fleet backstop: 0 if any in-flight ship task's PR is observed
+# MERGED without a firstmate-merge marker (an out-of-band merge) that has NOT
+# already been surfaced. Independent of the per-task check cadence, so it re-catches
+# an out-of-band merge even if a task's check.sh was removed or corrupted. Reuses
+# fm_merge_scan_unattributed so the attribution rule is not duplicated here. This
+# covers PRs firstmate has recorded (pr= in meta); a PR firstmate never observed at
+# all is caught once firstmate arms the attributing watch for it (AGENTS.md section
+# 7 Validate: arm as soon as a tracked ship task has an open PR). Pure detect, no
+# side effects: the caller enqueues first, then marks surfaced.
+heartbeat_finds_unattributed_merge() {
+  local task url surfaced
+  while IFS=$(printf '\t') read -r task url; do
+    [ -n "$task" ] || continue
+    surfaced=$(cat "$(_merge_hb_surfaced_path "$url")" 2>/dev/null || true)
+    [ "$surfaced" = "$url" ] && continue
+    return 0
+  done < <(fm_merge_scan_unattributed "$STATE")
+  return 1
+}
+
+# Mark every current unattributed merge surfaced. Called after the heartbeat
+# backstop enqueues its wake, so the same anomaly is not re-fired next heartbeat.
+mark_unattributed_merges_surfaced() {
+  local task url
+  while IFS=$(printf '\t') read -r task url; do
+    [ -n "$task" ] || continue
+    printf '%s' "$url" > "$(_merge_hb_surfaced_path "$url")"
+  done < <(fm_merge_scan_unattributed "$STATE")
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -605,13 +647,16 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
+    elif heartbeat_scan_finds_actionable || heartbeat_finds_unattributed_merge; then
+      # Backstop: a captain-relevant status the per-wake path absorbed by mistake,
+      # or an in-flight ship task whose PR merged without a firstmate-merge marker
+      # (an out-of-band merge firstmate must confirm and reconcile, never silently
+      # proceed). Enqueue first, then mark both kinds surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
+      mark_unattributed_merges_surfaced
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
