@@ -16,6 +16,7 @@ Install WezTerm and make its CLI available as one of:
 - `wezterm`
 - `wezterm.exe`
 - `/mnt/c/Program Files/WezTerm/wezterm.exe`
+- `/c/Program Files/WezTerm/wezterm.exe`
 - the explicit path in `FM_WEZTERM_BIN`
 
 Select it with local config:
@@ -30,6 +31,13 @@ WezTerm itself is a manual install: `fm-bootstrap.sh install wezterm` refuses in
 The adapter also requires these mux CLI features: `list --format`, `get-text --start-line`, `send-text --no-paste`, `split-pane --percent`, and `kill-pane --pane-id`.
 
 Away-mode (`/afk`) supervision can inject escalation digests back into firstmate's own WezTerm pane when `WEZTERM_PANE` is present, or when `FM_SUPERVISOR_BACKEND=wezterm` and `FM_SUPERVISOR_TARGET=wezterm:<pane-id>` are set explicitly.
+
+## Shell Contract
+
+Each task pane starts an explicit POSIX shell before firstmate sends `treehouse get`, environment assignments, or harness launch commands.
+The adapter prefers `bash -l` when `bash` is available and falls back to `sh`.
+When running under Git Bash or MSYS with a native `wezterm.exe`, the adapter passes WezTerm the Windows path for the Git Bash/MSYS `bash.exe`.
+WSL and Linux paths remain POSIX paths.
 
 ## Layout
 
@@ -86,6 +94,7 @@ The committed coverage uses a fake WezTerm CLI; run a real-environment smoke tes
 ## Verification Notes
 
 Fake WezTerm CLI coverage verifies spawn, split, current-path probing, send, capture, kill, composer-state checks, feature probes, stale-pane rejection, secondmate `FM_BACKEND` clearing, and forced secondmate child cleanup paths.
+It also verifies the Git Bash/MSYS WezTerm install path and explicit POSIX shell arguments for spawn and split-pane calls.
 Commands run:
 
 ```sh
@@ -102,5 +111,7 @@ Observed output included:
 
 ```text
 ok - wezterm target_ready: expected labels reject stale pane ids reused by another tab
+ok - wezterm bin: discovery includes the Git Bash/MSYS Windows install path
+ok - wezterm shell args: Git Bash/MSYS prefers the converted bash.exe path
 ok - force teardown kills WezTerm children using the child home state
 ```

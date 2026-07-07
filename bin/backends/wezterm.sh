@@ -20,11 +20,23 @@ fm_backend_wezterm_bin() {
   fi
   if command -v wezterm >/dev/null 2>&1; then command -v wezterm; return 0; fi
   if command -v wezterm.exe >/dev/null 2>&1; then command -v wezterm.exe; return 0; fi
-  if [ -x "/mnt/c/Program Files/WezTerm/wezterm.exe" ]; then
-    printf '%s\n' "/mnt/c/Program Files/WezTerm/wezterm.exe"
-    return 0
-  fi
+  local candidate
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_wezterm_builtin_candidate_paths)
+EOF
   return 1
+}
+
+fm_backend_wezterm_builtin_candidate_paths() {
+  printf '%s\n' \
+    "/mnt/c/Program Files/WezTerm/wezterm.exe" \
+    "/c/Program Files/WezTerm/wezterm.exe"
 }
 
 fm_backend_wezterm_tool_check() {
@@ -287,8 +299,42 @@ fm_backend_wezterm_split_direction() {  # <pane-count-before>
   esac
 }
 
+fm_backend_wezterm_is_windows_bash() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_wezterm_build_shell_args() {
+  local shell_path shell_base converted wezterm_bin
+  FM_BACKEND_WEZTERM_SHELL_ARGS=()
+  if command -v bash >/dev/null 2>&1; then
+    shell_path=$(command -v bash)
+  elif command -v sh >/dev/null 2>&1; then
+    shell_path=$(command -v sh)
+  else
+    echo "error: backend=wezterm requires bash or sh to start task panes" >&2
+    return 1
+  fi
+  shell_base=$(basename "$shell_path")
+  if fm_backend_wezterm_is_windows_bash && command -v cygpath >/dev/null 2>&1; then
+    wezterm_bin=$(fm_backend_wezterm_bin 2>/dev/null || true)
+    case "$wezterm_bin" in
+      *.exe|*.EXE)
+        converted=$(cygpath -w "$shell_path" 2>/dev/null) && [ -n "$converted" ] && shell_path=$converted
+        ;;
+    esac
+  fi
+  FM_BACKEND_WEZTERM_SHELL_ARGS=("$shell_path")
+  case "$shell_base" in
+    bash|bash.exe|zsh|zsh.exe|ksh|ksh.exe) FM_BACKEND_WEZTERM_SHELL_ARGS+=(-l) ;;
+  esac
+}
+
 fm_backend_wezterm_create_task() {  # <label> <cwd>
   local label=$1 cwd=$2 key title entry tab seed pane info win direction count target spawn_args
+  fm_backend_wezterm_build_shell_args || return 1
   key=$(fm_backend_wezterm_project_key "$cwd") || return 1
   title=$(fm_backend_wezterm_tab_title "$cwd")
   if entry=$(fm_backend_wezterm_registry_entry "$key" 2>/dev/null); then
@@ -297,13 +343,14 @@ fm_backend_wezterm_create_task() {  # <label> <cwd>
     target=$(fm_backend_wezterm_largest_pane_in_tab "$tab")
     [ -n "$target" ] || { echo "error: backend=wezterm could not find a live pane in tab $tab" >&2; return 1; }
     direction=$(fm_backend_wezterm_split_direction "$count")
-    pane=$(fm_backend_wezterm_cli split-pane --pane-id "$target" "$direction" --percent 50 --cwd "$cwd") || return 1
+    pane=$(fm_backend_wezterm_cli split-pane --pane-id "$target" "$direction" --percent 50 --cwd "$cwd" -- "${FM_BACKEND_WEZTERM_SHELL_ARGS[@]}") || return 1
   else
     if [ -n "${WEZTERM_PANE:-}" ] && [ -n "$(fm_backend_wezterm_pane_info "$WEZTERM_PANE")" ]; then
       spawn_args=(spawn --pane-id "$WEZTERM_PANE" --cwd "$cwd")
     else
       spawn_args=(spawn --new-window --cwd "$cwd")
     fi
+    spawn_args+=(-- "${FM_BACKEND_WEZTERM_SHELL_ARGS[@]}")
     pane=$(fm_backend_wezterm_cli "${spawn_args[@]}") || return 1
   fi
   pane=$(printf '%s' "$pane" | tr -d '[:space:]')

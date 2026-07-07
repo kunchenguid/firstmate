@@ -81,6 +81,39 @@ write_list_sized() {  # <file> <pane> <tab> <win> <cwd> <cols> <rows> ...
          size: {cols: (.[ $i + 4 ] | tonumber), rows: (.[ $i + 5 ] | tonumber)}}]' --args "$@" > "$file"
 }
 
+test_wezterm_bin_lists_git_bash_windows_install_candidate() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/wezterm.sh"; fm_backend_wezterm_builtin_candidate_paths' "$ROOT")
+  assert_contains "$out" "/c/Program Files/WezTerm/wezterm.exe" \
+    "wezterm binary discovery should include the Git Bash/MSYS Windows install path"
+  pass "wezterm bin: discovery includes the Git Bash/MSYS Windows install path"
+}
+
+test_shell_args_prefers_msys_bash_when_running_under_git_bash() {
+  local dir fb out real_bash
+  dir="$TMP_ROOT/msys-shell"; fb="$dir/fakebin"; mkdir -p "$fb"
+  real_bash=${BASH:?}
+  cat > "$fb/bash" <<'SH'
+#!/bin/sh
+exit 99
+SH
+  cat > "$fb/uname" <<'SH'
+#!/bin/sh
+printf '%s\n' MINGW64_NT-10.0
+SH
+  cat > "$fb/cygpath" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -w ] || exit 2
+printf '%s\n' 'C:\Program Files\Git\usr\bin\bash.exe'
+SH
+  : > "$fb/wezterm.exe"
+  chmod +x "$fb/bash" "$fb/uname" "$fb/cygpath" "$fb/wezterm.exe"
+  out=$(PATH="$fb:$PATH" FM_WEZTERM_BIN="$fb/wezterm.exe" "$real_bash" -c '. "$0/bin/backends/wezterm.sh"; fm_backend_wezterm_build_shell_args; printf "%s\n" "${FM_BACKEND_WEZTERM_SHELL_ARGS[@]}"' "$ROOT")
+  [ "$out" = $'C:\\Program Files\\Git\\usr\\bin\\bash.exe\n-l' ] \
+    || fail "Git Bash/MSYS shell args should prefer the converted bash.exe path, got: $out"
+  pass "wezterm shell args: Git Bash/MSYS prefers the converted bash.exe path"
+}
+
 test_create_task_spawns_new_tab_and_records_registry() {
   local dir fb out reg
   dir="$TMP_ROOT/create"; mkdir -p "$dir/state" "$dir/project"
@@ -96,6 +129,10 @@ test_create_task_spawns_new_tab_and_records_registry() {
   esac
   assert_contains "$(cat "$dir/log")" $'wezterm\x1fcli\x1fspawn\x1f--new-window\x1f--cwd\x1f'"$dir/project" \
     "create_task did not spawn the first wezterm task in an explicit new window"
+  assert_contains "$(cat "$dir/log")" $'\x1f--\x1f' \
+    "create_task did not end WezTerm spawn options before the explicit POSIX shell"
+  assert_contains "$(cat "$dir/log")" "bash" \
+    "create_task did not start an explicit bash-compatible POSIX shell"
   assert_contains "$(cat "$dir/log")" $'wezterm\x1fcli\x1fset-tab-title\x1f--tab-id\x1f2' \
     "create_task did not set the tab title"
   reg="$dir/state/wezterm-tabs.tsv"
@@ -142,6 +179,10 @@ test_create_task_reuses_project_tab_and_splits_pane() {
     || fail "reused create_task returned wrong ids: $out"
   assert_contains "$(cat "$dir/log")" $'wezterm\x1fcli\x1fsplit-pane\x1f--pane-id\x1f' \
     "create_task did not split an existing pane"
+  assert_contains "$(cat "$dir/log")" $'\x1f--\x1f' \
+    "create_task did not end WezTerm split-pane options before the explicit POSIX shell"
+  assert_contains "$(cat "$dir/log")" "bash" \
+    "create_task split-pane did not start an explicit bash-compatible POSIX shell"
   ! grep -q $'wezterm\x1fcli\x1fspawn' "$dir/log" \
     || fail "create_task spawned a new tab instead of reusing the registry tab"
   pass "wezterm create_task: same project reuses the tab and splits a pane"
@@ -576,6 +617,8 @@ test_secondmate_launch_clears_env_selected_wezterm_backend() {
   pass "fm-spawn.sh: env-selected WezTerm secondmate launches clear FM_BACKEND in the agent"
 }
 
+test_wezterm_bin_lists_git_bash_windows_install_candidate
+test_shell_args_prefers_msys_bash_when_running_under_git_bash
 test_create_task_spawns_new_tab_and_records_registry
 test_create_task_uses_current_pane_context_when_available
 test_create_task_reuses_project_tab_and_splits_pane
