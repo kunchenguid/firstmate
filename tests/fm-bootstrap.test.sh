@@ -189,6 +189,16 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
+
+  case_dir="$TMP_ROOT/orca-backend-selected-old-treehouse"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_fake_exit0 "$fakebin" orca
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=orca should ignore an old treehouse when treehouse is not required, got: $out"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
@@ -206,6 +216,16 @@ test_codex_app_backend_gates_codex_cli_only_when_selected() {
   [ "$out" = "$missing_codex" ] || fail "backend=codex-app should require the Codex CLI, got: $out"
 
   case_dir="$TMP_ROOT/codex-app-backend-selected"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex-app > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_codex "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=codex-app should ignore an old treehouse when treehouse is not required, got: $out"
+
+  case_dir="$TMP_ROOT/codex-app-backend-selected-no-treehouse"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' codex-app > "$case_dir/home/config/backend"

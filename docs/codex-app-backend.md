@@ -229,6 +229,8 @@ fm-codex-bridge archive-thread --thread-id <thread_id>
 
 Archiving is not evidence that work landed.
 It is only the Codex equivalent of removing the visible endpoint after Firstmate has already proved the task is safe to remove.
+Teardown archives the Codex thread before removing the git worktree or task metadata.
+If the archive call fails, teardown leaves the worktree and metadata in place.
 
 ## Configuration
 
@@ -250,6 +252,7 @@ Running inside Codex Desktop is common for the primary supervisor, but auto-sele
 
 When `backend=codex-app` is selected, bootstrap requires `codex`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
 It intentionally skips `tmux` and `treehouse` for this backend because Codex Desktop owns the visible thread and Firstmate uses a plain git worktree.
+It also skips Treehouse compatibility probes when Treehouse is not in the selected required-tool set.
 
 ## Tests
 
@@ -270,6 +273,7 @@ Implemented tests:
 - `fm-send.sh` routes to `send-turn`.
 - `fm-peek.sh` routes to recent thread turns.
 - Teardown archives only after existing safety checks pass.
+- Teardown archives before removing the git worktree and preserves state when archive fails.
 - Bootstrap requires the Codex CLI for `backend=codex-app` and does not require tmux or Treehouse.
 
 ## Implementation touch points

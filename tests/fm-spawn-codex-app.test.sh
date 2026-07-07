@@ -11,7 +11,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-codex-app-tests)
 
 make_fake_bridge() {  # <dir> -> echoes fake bridge path
-  local dir=$1 bridge="$1/fm-codex-bridge"
+  local bridge="$1/fm-codex-bridge"
   cat > "$bridge" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -61,6 +61,17 @@ case "$verb" in
     printf '{"ok":true,"thread_id":"%s","turn":{"id":"turn-spawn-123","status":"inProgress"}}\n' "${FM_FAKE_BRIDGE_THREAD_ID:-thread-spawn-123}"
     ;;
   archive-thread)
+    if [ -n "${FM_FAKE_BRIDGE_ARCHIVE_CHECK_PATH:-}" ]; then
+      if [ -d "$FM_FAKE_BRIDGE_ARCHIVE_CHECK_PATH" ]; then
+        printf 'archive-worktree-present\n' >> "$LOG"
+      else
+        printf 'archive-worktree-missing\n' >> "$LOG"
+      fi
+    fi
+    if [ "${FM_FAKE_BRIDGE_ARCHIVE_FAIL:-0}" = 1 ]; then
+      printf '{"ok":false,"error":"archive failed"}\n'
+      exit 9
+    fi
     printf '{"ok":true,"archived":true}\n'
     ;;
   thread-status)
@@ -234,15 +245,43 @@ test_teardown_codex_app_archives_and_removes_git_worktree() {
   printf 'Scout report.\n' > "$case_dir/home/data/$id/report.md"
   : > "$case_dir/bridge.log"
 
-  out=$(run_teardown_case "$case_dir" "$id" 2>&1)
+  out=$(FM_FAKE_BRIDGE_ARCHIVE_CHECK_PATH="$wt" run_teardown_case "$case_dir" "$id" 2>&1)
   status=$?
   expect_code 0 "$status" "codex-app teardown should succeed for scout with report: $out"
   log=$(cat "$case_dir/bridge.log")
   assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "teardown should archive the Codex thread"
+  assert_contains "$log" "archive-worktree-present" "teardown should archive before removing the git worktree"
   git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
     && fail "teardown should remove the git worktree from the project worktree list"
   assert_absent "$case_dir/home/state/$id.meta" "teardown should remove task meta"
   pass "fm-teardown.sh: codex-app archives the thread and removes a git-worktree-backed scout task"
+}
+
+test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
+  local id case_dir out status meta wt project log
+  id=codex-archive-fail-x6
+  case_dir=$(make_case teardown-archive-fail "$id")
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case "$case_dir" "$id" --scout 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app scout spawn should succeed before archive-failure teardown: $out"
+  meta="$case_dir/home/state/$id.meta"
+  wt=$(meta_value "$meta" worktree)
+  project=$(meta_value "$meta" project)
+  printf 'Scout report.\n' > "$case_dir/home/data/$id/report.md"
+  : > "$case_dir/bridge.log"
+
+  out=$(FM_FAKE_BRIDGE_ARCHIVE_FAIL=1 FM_FAKE_BRIDGE_ARCHIVE_CHECK_PATH="$wt" run_teardown_case "$case_dir" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex-app teardown should fail when thread archive fails"
+  assert_contains "$out" "failed to remove codex-app endpoint thread-spawn-123" "archive failure should explain the preserved endpoint"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'archive-thread\x1f--thread-id\x1fthread-spawn-123' "archive-failure teardown should try to archive"
+  assert_contains "$log" "archive-worktree-present" "archive failure should happen before worktree removal"
+  git -C "$project" worktree list --porcelain | grep -F "worktree $wt" >/dev/null \
+    || fail "archive failure should preserve the project worktree registration"
+  assert_present "$wt" "archive failure should preserve the git worktree"
+  assert_present "$meta" "archive failure should preserve task meta"
+  pass "fm-teardown.sh: codex-app preserves worktree and metadata when archive fails"
 }
 
 test_spawn_codex_app_records_thread_and_worktree
@@ -251,3 +290,4 @@ test_spawn_codex_app_refuses_secondmate
 test_spawn_codex_app_refuses_primary_cwd_from_bridge
 test_spawn_codex_app_requires_return_channel_status
 test_teardown_codex_app_archives_and_removes_git_worktree
+test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails

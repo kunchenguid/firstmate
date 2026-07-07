@@ -201,6 +201,13 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+tool_required() {
+  case " $TOOLS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 no_mistakes_version_parts() {
   local output
   command -v no-mistakes >/dev/null 2>&1 || return 1
@@ -402,7 +409,7 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
-if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+if tool_required treehouse && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
