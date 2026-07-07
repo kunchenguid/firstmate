@@ -286,9 +286,13 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   case "$stripped" in
     '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
+  # Strip a leading prompt glyph before judging what remains. '❯' is
+  # multi-byte, so strip it as a literal: a ? glob counts bytes under a
+  # C/POSIX locale and would leave a stray byte behind. The trim below
+  # eats any space that followed the glyph.
+  stripped=${stripped#'❯'}
   case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
