@@ -191,7 +191,7 @@ test_composer_state_popup_placeholder_fill_is_pending() {
   local out
   orca_case composer-popup-placeholder
   printf '{"ok":true,"result":{"terminal":{"tail":["  ╭──────────────────────────────────────╮","  │ ❯ /compact compaction instructions    │","  ╰──────────────── Composer ─────────────╯","","  Enter:send"]}}}\n' > "$RESP/1.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( LC_ALL=C PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
   [ "$out" = pending ] || fail "a popup-close-with-placeholder-fill must still read as pending (not yet submitted), got '$out'"
   pass "fm_backend_orca_composer_state: a slash-command popup's argument-hint placeholder still reads pending"
