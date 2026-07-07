@@ -18,9 +18,9 @@
 # binary untouched.
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness):
-# it draws a bordered composer row ("│ > <buf> │") matching the structural
-# classifier fm_backend_herdr_composer_state expects, and logs every submitted
-# line (hex + text + injection/user classification) - the same technique
+# it draws a bordered composer row ("│ > <buf> │") that exercises the bordered
+# branch of fm_backend_herdr_composer_state, and logs every submitted line (hex
+# + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
 # test asserts on submitted CONTENT, not pane appearance.
 set -u
@@ -96,9 +96,9 @@ EOF
 
 # --- deterministic bordered-composer loop, drawn in the scratch pane ---------
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
-# "│ > <buf> │" border so fm_backend_herdr_composer_state's structural
-# classifier (a row whose trimmed content starts AND ends with the same border
-# glyph) recognizes it, exactly like a real bordered-TUI harness composer.
+# "│ > <buf> │" border so the bordered branch of
+# fm_backend_herdr_composer_state recognizes it, exactly like a bordered-TUI
+# harness composer.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
