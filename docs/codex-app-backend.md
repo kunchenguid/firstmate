@@ -16,7 +16,8 @@ A Codex App backend must satisfy the same lifecycle contract as the terminal-bac
 4. Firstmate can archive, kill, or otherwise stop supervising the endpoint.
 5. The Codex thread can report back through Firstmate's normal `state/<id>.status` lifecycle.
 
-The final point is mandatory. If a Desktop-owned thread cannot write Firstmate status files, the backend cannot be treated as complete.
+The final point is mandatory.
+If a Desktop-owned thread cannot write Firstmate status files, the backend cannot be treated as complete.
 
 ## Verified Desktop host-tool smoke
 
@@ -152,7 +153,9 @@ The return channel is real at the Codex Desktop host-tool layer.
 
 ## Codex Desktop API blocker
 
-Firstmate's backend scripts are Bash entry points. They can call `tmux`, `herdr`, `zellij`, and primitive Orca CLI surfaces directly. The Codex Desktop host tools verified above are available to the Codex Desktop conversation, not to arbitrary Firstmate subprocesses.
+Firstmate's backend scripts are Bash entry points.
+They can call `tmux`, `herdr`, `zellij`, primitive Orca CLI surfaces, and `cmux` directly.
+The Codex Desktop host tools verified above are available to the Codex Desktop conversation, not to arbitrary Firstmate subprocesses.
 The missing piece is therefore a supported Codex Desktop transport that a Bash backend can call, not another Firstmate-local ledger.
 
 The available Codex CLI and app-server probes found useful pieces but not a supported visible-thread backend transport:
