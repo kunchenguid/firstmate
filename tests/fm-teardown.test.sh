@@ -366,6 +366,33 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+add_not_managed_then_logical_treehouse() {
+  local case_dir=$1 physical=$2 logical=$3
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "\$@"; do
+    case "\$a" in
+      --force) ;;
+      *) wt=\$a ;;
+    esac
+  done
+  printf '%s\n' "\$wt" >> "$case_dir/treehouse-calls"
+  case "\$wt" in
+    "$physical") echo "worktree \$wt is not managed by treehouse" >&2; exit 1 ;;
+    "$logical") exit 0 ;;
+  esac
+  echo "unexpected treehouse return path: \$wt" >&2
+  exit 2
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 # treehouse return always fails with the lock signature while the lock file
 # remains; used to assert exhausted retries still refuse loudly.
 add_persistent_lock_treehouse() {
@@ -1226,6 +1253,41 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   pass "fractional legacy retry wait remains supported without arithmetic"
 }
 
+test_treehouse_return_retries_alternate_home_spelling() {
+  local case_dir rc real_home logical_home physical_wt logical_wt calls
+  case_dir=$(make_case alternate-home-spelling)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  real_home="$case_dir/real-home"
+  logical_home="$case_dir/logical-home"
+  mkdir -p "$real_home"
+  mv "$case_dir/wt" "$real_home/wt"
+  ln -s "$real_home" "$logical_home"
+  physical_wt="$real_home/wt"
+  logical_wt="$logical_home/wt"
+  write_meta "$case_dir" no-mistakes ship
+  sed -i "s|^worktree=.*|worktree=$physical_wt|" "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree repair "$real_home" >/dev/null 2>&1 || true
+
+  add_not_managed_then_logical_treehouse "$case_dir" "$physical_wt" "$logical_wt"
+
+  set +e
+  HOME="$logical_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "alternate-home-spelling: teardown should retry the HOME spelling"
+  calls=$(cat "$case_dir/treehouse-calls")
+  [ "$calls" = "$physical_wt"$'\n'"$logical_wt" ] \
+    || fail "alternate-home-spelling: wrong treehouse retry sequence"$'\n'"$calls"
+  assert_grep "retrying alternate home spelling $logical_wt" "$case_dir/stderr" \
+    "alternate-home-spelling: teardown did not report the alternate spelling retry"
+  pass "treehouse return retries the alternate HOME spelling after a not-managed failure"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -1271,3 +1333,4 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_treehouse_return_retries_alternate_home_spelling

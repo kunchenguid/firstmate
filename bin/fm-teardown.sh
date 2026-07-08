@@ -399,6 +399,25 @@ retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
 
+alternate_home_spelling_for_dir() {
+  local dir=$1 dir_real home_real suffix candidate candidate_real
+  [ -n "$dir" ] || return 1
+  [ -d "$dir" ] || return 1
+  dir_real=$(canonical_existing_dir "$dir") || return 1
+  home_real=$(canonical_existing_dir "$HOME") || return 1
+  [ "$dir_real" != "$home_real" ] || return 1
+  case "$dir_real" in
+    "$home_real"/*) ;;
+    *) return 1 ;;
+  esac
+  suffix=${dir_real#"$home_real"/}
+  candidate=$HOME/$suffix
+  [ "$candidate" != "$dir" ] || return 1
+  candidate_real=$(canonical_existing_dir "$candidate") || return 1
+  [ "$candidate_real" = "$dir_real" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
 # Bounded patience window for transient index.lock after killing a crew process.
 # New knobs are preferred; FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS remains an alias
@@ -537,7 +556,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc alt_dir
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -548,6 +567,20 @@ teardown_treehouse_return() {
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
   if ! treehouse_return_is_index_lock_error "$out"; then
+    case "$out" in
+      *"not managed by treehouse"*)
+        alt_dir=$(alternate_home_spelling_for_dir "$dir" || true)
+        if [ -n "$alt_dir" ]; then
+          echo "teardown: $label return was not managed as $dir; retrying alternate home spelling $alt_dir" >&2
+          if out=$( ( cd "$cd_dir" && treehouse return --force "$alt_dir" ) 2>&1 ); then
+            [ -n "$out" ] && printf '%s\n' "$out"
+            echo "teardown: $label return succeeded with alternate home spelling" >&2
+            return 0
+          fi
+          [ -n "$out" ] && printf '%s\n' "$out" >&2
+        fi
+        ;;
+    esac
     return 1
   fi
 

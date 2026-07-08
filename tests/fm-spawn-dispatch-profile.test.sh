@@ -84,6 +84,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  HOME="${FM_TEST_HOME:-$HOME}" \
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -121,6 +122,29 @@ test_no_profile_keeps_claude_launch_unchanged() {
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+}
+
+test_spawn_records_home_spelled_treehouse_worktree() {
+  local rec id out status real_home logical_home physical_wt logical_wt
+  id="home-spelled-wt-z16"
+  rec=$(make_spawn_case home-spelled-wt claude "$id")
+  read_case_record "$rec"
+  real_home="$CASE_DIR/real-home"
+  logical_home="$CASE_DIR/logical-home"
+  physical_wt="$real_home/wt"
+  logical_wt="$logical_home/wt"
+  mkdir -p "$real_home"
+  ln -s "$real_home" "$logical_home"
+  git -C "$PROJ_DIR" worktree remove --force "$WT_DIR"
+  git -C "$PROJ_DIR" worktree add --quiet -b "wt-$id" "$physical_wt"
+
+  out=$(FM_TEST_HOME="$logical_home" run_spawn "$HOME_DIR" "$physical_wt" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed when pane reports the physical HOME spelling"
+  assert_contains "$out" "worktree=$logical_wt" "spawn summary did not use HOME-spelled worktree"
+  assert_grep "worktree=$logical_wt" "$HOME_DIR/state/$id.meta" \
+    "spawn meta did not record the HOME-spelled worktree"
+  pass "fm-spawn records treehouse worktrees with the HOME spelling when HOME is a symlink"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -365,6 +389,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_spawn_records_home_spelled_treehouse_worktree
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
