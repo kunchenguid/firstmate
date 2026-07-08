@@ -1067,10 +1067,11 @@ detect_supervisor_ratelimit() {  # <state>
   fi
   match=$(fm_ratelimit_render_match "$tail" "" "$reuse_reset" || true)
   if [ -z "$match" ]; then
-    if [ -e "$state/firstmate.ratelimit.failed" ]; then
+    if [ -e "$state/firstmate.ratelimit" ] || [ -e "$state/firstmate.ratelimit.attempts" ] \
+      || [ -e "$state/firstmate.ratelimit.failed" ]; then
       rm -f "$state/firstmate.ratelimit" "$state/firstmate.ratelimit.attempts" \
         "$state/firstmate.ratelimit.failed" 2>/dev/null || true
-      log "self-handle: cleared exhausted ratelimit marker for recovered supervisor pane $target"
+      log "self-handle: cleared ratelimit marker for recovered supervisor pane $target"
     fi
     return 0
   fi
