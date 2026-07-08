@@ -760,7 +760,8 @@ run_config_push() {
 }
 
 seed_healthy_watcher_lock() {
-  local w=$1 state="$w/home/state" identity
+  local w=$1 identity
+  local state="$w/home/state"
   identity=$(FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
     || fail "could not identify test pid for watcher lock"
   mkdir -p "$state/.watch.lock"
