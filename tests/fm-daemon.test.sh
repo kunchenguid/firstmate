@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
+AFK_START="$ROOT/bin/fm-afk-start.sh"
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
 # via a BASH_SOURCE guard, so only classify_*/housekeeping/escalate_*/afk_* and the
 # pane/submit helpers become defined.
@@ -22,6 +23,21 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+
+test_afk_start_refuses_when_flag_cannot_be_written() {
+  local dir state out status
+  dir=$(make_supercase afk-start-flag-unwritable)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
+  assert_not_contains "$out" "starting supervise daemon" "fm-afk-start.sh continued into daemon startup after .afk write failure"
+  assert_absent "$state/.supervise-daemon.log" "fm-afk-start.sh started the daemon after .afk write failure"
+  pass "fm-afk-start.sh fails before daemon startup when the afk flag cannot be written"
+}
 
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
@@ -968,6 +984,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+test_afk_start_refuses_when_flag_cannot_be_written
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
