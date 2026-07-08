@@ -151,6 +151,14 @@ Classify each wake this way:
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
+- `ratelimited` -> self-handle. A pane parked on a Claude quota or
+  `API Error: 529` overload footer needs no captain action. The daemon's
+  housekeeping runs the same quota-parking auto-resume as the always-on watcher -
+  submitting `continue` to a still-idle limit/empty pane after the reset margin -
+  and also parks a rate-limited supervisor pane of its own, marking that
+  self-pane resume with the sentinel so it is not mistaken for a captain return.
+  Only an exhausted auto-resume (`FM_RATELIMIT_MAX_RESUMES` attempts) escalates
+  (see docs/architecture.md "Event-driven supervision").
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
