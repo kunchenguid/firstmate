@@ -96,7 +96,7 @@ if [ "$watcher_fresh" = false ]; then
   } >&2
 fi
 
-if [ "$watcher_fresh" = true ] && fm_codex_background_wake_degraded; then
+if [ "$watcher_fresh" = true ] && [ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded; then
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
