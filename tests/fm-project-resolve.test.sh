@@ -105,6 +105,23 @@ test_json_registry_refuses_linked_worktree_as_canonical() {
   pass "projects.json refuses linked worktrees as canonical project paths"
 }
 
+test_json_registry_refuses_subdirectory_canonical_path() {
+  local home repo repo_real subdir out status
+  home=$(new_home subdir-canonical)
+  repo="$TMP_ROOT/subdir-canonical/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+  subdir="$repo_real/packages/app"
+  mkdir -p "$subdir"
+  write_json_registry "$home" flow "$subdir"
+
+  out=$(run_resolve "$home" --field canonical_path flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver accepted a canonicalPath below the git root"
+  assert_contains "$out" "canonicalPath must be the git work tree root" "subdirectory refusal should explain the root requirement"
+  pass "projects.json refuses subdirectories as canonical project paths"
+}
+
 test_json_registry_rejects_codex_owned_canonical_path() {
   local home repo codex_home out status
   home=$(new_home codex-root)
@@ -133,6 +150,138 @@ test_json_registry_malformed_file_fails_closed() {
   pass "malformed projects.json fails closed instead of falling back"
 }
 
+test_json_registry_requires_explicit_policy_fields() {
+  local home repo repo_real out status
+  home=$(new_home missing-policy)
+  repo="$TMP_ROOT/missing-policy/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --field base_ref flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json entry without baseRef resolved"
+  assert_contains "$out" "missing required baseRef" "missing baseRef should fail closed"
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json list accepted an entry without baseRef"
+  assert_contains "$out" "missing required baseRef" "list should validate missing baseRef for bootstrap"
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR"
+    }
+  ]
+}
+EOF
+  out=$(run_resolve "$home" --field yolo flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json entry without yolo resolved"
+  assert_contains "$out" "missing required yolo" "missing yolo should fail closed"
+  pass "projects.json requires explicit policy fields"
+}
+
+test_json_registry_list_rejects_missing_project_id() {
+  local home repo repo_real out status
+  home=$(new_home missing-project-id)
+  repo="$TMP_ROOT/missing-project-id/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json list accepted an entry without projectId"
+  assert_contains "$out" "missing required projectId" "list should validate projectId for bootstrap"
+  pass "projects.json list rejects entries missing projectId"
+}
+
+test_json_registry_rejects_invalid_policy_fields() {
+  local home repo repo_real out status
+  home=$(new_home invalid-policy)
+  repo="$TMP_ROOT/invalid-policy/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "fast",
+      "yolo": false
+    }
+  ]
+}
+EOF
+  out=$(run_resolve "$home" --field mode flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json entry with invalid mode resolved"
+  assert_contains "$out" "invalid mode" "invalid mode should fail closed"
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": "maybe"
+    }
+  ]
+}
+EOF
+  out=$(run_resolve "$home" --field yolo flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json entry with invalid yolo resolved"
+  assert_contains "$out" "invalid yolo" "invalid yolo should fail closed"
+  pass "projects.json rejects invalid policy fields"
+}
+
 test_json_registry_matches_physical_canonical_path() {
   local home real_parent link_parent repo link repo_real out
   home=$(new_home symlink-roundtrip)
@@ -151,6 +300,21 @@ test_json_registry_matches_physical_canonical_path() {
   out=$(run_resolve "$home" --field base_ref "$repo_real")
   [ "$out" = "refs/remotes/origin/dev" ] || fail "physical canonical path lost the registry base ref"
   pass "projects.json matches symlinked canonical paths by physical checkout"
+}
+
+test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy() {
+  local home repo repo_real out
+  home=$(new_home explicit-path-policy)
+  repo="$TMP_ROOT/explicit-path-policy/external/app"
+  make_repo "$repo" main
+  repo_real=$(cd "$repo" && pwd -P)
+  printf '%s\n' '- app [local-only +yolo] - legacy app (added 2026-07-07)' > "$home/data/projects.md"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$MODE" "$repo_real" 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "explicit external path borrowed legacy app mode/yolo: $out"
+  out=$(run_resolve "$home" --field project_id "$repo_real" 2>/dev/null)
+  [ "$out" = "$repo_real" ] || fail "explicit external path collapsed to basename project id"
+  pass "explicit paths outside managed projects do not borrow legacy policy by basename"
 }
 
 test_json_registry_list_merges_legacy_projects() {
@@ -173,7 +337,12 @@ test_json_registry_list_merges_legacy_projects() {
 test_json_registry_resolves_external_project_identity
 test_markdown_registry_fallback_still_works
 test_json_registry_refuses_linked_worktree_as_canonical
+test_json_registry_refuses_subdirectory_canonical_path
 test_json_registry_rejects_codex_owned_canonical_path
 test_json_registry_malformed_file_fails_closed
+test_json_registry_requires_explicit_policy_fields
+test_json_registry_list_rejects_missing_project_id
+test_json_registry_rejects_invalid_policy_fields
 test_json_registry_matches_physical_canonical_path
+test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy
 test_json_registry_list_merges_legacy_projects

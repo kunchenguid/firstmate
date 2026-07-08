@@ -730,6 +730,22 @@ registry_line_for_project() {
   printf '%s\n' "$line"
 }
 
+resolved_registry_line_for_project() {
+  local project=$1 today mode yolo policy
+  today=$(date +%F)
+  mode=$("$SCRIPT_DIR/fm-project-resolve.sh" --field mode "$project") || return 1
+  yolo=$("$SCRIPT_DIR/fm-project-resolve.sh" --field yolo "$project") || return 1
+  case "$mode" in no-mistakes|direct-PR|local-only) ;; *) mode=no-mistakes; yolo=off ;; esac
+  case "$yolo" in on|off) ;; *) yolo=off ;; esac
+  policy=
+  if [ "$mode" != no-mistakes ] || [ "$yolo" = on ]; then
+    policy=" [$mode"
+    [ "$yolo" != on ] || policy="$policy +yolo"
+    policy="$policy]"
+  fi
+  printf -- '- %s%s - cloned project (added %s)\n' "$project" "$policy" "$today"
+}
+
 project_mode_in_home() {
   local home=$1 project=$2 mode
   read -r mode _ <<EOF
@@ -739,7 +755,7 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
+  local home=$1 sub_reg tmp project line names
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
@@ -755,11 +771,10 @@ sync_project_registry() {
   else
     : > "$tmp"
   fi
-  today=$(date +%F)
   for project in "$@"; do
     line=$(registry_line_for_project "$project" || true)
     if [ -z "$line" ]; then
-      line="- $project - cloned project (added $today)"
+      line=$(resolved_registry_line_for_project "$project")
     fi
     printf '%s\n' "$line" >> "$tmp"
   done

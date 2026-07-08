@@ -106,10 +106,18 @@ markdown_mode_yolo() {
 }
 
 fallback_project_id() {
-  local arg=$1
+  local arg=$1 arg_real projects_real
   case "$arg" in
     projects/*) basename "$arg" ;;
-    */*) basename "$arg" ;;
+    */*)
+      arg_real=$(real_existing_dir "$arg" 2>/dev/null || true)
+      projects_real=$(real_existing_dir "$PROJECTS" 2>/dev/null || true)
+      if [ -n "$arg_real" ] && [ -n "$projects_real" ] && path_is_ancestor_or_self "$projects_real" "$arg_real"; then
+        basename "$arg"
+      else
+        printf '%s\n' "$arg"
+      fi
+      ;;
     *) printf '%s\n' "$arg" ;;
   esac
 }
@@ -187,7 +195,7 @@ EOF
 }
 
 validate_canonical_path() {
-  local project_id=$1 canonical=$2 expected_common=$3 codex_home codex_worktrees gitdir common gitdir_real common_real
+  local project_id=$1 canonical=$2 expected_common=$3 codex_home codex_worktrees toplevel toplevel_real gitdir common gitdir_real common_real
   case "$canonical" in
     /*) ;;
     *) echo "error: project $project_id canonicalPath must be absolute: $canonical" >&2; return 1 ;;
@@ -208,6 +216,15 @@ validate_canonical_path() {
     echo "error: project $project_id canonicalPath is not a git work tree: $canonical" >&2
     return 1
   }
+  toplevel=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
+  toplevel_real=$(real_existing_dir "$toplevel") || {
+    echo "error: project $project_id git work tree root cannot be resolved for $canonical" >&2
+    return 1
+  }
+  if [ "$toplevel_real" != "$canonical" ]; then
+    echo "error: project $project_id canonicalPath must be the git work tree root: $canonical (root: $toplevel_real)" >&2
+    return 1
+  fi
   gitdir=$(git -C "$canonical" rev-parse --git-dir 2>/dev/null) || return 1
   common=$(git -C "$canonical" rev-parse --git-common-dir 2>/dev/null) || return 1
   gitdir_real=$(git_path_real "$canonical" "$gitdir") || {
@@ -235,33 +252,65 @@ validate_canonical_path() {
   printf '%s\n' "$common_real"
 }
 
+json_required_string() {
+  local project=$1 project_id=$2 key=$3 label=$4 value
+  value=$(printf '%s\n' "$project" | jq -r --arg key "$key" '
+    if has($key) and (.[$key] | type == "string") then .[$key] else empty end
+  ') || return 1
+  [ -n "$value" ] || {
+    if [ -n "$project_id" ]; then
+      echo "error: project $project_id is missing required $label" >&2
+    else
+      echo "error: project registry entry is missing required $label" >&2
+    fi
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
+json_required_yolo() {
+  local project=$1 project_id=$2 yolo_type yolo_value
+  if ! printf '%s\n' "$project" | jq -e 'has("yolo")' >/dev/null; then
+    echo "error: project $project_id is missing required yolo" >&2
+    return 1
+  fi
+  yolo_type=$(printf '%s\n' "$project" | jq -r '.yolo | type') || return 1
+  yolo_value=$(printf '%s\n' "$project" | jq -r '.yolo') || return 1
+  case "$yolo_type:$yolo_value" in
+    boolean:true|string:on|string:true) echo "on" ;;
+    boolean:false|string:off|string:false) echo "off" ;;
+    *)
+      echo "error: project $project_id has invalid yolo: $yolo_value" >&2
+      return 1
+      ;;
+  esac
+}
+
 resolve_json() {
   local arg=$1 project raw project_id canonical expected_common common default_branch base_ref mode yolo worktree_policy origin fork
   project=$(json_registry_project "$arg") || return $?
   [ -n "$project" ] || return 3
 
-  project_id=$(printf '%s\n' "$project" | jq -r '.projectId // empty')
-  canonical=$(printf '%s\n' "$project" | jq -r '.canonicalPath // empty')
+  project_id=$(json_required_string "$project" "" projectId projectId) || return 1
+  canonical=$(json_required_string "$project" "$project_id" canonicalPath canonicalPath) || return 1
   expected_common=$(printf '%s\n' "$project" | jq -r '.gitCommonDir // empty')
-  default_branch=$(printf '%s\n' "$project" | jq -r '.defaultBranch // empty')
-  base_ref=$(printf '%s\n' "$project" | jq -r '.baseRef // empty')
-  mode=$(printf '%s\n' "$project" | jq -r '.mode // "no-mistakes"')
-  yolo=$(printf '%s\n' "$project" | jq -r 'if (.yolo // false) == true or (.yolo // "") == "on" then "on" else "off" end')
+  default_branch=$(json_required_string "$project" "$project_id" defaultBranch defaultBranch) || return 1
+  base_ref=$(json_required_string "$project" "$project_id" baseRef baseRef) || return 1
+  mode=$(json_required_string "$project" "$project_id" mode mode) || return 1
+  yolo=$(json_required_yolo "$project" "$project_id") || return 1
   worktree_policy=$(printf '%s\n' "$project" | jq -r '.worktreePolicy // "firstmate-owned"')
   origin=$(printf '%s\n' "$project" | jq -r '.remotes.origin // empty')
   fork=$(printf '%s\n' "$project" | jq -r '.remotes.fork // empty')
 
-  [ -n "$project_id" ] || { echo "error: project registry entry is missing projectId" >&2; return 1; }
-  [ -n "$canonical" ] || { echo "error: project $project_id is missing canonicalPath" >&2; return 1; }
   canonical=$(real_existing_dir "$canonical") || {
     echo "error: project $project_id canonicalPath is not a directory: $canonical" >&2
     return 1
   }
   common=$(validate_canonical_path "$project_id" "$canonical" "$expected_common") || return 1
-  if [ -z "$base_ref" ] && [ -n "$default_branch" ]; then
-    base_ref="refs/remotes/origin/$default_branch"
-  fi
-  case "$mode" in no-mistakes|direct-PR|local-only) ;; *) mode=no-mistakes; yolo=off ;; esac
+  case "$mode" in
+    no-mistakes|direct-PR|local-only) ;;
+    *) echo "error: project $project_id has invalid mode: $mode" >&2; return 1 ;;
+  esac
 
   raw=$(jq -n \
     --arg project_id "$project_id" \
@@ -355,7 +404,7 @@ emit_shell() {
 }
 
 list_projects() {
-  local id path proj seen_ids seen_paths
+  local id path proj seen_ids seen_paths entry
   seen_ids=
   seen_paths=
   if [ -f "$JSON_REG" ]; then
@@ -363,6 +412,10 @@ list_projects() {
       echo "error: $JSON_REG exists but jq is not installed" >&2
       return 1
     }
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      json_required_string "$entry" "" projectId projectId >/dev/null || return 1
+    done < <(jq -c '.projects[]?' "$JSON_REG")
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       proj=$(resolve_project "$id") || return 1
