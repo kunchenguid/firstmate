@@ -37,7 +37,7 @@ All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
-- `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, runs the shared guard, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
+- `opencode`: `.opencode/plugins/package.json` declares ESM loading for `.opencode/plugins/fm-primary-turnend-guard.js`, which listens for `session.idle`, runs the shared guard, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `turn_end`, runs the shared guard, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
@@ -50,7 +50,7 @@ Both payloads include `stop_hook_active`; when it is true, the shared guard exit
 OpenCode, Pi, and Grok expose passive turn-end events for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
-If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
+If a passive adapter cannot run its guard subprocess, call its SDK method, find `grok`, or recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 
 ## Empirical Validation
 
@@ -73,12 +73,13 @@ The tracked command therefore treats hook process PWD as the hook-loaded firstma
 It still passes the original payload to `bin/fm-turnend-guard.sh`, so the shared loop guard reads `stop_hook_active`.
 
 OpenCode 1.17.6 was validated with project plugins under scratch `.opencode/plugins/`.
-Hook file used: `.opencode/plugins/fm-smoke.js` for throw testing and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.
+Hook files used: `.opencode/plugins/package.json` for ESM loading, `.opencode/plugins/fm-smoke.js` for throw testing, and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.
 Command run for passive behavior: `opencode run --print-logs --log-level DEBUG --dangerously-skip-permissions 'Say hi in exactly one word.'`.
 Observed output: the plugin received `session.idle`, threw an error, and `opencode run` still exited 0 with `Hi`, proving `session.idle` cannot block directly.
 Command run for follow-up behavior: `OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt 'Say hi in exactly one word.' --print-logs --log-level INFO`.
 Observed output: the plugin called `client.session.promptAsync`, the TUI ran a second turn, and the second model output contained `OPENCODEHOOK`.
 In noninteractive `opencode run`, `promptAsync` returned successfully but the process exited before displaying the follow-up, so this adapter is trusted for primary TUI sessions and documented as passive/fail-open in headless mode.
+The tracked plugin also treats guard subprocess spawn and stdin errors as fail-open, matching the passive adapter policy above.
 
 Pi 0.80.2 was validated with a scratch extension.
 Hook file used: a scratch `ext.ts` matching `.pi/extensions/fm-primary-turnend-guard.ts`.

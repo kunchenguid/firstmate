@@ -302,7 +302,7 @@ Inheritance copies the literal `config/crew-harness` file, so a secondmate's own
 Propagation timing, mechanism, and `bin/fm-config-push.sh` are section 3's canonical statement.
 
 Each adapter splits into mechanics and knowledge.
-The per-task mechanics (launch command, autonomy flag, crewmate turn-end hook) live in `bin/fm-spawn.sh`; the primary-session turn-end guard lives in `docs/turnend-guard.md`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks, skill invocation, resume) lives in the agent-only `harness-adapters` skill.
+The per-task mechanics (launch command, autonomy flags, crewmate turn-end hook) live in `bin/fm-spawn.sh`; the primary-session turn-end guard lives in `docs/turnend-guard.md`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks, skill invocation, resume) lives in the agent-only `harness-adapters` skill.
 **Never dispatch a crewmate or secondmate on an unverified adapter.**
 If `config/crew-harness` or `config/secondmate-harness` names an unverified one, tell the captain and fall back to your own harness until it is verified.
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.

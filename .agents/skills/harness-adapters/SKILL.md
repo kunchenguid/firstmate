@@ -25,7 +25,7 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The per-task mechanics, including launch command, autonomy flag, and crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+The per-task mechanics, including launch command, autonomy flags, and crewmate turn-end hook, live in `bin/fm-spawn.sh`.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
@@ -128,6 +128,9 @@ This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
+`fm-spawn.sh` includes Codex's hook-trust bypass in its verified launch template, so hook-trust prompts should not stop firstmate-spawned Codex workers.
+If one does, treat it as a launch-template regression and check `bin/fm-spawn.sh`.
+This does not replace the directory trust dialog above.
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.

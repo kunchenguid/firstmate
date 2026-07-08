@@ -307,6 +307,11 @@ launch_template() {
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
+      # Codex needs both dangerous automation bypasses in unattended firstmate
+      # sessions: tool approval/sandbox bypass for autonomous work, and hook
+      # trust bypass so a repo-local hook prompt cannot stop a worker before it
+      # reads the brief. Ship/scout launches still carry notify= for the
+      # per-task turn-end marker; secondmate launches intentionally do not.
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "$(cat __BRIEF__)"'
       else
