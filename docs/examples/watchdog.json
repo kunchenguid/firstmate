@@ -1,0 +1,13 @@
+{
+  "poll_interval_sec": 30,
+  "thresholds": {
+    "compact_at_context_pct": 85,
+    "successor_at_context_pct": 95,
+    "embargo_at_5hr_pct": 85,
+    "embargo_at_7d_pct": 85
+  },
+  "steer_retries": 3,
+  "steer_timeout_sec": 120,
+  "rotate_to": ["codex", "opencode"],
+  "parser_version": 1
+}

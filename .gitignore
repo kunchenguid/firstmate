@@ -11,5 +11,6 @@ config/crew-dispatch.json
 config/secondmate-harness
 config/backlog-backend
 config/backend
+config/watchdog.json
 config/x-mode.env
 config/cmux-socket-password

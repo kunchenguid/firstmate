@@ -165,6 +165,13 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Watchdog metrics (config/watchdog.json)
+
+`config/watchdog.json` is an optional local, gitignored file containing thresholds for the session-metrics watchdog.
+See [`docs/examples/watchdog.json`](examples/watchdog.json) for a starting point to copy into local `config/watchdog.json`.
+When it is absent, `bin/fm-watchdog-lib.sh` uses the same defaults as the example file.
+Metrics snapshots are written under `state/watchdog/metrics-<session-id>.json`, keeping watchdog artifacts inside firstmate's existing runtime-signal directory without mixing them into the watcher's own dotfile internals.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and quota-axi), lists it with the exact install commands, and installs only after you say go.
