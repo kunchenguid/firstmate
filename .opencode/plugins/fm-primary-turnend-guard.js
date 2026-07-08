@@ -4,6 +4,12 @@ let skipNextIdle = false;
 
 function runProcess(command, args, input = "") {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -15,8 +21,9 @@ function runProcess(command, args, input = "") {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
-    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    child.stdin.on("error", () => {});
+    child.on("error", () => finish({ code: 0, stdout: "", stderr: "" }));
+    child.on("close", (code) => finish({ code: code ?? 0, stdout, stderr }));
     child.stdin.end(input);
   });
 }

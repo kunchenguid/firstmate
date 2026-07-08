@@ -91,6 +91,34 @@ SH
   done
 }
 
+# fm_path_without_tools <dest> <base-path> <tool>...: create a PATH directory
+# mirroring executable names from <base-path> except the named tools.
+# This keeps missing-tool tests deterministic on hosts that have optional tools
+# like node or orca installed in /usr/bin.
+fm_path_without_tools() {
+  local dest=$1 base_path=$2 old_ifs dir path name tool skip
+  shift 2
+  mkdir -p "$dest"
+  old_ifs=$IFS
+  IFS=:
+  for dir in $base_path; do
+    [ -d "$dir" ] || continue
+    for path in "$dir"/*; do
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      [ -x "$path" ] || continue
+      name=${path##*/}
+      skip=0
+      for tool in "$@"; do
+        [ "$name" = "$tool" ] && { skip=1; break; }
+      done
+      [ "$skip" -eq 0 ] || continue
+      [ -e "$dest/$name" ] || [ -L "$dest/$name" ] || ln -s "$path" "$dest/$name" 2>/dev/null || true
+    done
+  done
+  IFS=$old_ifs
+  printf '%s\n' "$dest"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
