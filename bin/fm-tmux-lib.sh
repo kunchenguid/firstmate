@@ -112,7 +112,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   case "$stripped" in
-    '>'|'❯'|'›'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    '❯'|'›') printf 'empty'; return 0 ;;
   esac
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
   # only tmux captures the raw cursor row, which may BE the footer).
