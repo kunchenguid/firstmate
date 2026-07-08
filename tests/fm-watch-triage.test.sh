@@ -64,6 +64,17 @@ wait_numeric_file() {
   return 1
 }
 
+# Wait up to <limit> 0.1s ticks for <file> to be removed; 0 once gone, 1 on timeout.
+wait_file_gone() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -548,6 +559,107 @@ SH
     || fail "parked pane re-spawned python to re-parse the reset: count=$(cat "$dir/pycount" 2>/dev/null | wc -c)"
   [ ! -s "$out" ] || fail "parked reuse pane printed another wake: $(cat "$out")"
   pass "a parked ratelimit pane reuses its recorded reset instead of re-parsing every poll"
+}
+
+# --- ratelimit markers clear when the pane returns to activity ----------------
+# The marker set (state/<id>.ratelimit[.attempts][.failed]) must not outlive the
+# rate-limit episode. Once the pane content changes and the render no longer shows a
+# quota/overload footer, the crew is active again: the whole set is cleared so a
+# stuck .failed verdict cannot forbid parking for the rest of the task, and a stale
+# past reset cannot be reused by a later episode. A genuinely new episode then parks
+# and wakes fresh, proving the auto-resume feature survives across episodes.
+test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks() {
+  local dir state fakebin out drain_out capture_file window key old_hash pid marker_line reset marker_window marker_harness
+  dir=$(make_case ratelimit-marker-clear); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-recovered"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/recovered.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The pane was parked and auto-resume had exhausted: a full stuck marker set.
+  printf '%s\ttest:fm-recovered\tclaude\n' "$(date +%s)" > "$state/recovered.ratelimit"
+  printf '3\n' > "$state/recovered.ratelimit.attempts"
+  printf 'ratelimit auto-resume exhausted\n' > "$state/recovered.ratelimit.failed"
+  # The suppressor holds the old footer hash; the render is now new, active content.
+  old_hash=$(hash_text "Claude usage limit reached")
+  printf '%s' "$old_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'building output, crew active again' > "$capture_file"
+
+  # Phase A: the changed, footer-free render clears the whole marker set without
+  # surfacing a wake (the crew is simply active again).
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_file_gone "$state/recovered.ratelimit" 30 \
+    || { reap "$pid"; fail "an active-again pane did not clear its ratelimit marker: $(cat "$out")"; }
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "watcher exited instead of absorbing the recovered pane: $(cat "$out")"
+  fi
+  [ ! -e "$state/recovered.ratelimit.attempts" ] || { reap "$pid"; fail "active recovery did not clear .ratelimit.attempts"; }
+  [ ! -e "$state/recovered.ratelimit.failed" ] || { reap "$pid"; fail "active recovery did not clear .ratelimit.failed"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "clearing the marker on recovery enqueued a wake"; }
+  reap "$pid"
+
+  # Phase B: a genuinely NEW quota episode on the same crew parks and wakes fresh -
+  # proof the cleared .failed no longer forbids parking for the rest of the task.
+  printf 'Claude usage limit reached\n' > "$capture_file"
+  printf '%s' "$(hash_text "Claude usage limit reached")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a new quota episode after recovery did not park/wake"
+  grep -F "ratelimited: $window" "$out" >/dev/null || fail "the new episode was not parked as ratelimited: $(cat "$out")"
+  marker_line=$(cat "$state/recovered.ratelimit" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r reset marker_window marker_harness <<EOF
+$marker_line
+EOF
+  case "$reset" in ''|*[!0-9]*) fail "new episode did not write a fresh reset marker: $marker_line" ;; esac
+  [ "$marker_window" = "$window" ] || fail "new-episode marker window mismatch: $marker_line"
+  [ "$marker_harness" = claude ] || fail "new-episode marker harness mismatch: $marker_line"
+  [ ! -e "$state/recovered.ratelimit.failed" ] || fail "new episode inherited the old .failed marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the new-episode park failed"
+  grep "$(printf '\tratelimited\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "new-episode ratelimited wake was not queued"
+  pass "ratelimit markers clear when the pane returns to activity, and a later episode parks fresh"
+}
+
+# --- ratelimit markers survive a content change that still shows the footer ----
+# The active-episode protection: a render that changed but STILL shows a quota
+# footer (e.g. `continue` typed into the composer during an in-flight resume retry)
+# does not prove the episode ended, so the marker and its retry-attempt count must
+# be preserved for the stable-stale/resume path rather than wiped.
+test_ratelimit_markers_preserved_when_footer_still_rendered() {
+  local dir state fakebin out capture_file window key old_hash pid
+  dir=$(make_case ratelimit-marker-preserve); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-retrying"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/retrying.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s\ttest:fm-retrying\tclaude\n' "$(date +%s)" > "$state/retrying.ratelimit"
+  printf '2\n' > "$state/retrying.ratelimit.attempts"
+  # Suppressor holds the footer-only hash; the render changed (a `continue` was
+  # typed) but the footer is still within the last non-blank lines.
+  old_hash=$(hash_text "Claude usage limit reached")
+  printf '%s' "$old_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'Claude usage limit reached\ncontinue' > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "watcher exited on a footer-still-rendered content change: $(cat "$out")"
+  fi
+  [ -e "$state/retrying.ratelimit" ] || { reap "$pid"; fail "a still-footered content change wiped the active ratelimit marker"; }
+  [ "$(cat "$state/retrying.ratelimit.attempts" 2>/dev/null || true)" = 2 ] \
+    || { reap "$pid"; fail "a still-footered content change reset the retry-attempt count"; }
+  reap "$pid"
+  pass "a content change that still renders the quota footer preserves the active ratelimit marker"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -1292,6 +1404,8 @@ test_terminal_stale_surfaced
 test_ratelimit_stale_is_parked_not_wedged
 test_ratelimit_failed_returns_to_stale_escalation
 test_ratelimit_parked_reuses_marker_reset_no_reparse
+test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks
+test_ratelimit_markers_preserved_when_footer_still_rendered
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

@@ -925,6 +925,23 @@ EOF
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"
       fi
+      # A ratelimit episode must not outlive the pane's return to activity. When a
+      # marker exists but the now-changing render no longer shows a quota/overload
+      # footer, the episode has ended (auto-resume, a captain steer, or a non-empty
+      # submit verdict), so clear the whole marker set - .ratelimit, .attempts, and
+      # .failed - and a genuinely new episode later starts fresh instead of reusing a
+      # past reset or inheriting a stuck .failed verdict that would forbid parking for
+      # the rest of the task. A render still showing the footer (e.g. text typed into
+      # the composer while parked) does NOT prove the episode ended, so leave the
+      # marker for the stable-stale path; reuse the recorded reset so this check
+      # spawns no python re-parse.
+      rl_task=$(window_to_task "$w" "$STATE")
+      if [ -n "$rl_task" ] && { [ -e "$STATE/$rl_task.ratelimit" ] || [ -e "$STATE/$rl_task.ratelimit.failed" ]; }; then
+        reuse_reset=$(fm_ratelimit_marker_reset "$STATE" "$rl_task" "$w" "$(window_harness "$w")" 2>/dev/null || true)
+        if ! fm_ratelimit_render_match "$tail40" "" "$reuse_reset" >/dev/null 2>&1; then
+          rm -f "$STATE/$rl_task.ratelimit" "$STATE/$rl_task.ratelimit.attempts" "$STATE/$rl_task.ratelimit.failed"
+        fi
+      fi
     fi
   done < <(recorded_windows)
 
