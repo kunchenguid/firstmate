@@ -14,6 +14,7 @@
 #   (h) the run is READ-ONLY: no state/data file is created or modified
 #   (i) the default output path is $FM_HOME/.lavish/fleet-board.html
 #   (j) shellcheck passes on the script when shellcheck is installed
+#   (k) the snapshot seam consumes a valid schema and falls back on a mismatch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,12 +64,15 @@ EOF
 }
 
 # Fingerprint every file under the given dirs (path + content hash), so a
-# before/after comparison proves the render mutated nothing.
+# before/after comparison proves the render mutated nothing. shasum is required:
+# without it both fingerprints would be empty and the read-only check (case h)
+# would pass vacuously, so its absence is a hard failure rather than a skip.
+command -v shasum >/dev/null 2>&1 || fail "shasum is required for the read-only fingerprint check"
 tree_fingerprint() {  # <dir>...
   local d
   for d in "$@"; do
     [ -d "$d" ] || continue
-    find "$d" -type f -print0 | sort -z | xargs -0 shasum 2>/dev/null
+    find "$d" -type f -print0 | sort -z | xargs -0 shasum
   done
 }
 
@@ -175,6 +179,52 @@ default_out=$(FM_HOME="$HOME5" FM_CREW_STATE_CMD="$FAKE_CS" "$BOARD")
 [ -f "$default_out" ] || fail "default output file not written"
 
 pass "default output path is \$FM_HOME/.lavish/fleet-board.html"
+
+# --- (k) snapshot seam: valid schema consumed, mismatched schema falls back --
+#
+# Exercises the gather_from_snapshot jq path, which the direct-gather cases above
+# never touch. Guards two contracts: a valid snapshot is consumed verbatim (with
+# field content preserved byte-for-byte, catching regex corruption of the
+# separator/newline scrub), and a differently-named schema is rejected so the
+# board falls back to the authoritative direct gather instead of rendering ghosts.
+
+if command -v jq >/dev/null 2>&1; then
+  HOME6="$TMP_ROOT/home6"
+  mkdir -p "$HOME6/data"
+  printf '## Queued\n- [ ] directitem - direct queued fallback (repo: alpha) (kind: ship)\n' > "$HOME6/data/backlog.md"
+
+  # A valid snapshot: id present, and a description full of u/f/0/1 characters
+  # that a broken separator-scrub regex would silently strip.
+  GOODSNAP="$TMP_ROOT/goodsnap"
+  cat > "$GOODSNAP" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = "--json" ] && printf '%s\n' '{"tasks":[{"id":"snaptask","section":"queued","desc":"stuff full of uufff001","repo":"beta"}]}'
+SH
+  chmod +x "$GOODSNAP"
+  OUT6="$TMP_ROOT/board6.html"
+  FM_HOME="$HOME6" FM_FLEET_SNAPSHOT_CMD="$GOODSNAP" "$BOARD" --out "$OUT6" >/dev/null || fail "snapshot render exited non-zero"
+  snap_html=$(cat "$OUT6")
+  assert_contains "$snap_html" '<span class="id">snaptask</span>' "valid snapshot task rendered"
+  assert_contains "$snap_html" 'stuff full of uufff001' "snapshot field content preserved byte-for-byte"
+  assert_not_contains "$snap_html" '<span class="id">directitem</span>' "valid snapshot supersedes direct gather"
+
+  # A mismatched schema (no id field) must fail the guard and fall back.
+  BADSNAP="$TMP_ROOT/badsnap"
+  cat > "$BADSNAP" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = "--json" ] && printf '%s\n' '{"tasks":[{"name":"ghost","section":"queued"}]}'
+SH
+  chmod +x "$BADSNAP"
+  OUT7="$TMP_ROOT/board7.html"
+  FM_HOME="$HOME6" FM_FLEET_SNAPSHOT_CMD="$BADSNAP" "$BOARD" --out "$OUT7" >/dev/null || fail "bad-snapshot render exited non-zero"
+  bad_html=$(cat "$OUT7")
+  assert_contains "$bad_html" '<span class="id">directitem</span>' "mismatched snapshot falls back to direct gather"
+  assert_not_contains "$bad_html" 'ghost' "mismatched snapshot record must not render"
+
+  pass "snapshot seam consumes a valid schema and falls back on a mismatch"
+else
+  pass "jq not installed - skipping snapshot-seam assertion"
+fi
 
 # --- (j) shellcheck ---------------------------------------------------------
 

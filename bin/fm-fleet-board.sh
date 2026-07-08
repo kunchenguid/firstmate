@@ -18,8 +18,8 @@
 # Data sources, in order of preference. The internal per-task record shape is
 # identical either way, so the snapshot path slots in without a render rewrite:
 #   1. bin/fm-fleet-snapshot.sh --json, when that script exists (upstream). Its
-#      JSON is normalized into the same tab-separated task records used below;
-#      on any parse trouble it falls back to (2).
+#      JSON is normalized into the same unit-separator-delimited task records
+#      used below; on any parse trouble it falls back to (2).
 #   2. Direct gather: data/backlog.md sections (In flight / Queued / Done), each
 #      state/<id>.meta (window=, harness=, model=, effort=, kind=, mode=, pr=),
 #      and bin/fm-crew-state.sh <id> for the current state of in-flight tasks.
@@ -46,8 +46,10 @@ SNAPSHOT_BIN="${FM_FLEET_SNAPSHOT_CMD:-$SCRIPT_DIR/fm-fleet-snapshot.sh}"
 # the record, so the internal record delimiter must be non-whitespace.
 SEP=$'\037'
 
+# Print the header comment block (line 2 onward) up to the first non-comment
+# line, so the help text never trails into `set -u` if the header grows.
 print_help() {
-  sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 OUT=""
@@ -90,9 +92,10 @@ meta_val() {  # <meta-file> <key>
 
 # --- normalized task record -------------------------------------------------
 #
-# Every task, from either data source, is emitted as one tab-separated record
-# with these positional fields. Keeping this the single contract is what lets a
-# future fm-fleet-snapshot.sh feed the same renderer untouched:
+# Every task, from either data source, is emitted as one record whose fields are
+# joined by SEP (ASCII unit separator \037, never a tab). Keeping this the single
+# contract is what lets a future fm-fleet-snapshot.sh feed the same renderer
+# untouched:
 #
 #   1 section     inflight|queued|done
 #   2 id
@@ -229,12 +232,22 @@ gather_direct() {
 # schema at integration time; this maps the expected shape and returns non-zero
 # on any mismatch so gather_direct stays authoritative until then. It emits the
 # same normalized records as gather_direct, so the renderer needs no change.
+#
+# The schema guard requires `.tasks` to be an array whose every element carries a
+# non-empty string `id`. A different upstream shape (a `tasks` array of
+# differently-named fields) therefore fails the guard and falls back to
+# gather_direct, rather than emitting empty-id records that would render as empty
+# groups with counts that disagree with the visible rows.
 gather_from_snapshot() {
   command -v jq >/dev/null 2>&1 || return 1
   local json
   json=$("$SNAPSHOT_BIN" --json 2>/dev/null) || return 1
   [ -n "$json" ] || return 1
-  printf '%s' "$json" | jq -e 'has("tasks")' >/dev/null 2>&1 || return 1
+  printf '%s' "$json" | jq -e '
+    has("tasks")
+    and (.tasks | type == "array")
+    and (.tasks | all(.id? | (type == "string") and (length > 0)))
+  ' >/dev/null 2>&1 || return 1
   printf '%s' "$json" | jq -r '
     .tasks[]? |
     [ (.section // "queued"),
@@ -253,7 +266,7 @@ gather_from_snapshot() {
       (.mode // ""),
       (.pr // ""),
       (.branch // "")
-    ] | map(gsub("[\\u001f\\n]"; " ")) | join("\u001f")
+    ] | map(gsub("[\u001f\n]"; " ")) | join("\u001f")
   ' 2>/dev/null || return 1
 }
 
@@ -310,7 +323,7 @@ CSS
 inflight_chip() {  # <state>
   case "$1" in
     working)      printf 'st-work working' ;;
-    parked)       printf 'st-danger needs-decision' ;;
+    parked)       printf 'st-work parked' ;;
     done)         printf 'st-ok ready' ;;
     failed)       printf 'st-danger failed' ;;
     blocked)      printf 'st-danger blocked' ;;
@@ -378,12 +391,19 @@ EOF
 }
 
 render_group() {  # <section> <label> <records>
-  local sec=$1 label=$2 records=$3 line matched="" count=0
+  local sec=$1 label=$2 records=$3 line matched="" count=0 rest rid
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      "$sec$SEP"*) matched="$matched$line"$'\n'; count=$((count + 1)) ;;
+      "$sec$SEP"*) : ;;
+      *) continue ;;
     esac
+    # Skip an id-less record so the count never disagrees with what render_row
+    # actually renders (render_row also returns early on an empty id).
+    rest=${line#"$sec$SEP"}
+    rid=${rest%%"$SEP"*}
+    [ -n "$rid" ] || continue
+    matched="$matched$line"$'\n'; count=$((count + 1))
   done <<< "$records"
 
   printf '<div class="group">%s · %s task(s)</div>\n' "$(html_escape "$label")" "$count"
@@ -413,6 +433,10 @@ render_html() {  # <records>
 # --- main -------------------------------------------------------------------
 
 RECORDS=$(gather_tasks)
-mkdir -p "$(dirname "$OUT")"
-render_html "$RECORDS" > "$OUT"
+OUT_DIR=$(dirname "$OUT")
+mkdir -p "$OUT_DIR" || { echo "fm-fleet-board.sh: cannot create output dir: $OUT_DIR" >&2; exit 1; }
+if ! render_html "$RECORDS" > "$OUT"; then
+  echo "fm-fleet-board.sh: failed to write board: $OUT" >&2
+  exit 1
+fi
 printf '%s\n' "$OUT"

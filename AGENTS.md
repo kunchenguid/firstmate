@@ -706,8 +706,10 @@ bin/fm-watch.sh                     # the watcher itself; exits with: signal|sta
 bin/fm-wake-drain.sh                # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>           # one-line current-state read; reconciles matching run-step, pane, and status log
 bin/fm-fleet-view.sh                # read-only Markdown whole-fleet view rendered from the structured snapshot
-bin/fm-fleet-board.sh               # read-only HTML fleet board for the captain; render on captain request
+bin/fm-fleet-board.sh               # read-only HTML fleet board; the captain-facing entry point is the /fleet skill
 ```
+
+When the captain invokes `/fleet` or asks to see the whole fleet at a glance, load the `fleet` skill, which renders the board and opens it for review.
 
 On wake, in order of cheapness:
 
