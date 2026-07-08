@@ -369,6 +369,38 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+add_git_process_lock_aware_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  printf '%s\n' "$wt" >> "${FM_TREEHOUSE_CALL_LOG:?}"
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    echo "Another git process seems to be running in this repository." >&2
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 git_index_lock_path() {
   local dir=$1 lock abs_dir
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
@@ -1117,6 +1149,37 @@ test_treehouse_return_retries_git_process_lock_once_without_removing_lock() {
   pass "treehouse return retries a transient git-process lock once without removing the lock"
 }
 
+test_git_process_lock_message_still_reaches_stale_cleanup() {
+  local case_dir rc lock calls
+  case_dir=$(make_case git-process-stale-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_git_process_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "git-process-stale-lock: teardown should clean up a provably stale git-process lock"
+  calls=$(cat "$case_dir/treehouse-calls")
+  [ "$calls" = "$case_dir/wt"$'\n'"$case_dir/wt"$'\n'"$case_dir/wt" ] \
+    || fail "git-process-stale-lock: wrong treehouse retry sequence"$'\n'"$calls"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "git-process-stale-lock: teardown did not run stale-lock cleanup"
+  assert_absent "$lock" "git-process-stale-lock: stale lock file should have been removed"
+  pass "git-process lock output falls through to stale-lock cleanup after retry"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -1160,3 +1223,4 @@ test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_treehouse_return_retries_alternate_home_spelling
 test_treehouse_return_retries_git_process_lock_once_without_removing_lock
+test_git_process_lock_message_still_reaches_stale_cleanup

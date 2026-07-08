@@ -548,6 +548,35 @@ treehouse_return_output_git_process_lock() {
   return 1
 }
 
+finish_treehouse_return_after_retry_failed() {
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock=$5
+
+  if [ -e "$lock" ]; then
+    if worktree_lock_is_provably_stale "$lock" "$dir"; then
+      rm -f "$lock"
+      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
+      if [ -n "$post_cleanup_check" ]; then
+        if ! "$post_cleanup_check"; then
+          echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
+          return 1
+        fi
+      fi
+      if treehouse_return_once "$dir" "$cd_dir"; then
+        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        return 0
+      fi
+      echo "teardown: $label return still failing after stale-lock cleanup" >&2
+      return 1
+    fi
+
+    echo "teardown: $label return failed and git lock $lock is not provably stale (may belong to a live process); leaving it in place" >&2
+    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+  fi
+
+  echo "teardown: $label return still failing after git lock $lock disappeared" >&2
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a stale git
 # lock left by a killed crew process. On failure: wait briefly and retry once
 # (the owning process may be exiting), then - only if the lock is provably
@@ -580,7 +609,12 @@ teardown_treehouse_return() {
       echo "teardown: $label return succeeded on transient-lock retry" >&2
       return 0
     fi
-    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+    lock=$(worktree_git_lock_path "$dir") || lock=""
+    if [ -z "$lock" ] || [ ! -e "$lock" ]; then
+      return 1
+    fi
+    finish_treehouse_return_after_retry_failed "$dir" "$cd_dir" "$label" "$post_cleanup_check" "$lock"
+    return $?
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
@@ -596,30 +630,7 @@ teardown_treehouse_return() {
     return 0
   fi
 
-  if [ -e "$lock" ]; then
-    if worktree_lock_is_provably_stale "$lock" "$dir"; then
-      rm -f "$lock"
-      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
-      if [ -n "$post_cleanup_check" ]; then
-        if ! "$post_cleanup_check"; then
-          echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
-          return 1
-        fi
-      fi
-      if treehouse_return_once "$dir" "$cd_dir"; then
-        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
-        return 0
-      fi
-      echo "teardown: $label return still failing after stale-lock cleanup" >&2
-      return 1
-    fi
-
-    echo "teardown: $label return failed and git lock $lock is not provably stale (may belong to a live process); leaving it in place" >&2
-    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
-  fi
-
-  echo "teardown: $label return still failing after git lock $lock disappeared" >&2
-  return 1
+  finish_treehouse_return_after_retry_failed "$dir" "$cd_dir" "$label" "$post_cleanup_check" "$lock"
 }
 
 validate_worktree_teardown_safety() {
