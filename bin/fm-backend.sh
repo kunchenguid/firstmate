@@ -632,10 +632,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       # empirically (docs/herdr-backend.md "Session targeting") that the bare
       # env var alone is NOT reliably honored once another herdr server is
       # already bound on the machine - it silently queries whatever server IS
-      # running instead. fm_backend_herdr_cli appends the required --session
-      # flag on top, so this check is correctly scoped even when the caller's
-      # own ambient session (e.g. the primary firstmate's default session) is
-      # a DIFFERENT one than the target's.
+      # running instead. fm_backend_herdr_cli prepends the required --session
+      # flag as a global option, so this check is correctly scoped even when
+      # the caller's own ambient session (e.g. the primary firstmate's default
+      # session) is a DIFFERENT one than the target's.
       fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     zellij)

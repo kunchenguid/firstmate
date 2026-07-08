@@ -30,6 +30,8 @@ This mainly matters as an opt-out of herdr or cmux runtime auto-detection (see [
 
 Nothing to provision up front.
 The first crewmate spawn creates whatever tmux session and window it needs.
+Task windows are created with a session target that ends in a colon (`<session>:`), so tmux chooses the next unused window index in that session.
+This matters on tmux 3.6b, where a bare session target can be interpreted as the current window index instead of the append/next-unused slot.
 
 ## Run inside tmux for the best experience
 
@@ -70,6 +72,13 @@ tmux list-windows -t <session-name>
 
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
+
+## Composer and submit verification
+
+`fm-send.sh` and the away-mode daemon share the tmux composer classifier in `bin/fm-tmux-lib.sh`.
+It captures only the cursor row with ANSI styling, strips dim/faint ghost or placeholder text, strips known composer borders, and then decides whether real unsubmitted text remains.
+An idle Codex composer whose row is a bold `›` prompt followed by dim suggestion text therefore reads as empty, while the same `›` prompt followed by normal-intensity typed text still reads as pending.
+Submit verification types the message once and retries Enter only until the composer clears, preserving the swallowed-Enter protection without duplicating text.
 
 ## Agent liveness probe
 

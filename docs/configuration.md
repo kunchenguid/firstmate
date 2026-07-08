@@ -39,7 +39,7 @@ A herdr spawn additionally version-gates against the installed `herdr` binary's 
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
-When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks that `orca --help` exposes the expected Orca developer CLI commands (`status`, `repo`, `worktree`, and `terminal`), keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -175,7 +175,7 @@ Metrics snapshots are written under `state/watchdog/metrics-<session-id>.json`, 
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and quota-axi), lists it with the exact install commands, and installs only after you say go.
-When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires the expected Orca CLI shape, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
@@ -268,6 +268,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
+FM_BACKEND_HERDR_INPUT_SETTLE=0.2  # herdr-only: seconds to wait before pane input calls after target readiness
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
 FM_BACKEND_HERDR_BARE_PROMPT_RE='^[❯›]'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")

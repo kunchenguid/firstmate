@@ -169,6 +169,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
   For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1, whose `tasks-axi update --help` lacks `--archive-body`, or whose `tasks-axi mv --help` lacks the `[<id>...]` atomic multi-ID marker; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
   For `quota-axi`, bootstrap requires it because crew-dispatch `quota-balanced` may call it; `bin/fm-dispatch-select.sh` still degrades at runtime when quota data is unavailable.
+  For `orca`, this also covers an executable named `orca` whose `orca --help` output does not expose the expected Orca developer CLI commands (`status`, `repo`, `worktree`, and `terminal`).
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
