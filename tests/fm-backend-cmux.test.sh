@@ -569,6 +569,26 @@ test_secret_specs_read_from_local_config() {
   pass "fm_backend_cmux_secret_specs_for_harness: reads pairings (with optional region) from local config/cmux-env-secrets, skipping comments, blanks, unpaired harnesses, and an absent file"
 }
 
+test_secret_specs_warns_on_malformed_matching_line() {
+  local dir cfg out warn
+  dir="$TMP_ROOT/secret-specs-malformed"; mkdir -p "$dir/config"
+  cfg="$dir/config"
+  printf 'opencode FIREWORKS_API_KEY\n' > "$cfg/cmux-env-secrets"
+  ( . "$ROOT/bin/backends/cmux.sh"
+    out=$(FM_CONFIG_OVERRIDE="$cfg" fm_backend_cmux_secret_specs_for_harness opencode 2>"$dir/warn.txt")
+    warn=$(cat "$dir/warn.txt")
+    [ -z "$out" ] || { echo "a malformed line must configure no injection, got '$out'" >&2; exit 1; }
+    case "$warn" in
+      *warning*"$cfg/cmux-env-secrets"*"opencode FIREWORKS_API_KEY"*) : ;;
+      *) echo "expected a stderr warning naming the file and offending line, got '$warn'" >&2; exit 1 ;;
+    esac
+    out=$(FM_CONFIG_OVERRIDE="$cfg" fm_backend_cmux_secret_specs_for_harness codex 2>"$dir/warn-other.txt")
+    warn=$(cat "$dir/warn-other.txt")
+    [ -z "$out" ] && [ -z "$warn" ] || { echo "a non-matching harness must stay silent, got out='$out' warn='$warn'" >&2; exit 1; }
+  ) || fail "fm_backend_cmux_secret_specs_for_harness did not warn on a harness-matching line missing its secret name"
+  pass "fm_backend_cmux_secret_specs_for_harness: warns loudly (file + offending line) when a harness-matching pairing lacks a secret name, instead of silently skipping it"
+}
+
 test_create_task_passes_fireworks_env_for_opencode() {
   local dir fb cfg out title
   dir="$TMP_ROOT/create-task-opencode-env"; mkdir -p "$dir/responses"
@@ -1259,6 +1279,7 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_secret_specs_read_from_local_config
+test_secret_specs_warns_on_malformed_matching_line
 test_create_task_passes_fireworks_env_for_opencode
 test_create_task_omits_env_for_unpaired_harness
 test_create_task_skips_env_when_unconfigured

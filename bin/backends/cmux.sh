@@ -352,7 +352,10 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # (which fork a task inside the same host shell and so inherit firstmate's
 # own process environment), a cmux terminal surface's environment is heavily
 # scrubbed at spawn time - ambient provider API keys never reach it. An
-# absent file, or a harness with no matching line, means no injection at all.
+# absent file, or a harness with no matching line, means no injection at all;
+# a harness-matching line missing its secret name is skipped with a stderr
+# warning so a mistyped pairing surfaces at spawn instead of silently
+# reverting to no injection.
 fm_backend_cmux_secret_specs_for_harness() {  # <harness>
   local harness=$1 config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" f h env_var secret_name region _rest
   f="$config_dir/cmux-env-secrets"
@@ -360,7 +363,10 @@ fm_backend_cmux_secret_specs_for_harness() {  # <harness>
   while read -r h env_var secret_name region _rest || [ -n "$h" ]; do
     case "$h" in ''|'#'*) continue ;; esac
     [ "$h" = "$harness" ] || continue
-    [ -n "$secret_name" ] || continue
+    if [ -z "$secret_name" ]; then
+      echo "warning: cmux env passthrough: ignoring malformed line in $f (missing secret name): $h${env_var:+ $env_var}" >&2
+      continue
+    fi
     if [ -n "$region" ]; then
       printf '%s %s %s\n' "$env_var" "$secret_name" "$region"
     else
