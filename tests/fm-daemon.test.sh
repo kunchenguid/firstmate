@@ -39,6 +39,43 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   pass "fm-afk-start.sh fails before daemon startup when the afk flag cannot be written"
 }
 
+test_afk_start_ignores_stale_pidfile_without_lock() {
+  local dir state out status
+  dir=$(make_supercase afk-start-stale-pidfile)
+  state="$dir/state"
+  printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale pidfile-only live pid"
+  pass "fm-afk-start.sh ignores stale pidfile-only live pids"
+}
+
+test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
+  local dir state out status lock
+  dir=$(make_supercase afk-start-stale-lock-reused-pid)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
+  printf '%s\n' "$$" > "$lock/pid"
+  printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup after rejecting the stale lock"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation after stale lock cleanup"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale daemon lock with a reused pid"
+  assert_not_contains "$out" "another fm-supervise-daemon is already running" "daemon singleton lock still trusted the reused pid"
+  pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -985,6 +1022,8 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
+test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
