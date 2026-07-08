@@ -28,9 +28,7 @@ batched digest rather than per-wake injections.
    ```sh
    bin/fm-afk-start.sh
    ```
-   The helper sets or refreshes `state/.afk`, exits immediately if the daemon
-   pid file already names a live process, and otherwise execs
-   `bin/fm-supervise-daemon.sh` in the foreground.
+   The helper sets or refreshes `state/.afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
@@ -116,12 +114,13 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 
 The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
 herdr - both literal, non-submitting sends), then submitted with Enter and
-**verified**: Enter is retried (Enter only, never a retype) until the composer
-clears.
-A submit "landed" only when the composer is confirmed empty afterward, using
-the same corrected, border-aware detector as the composer guard.
-A bordered-empty claude composer is recognized as submitted rather than
-mistaken for a swallowed Enter.
+**verified** through the selected backend's submit primitive.
+Enter is retried (Enter only, never a retype) until the backend confirms the
+submit landed.
+For tmux that confirmation is a cleared composer, using the same corrected,
+border-aware detector as the composer guard.
+For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the pre-injection guard and conservative fallback for non-idle or unreadable baselines.
+A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
@@ -190,11 +189,12 @@ the marker lets firstmate distinguish it from a real captain message.
   no-op.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
-  Enter is retried, Enter only and never a retype, until the composer is
-  confirmed empty. That empty composer is the acknowledgement that the submit
-  landed, using the same dim-ghost-aware and border-aware detector (tmux) or
-  ANSI-aware structural classifier (herdr) so a ghost-only or bordered-empty
-  composer counts as submitted rather than a false swallowed Enter.
+  Enter is retried, Enter only and never a retype, until the backend submit
+  primitive reports `empty` as its caller-facing success verdict.
+  For tmux that verdict means the dim-ghost-aware and border-aware composer
+  cleared.
+  For herdr's normal idle-baseline path it means native agent-state observed a real turn start; herdr uses the ANSI-aware structural classifier for the pre-injection composer guard and fallback paths.
+  This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper

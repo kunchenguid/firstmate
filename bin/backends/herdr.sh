@@ -781,18 +781,17 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # semantic signal regardless of what text a harness's idle composer happens
 # to display.
 #
-# Incident (2026-07-07): a redelivery loop in the away-mode daemon. Root
-# cause: fm_backend_herdr_composer_state's structural row classifier
-# recognizes only bordered and two hardcoded bare prompt glyphs; real codex's
-# IDLE composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") that no static pattern can tell apart from genuinely unsubmitted
-# input, so a codex confirmation built on composer content classified a
-# landed submit as still-"pending" forever - see docs/herdr-backend.md for
-# the full account. Composer content is retained for other callers (the
-# away-mode daemon's PRE-injection empty-box guard, still dispatched via
-# fm_backend_composer_state / fm_backend_herdr_composer_state, unchanged) and
-# for submit attempts whose pre-Enter agent-state baseline is not legibly
-# idle.
+# Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
+# away-mode daemon. Root cause: composer-content submit confirmation was too
+# sensitive to harness rendering details. Real claude/codex use bare prompt
+# rows, and real codex adds dynamic idle suggestions after `›`; the later
+# ANSI-aware composer classifier now handles the pre-injection guard for that
+# Codex shape, but idle-baseline submit confirmation deliberately stays on
+# native agent-state so delivery does not depend on composer text. Composer
+# content is retained for other callers (the away-mode daemon's PRE-injection
+# empty-box guard, still dispatched via fm_backend_composer_state /
+# fm_backend_herdr_composer_state) and for submit attempts whose pre-Enter
+# agent-state baseline is not legibly idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a

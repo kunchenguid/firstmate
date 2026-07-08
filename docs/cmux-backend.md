@@ -266,7 +266,7 @@ Verified live: two workspaces created with the identical title `fm-test-dup` bot
 
 ## Composer verification: structural border-row classification (adapted from herdr)
 
-cmux's `read-screen` gives plain-text capture with no cursor-row/ANSI-only primitive, the same shape herdr's `pane read` has (unlike tmux's `#{cursor_y}`).
+cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and unlike herdr's later `--format ansi` path for Codex ghost suggestions.
 Per this build task's explicit direction, `fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural border-row classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach: it locates the composer's own row as the only captured line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain ASCII `|`), scanning forward and keeping the LAST match so an earlier border-shaped line can never outrank the real bottom-anchored composer row.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
 `tests/fm-backend-cmux.test.sh` pins this exact regression shape (`test_send_text_submit_popup_autocomplete_requires_second_enter`), verifying the adapter retries a genuine second Enter rather than declaring victory after the first one closes a popup.

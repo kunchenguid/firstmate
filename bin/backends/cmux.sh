@@ -524,9 +524,10 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 # empty|pending|unknown. Adapted from the bordered-row branch of herdr's
 # structural classifier (fm_backend_herdr_composer_state) per the build task's
 # explicit direction - this is the highest-risk piece of a new backend's
-# send-and-verify logic, and cmux's `read-screen` gives the same kind of
-# plain-text capture with no cursor-row primitive that herdr's `pane read`
-# does. The cmux classifier intentionally remains border-row based: locate the
+# send-and-verify logic, and cmux's `read-screen` gives plain-text capture
+# with no cursor-row primitive and no ANSI style channel like herdr's newer
+# `pane read --format ansi` path. The cmux classifier intentionally remains
+# border-row based: locate the
 # composer row as the only captured line whose TRIMMED content both STARTS and
 # ENDS with the same border glyph (│, ┃, or a plain ASCII |), scanning forward
 # and keeping the LAST match so an earlier border-shaped line (scrollback, a
