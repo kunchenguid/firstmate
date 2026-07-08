@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+HARNESS="$ROOT/bin/fm-harness.sh"
+TMP_ROOT=$(fm_test_tmproot fm-copilot-harness)
+
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  printf '%s\n' "$fakebin"
+}
+
+make_spawn_case() {
+  local name=$1 case_dir home proj wt fakebin id
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  id="copilot-$name-x1"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
+}
+
+run_copilot_spawn() {
+  local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
+  shift 5
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" "$@" 2>&1
+}
+
+test_copilot_spawn_installs_worktree_hook() {
+  local rec case_dir home proj wt fakebin id out status hook excl
+  rec=$(make_spawn_case hook)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" copilot)
+  status=$?
+  expect_code 0 "$status" "copilot spawn should succeed"
+  assert_contains "$out" "spawned $id harness=copilot" "copilot spawn did not report success"
+
+  hook="$wt/.github/hooks/fm-turn-end.json"
+  assert_present "$hook" "copilot turn-end hook was not installed in the worktree"
+  assert_grep 'agentStop' "$hook" "copilot hook did not register the agentStop event"
+  assert_grep "$home/state/$id.turn-ended" "$hook" "copilot hook did not point at this task's turn-ended marker"
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude)
+  assert_grep '.github/hooks/fm-turn-end.json' "$excl" "copilot hook path was not gitignored"
+  pass "copilot spawn installs a worktree-resident agentStop hook"
+}
+
+test_copilot_spawn_threads_model_and_effort() {
+  local rec case_dir home proj wt fakebin id out status meta
+  rec=$(make_spawn_case flags)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --harness copilot --model gpt-5.5 --effort high)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with model/effort should succeed"
+  assert_contains "$out" "harness=copilot" "copilot spawn did not record harness in output"
+  meta="$home/state/$id.meta"
+  assert_present "$meta" "copilot spawn did not write meta"
+  assert_grep 'model=gpt-5.5' "$meta" "copilot spawn did not record the requested model"
+  assert_grep 'effort=high' "$meta" "copilot spawn did not record the requested effort"
+  pass "copilot spawn threads model and effort into meta"
+}
+
+test_fm_harness_detects_copilot_env_marker() {
+  local out
+  out=$(COPILOT_CLI=1 CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' "$HARNESS")
+  [ "$out" = "copilot" ] || fail "fm-harness.sh did not detect COPILOT_CLI=1 (got: '$out')"
+  pass "fm-harness.sh detects the copilot env marker"
+}
+
+test_copilot_spawn_installs_worktree_hook
+test_copilot_spawn_threads_model_and_effort
+test_fm_harness_detects_copilot_env_marker

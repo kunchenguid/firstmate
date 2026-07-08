@@ -33,7 +33,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|copilot)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -76,6 +76,8 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# copilot uses a gitignored worktree-resident .github/hooks/fm-turn-end.json
+# (agentStop hook), the same shape as claude's .claude/settings.local.json Stop hook.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -279,7 +281,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|copilot)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +342,15 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # copilot (GitHub Copilot CLI): -i/--interactive starts an interactive session
+    # and automatically executes the given prompt, the positional-prompt equivalent
+    # of claude/pi/grok's launch pattern (copilot has no bare positional prompt
+    # arg). --allow-all is the targeted equivalent of claude's
+    # --dangerously-skip-permissions (enables all tool/path/URL permissions so the
+    # crewmate runs unattended). copilot's turn-end signal does NOT ride the launch
+    # command - it is an agentStop hook installed below as a worktree-resident
+    # .github/hooks/ file, identical in shape to claude's Stop hook.
+    copilot) printf '%s' 'copilot --allow-all __MODELFLAG____EFFORTFLAG__-i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -427,7 +438,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|copilot)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -468,6 +479,14 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    copilot)
+      # copilot's --effort/--reasoning-effort accepts firstmate's full shared
+      # vocabulary (none|low|medium|high|xhigh|max per its own --help), so every
+      # requested effort value is passed through unchanged.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -948,6 +967,19 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    copilot*)
+      # copilot fires an agentStop hook at every turn boundary (verified,
+      # GitHub Copilot CLI 1.0.68), the equivalent of claude's Stop hook.
+      # Unlike grok, copilot's repository-level hooks (.github/hooks/*.json in
+      # the worktree) load with no separate hook-trust gate beyond the normal
+      # one-time folder-trust dialog every harness already needs, so the hook
+      # lives worktree-resident exactly like claude's, with no global registry.
+      mkdir -p "$WT/.github/hooks"
+      cat > "$WT/.github/hooks/fm-turn-end.json" <<EOF
+{"version":1,"hooks":{"agentStop":[{"type":"command","command":"touch '$TURNEND'"}]}}
+EOF
+      exclude_path '.github/hooks/fm-turn-end.json'
       ;;
   esac
 fi

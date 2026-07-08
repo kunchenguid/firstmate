@@ -78,6 +78,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| copilot | `--model <model>` | `--effort <none\|low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.68. `--effort`/`--reasoning-effort` are aliases; the installed CLI's help advertises the full shared vocabulary, so no value is omitted. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -92,6 +93,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- copilot: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified live: a project skill under `.agents/skills/` appears in the `/`-autocomplete with its description, and a single Enter both selects and submits it (no observed argument-placeholder hazard for a no-argument invocation, unlike codex/grok). `fm-send`'s standard submit still applies as the safety net for any argument-taking form.
 
 ## claude (VERIFIED)
 
@@ -244,3 +246,27 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## copilot (VERIFIED 2026-07-06, GitHub Copilot CLI 1.0.68)
+
+GitHub Copilot CLI (`copilot`), the terminal agent firstmate itself commonly runs on.
+Launch with `-i/--interactive <prompt>`: starts an interactive session and automatically executes the given prompt (copilot has no bare positional prompt argument, unlike claude/pi/grok).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc cancel` (mid-turn footer hint, e.g. `◉ Working esc cancel` or `○ Working · 110 B esc cancel`; absent when idle, verified 1.0.68). |
+| Exit command | `Ctrl+D` (bound to `shutdown`, verified to cleanly exit to the shell). `Ctrl+C` twice within about a second also exits (`ctrl+c×2` bound to `exit` per `/help`); either works, `Ctrl+D` is simpler (single key, no timing window). |
+| Interrupt | single `Ctrl+C` or `Esc` (both bound to `cancel` per `/help`; cancels the current turn without exiting). |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same as claude. |
+| Autonomy | `--allow-all` (equivalent to `--allow-all-tools --allow-all-paths --allow-all-urls`); the targeted equivalent of claude's `--dangerously-skip-permissions`. |
+| Env marker | `COPILOT_CLI=1`, set on the CLI process itself (not just child/tool processes). |
+| Resume | `copilot --resume=<session-id>` or bare `--resume`/`-r` for the most recent session; the id is printed to the pane on exit as `Resume this session with: copilot --resume=<id>`. |
+
+First launch in a fresh, not-yet-trusted directory shows a "Confirm folder trust" dialog ("Do you trust the files in this folder?").
+Accept with `2` (or Enter on the default `1`) to proceed; option `2`, "Yes, and remember this folder for future sessions", persists the decision so later worktrees under the same path skip it, mirroring claude/pi/grok's per-path trust memory.
+After every spawn, peek the pane within about 20 seconds and handle this dialog if shown, exactly as for the other harnesses.
+
+Turn-end hook: copilot fires an `agentStop` hook at every turn boundary (verified 1.0.68), the direct equivalent of claude's `Stop` hook.
+Unlike grok, copilot loads repository-level hooks (`<worktree>/.github/hooks/*.json`) with no separate hook-trust gate beyond the ordinary one-time folder-trust dialog above, so the turn-end hook is installed worktree-resident, the same shape as claude's `.claude/settings.local.json`: `fm-spawn` writes `<worktree>/.github/hooks/fm-turn-end.json` with an `agentStop` command hook that touches `state/<id>.turn-ended`, and excludes the path via git info/exclude so it never dirties the worktree or blocks teardown.
+No global registry or per-task pointer token is needed (contrast with grok's global-hook workaround above), because the hook file itself lives inside, and is scoped to, this one task's worktree.
+The hook payload delivers the firing session's `cwd` on stdin, but `fm-spawn`'s hook command does not need to read it: the hook file is only ever loaded by copilot sessions launched inside this exact worktree.

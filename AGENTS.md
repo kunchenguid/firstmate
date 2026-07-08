@@ -208,7 +208,7 @@ If the captain expresses a standing dispatch preference such as "use grok for ne
 Crewmates default to the same harness you are running on.
 The captain may override the static default at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single adapter name; absent or `default` means mirror your own harness).
 Resolve `default` with `bin/fm-harness.sh`; resolve the active static crewmate harness with `bin/fm-harness.sh crew`.
-Verified adapter names are `claude`, `codex`, `opencode`, `pi`, and `grok`.
+Verified adapter names are `claude`, `codex`, `opencode`, `pi`, `grok`, and `copilot`.
 
 ### Crew dispatch profiles
 
@@ -506,6 +506,7 @@ bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harn
 bin/fm-spawn.sh <id> projects/<repo> --harness codex   # explicit per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> grok        # per-task harness override
+bin/fm-spawn.sh <id> projects/<repo> copilot     # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
 bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # explicit runtime backend; tmux is the verified reference backend (docs/tmux-backend.md)
 bin/fm-spawn.sh <id> projects/<repo> --backend herdr  # experimental herdr backend (docs/herdr-backend.md); version-gates at spawn

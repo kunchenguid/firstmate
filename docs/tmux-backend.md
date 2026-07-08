@@ -12,7 +12,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
+- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, `grok`, or `copilot`.
 - `git` with GitHub auth (`gh auth login`).
 - `node`, required by firstmate's universal toolchain.
 - `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and `quota-axi` for bootstrap-managed backlog and dispatch support.

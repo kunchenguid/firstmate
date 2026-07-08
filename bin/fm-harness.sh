@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|copilot|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,6 +35,10 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # copilot sets COPILOT_CLI=1 for its own process (verified, GitHub Copilot CLI
+  # 1.0.68). It is set on the CLI process itself, not just child/tool processes,
+  # so it is checked here alongside the other harnesses' own markers.
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -44,6 +48,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *copilot*) echo copilot; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +58,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *copilot*) echo copilot; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
