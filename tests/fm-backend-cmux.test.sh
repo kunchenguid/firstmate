@@ -697,6 +697,23 @@ test_composer_state_ghost_placeholder_is_empty() {
   pass "fm_backend_cmux_composer_state: the ghost placeholder text reads empty, not pending"
 }
 
+# Locale-invariance regression: the leading-glyph strip must remove the whole
+# multi-byte ❯ under a C/POSIX locale. A byte-count strip (${stripped#?}) drops
+# a single byte there, leaving stray bytes of the 3-byte glyph so the idle ghost
+# placeholder is misread as pending. Precedent: the locale-invariant PID
+# identity test in tests/fm-watcher-lock.test.sh.
+test_composer_state_ghost_placeholder_is_empty_under_c_locale() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-ghost-clocale"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ─────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle ghost placeholder must still read empty (locale-invariant glyph strip), got '$out'"
+  pass "fm_backend_cmux_composer_state: the idle ghost placeholder reads empty even under LC_ALL=C"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"
@@ -1045,6 +1062,7 @@ test_send_literal_uses_separator_for_option_shaped_text
 test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
+test_composer_state_ghost_placeholder_is_empty_under_c_locale
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
