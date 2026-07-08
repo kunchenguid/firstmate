@@ -41,7 +41,11 @@ default_branch() {
   return 1
 }
 
-BRANCH="fm/$ID"
+# The crewmate's branch may be fm/<id> or a Shortcut <type>/sc-<id> branch; read
+# the worktree's actual current branch rather than assuming the fm/ convention.
+WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
+BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$BRANCH" ] || BRANCH="fm/$ID"
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }

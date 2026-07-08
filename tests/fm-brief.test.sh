@@ -141,6 +141,54 @@ test_validation_skill_skipped_for_no_mistakes() {
   pass "fm-brief.sh: validation gate is skipped for no-mistakes mode"
 }
 
+# When firstmate threads a resolved Shortcut story in (FM_SC_TYPE/FM_SC_ID), the
+# ship brief must use the <type>/sc-<id> branch and inject the shortcut-workflow
+# gate. Without a story it stays on fm/<id> with no shortcut gate.
+test_shortcut_story_branch_and_gate() {
+  local home id brief
+  home="$TMP_ROOT/sc-story-home"
+  write_registry "$home"
+  id="brief-sc-e1"
+  FM_HOME="$home" FM_SC_TYPE=feature FM_SC_ID=6231 FM_SC_PERMALINK="https://app.shortcut.com/x/story/6231/foo" \
+    "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "git checkout -b feature/sc-6231" "$brief" "brief did not use the <type>/sc-<id> branch"
+  assert_grep "/shortcut-workflow" "$brief" "brief missing the shortcut-workflow gate"
+  assert_grep "sc-6231" "$brief" "brief missing the story id reference"
+  assert_no_grep "git checkout -b fm/$id" "$brief" "brief still used the fm/ branch despite a story"
+  pass "fm-brief.sh: Shortcut story threads the <type>/sc-<id> branch and shortcut-workflow gate"
+}
+
+test_no_story_uses_default_branch() {
+  local home id brief
+  home="$TMP_ROOT/sc-nostory-home"
+  write_registry "$home"
+  id="brief-sc-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "git checkout -b fm/$id" "$brief" "brief lost the default fm/ branch with no story"
+  assert_no_grep "shortcut-workflow" "$brief" "brief added a shortcut gate with no story"
+  pass "fm-brief.sh: no story keeps the default fm/<id> branch and no shortcut gate"
+}
+
+test_shortcut_invalid_story_falls_back() {
+  local home id brief
+  home="$TMP_ROOT/sc-bad-home"
+  write_registry "$home"
+  id="brief-sc-e3"
+  FM_HOME="$home" FM_SC_TYPE=bogus FM_SC_ID=6231 "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" "invalid story type did not fall back to fm/"
+  assert_no_grep "shortcut-workflow" "$brief" "invalid story type still injected a gate"
+  id="brief-sc-e4"
+  FM_HOME="$home" FM_SC_TYPE=feature FM_SC_ID="not-a-number" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" "non-numeric story id did not fall back to fm/"
+  pass "fm-brief.sh: invalid Shortcut story type/id falls back to fm/<id>"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
@@ -148,3 +196,6 @@ test_ship_project_memory_wording
 test_validation_skill_knob_adds_gate
 test_validation_skill_absent_no_gate
 test_validation_skill_skipped_for_no_mistakes
+test_shortcut_story_branch_and_gate
+test_no_story_uses_default_branch
+test_shortcut_invalid_story_falls_back

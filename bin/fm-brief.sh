@@ -175,10 +175,35 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Branch: default fm/<id>, or the Shortcut <type>/sc-<id> branch when firstmate
+# threaded a resolved story in via FM_SC_TYPE/FM_SC_ID/FM_SC_PERMALINK (see the
+# shortcut-workflow skill). The worktree/folder name is irrelevant; the branch is
+# what carries the sc-<id> token the Shortcut-GitHub link keys off.
+SC_TYPE="${FM_SC_TYPE:-}"
+SC_ID="${FM_SC_ID:-}"
+SC_PERMALINK="${FM_SC_PERMALINK:-}"
+BRANCH="fm/$ID"
+if [ -n "$SC_ID" ]; then
+  case "$SC_TYPE" in
+    feature|bug|chore)
+      if printf '%s' "$SC_ID" | grep -qE '^[0-9]+$'; then
+        BRANCH="$SC_TYPE/sc-$SC_ID"
+      else
+        echo "warn: FM_SC_ID '$SC_ID' is not numeric; using default branch $BRANCH" >&2
+        SC_ID=""
+      fi
+      ;;
+    *)
+      echo "warn: FM_SC_TYPE '$SC_TYPE' must be feature|bug|chore; using default branch $BRANCH" >&2
+      SC_ID=""
+      ;;
+  esac
+fi
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1="1. Never push to the default branch (push only your \`$BRANCH\` branch). Never merge a PR."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
@@ -190,13 +215,13 @@ EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$BRANCH\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$BRANCH\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch $BRANCH\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
 EOF
 )
@@ -246,6 +271,19 @@ EOF
   fi
 fi
 
+# Shortcut story gate: when firstmate threaded a valid story in, tell the crewmate
+# to follow the shortcut-workflow skill (branch/commit/PR conventions).
+SHORTCUT_GATE=""
+if [ -n "$SC_ID" ]; then
+  SHORTCUT_GATE=$(cat <<EOF
+
+# Shortcut story (MANDATORY)
+This task is Shortcut story sc-$SC_ID (type: $SC_TYPE). Permalink: $SC_PERMALINK
+Run \`/shortcut-workflow\` and follow it exactly: your branch is \`$BRANCH\`, every commit carries [sc-$SC_ID] in the title and the permalink in the body, and the PR body uses the required sections. No conventional-commit prefixes, no AI attribution.
+EOF
+)
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -259,7 +297,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $BRANCH\`$SETUP2
 
 # Rules
 $RULE1
@@ -282,6 +320,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$SHORTCUT_GATE
 $VALIDATION_GATE
 
 $DOD
