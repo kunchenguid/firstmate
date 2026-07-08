@@ -135,7 +135,9 @@ The session id is printed on quit.
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.
 Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-block loop safety Claude uses.
-Codex's Stop payload includes `cwd`, and Codex runs hook commands from the session cwd, so the tracked hook walks up from `.cwd` and chooses the outermost firstmate hook-bearing ancestor rather than the nearest git root.
+Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
+Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
+The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 

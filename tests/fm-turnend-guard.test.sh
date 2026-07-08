@@ -422,14 +422,15 @@ test_codex_hook_invokes_shared_guard() {
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
   [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  assert_contains "$command" '.cwd' "codex hook must read the hook payload cwd"
-  assert_contains "$command" '.codex/hooks.json' "codex hook must select a hook-bearing firstmate ancestor"
+  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
+  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
   assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
 
-test_codex_hook_resolves_payload_cwd_to_firstmate_ancestor() {
-  local settings command dir expected_root subdir payload out status
+test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
+  local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
@@ -437,20 +438,20 @@ test_codex_hook_resolves_payload_cwd_to_firstmate_ancestor() {
   dir=$(make_primary_dir "$TMP_ROOT/codex-hook-root")
   mark_codex_hook_root "$dir"
   expected_root=$(cd "$dir" && pwd -P)
-  subdir="$dir/nested/path"
-  mkdir -p "$subdir"
+  outside="$TMP_ROOT/codex-hook-outside"
+  mkdir -p "$outside"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
-  payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | bash -c "$command" 2>&1); status=$?
-  expect_code 0 "$status" "codex hook must execute successfully when payload cwd is a nested directory"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must resolve payload cwd to the firstmate ancestor"
+  payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
   assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
-  pass ".codex/hooks.json: Stop hook resolves payload cwd to the firstmate ancestor"
+  pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
 
 test_codex_hook_ignores_nested_git_root_guard() {
@@ -484,7 +485,7 @@ EOF
   subdir="$nested/deep/path"
   mkdir -p "$subdir"
   payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$subdir" && bash -c "$command") 2>&1); status=$?
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must not execute a nested project guard"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
   assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
@@ -596,7 +597,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
-test_codex_hook_resolves_payload_cwd_to_firstmate_ancestor
+test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree

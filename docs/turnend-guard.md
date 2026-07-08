@@ -36,7 +36,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
-- `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, walks up from payload `.cwd`, chooses the outermost firstmate hook-bearing ancestor, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
+- `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, runs the shared guard, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `turn_end`, runs the shared guard, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
@@ -65,9 +65,11 @@ Codex `codex-cli 0.142.1` was validated with a scratch `.codex/hooks.json` Stop 
 Hook file used: `.codex/hooks.json`.
 Command run: `codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Say hi in exactly one word.'`.
 Observed output: the first model output was `Hi`, the Stop hook exited 2, Codex logged `hook: Stop Blocked`, the model continued with `CODEXHOOK`, and the second hook call had `stop_hook_active=true`.
-The Stop payload included `cwd`, and Codex runs hook commands with the session cwd as their working directory.
-The tracked command therefore does not trust the nearest git root, because a primary may be sitting inside `projects/<repo>` or another nested checkout.
-It walks ancestors from `.cwd` and chooses the outermost firstmate hook-bearing checkout before invoking `bin/fm-turnend-guard.sh`.
+The Stop payload included `cwd`.
+Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Use the shell tool to run mkdir -p outside && cd outside && pwd, then use the shell tool again to run pwd. Your final answer must include the two observed outputs.'`.
+Observed output: the first command printed `<scratch>/outside`, the second command printed `<scratch>`, the Stop hook process `pwd -P` printed `<scratch>`, payload `cwd` printed `<scratch>`, and `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, and `CODEX_CWD` were empty.
+The tracked command therefore treats hook process PWD as the hook-loaded firstmate root and does not let payload `cwd` choose an executable.
+It still passes the original payload to `bin/fm-turnend-guard.sh`, so the shared loop guard reads `stop_hook_active`.
 
 OpenCode 1.17.6 was validated with project plugins under scratch `.opencode/plugins/`.
 Hook file used: `.opencode/plugins/fm-smoke.js` for throw testing and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.
