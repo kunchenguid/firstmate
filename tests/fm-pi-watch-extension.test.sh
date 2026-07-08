@@ -28,12 +28,17 @@ test_generator_writes_extension() {
   assert_contains "$text" "deliverAs: \"followUp\"" "generated extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "generated extension missing loaded marker"
   assert_contains "$text" "const extensionVersion = \"$version_text\"" "generated extension missing content version"
+  assert_contains "$text" "sessionOwnsLock" "generated extension missing session lock ownership check"
+  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "generated extension does not read the effective session lock"
+  assert_contains "$text" "if (!sessionOwnsLock()) return false" "generated extension writes loaded marker without the session lock"
+  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "generated extension arms without the session lock"
   marker_write="writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)"
   assert_contains "$text" "$marker_write" "generated extension does not write the content version and process marker"
   assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "generated extension missing effective config resolution"
   assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "generated extension does not pass the effective config to the watcher arm"
   assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "generated extension does not pass the effective watcher arm script"
   assert_contains "$text" "$expected_config_source" "generated extension does not source the effective x-mode config"
+  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "generated extension does not restart into a Pi-owned watcher child"
   assert_not_contains "$text" "[ -f config/x-mode.env ]" "generated extension kept a repo-relative x-mode config path"
   pass "Pi extension generator writes the firstmate-owned watcher bridge"
 }
@@ -67,6 +72,7 @@ test_spawn_template_mentions_pi_watch_placeholder() {
   text=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$text" "-e __PIWATCH__" "Pi secondmate launch template does not include the primary watch extension"
   assert_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn does not generate the Pi watch extension before launch"
+  assert_contains "$text" "env FM_HOME=\"\$PROJ_ABS\" FM_ROOT_OVERRIDE=\"\$PROJ_ABS\" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \"\$SCRIPT_DIR/fm-pi-watch-extension.sh\"" "fm-spawn lets primary operational overrides leak into Pi secondmate watch generation"
   assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
   pass "Pi secondmate launch wiring includes the generated primary watcher extension"
 }
@@ -82,6 +88,8 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
   assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
+  assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
+  assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
 }
 
@@ -354,7 +362,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
-printf 'watcher: healthy pid=1 (beacon 0s)\n'
+printf 'watcher: started pid=1 (beacon fresh)\n'
 SH
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -412,6 +420,83 @@ EOF
   pass "OpenCode watcher plugin coordinates with the turn-end guard"
 }
 
+test_opencode_healthy_arm_output_does_not_suppress_guard() {
+  local arm_plugin guard_plugin repo home log guard_log out status
+  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  repo="$TMP_ROOT/opencode-external-healthy-root"
+  home="$TMP_ROOT/opencode-external-healthy-home"
+  log="$TMP_ROOT/opencode-external-healthy-arm.log"
+  guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'args=%s\n' "$*" >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'guard ran after external healthy watcher\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
+const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+await armMod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const guardHooks = await guardMod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 50 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run");
+  process.exit(1);
+}
+if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("args=--restart")) {
+  console.error("watch arm was not asked to restart into an owned child");
+  process.exit(1);
+}
+if (!existsSync(process.env.FM_GUARD_LOG)) {
+  console.error("turn-end guard was suppressed by an external healthy watcher");
+  process.exit(1);
+}
+if (!promptBody.includes("TURN WOULD END BLIND")) {
+  console.error(`missing blind-turn prompt: ${promptBody}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
+  pass "OpenCode healthy arm output does not suppress the turn-end guard"
+}
+
 test_generator_writes_extension
 test_generator_preserves_loaded_marker_when_unchanged
 test_generator_uses_portable_mktemp_template
@@ -423,3 +508,4 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_watch_arm_coordinates_with_turnend_guard
+test_opencode_healthy_arm_output_does_not_suppress_guard

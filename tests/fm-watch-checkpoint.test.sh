@@ -64,6 +64,22 @@ SH
   pass "checkpoint preserves watcher environment for the foreground fm-watch.sh"
 }
 
+test_existing_singleton_watcher_is_not_success() {
+  local home out err status
+  home=$(make_home singleton)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  mkdir "$home/state/.watch.lock"
+  printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
+  status=0
+  FM_HOME="$home" FM_GUARD_GRACE=300 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  expect_code 1 "$status" "singleton checkpoint exit"
+  assert_contains "$(cat "$out")" "watcher: already running" "singleton watcher output was not passed through"
+  assert_contains "$(cat "$err")" "outside this foreground checkpoint" "singleton watcher failure was not explained"
+  pass "checkpoint rejects an existing watcher singleton as unowned"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_check_uses_preserved_watcher_environment
+test_existing_singleton_watcher_is_not_success

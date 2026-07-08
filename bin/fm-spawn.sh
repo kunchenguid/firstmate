@@ -623,7 +623,7 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
   if [ "$HARNESS" = pi ]; then
-    FM_HOME="$PROJ_ABS" FM_ROOT_OVERRIDE="$PROJ_ABS" "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null
+    env FM_HOME="$PROJ_ABS" FM_ROOT_OVERRIDE="$PROJ_ABS" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"

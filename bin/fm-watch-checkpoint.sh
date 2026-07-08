@@ -92,6 +92,13 @@ if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; the
   exit 0
 fi
 
+if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
+  [ ! -s "$OUT" ] || cat "$OUT"
+  [ ! -s "$ERR" ] || cat "$ERR" >&2
+  echo "checkpoint: watcher is already running outside this foreground checkpoint" >&2
+  exit 1
+fi
+
 if [ "$RC" -eq 124 ]; then
   printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
   exit 124

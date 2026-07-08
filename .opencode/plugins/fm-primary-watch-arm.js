@@ -15,7 +15,7 @@ function setArmStatus(status) {
 }
 
 function readyStatus() {
-  if (armStatus === "armed" || armStatus === "wake" || armStatus === "failed") return armStatus;
+  if (armStatus === "armed" || armStatus === "wake" || armStatus === "failed" || armStatus === "external") return armStatus;
   return "";
 }
 
@@ -125,8 +125,12 @@ function firstWakeOrFailure(stdout, stderr, code) {
 
 function observeArmOutput(stdout, stderr) {
   const combined = `${stdout}\n${stderr}`;
-  if (combined.split(/\r?\n/).some((line) => /^watcher: (started|healthy)\b/.test(line))) {
+  if (combined.split(/\r?\n/).some((line) => /^watcher: started\b/.test(line))) {
     setArmStatus("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: healthy\b/.test(line))) {
+    setArmStatus("external");
     return;
   }
   if (combined.split(/\r?\n/).some((line) => /^watcher: FAILED/.test(line))) {
@@ -155,7 +159,7 @@ function spawnArm(paths, sessionID, client) {
     FM_HOME: paths.home,
     FM_ROOT_OVERRIDE: paths.root,
   };
-  child = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh"'], {
+  child = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
     cwd: paths.root,
     env,
     stdio: ["ignore", "pipe", "pipe"],
