@@ -11,8 +11,11 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME=${1:?usage: fm-project-mode.sh <project-name-or-path>}
 
-mode=$("$SCRIPT_DIR/fm-project-resolve.sh" --field mode "$NAME")
-yolo=$("$SCRIPT_DIR/fm-project-resolve.sh" --field yolo "$NAME")
+project_shell=$("$SCRIPT_DIR/fm-project-resolve.sh" --shell "$NAME")
+eval "$project_shell"
+
+mode=${fm_project_mode:-}
+yolo=${fm_project_yolo:-}
 
 case "$mode" in
   no-mistakes|direct-PR|local-only) ;;

@@ -110,7 +110,7 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-project-resolve.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
@@ -725,14 +725,33 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 }
 
 test_spawn_conformance_old_vs_new() {
-  local old_bin fb proj wt data id log_old log_new out_old out_new
+  local old_bin fb proj proj_real default_branch wt data id log_old log_new out_old out_new
   local state_old state_new config_old config_new
   old_bin=$(build_old_bin spawn-old)
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
   id="spawnconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  proj_real=$(cd "$proj" && pwd -P)
+  proj=$proj_real
+  default_branch=$(git -C "$proj_real" symbolic-ref --quiet --short HEAD)
   fb=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake" "$wt")
   mkdir -p "$data/$id"
+  cat > "$data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "spawn-project",
+      "canonicalPath": "$proj_real",
+      "gitCommonDir": "$proj_real/.git",
+      "defaultBranch": "$default_branch",
+      "baseRef": "refs/heads/$default_branch",
+      "mode": "no-mistakes",
+      "yolo": false
+    }
+  ]
+}
+EOF
   printf 'test brief content\n' > "$data/$id/brief.md"
   state_old="$TMP_ROOT/spawn-state-old"; state_new="$TMP_ROOT/spawn-state-new"
   config_old="$TMP_ROOT/spawn-config-old"; config_new="$TMP_ROOT/spawn-config-new"

@@ -721,13 +721,16 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJECT_ID=$("$SCRIPT_DIR/fm-project-resolve.sh" --field project_id "$PROJ")
-  PROJECT_SOURCE=$("$SCRIPT_DIR/fm-project-resolve.sh" --field source "$PROJ")
-  PROJECT_BASE_REF=$("$SCRIPT_DIR/fm-project-resolve.sh" --field base_ref "$PROJ")
+  PROJECT_SHELL=$("$SCRIPT_DIR/fm-project-resolve.sh" --shell "$PROJ")
+  eval "$PROJECT_SHELL"
+  PROJECT_ID=${fm_project_project_id:-}
+  PROJECT_SOURCE=${fm_project_source:-}
+  PROJECT_BASE_REF=${fm_project_base_ref:-}
   if [ "$PROJECT_SOURCE" != json ]; then
     PROJECT_BASE_REF=
   fi
-  PROJ_RESOLVED=$("$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$PROJ")
+  PROJ_RESOLVED=${fm_project_canonical_path:-}
+  [ -n "$PROJ_RESOLVED" ] || { echo "error: project resolver returned empty canonical path for $PROJ" >&2; exit 1; }
   PROJ_ABS="$(cd "$PROJ_RESOLVED" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
@@ -1196,10 +1199,8 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=${PROJECT_ID:-$(basename "$PROJ_ABS")}
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
+  MODE=${fm_project_mode:-no-mistakes}
+  YOLO=${fm_project_yolo:-off}
 fi
 
 if [ "$BACKEND" = codex-app ]; then
