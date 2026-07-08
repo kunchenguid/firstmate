@@ -725,6 +725,9 @@ TXT
   printf '%s' "$out" | jq -e \
     'any(.[]; contains("```bash\nprintf") and contains("marker must not land in here\"") and contains("\n```"))' \
     >/dev/null || fail "the fenced code block must stay in one chunk"
+  printf '%s' "$out" | jq -e \
+    'all(.[] | split("\n")[]; (test("^[[:space:]]*```.* \\([0-9]+/[0-9]+\\)$") | not))' \
+    >/dev/null || fail "numbering markers must not be appended to fenced-code boundary lines"
   pass "fmx_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
 }
 

@@ -170,6 +170,13 @@ fmx_split_thread() {
   jq -Rsc --argjson limit "$1" --argjson cap "$2" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def fence_marker: test("^[[:space:]]*```");
+    def fence_count: ((split("```") | length) - 1);
+    def numbered($i; $n):
+      "(\($i + 1)/\($n))" as $mark
+      | if ((fence_count % 2) == 0) and (split("\n")[-1] | fence_marker)
+        then . + "\n" + $mark
+        else . + " " + $mark
+        end;
     def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
     def wordsplit($b):
       (gsub("[[:space:]]+"; " ") | trim) as $norm
@@ -228,7 +235,7 @@ fmx_split_thread() {
               then ($raw[0:$cap] | (.[($cap - 1)] += "…"))
               else $raw end) as $kept
           | ($kept | length) as $n
-          | [ range(0; $n) as $i | $kept[$i] + " (\($i + 1)/\($n))" ]
+          | [ range(0; $n) as $i | $kept[$i] | numbered($i; $n) ]
         end;
     split_thread($limit; $cap)
   '
