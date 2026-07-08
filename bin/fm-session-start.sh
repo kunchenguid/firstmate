@@ -77,6 +77,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -312,10 +314,33 @@ supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
-  cat <<EOF
+  if fm_codex_background_wake_degraded; then
+    cat <<EOF
+Run the persistent present-mode watcher loop with the X-mode cadence sourced
+first - this script never arms it itself. On this Codex surface, do not rely on
+one-shot watcher exit to wake the assistant chat.
+
+  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+  bin/fm-watch-loop.sh
+
+EOF
+  else
+    cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
 X mode is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
+
+EOF
+  fi
+else
+if fm_codex_background_wake_degraded; then
+cat <<'EOF'
+Run the persistent present-mode watcher loop as your supervision command -
+this script never does, and never should. On this Codex surface, a one-shot
+watcher can queue a wake and exit without starting a new assistant turn, so the
+loop drains surfaced wakes and immediately re-arms instead.
+
+  bin/fm-watch-loop.sh
 
 EOF
 else
@@ -324,6 +349,7 @@ Follow the supervision operating instructions block above for harness '$PRIMARY_
 This script never starts supervision itself.
 
 EOF
+fi
 fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read

@@ -186,7 +186,7 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  FM_CODEX_BACKGROUND_WAKE="${FM_CODEX_BACKGROUND_WAKE:-verified}" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
 }
 
 hash_file_for_test() {
@@ -533,6 +533,24 @@ EOF
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
+test_next_step_codex_uses_watch_loop() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-codex)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(FM_CODEX_BACKGROUND_WAKE=unverified CODEX_CI=1 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "persistent present-mode watcher loop" "Codex next step did not name the persistent loop"
+  assert_contains "$out" "bin/fm-watch-loop.sh" "Codex next step did not print the watch-loop command"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "Codex next step still told the operator to use the one-shot arm"
+
+  pass "next step uses the persistent watch loop on degraded Codex surfaces"
+}
+
 test_next_step_afk_delegates_to_daemon() {
   local rec root home fakebin out
   rec=$(new_world next-step-afk)
@@ -696,6 +714,7 @@ test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
+test_next_step_codex_uses_watch_loop
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker

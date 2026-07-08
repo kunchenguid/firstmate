@@ -18,6 +18,11 @@ When tasks are in flight and there is no live identity-matched watcher with a fr
 The Codex Stop hook validation below proves Codex can block or continue a turn through hook exit status, but it does not prove a long-running background watcher task wakes the assistant when that task exits.
 On Codex API/unified-exec surfaces, a background watcher process can exit with a wake reason without automatically waking the assistant, so Firstmate must not treat that wake channel as verified.
 Firstmate treats Codex surfaces carrying `CODEX_CI` or `CODEX_THREAD_ID` as degraded by default: `fm-watch-arm.sh` labels confirmed live watcher status as `DEGRADED`, `fm-guard.sh` warns while work is in flight, and `fm-turnend-guard.sh` blocks turn end outside `state/.afk` where the away-mode daemon owns re-arm semantics.
+The Firstmate-side fallback is `bin/fm-watch-loop.sh`.
+Run it as one persistent present-mode supervision command while tasks are in flight on an unverified Codex surface.
+It keeps a singleton `state/.watch-loop.lock`, touches `state/.watch-loop-beat`, runs `bin/fm-watch.sh`, drains `state/.wake-queue` through `bin/fm-wake-drain.sh` whenever a wake fires, prints the drained wake records in its own output, and immediately re-arms the watcher.
+It refuses to start while `state/.afk` exists because the AFK daemon owns away-mode supervision.
+This does not prove or create Codex chat auto-wake; the loop's own output is the reliable operator surface until Codex exposes an agent-callable monitor or event primitive.
 Set `FM_CODEX_BACKGROUND_WAKE=verified` only after a local smoke demonstrates automatic wake-on-exit for a long-running watcher task; `FM_CODEX_BACKGROUND_WAKE=unverified` forces the degraded path in tests.
 The ideal Codex-side fix is an agent-callable monitor or event tool like <https://github.com/openai/codex/issues/29922>, backed by unified-exec process and output events.
 

@@ -41,9 +41,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+WATCH_LOOP="$SCRIPT_DIR/fm-watch-loop.sh"
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -76,11 +79,9 @@ GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || ex
 [ -d "$STATE" ] || exit 0
 
 # --- the actual predicate ----------------------------------------------------
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
+[ ! -e "$STATE/.afk" ] && fm_watch_loop_healthy "$STATE" "$WATCH_LOOP" "$GRACE" "$FM_HOME" && exit 0
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   [ -e "$STATE/.afk" ] && exit 0
   if ! fm_codex_background_wake_degraded; then
@@ -92,7 +93,7 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END WITH DEGRADED SUPERVISION\n'
     printf '●  %s task(s) in flight and a live watcher holds this home lock, but %s.\n' "$FM_SUP_IN_FLIGHT" "$REASON"
-    printf '●  Keep the Codex exec session manually polled, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
+    printf '●  Run bin/fm-watch-loop.sh as the persistent present-mode supervisor, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
     printf '●%s\n' "$rule"
   } >&2
   exit 2

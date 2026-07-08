@@ -7,6 +7,14 @@
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# These watcher/queue suites are not Codex wake-channel diagnostics unless a
+# case opts in explicitly. Keep the developer's live Codex environment from
+# adding degraded-path guard noise to otherwise generic tests.
+if [ -z "${FM_CODEX_BACKGROUND_WAKE+x}" ]; then
+  FM_CODEX_BACKGROUND_WAKE=verified
+  export FM_CODEX_BACKGROUND_WAKE
+fi
+
 # fm-wake-drain.sh now calls fm-guard.sh to assert watcher liveness on every
 # drain. fm-guard.sh's first check warns when the firstmate PRIMARY checkout
 # (FM_ROOT) sits on a feature branch; with no override FM_ROOT resolves to the

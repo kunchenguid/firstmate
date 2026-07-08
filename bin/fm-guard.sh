@@ -22,6 +22,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
+WATCH_LOOP="$SCRIPT_DIR/fm-watch-loop.sh"
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
@@ -69,13 +70,15 @@ fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
+watch_loop_fresh=false
+fm_watch_loop_healthy "$STATE" "$WATCH_LOOP" "$GRACE" "$FM_HOME" && watch_loop_fresh=true
 [ "$in_flight" -eq 0 ] && exit 0
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
-if [ "$watcher_fresh" = false ]; then
+if [ "$watcher_fresh" = false ] && [ "$watch_loop_fresh" = false ]; then
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   queue_arg=0
@@ -104,13 +107,13 @@ if [ "$watcher_fresh" = false ]; then
   } >&2
 fi
 
-if [ "$watcher_fresh" = true ] && [ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded; then
+if [ "$watcher_fresh" = true ] && [ "$watch_loop_fresh" = false ] && [ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded; then
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  CODEX WATCH WAKE CHANNEL UNVERIFIED\n'
     printf '●  %s task(s) in flight and the watcher beacon is fresh, but %s.\n' "$in_flight" "$(fm_codex_background_wake_degraded_text)"
-    printf '●  Keep the Codex exec session manually polled, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
+    printf '●  Run bin/fm-watch-loop.sh as the persistent present-mode supervisor, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
     printf '●%s\n' "$rule"
   } >&2
 fi

@@ -88,13 +88,14 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-watch-loop.sh" "$dir/bin/fm-watch-loop.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-watch-loop.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -167,6 +168,17 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
+record_watch_loop_lock() {
+  local dir=$1 pid=$2 identity=$3 root bin_dir
+  root=$(cd "$dir" && pwd)
+  bin_dir=$(cd "$dir/bin" && pwd)
+  mkdir -p "$dir/state/.watch-loop.lock"
+  printf '%s\n' "$pid" > "$dir/state/.watch-loop.lock/pid"
+  printf '%s\n' "$root" > "$dir/state/.watch-loop.lock/fm-home"
+  printf '%s\n' "$bin_dir/fm-watch-loop.sh" > "$dir/state/.watch-loop.lock/loop-path"
+  printf '%s\n' "$identity" > "$dir/state/.watch-loop.lock/pid-identity"
 }
 
 test_hook_silent_when_no_work_in_flight() {
@@ -265,6 +277,27 @@ test_hook_allows_afk_with_codex_unverified_background_wake() {
   expect_code 0 "$status" "hook must not block Codex degraded wake checks while away-mode owns supervision"
   [ -z "$out" ] || fail "hook produced output while away-mode owns supervision: $out"
   pass "fm-turnend-guard: away mode exempts the Codex degraded wake block"
+}
+
+test_hook_allows_codex_unverified_when_watch_loop_is_healthy() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-watch-loop")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watch-loop holder"
+  }
+  record_watch_loop_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.watch-loop-beat"
+  out=$(printf '{"stop_hook_active":false}' | CODEX_CI=1 CODEX_THREAD_ID=thread-test bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must allow Codex turn end when the persistent watch loop is healthy"
+  [ -z "$out" ] || fail "hook produced output with healthy watch loop: $out"
+  pass "fm-turnend-guard: healthy watch-loop satisfies Codex present-mode supervision"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -658,6 +691,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher
 test_hook_allows_afk_with_codex_unverified_background_wake
+test_hook_allows_codex_unverified_when_watch_loop_is_healthy
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
