@@ -53,6 +53,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *gemini*) echo gemini; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
