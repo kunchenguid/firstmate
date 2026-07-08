@@ -183,12 +183,13 @@ X_MODE_PRESENT=0
 if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$STATE/fm-primary-pi-watch.ts"
   PI_MARKER="$STATE/.pi-watch-extension-loaded"
+  PI_VERSION="$STATE/.pi-watch-extension-version"
   if [ "$READ_ONLY" -eq 0 ]; then
     if ! "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null 2>&1; then
       printf 'PI_WATCH_EXTENSION: generation failed - run %s/fm-pi-watch-extension.sh before relying on Pi background wake supervision\n' "$SCRIPT_DIR"
     fi
   fi
-  if [ ! -f "$PI_MARKER" ] || { [ -f "$PI_EXT" ] && [ "$PI_EXT" -nt "$PI_MARKER" ]; }; then
+  if [ ! -f "$PI_MARKER" ] || [ ! -f "$PI_VERSION" ] || ! cmp -s "$PI_MARKER" "$PI_VERSION"; then
     printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s for background wake supervision\n' "$PI_EXT"
   fi
 fi

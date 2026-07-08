@@ -9,14 +9,17 @@ TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 GEN="$ROOT/bin/fm-pi-watch-extension.sh"
 
 test_generator_writes_extension() {
-  local home out file text expected_config_source
+  local home out file text expected_config_source version version_text marker_write
   home="$TMP_ROOT/home"
   mkdir -p "$home/state"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN")
   file="$home/state/fm-primary-pi-watch.ts"
+  version="$home/state/.pi-watch-extension-version"
   expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
   [ "$out" = "$file" ] || fail "generator printed '$out', expected '$file'"
   assert_present "$file" "generator did not write the Pi watch extension"
+  assert_present "$version" "generator did not write the Pi watch extension version"
+  version_text=$(cat "$version")
   text=$(cat "$file")
   assert_contains "$text" "fm_watch_arm_pi" "generated extension missing tool name"
   assert_contains "$text" "fm-watch-arm-pi" "generated extension missing command name"
@@ -24,6 +27,9 @@ test_generator_writes_extension() {
   assert_contains "$text" "sendUserMessage" "generated extension missing Pi wake API"
   assert_contains "$text" "deliverAs: \"followUp\"" "generated extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "generated extension missing loaded marker"
+  assert_contains "$text" "const extensionVersion = \"$version_text\"" "generated extension missing content version"
+  marker_write="writeFileSync(marker, \`\${extensionVersion}\\n\`)"
+  assert_contains "$text" "$marker_write" "generated extension does not write the content version marker"
   assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "generated extension missing effective config resolution"
   assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "generated extension does not pass the effective config to the watcher arm"
   assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "generated extension does not pass the effective watcher arm script"
