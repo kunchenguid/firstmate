@@ -56,6 +56,9 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 **Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
 The first mate detects and offers to install everything else.
+For the best firstmate experience, run the primary firstmate session in Claude Code if you have an Anthropic subscription: its background task and Stop-hook behavior match firstmate's lowest-friction supervision model.
+If Claude Code is not available, use Pi next; it has the best non-Anthropic primary-session ergonomics verified so far.
+Codex, OpenCode, and Grok remain supported verified harnesses, but their supervision paths involve more harness-specific tradeoffs.
 
 ```sh
 gh auth login

@@ -73,13 +73,15 @@ beacon_desc=$FM_SUP_BEACON_DESC
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
 if [ "$watcher_fresh" = false ]; then
-  if [ "$READ_ONLY" -eq 1 ]; then
-    fix='Watcher repair belongs to the session holding the fleet lock; do not drain or re-arm from this read-only session.'
-  elif "$queue_pending"; then
-    fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
-  else
-    fix='Re-arm it NOW: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
-  fi
+  afk=0
+  [ -e "$STATE/.afk" ] && afk=1
+  queue_arg=0
+  "$queue_pending" && queue_arg=1
+  fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --read-only "$READ_ONLY" \
+    --afk "$afk" \
+    --queue-pending "$queue_arg" \
+    --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
@@ -88,7 +90,7 @@ if [ "$watcher_fresh" = false ]; then
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else
-      printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
+      printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
     fi
     printf '●  %s\n' "$CONTINUE_LINE"
     printf '●  %s\n' "$fix"

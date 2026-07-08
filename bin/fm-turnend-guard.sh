@@ -78,7 +78,10 @@ fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
-REASON='tasks in flight, no live watcher - run bin/fm-watch-arm.sh as a background task before ending the turn'
+afk=0
+[ -e "$STATE/.afk" ] && afk=1
+REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --repair-line 2>/dev/null \
+  || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"

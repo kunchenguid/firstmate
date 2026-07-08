@@ -19,7 +19,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='tasks in flight, no live watcher - run bin/fm-watch-arm.sh as a background task before ending the turn'
+REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -88,9 +88,13 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
+  cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  mkdir -p "$dir/docs"
+  cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -135,7 +139,7 @@ make_crewmate_worktree_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -254,7 +258,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -279,7 +283,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"

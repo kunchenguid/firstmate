@@ -132,8 +132,9 @@ It composes today's `fm-lock.sh`, `fm-bootstrap.sh`, and `fm-wake-drain.sh` - ca
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use this template's defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
 5. **Fleet-state digest** - the full `data/backlog.md`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
-6. **Next step** - a conditional closing reminder for the actual watcher owner: stay read-only when the lock was refused, use `/afk` when away mode is active, source `config/x-mode.env` before arming when X mode is active, or arm normally otherwise.
-   The script itself never arms the watcher, because a fire-and-forget arm from inside a script that then exits would be reaped immediately, silently dropping supervision.
+6. **Supervision operating instructions and next step** - after the wake queue and before context, the digest emits exactly one operating block for the detected primary harness.
+   The closing reminder points back to that emitted block and preserves only the lock, afk, X-mode, and read-once reminders.
+   The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
 
 **Everything in this digest is read exactly once, at session start.**
 Do not separately run `bin/fm-bootstrap.sh`, `bin/fm-lock.sh`, or `bin/fm-wake-drain.sh`, and do not separately read `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/learnings.md`, `data/backlog.md`, or any `state/*.meta` afterward - they were just printed in full, and re-reading them defeats the entire point of collapsing session start into one command.
@@ -333,7 +334,7 @@ Reconcile reality with your records before doing anything else, working from the
    If it is, load `/afk`, ensure the daemon is running, do not separately arm the watcher because the daemon owns it, and resume away-mode supervision.
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-10. Having already handled the drained wakes from the digest, follow the section 8 watcher checklist through the digest's own closing reminder; if the lock was refused or `state/.afk` exists, follow the digest's no-direct-arm guidance.
+10. Having already handled the drained wakes from the digest, follow the emitted supervision operating block through the digest's own closing reminder; if the lock was refused or `state/.afk` exists, follow the digest's no-direct-supervision guidance.
 
 A firstmate restart must be a non-event.
 All truth lives in each task's backend live-task inventory (tmux by hard default, herdr or cmux when explicitly selected or auto-detected, and zellij/orca when explicitly selected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, treehouse, and Orca's recorded worktree/terminal ids; your conversation memory is a cache.
@@ -659,8 +660,9 @@ From there the task is an ordinary ship task through its mode-specific validatio
 ## 8. Supervision protocol
 
 The watcher is the backbone.
-Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
-It costs zero tokens while running.
+Whenever at least one task is in flight, keep exactly one live supervision wait owned by the emitted primary-harness protocol from `bin/fm-session-start.sh`.
+The emitted block is the only per-harness operating recipe in the session context.
+Do not substitute another harness's command shape for it.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
 The no-verb signal path - a `signal` whose status carries no captain-relevant verb (a `working:` note, a bare turn-ended) - is absorbed ONLY while that crewmate shows positive evidence it is still working: its no-mistakes run for its branch is in an actively-running step, or its pane shows the harness busy signature.
@@ -671,7 +673,7 @@ Absorbed wakes are advanced past their suppression marker and logged to `state/.
 It exits with one reason line on an *actionable* wake: a `signal` carrying a captain-relevant verb (`needs-decision:`/`blocked:`/`failed:`/`done:`/`PR ready`/`checks green`/`ready in branch`/`merged`); a no-verb `signal` whose crewmate is NOT provably working (it stopped its turn with no running pipeline and no busy pane, so it may be done, waiting on a decision, or wedged); any `check`; a `stale` whose crewmate is not provably working, whether or not its status log's last line is captain-relevant (surfaced at once, never left to wait out the timer); a provably-working `stale` that stays idle past the wedge threshold (`FM_STALE_ESCALATE_SECS`, default 240s); or the heartbeat fleet-scan's fail-safe backstop catching a captain-relevant status the per-wake path missed.
 Repeated provably-working stale escalations on the same unchanged pane are counted in `state/.wedge-escalations-*`; at `FM_WEDGE_DEMAND_INSPECT_COUNT` (default 3), the stale reason includes `demand-deep-inspection` so the wake is not mistaken for another routine validation wait.
 A captain-relevant status-log line does not by itself make a stale pane terminal: a crewmate gets no new status entry once firstmate hands it to a no-mistakes validation, so its last line can still read `done:` from BEFORE that validation started for the run's entire duration; a provably-working crew therefore always wins over that stale line and is absorbed (with the same wedge-escalation safety net), and only a crewmate that is NOT provably working has its status log trusted to decide terminal-vs-non-terminal.
-Only an actionable wake is written to the durable queue at `state/.wake-queue` - before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat` - and only an actionable wake ends the background task, so you re-arm exactly once per actionable event instead of once per wake.
+Only an actionable wake is written to the durable queue at `state/.wake-queue` - before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat` - and only an actionable wake ends the current supervision wait, so you resume the emitted harness protocol exactly once per actionable event instead of once per wake.
 That is what eliminates the quiet-stretch churn without swallowing a finish: during a long crew validation the run is actively running, so the crewmate's `turn-ended`/`working:`/stale wakes (and no-change heartbeats) are absorbed in bash, the liveness beacon (`state/.last-watcher-beat`) stays fresh the whole time so `fm-guard.sh` never false-alarms, and your LLM is woken only when something genuinely needs you - including the moment that crewmate stops with no running pipeline, which now surfaces immediately.
 The classifier lives in `bin/fm-classify-lib.sh` and is shared: the captain-relevant verb set and status-scan primitives back both this always-on watcher and the away-mode daemon, so the overlapping policy cannot drift; the provably-working predicate (`crew_is_provably_working`, reusing `bin/fm-crew-state.sh`) lives in that same library and runs only on the watcher's no-verb signal and first-sighting stale paths, never on every wake, so the per-wake triage stays cheap.
 While `state/.afk` exists the daemon owns supervision, so the watcher reverts to one-shot - it surfaces every wake for the daemon to classify (skipping the provably-working read entirely) - and never double-triages; the daemon keeps its own bounded-latency stale backstop for a crewmate that stops in away mode.
@@ -679,35 +681,30 @@ At the start of every wake-handling turn, run `bin/fm-wake-drain.sh` before peek
 Session-start recovery is the exception: `bin/fm-session-start.sh` already drained the queue when locked, or deliberately skipped the drain when read-only because another session owns it.
 The printed reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
-The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
-Each cycle is one harness-tracked background task that blocks until an actionable wake is due (benign wakes are absorbed in bash without ending the task), fires with one reason line, and ends, so the chain survives only when firstmate starts the next cycle after each fire.
-After handling the drained wakes, re-arm before you end the turn by running `bin/fm-watch-arm.sh` as its own background task.
-Arm or re-arm the watcher only through the harness's own tracked background mechanism - the one that survives the call and notifies you when the process exits - so the cycle actually persists and the next wake reaches you.
-Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
-**Standalone, never bundled.**
-Run `bin/fm-watch-arm.sh` as its OWN background task with nothing else in that bash, never tacked onto the tail of a multi-command call: bundled, its self-verifying status line is buried in unrelated output and it can silently no-op as a side effect of those other commands, so no fresh cycle gets established and supervision lapses unnoticed.
-`bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified "already running", as the source of truth for watcher state.
-**Re-arm after each FIRE; do not churn on a no-op.**
-Read that line to know whether a cycle is already live: `started` (this arm just launched the live cycle, now blocking for the next wake) and `healthy` (a live cycle already held the lock) both mean a cycle is live, so do NOT start another - re-running it while one is healthy only churns no-op tasks and never establishes a fresh cycle; `FAILED` means no live cycle, so arm one now after draining any queued wakes.
-A cycle is down only when its background task completes carrying a WAKE REASON (`signal`/`stale`/`check`/`heartbeat`): that is the watcher firing, and that is the one moment to handle the wake and then start exactly one fresh cycle.
-The watcher is singleton-safe: acquisition is race-proof, so under any number of concurrent arms at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
-If one is already alive with a fresh liveness beacon, another invocation exits cleanly instead of creating a duplicate watcher; if the live holder's beacon is stale, the new invocation exits with an actionable failure.
+The live cycle is the supervision: while any task is in flight, the active harness protocol must maintain one wait that can wake this primary when `bin/fm-watch.sh` reports an actionable reason.
+After handling drained wakes, resume the emitted harness protocol before ending the turn.
+Never use shell `&` as a substitute for a verified harness wake mechanism.
+The watcher remains singleton-safe: acquisition is race-proof, so under any number of concurrent starts at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
+If the active protocol's arm wrapper reports an existing healthy watcher, do not start another cycle.
+If it reports failure, drain queued wakes first and then repair supervision according to the emitted block.
 **No turn ends blind, holds included.**
-Never end a turn while any task is in flight without a live cycle running: a text-only "holding" or "waiting" reply with crewmates live and no live cycle is a bug, and because such a turn runs no supervision script it is exactly the blind gap the script-only guard (`fm-guard.sh`, below) cannot catch, so this discipline must.
+Never end a turn while any task is in flight without the active harness supervision protocol live: a text-only "holding" or "waiting" reply with crewmates live and no live cycle is a bug, and because such a turn runs no supervision script it is exactly the blind gap the script-only guard (`fm-guard.sh`, below) cannot catch, so this discipline must.
 If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which stops only this home's watcher (the pid recorded in this home's `state/.watch.lock`) and starts a fresh one.
 Never `pkill -f bin/fm-watch.sh`: that pattern matches every firstmate home's watcher, including secondmate homes that run the same script, so a broad pkill from one home kills sibling homes' watchers.
 Away-mode supervision is provided by the `/afk` skill and its daemon; while `state/.afk` exists, the daemon owns the watcher.
 Waiting on the watcher is intentionally silent.
-After arming it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
+After starting the active harness supervision wait, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
 Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
-bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
-bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
-bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
-bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
-bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
-bin/fm-fleet-view.sh       # read-only Markdown whole-fleet view rendered from the structured snapshot
+bin/fm-supervision-instructions.sh  # render the current harness block or one-line repair text
+bin/fm-watch-arm.sh                 # verified arm wrapper used by harness protocols that call it
+bin/fm-watch-arm.sh --restart       # home-scoped forced restart; never a broad pkill
+bin/fm-watch-checkpoint.sh          # bounded foreground watcher checkpoint for Codex-style protocols
+bin/fm-watch.sh                     # the watcher itself; exits with: signal|stale|check|heartbeat
+bin/fm-wake-drain.sh                # drain queued wake records at turn start; asserts guard after draining
+bin/fm-crew-state.sh <id>           # one-line current-state read; reconciles matching run-step, pane, and status log
+bin/fm-fleet-view.sh                # read-only Markdown whole-fleet view rendered from the structured snapshot
 ```
 
 On wake, in order of cheapness:
@@ -716,10 +713,10 @@ On wake, in order of cheapness:
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
    A status line is the wake *event*, not the crewmate's current state; when you need the live state - especially to confirm a `needs-decision`/`blocked` is still real and not already resolved-and-resumed - read it with `bin/fm-crew-state.sh <id>`, which reconciles the authoritative run-step over the possibly-stale log line, and never `tail` the status log as the current-state source.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
-   If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before re-arming.
+   If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before resuming supervision.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
-5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` only for targeted follow-up, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
+5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` only for targeted follow-up, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then resume the emitted supervision protocol.
    Do not report that the fleet is unchanged.
 
 When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, load `fmx-respond` (section 13) and post the X-mention's **final** completion follow-up if that task is X-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --final --text-file <path>`, so the link always clears here regardless of how many of the up-to-three follow-ups were already spent on earlier milestones.
@@ -736,17 +733,17 @@ A secondmate may be sitting on its own watcher with no visible pane changes, so 
 This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature.
 
 **Watcher liveness is guarded, not just disciplined.**
-Arming the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
+Resuming the emitted supervision protocol is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
 The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, or that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
 `bin/fm-wake-drain.sh` runs the same guard after it drains, so the liveness check also fires on a drain-and-handle turn that runs no other supervision script, narrowing the window in which a lapsed chain can hide; the grace beacon keeps it silent right after a normal fire and it warns only on a genuine stale-beyond-grace lapse.
-The no-watcher case leads with a prominent, bordered ●-marked banner (in-flight count, beacon age, and the exact one-line re-arm command) so it reads as an alarm rather than a buried stderr line you can skim past.
+The no-watcher case leads with a prominent, bordered ●-marked banner (in-flight count, beacon age, and the exact one-line repair instruction) so it reads as an alarm rather than a buried stderr line you can skim past.
 The banner is only a supervision warning: the guarded operation still runs.
 When the guarded operation is `fm-send`, `fm-send` sets the banner's continuation line to say explicitly that the requested message WILL still be sent.
 So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and its re-arm) silent.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
-If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
+If a guard warning says watcher liveness is stale, drain any queued wakes and then resume the emitted supervision protocol.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
@@ -760,11 +757,10 @@ The shared predicate is `bin/fm-turnend-guard.sh`: when tasks are in flight with
 It shares status fields with `fm-guard.sh` via `bin/fm-supervision-lib.sh`, uses `bin/fm-wake-lib.sh` for live watcher lock health, and never blocks or follows up more than once per turn.
 It is scoped to fire only in the actual primary checkout - never in a crewmate/scout worktree or a secondmate home - and stays silent when supervision is healthy.
 See `docs/turnend-guard.md` for the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
-Watcher liveness is not enough if you are foreground-blocked.
-Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
-This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
-Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
-A crewmate driving its own `no-mistakes` validation does the opposite: it drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
+Watcher liveness is harness-aware.
+Do not assume one primary harness can use another harness's foreground or background shape.
+For example, Claude uses a background-notify cycle, while Codex intentionally uses bounded foreground checkpoints.
+A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
@@ -919,16 +915,10 @@ Bootstrap wires the relay poll automatically and purely additively from `.env` p
 
 **Cadence.**
 An X instance polls every 30s instead of the default 300s.
-To get that, arm the watcher with the X cadence sourced, exactly as section 8 describes but prefixed:
-
-```sh
-[ -f config/x-mode.env ] && . config/x-mode.env
-bin/fm-watch-arm.sh        # as the harness's tracked background task
-```
-
-The sourced file exports `FM_CHECK_INTERVAL=30` into the arm, which the watcher it forks inherits, so only an X instance speeds up; a non-X instance has no such file and keeps the 300s default.
-Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start and the arm no-ops on an already-healthy watcher, a cadence **transition** (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher with the new environment: `[ -f config/x-mode.env ] && . config/x-mode.env; bin/fm-watch-arm.sh --restart` (omit the source on opt-out so the 300s default returns), run as the harness's tracked background task.
-Bootstrap deliberately does not restart the watcher itself - it must never block, and `fm-watch-arm.sh --restart` is home-scoped (never a broad `pkill`).
+The session-start supervision operating block includes the X-mode cadence instruction when `config/x-mode.env` exists.
+The sourced file exports `FM_CHECK_INTERVAL=30` into whichever watcher process the active harness protocol starts, so only an X instance speeds up; a non-X instance has no such file and keeps the 300s default.
+Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence **transition** (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher through the emitted harness protocol.
+Bootstrap deliberately does not restart the watcher itself.
 X mode is also a reason to keep the watcher armed even with no fleet work, so an X-only user is still served.
 Cadence under away-mode (the supervise daemon owns the watcher then) is a separate follow-up and out of scope here; while afk is active the daemon's default cadence applies.
 

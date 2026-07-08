@@ -38,7 +38,8 @@
 #                       state/*.status tail, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
-#                       script deliberately never arms the watcher itself.
+#                       script points back to the emitted harness supervision
+#                       block and deliberately never arms the watcher itself.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
@@ -72,6 +73,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -172,6 +174,30 @@ else
   fi
 fi
 
+# --- 4. supervision operating instructions ----------------------------------
+AFK_PRESENT=0
+[ -e "$STATE/.afk" ] && AFK_PRESENT=1
+X_MODE_PRESENT=0
+[ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+
+if [ "$PRIMARY_HARNESS" = pi ]; then
+  PI_EXT="$STATE/fm-primary-pi-watch.ts"
+  PI_MARKER="$STATE/.pi-watch-extension-loaded"
+  if [ "$READ_ONLY" -eq 0 ]; then
+    if ! "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null 2>&1; then
+      printf 'PI_WATCH_EXTENSION: generation failed - run %s/fm-pi-watch-extension.sh before relying on Pi background wake supervision\n' "$SCRIPT_DIR"
+    fi
+  fi
+  if [ ! -f "$PI_MARKER" ] || { [ -f "$PI_EXT" ] && [ "$PI_EXT" -nt "$PI_MARKER" ]; }; then
+    printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s for background wake supervision\n' "$PI_EXT"
+  fi
+fi
+"$SCRIPT_DIR/fm-supervision-instructions.sh" \
+  --harness "$PRIMARY_HARNESS" \
+  --read-only "$READ_ONLY" \
+  --afk "$AFK_PRESENT" \
+  --x-mode "$X_MODE_PRESENT"
+
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
@@ -227,9 +253,7 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-AFK_PRESENT=0
 if [ -e "$STATE/.afk" ]; then
-  AFK_PRESENT=1
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
@@ -246,27 +270,22 @@ holding the lock owns mutable follow-up.
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
-Away mode is active. Do not arm the normal watcher directly; load /afk and
-ensure the daemon is running, because the daemon owns watcher supervision.
+Away mode is active. Follow the supervision operating instructions block above:
+load /afk and ensure the daemon is running, because the daemon owns watcher
+supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
   cat <<EOF
-Arm the watcher yourself as your harness's own tracked background task with
-the X-mode cadence sourced first - this script never arms it itself.
-
-  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
-  bin/fm-watch-arm.sh
+Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+X mode is active, so the emitted block's cadence instruction applies.
+This script never starts supervision itself.
 
 EOF
 else
-cat <<'EOF'
-Arm the watcher yourself as your harness's own tracked background task - this
-script never does, and never should: a fire-and-forget arm from inside a
-script that then exits would be reaped immediately, silently dropping
-supervision (AGENTS.md section 8).
-
-  bin/fm-watch-arm.sh
+cat <<EOF
+Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+This script never starts supervision itself.
 
 EOF
 fi

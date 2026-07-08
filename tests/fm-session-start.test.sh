@@ -87,15 +87,23 @@ SH
 # deterministically. Mirrors fm-grok-harness.test.sh's fake ps.
 make_fake_ps_claude() {
   local fakebin=$1
+  make_fake_ps_harness "$fakebin" claude
+}
+
+make_fake_ps_harness() {
+  local fakebin=$1 harness=$2
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+set -u
+harness=${FM_FAKE_HARNESS:-claude}
 case "$*" in
-  *"comm="*) printf '%s\n' '/usr/local/bin/claude'; exit 0 ;;
-  *"args="*) printf '%s\n' 'claude'; exit 0 ;;
+  *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
+  *"args="*) printf '%s\n' "$harness"; exit 0 ;;
 esac
 exit 1
 SH
   chmod +x "$fakebin/ps"
+  printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
 # make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
@@ -448,11 +456,11 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
-  assert_contains "$out" "X-mode cadence sourced first" "next step did not mention X cadence"
-  assert_contains "$out" "[ -f \"$home/config/x-mode.env\" ] && . \"$home/config/x-mode.env\"" "next step did not source the generated X cadence file"
-  assert_contains "$out" "bin/fm-watch-arm.sh" "next step did not retain the watcher arm command after sourcing X cadence"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
+  assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
+  assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
 
-  pass "next step sources the X-mode cadence before arming the watcher"
+  pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
 test_next_step_afk_delegates_to_daemon() {
@@ -469,10 +477,38 @@ EOF
 
   assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
   assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
-  assert_contains "$out" "daemon owns watcher supervision" "next step did not delegate watcher ownership to the daemon"
+  assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
+  assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
 
   pass "next step delegates watcher ownership to the AFK daemon"
+}
+
+test_supervision_block_exactly_one_and_pi_diagnostic() {
+  local rec root home fakebin out block_count wake_line sup_line context_line
+  rec=$(new_world pi-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  block_count=$(printf '%s\n' "$out" | grep -c '^SUPERVISION OPERATING INSTRUCTIONS - primary harness:')
+  [ "$block_count" -eq 1 ] || fail "expected exactly one supervision block, got $block_count"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" "pi supervision block missing"
+  assert_contains "$out" "Mode: Pi extension background wake." "pi snippet missing from session start"
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi extension load diagnostic missing"
+  assert_present "$home/state/fm-primary-pi-watch.ts" "session start did not generate the Pi watch extension"
+
+  wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  sup_line=$(printf '%s\n' "$out" | grep -n '^SUPERVISION OPERATING INSTRUCTIONS' | head -1 | cut -d: -f1)
+  context_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
+  [ "$wake_line" -lt "$sup_line" ] || fail "supervision block did not follow wake queue"
+  [ "$sup_line" -lt "$context_line" ] || fail "supervision block did not precede context"
+
+  pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
 test_context_digest_absent_empty_present
@@ -486,3 +522,4 @@ test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_supervision_block_exactly_one_and_pi_diagnostic
