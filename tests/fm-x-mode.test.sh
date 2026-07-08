@@ -1459,12 +1459,13 @@ test_followup_post_failure_keeps_link() {
 }
 
 test_followup_post_record_failure_clears_link() {
-  local home fakebin out rc meta err flag mvflag
+  local home fakebin out rc meta err flag mvflag real_mv
   home="$TMP_ROOT/fu-post-record-fail"; mkdir -p "$home/state"
   fakebin=$(make_fake_curl "$home")
   flag="$home/fail-followups-write"
   mvflag="$home/mv-failed-once"
   err="$home/err.txt"
+  real_mv=$(command -v mv)
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
@@ -1474,7 +1475,7 @@ if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
   : > "$FAKE_MV_FAILED_ONCE"
   exit 2
 fi
-exec /bin/mv "$@"
+exec "$REAL_MV" "$@"
 SH
   chmod +x "$fakebin/mv"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
@@ -1482,7 +1483,7 @@ SH
   meta="$home/state/task-rf.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 FAKE_CURL_TOUCH_AFTER_POST="$flag" \
-    FAKE_MV_FAIL_AFTER_FLAG="$flag" FAKE_MV_FAILED_ONCE="$mvflag" \
+    FAKE_MV_FAIL_AFTER_FLAG="$flag" FAKE_MV_FAILED_ONCE="$mvflag" REAL_MV="$real_mv" \
     "$ROOT/bin/fm-x-followup.sh" task-rf - <<<"posted but local state write fails" 2>"$err"); rc=$?
   expect_code 0 "$rc" "followup post state-record failure exit"
   [ "$out" = "req-rf" ] || fail "posted followup with tombstoned state must echo the request_id (got: $out)"
