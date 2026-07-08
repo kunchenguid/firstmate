@@ -39,6 +39,7 @@ The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant statu
 The always-on watcher also uses that library's provably-working predicate on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon keeps its away-mode stale recheck unchanged.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
+When herdr env markers are absent, the daemon may recover the primary from a safe firstmate-home Codex match in `herdr agent list`, but refuses a legacy tmux fallback if herdr has agents and no safe primary is discoverable.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native busy state, native agent-state submit confirmation on idle baselines, and its structural composer classifier for pending-input guards and submit fallback.
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
