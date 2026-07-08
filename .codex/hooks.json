@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); root=$(printf \"%s\" \"$payload\" | jq -r \".cwd // empty\" 2>/dev/null || true); [ -n \"$root\" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || true); [ -n \"$root\" ] || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard.sh\"'",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); cwd=$(printf \"%s\" \"$payload\" | jq -r \".cwd // empty\" 2>/dev/null || true); root=; [ -n \"$cwd\" ] && root=$(git -C \"$cwd\" rev-parse --show-toplevel 2>/dev/null || true); [ -n \"$root\" ] || root=$(git rev-parse --show-toplevel 2>/dev/null || true); [ -n \"$root\" ] || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard.sh\"'",
             "timeout": 30
           }
         ]

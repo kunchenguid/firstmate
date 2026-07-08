@@ -421,6 +421,30 @@ test_codex_hook_invokes_shared_guard() {
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
 
+test_codex_hook_resolves_payload_cwd_to_git_root() {
+  local settings command dir expected_root subdir payload out status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-root")
+  expected_root=$(cd "$dir" && pwd -P)
+  subdir="$dir/nested/path"
+  mkdir -p "$subdir"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'guard=%s\n' "$0"
+cat
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | bash -c "$command" 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must execute successfully when payload cwd is a nested directory"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must normalize payload cwd to the git root"
+  assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
+  pass ".codex/hooks.json: Stop hook normalizes payload cwd to the git root"
+}
+
 test_opencode_plugin_forces_followup() {
   local plugin content
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -481,6 +505,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
+test_codex_hook_resolves_payload_cwd_to_git_root
 test_opencode_plugin_forces_followup
 test_pi_extension_forces_followup
 test_grok_hook_invokes_adapter
