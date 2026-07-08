@@ -183,6 +183,20 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
 }
 
+test_guard_points_down_codex_surface_to_watch_loop() {
+  local dir state err
+  dir=$(make_case guard-codex-down)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_CODEX_BACKGROUND_WAKE=unverified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard did not print the down-watcher banner"
+  grep -F 'bin/fm-watch-loop.sh' "$err" >/dev/null || fail "degraded Codex down-watcher banner did not point to the watch loop"
+  ! grep -F 'run bin/fm-watch-arm.sh' "$err" >/dev/null || fail "degraded Codex down-watcher banner still pointed to one-shot arm: $(cat "$err")"
+  pass "guard points degraded Codex down-watcher recovery to the watch loop"
+}
+
 test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher() {
   local dir state err
   dir=$(make_case guard-codex-degraded)
@@ -795,6 +809,7 @@ test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_points_down_codex_surface_to_watch_loop
 test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher
 test_guard_skips_codex_unverified_background_wake_warning_in_afk
 test_guard_treats_retrying_watch_loop_as_down

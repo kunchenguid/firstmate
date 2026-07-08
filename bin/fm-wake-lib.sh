@@ -94,7 +94,7 @@ fm_watch_loop_lock_matches_pid() {
 
 FM_WATCH_LOOP_HEALTHY_PID=
 fm_watch_loop_healthy() {
-  local state=$1 loop_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age child_pid child_identity current_child_identity watch_path
+  local state=$1 loop_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age child_pid child_identity current_child_identity watch_path drain_pid drain_identity current_drain_identity
   FM_WATCH_LOOP_HEALTHY_PID=
   lockdir="$state/.watch-loop.lock"
   beat="$state/.watch-loop-beat"
@@ -103,6 +103,17 @@ fm_watch_loop_healthy() {
   fm_watch_loop_lock_matches_pid "$state" "$loop_path" "$pid" "$home" || return 1
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
+  drain_pid=$(cat "$lockdir/drain-pid" 2>/dev/null || true)
+  drain_identity=$(cat "$lockdir/drain-pid-identity" 2>/dev/null || true)
+  if [ "$drain_pid" = "$pid" ] && [ -n "$drain_identity" ]; then
+    fm_pid_alive "$drain_pid" || return 1
+    current_drain_identity=$(fm_pid_identity "$drain_pid") || return 1
+    if [ "$current_drain_identity" = "$drain_identity" ]; then
+      # shellcheck disable=SC2034 # Read by callers after fm_watch_loop_healthy returns.
+      FM_WATCH_LOOP_HEALTHY_PID=$pid
+      return 0
+    fi
+  fi
   child_pid=$(cat "$lockdir/child-pid" 2>/dev/null || true)
   child_identity=$(cat "$lockdir/child-pid-identity" 2>/dev/null || true)
   [ -n "$child_identity" ] || return 1
@@ -125,6 +136,8 @@ fm_lock_clean_known_files() {
     "$lockdir/loop-path" \
     "$lockdir/child-pid" \
     "$lockdir/child-pid-identity" \
+    "$lockdir/drain-pid" \
+    "$lockdir/drain-pid-identity" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
     2>/dev/null || true

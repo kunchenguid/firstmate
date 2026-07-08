@@ -76,6 +76,10 @@ clear_child_marker() {
   rm -f "$LOOP_LOCK/child-pid" "$LOOP_LOCK/child-pid-identity" 2>/dev/null || true
 }
 
+clear_drain_marker() {
+  rm -f "$LOOP_LOCK/drain-pid" "$LOOP_LOCK/drain-pid-identity" 2>/dev/null || true
+}
+
 record_child_marker() {
   local pid=$1 identity
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
@@ -84,6 +88,18 @@ record_child_marker() {
   }
   printf '%s\n' "$pid" > "$LOOP_LOCK/child-pid" 2>/dev/null || return 1
   printf '%s\n' "$identity" > "$LOOP_LOCK/child-pid-identity" 2>/dev/null || return 1
+  return 0
+}
+
+record_drain_marker() {
+  local pid identity
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+    clear_drain_marker
+    return 1
+  }
+  printf '%s\n' "$pid" > "$LOOP_LOCK/drain-pid" 2>/dev/null || return 1
+  printf '%s\n' "$identity" > "$LOOP_LOCK/drain-pid-identity" 2>/dev/null || return 1
   return 0
 }
 
@@ -105,6 +121,7 @@ cleanup() {
     wait "$child" 2>/dev/null || true
   fi
   clear_child_marker
+  clear_drain_marker
   [ -n "${child_out:-}" ] && rm -f "$child_out" 2>/dev/null || true
   fm_lock_release "$LOOP_LOCK" 2>/dev/null || true
   log_event "stopped"
@@ -116,9 +133,14 @@ touch "$LOOP_BEAT"
 say "started pid=${BASHPID:-$$} (present-mode persistent re-arm; no AFK injection)"
 
 drain_if_pending() {
+  local rc
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   say "draining queued wakes"
+  record_drain_marker || true
   "$DRAIN"
+  rc=$?
+  clear_drain_marker
+  return "$rc"
 }
 
 output_has_wake() {

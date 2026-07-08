@@ -99,12 +99,16 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
-afk=0
-[ -e "$STATE/.afk" ] && afk=1
-x_mode=0
-[ -f "$CONFIG/x-mode.env" ] && x_mode=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
-  || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
+if [ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded; then
+  REASON='tasks in flight, no live Codex-safe watcher loop - run bin/fm-watch-loop.sh before ending the turn'
+else
+  afk=0
+  [ -e "$STATE/.afk" ] && afk=1
+  x_mode=0
+  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+  REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+    || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
+fi
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"

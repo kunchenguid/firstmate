@@ -63,12 +63,13 @@ test_loop_drains_signal_and_rearms() {
   out="$dir/loop.out"
   err="$dir/loop.err"
   status_file="$state/task.status"
+  printf 'project=x\n' > "$state/task.meta"
 
   (
     cd "$ROOT" || exit 1
     PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_LOOP_TICK=0.1 \
       FM_WATCH_LOOP_IDLE_SLEEP=0.1 FM_POLL=0.1 FM_SIGNAL_GRACE=0.1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bin/fm-watch-loop.sh
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_CODEX_BACKGROUND_WAKE=unverified bin/fm-watch-loop.sh
   ) > "$out" 2> "$err" &
   loop_pid=$!
 
@@ -102,6 +103,10 @@ test_loop_drains_signal_and_rearms() {
   [ "$second_watch" != "$first_watch" ] || {
     stop_loop "$loop_pid"
     fail "watch loop reused the fired watcher pid instead of re-arming"
+  }
+  ! grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || {
+    stop_loop "$loop_pid"
+    fail "watch loop triggered its own down-watcher guard while draining: $(cat "$err")"
   }
 
   stop_loop "$loop_pid"

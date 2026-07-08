@@ -75,6 +75,8 @@ fm_watch_loop_healthy "$STATE" "$WATCH_LOOP" "$GRACE" "$FM_HOME" && watch_loop_f
 [ "$in_flight" -eq 0 ] && exit 0
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
+codex_degraded_present=false
+[ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded && codex_degraded_present=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
@@ -85,12 +87,20 @@ if [ "$watcher_fresh" = false ] && [ "$watch_loop_fresh" = false ]; then
   "$queue_pending" && queue_arg=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
-    --read-only "$READ_ONLY" \
-    --afk "$afk" \
-    --x-mode "$x_mode" \
-    --queue-pending "$queue_arg" \
-    --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
+  if [ "$READ_ONLY" -ne 1 ] && "$codex_degraded_present" && "$queue_pending"; then
+    fix='After draining queued wakes, start persistent supervision: run bin/fm-watch-loop.sh as the present-mode watcher loop.'
+  elif [ "$READ_ONLY" -ne 1 ] && "$codex_degraded_present"; then
+    fix='Start persistent supervision NOW: run bin/fm-watch-loop.sh as the present-mode watcher loop.'
+  elif "$codex_degraded_present" && "$queue_pending"; then
+    fix='Watcher repair belongs to the session holding the fleet lock; do not drain or start the Codex watcher loop from this read-only session.'
+  else
+    fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+      --read-only "$READ_ONLY" \
+      --afk "$afk" \
+      --x-mode "$x_mode" \
+      --queue-pending "$queue_arg" \
+      --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
@@ -98,6 +108,8 @@ if [ "$watcher_fresh" = false ] && [ "$watch_loop_fresh" = false ]; then
     printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
+    elif "$codex_degraded_present"; then
+      printf '●  On this Codex surface, the one-shot watcher is not enough; the persistent loop drains and re-arms.\n'
     else
       printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
     fi
@@ -107,7 +119,7 @@ if [ "$watcher_fresh" = false ] && [ "$watch_loop_fresh" = false ]; then
   } >&2
 fi
 
-if [ "$watcher_fresh" = true ] && [ "$watch_loop_fresh" = false ] && [ ! -e "$STATE/.afk" ] && fm_codex_background_wake_degraded; then
+if [ "$watcher_fresh" = true ] && [ "$watch_loop_fresh" = false ] && "$codex_degraded_present"; then
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
