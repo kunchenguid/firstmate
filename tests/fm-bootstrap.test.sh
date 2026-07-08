@@ -89,6 +89,62 @@ SH
   chmod +x "$fakebin/jq"
 }
 
+make_fake_fleet_sync_root() {
+  local dir=$1 fake_root
+  fake_root="$dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'alpha: synced'
+printf '%s\n' 'beta: skipped: no origin remote'
+exec perl -e 'sleep 300'
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  printf '%s\n' "$fake_root"
+}
+
+add_origin_backed_projects() {
+  local home=$1 count=$2 i repo
+  mkdir -p "$home/projects"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    repo=$(printf '%s/projects/repo-%02d' "$home" "$i")
+    git init -q "$repo"
+    git -C "$repo" remote add origin "file://$home/remotes/repo-$i.git"
+    i=$((i + 1))
+  done
+}
+
+add_no_origin_projects() {
+  local home=$1 count=$2 i repo
+  mkdir -p "$home/projects"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    repo=$(printf '%s/projects/local-%02d' "$home" "$i")
+    git init -q "$repo"
+    i=$((i + 1))
+  done
+}
+
+run_bootstrap_timeout_case() {
+  local home=$1 fake_root=$2 fakebin=$3 override=${4:-__unset__}
+  (
+    sleep() {
+      local inc=${1:-1}
+      SECONDS=$((SECONDS + inc))
+    }
+    export -f sleep
+    if [ "$override" = __unset__ ]; then
+      PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+        FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+    else
+      PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+        FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$override" \
+        FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+    fi
+  )
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -199,6 +255,57 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
+  local case_dir home fakebin fake_root out expected
+  case_dir="$TMP_ROOT/fleet-timeout-scaled"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 18
+  add_no_origin_projects "$home" 3
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root=$(make_fake_fleet_sync_root "$case_dir")
+
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
+
+  expected=$'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote\nFLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)'
+  assert_contains "$out" "$expected" "bootstrap timeout should scale to 59s for 18 origin-backed projects and relay partial output first"
+  pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
+}
+
+test_fleet_sync_timeout_floor_preserves_small_fleets() {
+  local case_dir home fakebin fake_root out
+  case_dir="$TMP_ROOT/fleet-timeout-small"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 2
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root=$(make_fake_fleet_sync_root "$case_dir")
+
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
+
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "small fleets should keep the 20s timeout floor"
+  pass "bootstrap keeps the quick 20s default for small fleets"
+}
+
+test_fleet_sync_timeout_explicit_override_wins() {
+  local case_dir home fakebin fake_root out
+  case_dir="$TMP_ROOT/fleet-timeout-override"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 18
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root=$(make_fake_fleet_sync_root "$case_dir")
+
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" 7)
+
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=7s elapsed=7s)" "explicit timeout override should still win over computed default"
+  assert_not_contains "$out" "timeout=59s" "explicit override should not be replaced by the computed timeout"
+  pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
+}
+
 test_crew_dispatch_active_rules_are_surfaced() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -257,5 +364,8 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_fleet_sync_timeout_scales_with_origin_backed_project_count
+test_fleet_sync_timeout_floor_preserves_small_fleets
+test_fleet_sync_timeout_explicit_override_wins
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
