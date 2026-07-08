@@ -41,7 +41,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 3. **Write the report to a dated file so it persists, and surface a concise version in chat.**
    - Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
      This is the required artifact; it lives in gitignored `data/` alongside the worked example.
-     If the file already exists for today, overwrite it with the fresh snapshot rather than appending.
+     If today's file already exists, delete it first, then create a new file from scratch.
    - Surface a concise version to the captain in chat - the TL;DR plus the "Check first" list - and point to the file for the full picture.
    - For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but the markdown file is the required artifact and the chat summary is the required minimum.
 
