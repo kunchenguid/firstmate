@@ -196,11 +196,10 @@ fm_backend_zellij_version_check() {
 # fm_backend_zellij_cli: run `zellij --session <session> action <args...>`,
 # setting BOTH the ZELLIJ_SESSION_NAME env var AND the leading global
 # `--session <name>` flag (zellij's session-target flag is GLOBAL, before the
-# subcommand - unlike herdr's trailing --session - verified both forms
-# independently route correctly on the installed 0.44.0 client; kept together
-# for defense in depth, mirroring bin/backends/herdr.sh's fm_backend_herdr_cli
-# rationale even though no equivalent env-var-unreliable incident has been
-# observed for zellij).
+# subcommand, matching herdr's current leading-global-flag convention; kept
+# together for defense in depth, mirroring bin/backends/herdr.sh's
+# fm_backend_herdr_cli rationale even though no equivalent
+# env-var-unreliable incident has been observed for zellij).
 fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
   local session=$1
   shift
