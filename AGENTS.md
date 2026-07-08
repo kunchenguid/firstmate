@@ -683,7 +683,11 @@ Session-start recovery is the exception: `bin/fm-session-start.sh` already drain
 The printed reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
 The live cycle is the supervision: while any task is in flight, the active harness protocol must maintain one wait that can wake this primary when `bin/fm-watch.sh` reports an actionable reason.
+On verified wake channels, that protocol may be a harness-tracked `bin/fm-watch-arm.sh` background task.
+On Codex surfaces where background-task completion is not a verified wake channel, run `bin/fm-watch-loop.sh` as the persistent present-mode supervisor instead of relying on a one-shot arm cycle.
+That loop keeps `state/.watch-loop-beat` fresh, drains queued wakes, and immediately re-arms without enabling AFK injection semantics.
 After handling drained wakes, resume the emitted harness protocol before ending the turn.
+On a degraded Codex surface, keep `bin/fm-watch-loop.sh` running instead; it performs the drain and re-arm loop itself.
 Never use shell `&` as a substitute for a verified harness wake mechanism.
 The watcher remains singleton-safe: acquisition is race-proof, so under any number of concurrent starts at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
 If the active protocol's arm wrapper reports an existing healthy watcher, do not start another cycle.

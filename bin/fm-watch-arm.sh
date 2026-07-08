@@ -38,6 +38,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -73,7 +75,13 @@ healthy_watcher() {
 report_healthy() {
   local age
   age=$(fm_path_age "$BEAT")
-  echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
+  echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)$(watcher_degraded_suffix)"
+}
+
+watcher_degraded_suffix() {
+  if fm_codex_background_wake_degraded; then
+    printf ' [DEGRADED: %s]' "$(fm_codex_background_wake_degraded_text)"
+  fi
 }
 
 watch_output_has_wake() {
@@ -153,7 +161,7 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
-      echo "watcher: started pid=$child (beacon fresh)"
+      echo "watcher: started pid=$child (beacon fresh)$(watcher_degraded_suffix)"
       wait "$child"
       rc=$?
       print_watch_output "$child_out"

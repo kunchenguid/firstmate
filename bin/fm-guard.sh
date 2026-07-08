@@ -103,6 +103,17 @@ if [ "$watcher_fresh" = false ]; then
   } >&2
 fi
 
+if [ "$watcher_fresh" = true ] && fm_codex_background_wake_degraded; then
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  CODEX WATCH WAKE CHANNEL UNVERIFIED\n'
+    printf '●  %s task(s) in flight and the watcher beacon is fresh, but %s.\n' "$in_flight" "$(fm_codex_background_wake_degraded_text)"
+    printf '●  Keep the Codex exec session manually polled, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+fi
+
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
 # a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
 if "$queue_pending"; then
