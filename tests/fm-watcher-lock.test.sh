@@ -10,11 +10,40 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
+WATCH_LOOP="$ROOT/bin/fm-watch-loop.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+pid_identity() {
+  local state=$1 pid=$2
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid"
+}
+
+record_guard_watcher_lock() {
+  local dir=$1 state=$2 pid=$3 identity=$4
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+record_guard_watch_loop_lock() {
+  local dir=$1 state=$2 pid=$3 identity=$4
+  mkdir -p "$state/.watch-loop.lock"
+  printf '%s\n' "$pid" > "$state/.watch-loop.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch-loop.lock/fm-home"
+  printf '%s\n' "$WATCH_LOOP" > "$state/.watch-loop.lock/loop-path"
+  printf '%s\n' "$identity" > "$state/.watch-loop.lock/pid-identity"
+}
+
+record_guard_watch_loop_child() {
+  local state=$1 pid=$2 identity=$3
+  printf '%s\n' "$pid" > "$state/.watch-loop.lock/child-pid"
+  printf '%s\n' "$identity" > "$state/.watch-loop.lock/child-pid-identity"
+}
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -178,6 +207,61 @@ test_guard_skips_codex_unverified_background_wake_warning_in_afk() {
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_CODEX_BACKGROUND_WAKE=unverified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   ! grep -F 'CODEX WATCH WAKE CHANNEL UNVERIFIED' "$err" >/dev/null || fail "guard warned about Codex degraded wake while away-mode owns supervision"
   pass "guard skips the Codex degraded wake warning while away mode owns supervision"
+}
+
+test_guard_treats_retrying_watch_loop_as_down() {
+  local dir state err pid identity
+  dir=$(make_case guard-watch-loop-retrying)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(pid_identity "$state" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watch-loop holder"
+  }
+  record_guard_watch_loop_lock "$dir" "$state" "$pid" "$identity"
+  touch "$state/.watch-loop-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard accepted a retrying watch loop as healthy: $(cat "$err")"
+  pass "guard treats retrying watch-loop without child watcher as down"
+}
+
+test_guard_accepts_watch_loop_with_live_child_watcher() {
+  local dir state err loop_pid loop_identity watch_pid watch_identity
+  dir=$(make_case guard-watch-loop-healthy)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  sleep 60 &
+  loop_pid=$!
+  loop_identity=$(pid_identity "$state" "$loop_pid") || {
+    kill "$loop_pid" 2>/dev/null || true
+    wait "$loop_pid" 2>/dev/null || true
+    fail "could not identify live watch-loop holder"
+  }
+  sleep 60 &
+  watch_pid=$!
+  watch_identity=$(pid_identity "$state" "$watch_pid") || {
+    kill "$loop_pid" "$watch_pid" 2>/dev/null || true
+    wait "$loop_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+    fail "could not identify live watcher child"
+  }
+  record_guard_watch_loop_lock "$dir" "$state" "$loop_pid" "$loop_identity"
+  record_guard_watch_loop_child "$state" "$watch_pid" "$watch_identity"
+  record_guard_watcher_lock "$dir" "$state" "$watch_pid" "$watch_identity"
+  touch "$state/.watch-loop-beat" "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_CODEX_BACKGROUND_WAKE=unverified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  kill "$loop_pid" "$watch_pid" 2>/dev/null || true
+  wait "$loop_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+  [ ! -s "$err" ] || fail "guard warned with a healthy watch loop: $(cat "$err")"
+  pass "guard accepts watch-loop only with a live child watcher"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -713,6 +797,8 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher
 test_guard_skips_codex_unverified_background_wake_warning_in_afk
+test_guard_treats_retrying_watch_loop_as_down
+test_guard_accepts_watch_loop_with_live_child_watcher
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency

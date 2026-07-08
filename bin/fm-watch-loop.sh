@@ -72,6 +72,21 @@ child=
 child_out=
 status=
 
+clear_child_marker() {
+  rm -f "$LOOP_LOCK/child-pid" "$LOOP_LOCK/child-pid-identity" 2>/dev/null || true
+}
+
+record_child_marker() {
+  local pid=$1 identity
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+    clear_child_marker
+    return 1
+  }
+  printf '%s\n' "$pid" > "$LOOP_LOCK/child-pid" 2>/dev/null || return 1
+  printf '%s\n' "$identity" > "$LOOP_LOCK/child-pid-identity" 2>/dev/null || return 1
+  return 0
+}
+
 log_event() {
   local msg=$1
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >> "$LOOP_LOG" 2>/dev/null || true
@@ -89,6 +104,7 @@ cleanup() {
     kill "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
   fi
+  clear_child_marker
   [ -n "${child_out:-}" ] && rm -f "$child_out" 2>/dev/null || true
   fm_lock_release "$LOOP_LOCK" 2>/dev/null || true
   log_event "stopped"
@@ -127,8 +143,13 @@ while :; do
   }
   "$WATCH" >"$child_out" 2>>"$WATCH_ERR" &
   child=$!
+  record_child_marker "$child" || true
 
   while fm_pid_alive "$child"; do
+    if [ -e "$STATE/.afk" ]; then
+      say "stopping because state/.afk appeared; away-mode daemon owns watcher supervision"
+      cleanup
+    fi
     touch "$LOOP_BEAT"
     sleep "$TICK"
   done
@@ -136,6 +157,7 @@ while :; do
   rc=0
   wait "$child" || rc=$?
   child=
+  clear_child_marker
   touch "$LOOP_BEAT"
 
   if output_has_wake "$child_out"; then

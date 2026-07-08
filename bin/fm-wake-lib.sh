@@ -94,7 +94,7 @@ fm_watch_loop_lock_matches_pid() {
 
 FM_WATCH_LOOP_HEALTHY_PID=
 fm_watch_loop_healthy() {
-  local state=$1 loop_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  local state=$1 loop_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age child_pid child_identity current_child_identity watch_path
   FM_WATCH_LOOP_HEALTHY_PID=
   lockdir="$state/.watch-loop.lock"
   beat="$state/.watch-loop-beat"
@@ -103,6 +103,15 @@ fm_watch_loop_healthy() {
   fm_watch_loop_lock_matches_pid "$state" "$loop_path" "$pid" "$home" || return 1
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
+  child_pid=$(cat "$lockdir/child-pid" 2>/dev/null || true)
+  child_identity=$(cat "$lockdir/child-pid-identity" 2>/dev/null || true)
+  [ -n "$child_identity" ] || return 1
+  fm_pid_alive "$child_pid" || return 1
+  current_child_identity=$(fm_pid_identity "$child_pid") || return 1
+  [ "$current_child_identity" = "$child_identity" ] || return 1
+  watch_path="$(dirname "$loop_path")/fm-watch.sh"
+  fm_watcher_healthy "$state" "$watch_path" "$grace" "$home" || return 1
+  [ "$FM_WATCHER_HEALTHY_PID" = "$child_pid" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watch_loop_healthy returns.
   FM_WATCH_LOOP_HEALTHY_PID=$pid
   return 0
@@ -114,6 +123,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/loop-path" \
+    "$lockdir/child-pid" \
+    "$lockdir/child-pid-identity" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
     2>/dev/null || true

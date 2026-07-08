@@ -181,6 +181,12 @@ record_watch_loop_lock() {
   printf '%s\n' "$identity" > "$dir/state/.watch-loop.lock/pid-identity"
 }
 
+record_watch_loop_child() {
+  local dir=$1 pid=$2 identity=$3
+  printf '%s\n' "$pid" > "$dir/state/.watch-loop.lock/child-pid"
+  printf '%s\n' "$identity" > "$dir/state/.watch-loop.lock/child-pid-identity"
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -280,8 +286,43 @@ test_hook_allows_afk_with_codex_unverified_background_wake() {
 }
 
 test_hook_allows_codex_unverified_when_watch_loop_is_healthy() {
-  local dir pid identity out status
+  local dir loop_pid loop_identity watch_pid watch_identity identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-watch-loop")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  loop_pid=$!
+  identity=$(watcher_identity "$dir" "$loop_pid") || {
+    kill "$loop_pid" 2>/dev/null || true
+    wait "$loop_pid" 2>/dev/null || true
+    fail "could not identify live watch-loop holder"
+  }
+  loop_identity=$identity
+  sleep 60 &
+  watch_pid=$!
+  identity=$(watcher_identity "$dir" "$watch_pid") || {
+    kill "$loop_pid" "$watch_pid" 2>/dev/null || true
+    wait "$loop_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+    fail "could not identify live watcher child"
+  }
+  watch_identity=$identity
+  record_watch_loop_lock "$dir" "$loop_pid" "$loop_identity"
+  record_watch_loop_child "$dir" "$watch_pid" "$watch_identity"
+  record_watcher_lock "$dir" "$watch_pid" "$watch_identity"
+  touch "$dir/state/.watch-loop-beat"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(printf '{"stop_hook_active":false}' | CODEX_CI=1 CODEX_THREAD_ID=thread-test bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$loop_pid" "$watch_pid" 2>/dev/null || true
+  wait "$loop_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must allow Codex turn end when the persistent watch loop is healthy"
+  [ -z "$out" ] || fail "hook produced output with healthy watch loop: $out"
+  pass "fm-turnend-guard: healthy watch-loop satisfies Codex present-mode supervision"
+}
+
+test_hook_blocks_when_watch_loop_is_retrying_without_child() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-watch-loop-retrying")
   : > "$dir/state/task1.meta"
   sleep 60 &
   pid=$!
@@ -292,12 +333,12 @@ test_hook_allows_codex_unverified_when_watch_loop_is_healthy() {
   }
   record_watch_loop_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.watch-loop-beat"
-  out=$(printf '{"stop_hook_active":false}' | CODEX_CI=1 CODEX_THREAD_ID=thread-test bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  expect_code 0 "$status" "hook must allow Codex turn end when the persistent watch loop is healthy"
-  [ -z "$out" ] || fail "hook produced output with healthy watch loop: $out"
-  pass "fm-turnend-guard: healthy watch-loop satisfies Codex present-mode supervision"
+  expect_code 2 "$status" "hook must block when the watch loop is alive but not supervising a watcher child"
+  assert_contains "$out" "TURN WOULD END BLIND" "retrying watch loop must not satisfy supervision"
+  pass "fm-turnend-guard: retrying watch-loop does not satisfy supervision"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -692,6 +733,7 @@ test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher
 test_hook_allows_afk_with_codex_unverified_background_wake
 test_hook_allows_codex_unverified_when_watch_loop_is_healthy
+test_hook_blocks_when_watch_loop_is_retrying_without_child
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
