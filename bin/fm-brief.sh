@@ -6,10 +6,17 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--base <branch>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --base <branch> declares a non-default intended base branch for a ship task in
+#   a PR-based mode (no-mistakes or direct-PR). It records the branch name to
+#   data/<task-id>/base so fm-spawn.sh promotes it into state/<task-id>.meta as
+#   base=<branch>, and writes the base into the brief so the crewmate/pipeline
+#   targets it instead of the repo default branch. fm-pr-check.sh then asserts the
+#   PR head is stacked on that base before merge. Rejected for --scout,
+#   --secondmate, and local-only mode; absent means the repo default branch.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -73,16 +80,31 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+BASE=
 POS=()
+want_base=
 for a in "$@"; do
+  if [ -n "$want_base" ]; then BASE=$a; want_base=; continue; fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --base) want_base=1 ;;
+    --base=*) BASE=${a#--base=} ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_base" ] || { echo "error: --base requires a value" >&2; exit 1; }
+# --base declares a non-default intended base and only makes sense for a ship task
+# in a PR-based mode. Reject it for scout/secondmate here; the local-only rejection
+# happens once the delivery mode is resolved below.
+if [ -n "$BASE" ]; then
+  case "$BASE" in
+    *[[:space:]]*) echo "error: --base branch name must not contain whitespace: '$BASE'" >&2; exit 1 ;;
+  esac
+  [ "$KIND" = ship ] || { echo "error: --base applies only to ship tasks, not --scout or --secondmate" >&2; exit 1; }
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -271,6 +293,24 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# A non-default intended base only fits a PR-based mode. local-only has no remote
+# and merges into local main, so reject --base there. When accepted, record the
+# base to the data/<id>/base sidecar so fm-spawn.sh promotes it into meta, and
+# build the shared Setup note that tells the crewmate to keep the branch stacked
+# on that base rather than the repo default branch.
+BASE_SETUP=""
+if [ -n "$BASE" ]; then
+  if [ "$MODE" = local-only ]; then
+    echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$BASE" > "$DATA/$ID/base"
+  BASE_SETUP="
+
+**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+Keep your \`fm/$ID\` branch stacked on \`$BASE\` and make the PR target \`$BASE\` as its base; never let the work rebase onto or open against the default branch."
+fi
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -283,6 +323,8 @@ When it is implemented and committed, push your branch and open a PR with \`gh-a
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
+    [ -z "$BASE" ] || DOD="$DOD
+Open the PR against base branch \`$BASE\`, not the repo default: \`gh-axi pr create --base $BASE ...\`."
     ;;
   local-only)
     SETUP2=""
@@ -319,6 +361,9 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
+    [ -z "$BASE" ] || DOD="$DOD
+
+This task targets base branch \`$BASE\`, not the repo default: when you run /no-mistakes, tell the run its base is \`$BASE\` so it rebases onto and opens the PR against \`$BASE\`, never the default branch."
     ;;
 esac
 
@@ -337,7 +382,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2$BASE_SETUP
 
 # Rules
 $RULE1

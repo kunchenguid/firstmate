@@ -260,6 +260,90 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# --base <branch> records the intended base to the data/<id>/base sidecar (which
+# fm-spawn.sh promotes into meta) and writes the base into the brief so the
+# crewmate/pipeline targets it instead of the repo default branch.
+test_base_no_mistakes_records_sidecar_and_brief() {
+  local home id brief
+  home="$TMP_ROOT/base-nm-home"
+  mkdir -p "$home/data"
+  id="brief-base-nm1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/admin-dashboard >/dev/null 2>&1 \
+    || fail "base-nm: fm-brief.sh --base should exit 0 for a no-mistakes ship task"
+  brief="$home/data/$id/brief.md"
+  assert_present "$home/data/$id/base" "base-nm: intended-base sidecar was not written"
+  assert_grep "feature/admin-dashboard" "$home/data/$id/base" "base-nm: sidecar missing the base branch name"
+  assert_grep "**Base branch.** This task targets base branch \`feature/admin-dashboard\`" "$brief" \
+    "base-nm: brief missing the Setup base note"
+  assert_grep "tell the run its base is \`feature/admin-dashboard\`" "$brief" \
+    "base-nm: no-mistakes DOD missing the tell-the-run-its-base instruction"
+  pass "fm-brief.sh: --base records the sidecar and stacks the no-mistakes brief on the base"
+}
+
+# --base also form works, and the sidecar holds only the branch name on one line.
+test_base_equals_form_and_sidecar_shape() {
+  local home id
+  home="$TMP_ROOT/base-equals-home"
+  mkdir -p "$home/data"
+  id="brief-base-eq1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base=feature/x >/dev/null 2>&1 \
+    || fail "base-equals: --base=<branch> form should be accepted"
+  [ "$(cat "$home/data/$id/base")" = "feature/x" ] \
+    || fail "base-equals: sidecar should hold exactly the branch name"
+  pass "fm-brief.sh: --base=<branch> form records the sidecar cleanly"
+}
+
+# For a direct-PR project, --base tells the crewmate to open the PR against it.
+test_base_direct_pr_targets_base() {
+  local home id brief
+  home="$TMP_ROOT/base-dpr-home"
+  write_registry "$home"
+  id="brief-base-dpr1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-dpr: fm-brief.sh --base should exit 0 for a direct-PR ship task"
+  brief="$home/data/$id/brief.md"
+  assert_grep "gh-axi pr create --base feature/x" "$brief" \
+    "base-dpr: direct-PR brief missing the --base PR-open instruction"
+  pass "fm-brief.sh: --base makes a direct-PR brief open the PR against the base"
+}
+
+# --base is rejected where it has no meaning: scout, secondmate, and local-only.
+test_base_rejected_for_scout() {
+  local home id status err
+  home="$TMP_ROOT/base-scout-home"
+  mkdir -p "$home/data"
+  id="brief-base-scout1"
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --base feature/x 2>&1); status=$?
+  expect_code 1 "$status" "base-scout: --base with --scout should be rejected"
+  assert_contains "$err" "applies only to ship tasks" "base-scout: refusal did not explain scope"
+  assert_absent "$home/data/$id/base" "base-scout: a rejected --base must not leave a sidecar"
+  pass "fm-brief.sh: --base is rejected for scout tasks"
+}
+
+test_base_rejected_for_local_only() {
+  local home id status err
+  home="$TMP_ROOT/base-local-home"
+  write_registry "$home"
+  id="brief-base-local1"
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --base feature/x 2>&1); status=$?
+  expect_code 1 "$status" "base-local: --base with local-only mode should be rejected"
+  assert_contains "$err" "does not apply to local-only" "base-local: refusal did not explain local-only"
+  pass "fm-brief.sh: --base is rejected for local-only projects"
+}
+
+# Without --base the brief and directory are unchanged: no sidecar, no base note.
+test_no_base_leaves_brief_unchanged() {
+  local home id brief
+  home="$TMP_ROOT/no-base-home"
+  mkdir -p "$home/data"
+  id="brief-no-base1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_absent "$home/data/$id/base" "no-base: default ship task must not write a base sidecar"
+  assert_no_grep "Base branch." "$brief" "no-base: default brief must not carry the base note"
+  pass "fm-brief.sh: a ship task without --base is unchanged (no sidecar, no base note)"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -271,3 +355,9 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_base_no_mistakes_records_sidecar_and_brief
+test_base_equals_form_and_sidecar_shape
+test_base_direct_pr_targets_base
+test_base_rejected_for_scout
+test_base_rejected_for_local_only
+test_no_base_leaves_brief_unchanged

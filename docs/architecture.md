@@ -160,6 +160,8 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+When a task declared a non-default intended base with `fm-brief.sh --base` (recorded as `base=` in meta and flowing through the `data/<id>/base` sidecar promoted by `fm-spawn.sh`), `fm-pr-check.sh` refuses fail-closed before recording `pr=` or arming the merge poll unless the freshly fetched PR head is stacked on that base (`git merge-base --is-ancestor <base> <pr-head>`) and the PR's base label targets it.
+Requiring both catches a head silently rebased onto the repo default branch and a PR opened against the default branch, either of which would otherwise drag the feature base's unmerged commits into the default branch on merge; with no `base=` recorded the guard is skipped and default-branch tasks are unchanged.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 

@@ -57,6 +57,11 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   For a ship task, if data/<task-id>/base exists (written by fm-brief.sh --base),
+#   its branch name is recorded into meta as base=<branch> so fm-pr-check.sh can
+#   assert the PR head is stacked on that intended base before merge. Absent means
+#   the repo default branch is the base and the meta stays byte-identical to the
+#   pre-base default path (no base= line).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -84,7 +89,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -988,6 +993,16 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+# A ship task can declare a non-default intended base branch via fm-brief.sh
+# --base, which drops the branch name in data/<id>/base. Promote it into meta as
+# base= so fm-pr-check.sh can assert the PR head is stacked on that base before
+# merge. Absent sidecar -> no base= -> the repo default branch is the base and the
+# meta stays byte-identical to the pre-base default path.
+BASE=
+if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
+  IFS= read -r BASE < "$DATA/$ID/base" || true
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -998,6 +1013,7 @@ META_WINDOW=$T
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ -z "$BASE" ] || echo "base=$BASE"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

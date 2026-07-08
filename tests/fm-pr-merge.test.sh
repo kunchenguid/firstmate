@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-pr-merge.sh: the one path firstmate uses to merge a task's
-# PR, which must always record pr= and any available pr_head= into the task's
-# meta before merging so fm-teardown.sh's landed-check has a PR reference to
-# verify against, even on repos with no PR CI where the usual "checks green"
-# fm-pr-check.sh trigger never fires.
+# Tests for bin/fm-pr-merge.sh and bin/fm-pr-check.sh's stacked-on-base guard.
 #
-# Matrix:
+# fm-pr-merge.sh is the one path firstmate uses to merge a task's PR, which must
+# always record pr= and any available pr_head= into the task's meta before
+# merging so fm-teardown.sh's landed-check has a PR reference to verify against,
+# even on repos with no PR CI where the usual "checks green" fm-pr-check.sh
+# trigger never fires.
+#
+# fm-pr-check.sh additionally, when a non-default base= was declared for the task
+# (fm-brief.sh --base), asserts the PR head is STACKED on that intended base
+# before recording pr= or arming the merge poll - catching a feature-branch fix
+# that the pipeline rebased onto the repo default (data/learnings.md 2026-07-07).
+#
+# Matrix (fm-pr-merge.sh):
 #   (a) merge records pr= and pr_head= before merging, and merges
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
@@ -14,6 +21,12 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+# Matrix (fm-pr-check.sh stacked-on-base guard):
+#   (i) base= present, head stacked on the base AND base label matches -> records pr=, arms the poll
+#   (j) base= present, PR head rebased onto main -> refuses, no pr=, no poll
+#   (k) base= present but the base branch is unfetchable -> fail-closed refusal
+#   (l) no base= (the common case) -> unchanged: records pr= and arms the poll
+#   (m) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -295,6 +308,190 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# --- fm-pr-check.sh stacked-on-base guard ------------------------------------
+
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+
+# Build a real git fixture: an origin with main, a feature/base branch stacked on
+# main, and a PR head (refs/pull/9/head) parented on either feature/base (stacked,
+# good) or main (rebased onto the wrong base). Echoes the case dir. The worktree
+# shares the project clone's origin remote, so fm-pr-check.sh can fetch both refs.
+make_git_case() {
+  local name=$1 pr_parent=$2 base_label=${3:-main} case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  (
+    cd "$case_dir/_seed"
+    git config user.email t@t
+    git config user.name t
+    printf 'base\n' > f.txt
+    git add f.txt
+    git commit -qm main-baseline
+    git push -q origin main
+    git checkout -q -b feature/base
+    printf 'feature\n' >> f.txt
+    git add f.txt
+    git commit -qm feature-base-1
+    git push -q origin feature/base
+    if [ "$pr_parent" = feature ]; then
+      git checkout -q -b prhead feature/base
+    else
+      git checkout -q -b prhead main
+    fi
+    printf 'fix\n' >> f.txt
+    git add f.txt
+    git commit -qm pr-fix
+    git push -q origin prhead:refs/pull/9/head
+  )
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+
+  # gh mock so the pr_head recording path runs and both the success-path base
+  # label check and the wrong-base diagnostic get a baseRefName; the stacking
+  # assertion itself uses fetched refs, not gh. The label is per-case configurable.
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+  *baseRefName*) printf '%s\n' '$base_label' ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+run_pr_check() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" "$@"
+}
+
+test_pr_check_accepts_stacked_base() {
+  local case_dir rc
+  case_dir=$(make_git_case stacked feature feature/base)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stacked-base: fm-pr-check should accept a PR head stacked on its base"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "stacked-base: pr= should be recorded for a correctly stacked PR"
+  assert_present "$case_dir/state/task-x1.check.sh" "stacked-base: the merge poll should be armed"
+  assert_no_grep 'not stacked on its intended base' "$case_dir/stderr" \
+    "stacked-base: a stacked PR must not trip the guard"
+  pass "fm-pr-check accepts a PR head stacked on the declared base"
+}
+
+test_pr_check_refuses_wrong_base() {
+  local case_dir rc
+  case_dir=$(make_git_case wrongbase main)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "wrong-base: fm-pr-check should refuse a PR head not stacked on its base"
+  assert_grep 'not stacked on its intended base' "$case_dir/stderr" \
+    "wrong-base: refusal did not explain the stacking failure"
+  assert_grep 'feature/base' "$case_dir/stderr" "wrong-base: refusal did not name the intended base"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "wrong-base: a wrong-based PR must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "wrong-base: a wrong-based PR must not arm the merge poll"
+  pass "fm-pr-check refuses (loud, pre-merge) a PR head rebased onto the wrong base"
+}
+
+test_pr_check_refuses_wrong_base_label() {
+  local case_dir rc
+  # Head is correctly stacked on feature/base (content is fine), but the PR was
+  # opened against main (base label = main), which would merge the feature base's
+  # commits into main. The label check must catch this after stacking passes.
+  case_dir=$(make_git_case wronglabel feature main)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "wrong-base-label: fm-pr-check should refuse a PR opened against the wrong base"
+  assert_grep 'opened against base' "$case_dir/stderr" \
+    "wrong-base-label: refusal did not explain the base label mismatch"
+  assert_grep 'feature/base' "$case_dir/stderr" \
+    "wrong-base-label: refusal did not name the intended base"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "wrong-base-label: a wrong-labeled PR must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "wrong-base-label: a wrong-labeled PR must not arm the merge poll"
+  pass "fm-pr-check refuses (loud, pre-merge) a stacked PR opened against the wrong base label"
+}
+
+test_pr_check_fail_closed_when_base_unfetchable() {
+  local case_dir rc
+  case_dir=$(make_git_case unfetchable feature)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/does-not-exist"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unfetchable-base: fm-pr-check should fail closed when the base cannot be verified"
+  assert_grep 'could not be fetched from origin' "$case_dir/stderr" \
+    "unfetchable-base: refusal did not explain the unresolvable base"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "unfetchable-base: an unverifiable base must not arm the merge poll"
+  pass "fm-pr-check fails closed when the declared base cannot be resolved"
+}
+
+test_pr_check_no_base_arms_normally() {
+  local case_dir rc
+  case_dir=$(make_git_case nobase feature)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-base: fm-pr-check should behave exactly as before without base="
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "no-base: pr= should be recorded on the default (no-base) path"
+  assert_present "$case_dir/state/task-x1.check.sh" "no-base: the merge poll should be armed"
+  assert_no_grep 'not stacked' "$case_dir/stderr" "no-base: the stacking guard must not run without base="
+  pass "fm-pr-check without base= records pr= and arms the poll unchanged"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -305,3 +502,8 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_pr_check_accepts_stacked_base
+test_pr_check_refuses_wrong_base
+test_pr_check_refuses_wrong_base_label
+test_pr_check_fail_closed_when_base_unfetchable
+test_pr_check_no_base_arms_normally
