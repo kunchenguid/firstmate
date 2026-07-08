@@ -1011,7 +1011,8 @@ fm_super_main() {
   if discovered=$(discover_supervisor_target); then
     : # resolved cleanly
   else
-    if [ -z "${FM_SUPERVISOR_TARGET:-}" ] \
+    if [ "$backend_source" = "FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)" ] \
+       && [ -z "${FM_SUPERVISOR_TARGET:-}" ] \
        && [ -z "${TMUX_PANE:-}" ] \
        && { [ "${HERDR_ENV:-}" = "1" ] || herdr_agent_list_has_agents; }; then
       echo "error: herdr appears active, but no safe firstmate supervisor pane was discoverable from HERDR_PANE_ID or herdr agent list; refusing tmux fallback '$discovered'. Set FM_SUPERVISOR_BACKEND=herdr and FM_SUPERVISOR_TARGET=<session>:<pane-id> explicitly." >&2

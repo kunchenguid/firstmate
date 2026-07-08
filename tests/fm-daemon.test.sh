@@ -940,6 +940,53 @@ JSON
   pass "daemon startup refuses tmux firstmate:0 fallback when herdr has agents but no safe primary"
 }
 
+test_daemon_startup_preserves_explicit_tmux_backend_fallback() {
+  command -v jq >/dev/null 2>&1 || { pass "explicit tmux fallback override skipped without jq"; return; }
+  local dir json fakebin home err out log pid i status
+  dir=$(make_supercase herdr-agent-list-explicit-tmux)
+  home="$dir/home"
+  json="$dir/agents.json"
+  err="$dir/daemon.err"
+  out="$dir/daemon.out"
+  log="$dir/state/.supervise-daemon.log"
+  mkdir -p "$home"
+  cat > "$json" <<JSON
+{"result":{"agents":[
+  {"agent":"codex","agent_status":"working","cwd":"$home/projects/Social","foreground_cwd":"/root/.treehouse/Social-452543/1/Social","pane_id":"w1:p9","focused":false}
+]}}
+JSON
+  fakebin=$(make_herdr_agent_list_fakebin "$dir" "$json")
+
+  PATH="$fakebin:$dir/fakebin:$PATH" FM_FAKE_HERDR_AGENT_LIST="$json" FM_HOME="$home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    FM_CRASH_NORMAL_SLEEP=30 FM_HOUSEKEEPING_TICK=30 "$DAEMON" >"$out" 2>"$err" &
+  pid=$!
+  status=running
+  for i in $(seq 1 50); do
+    if [ -s "$log" ] && grep -F 'daemon starting' "$log" >/dev/null; then
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || status=$?
+      fail "daemon exited before honoring explicit tmux fallback (status=$status): $(cat "$err")"
+    fi
+    sleep 0.1
+  done
+  grep -F 'daemon starting' "$log" >/dev/null \
+    || fail "daemon did not reach startup with explicit tmux fallback: $(cat "$err")"
+  grep -F 'backend=tmux' "$log" >/dev/null \
+    || fail "daemon did not keep explicit tmux backend: $(cat "$log")"
+  grep -F 'target=firstmate:0' "$log" >/dev/null \
+    || fail "daemon did not keep legacy tmux fallback target: $(cat "$log")"
+  if grep -F 'herdr appears active' "$err" >/dev/null; then
+    fail "explicit tmux backend was blocked by herdr hard-fail: $(cat "$err")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  pass "daemon startup preserves explicit tmux backend precedence over herdr fallback refusal"
+}
+
 test_pane_is_busy_herdr_native_busy_state() {
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
@@ -1114,6 +1161,7 @@ test_discover_supervisor_target_herdr
 test_discover_supervisor_target_from_herdr_agent_list
 test_discover_supervisor_target_rejects_crewmate_paths
 test_daemon_startup_refuses_herdr_fleet_tmux_fallback
+test_daemon_startup_preserves_explicit_tmux_backend_fallback
 test_pane_is_busy_herdr_native_busy_state
 test_pane_is_busy_herdr_falls_back_to_capture_regex
 test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
