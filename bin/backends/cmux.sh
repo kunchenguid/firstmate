@@ -421,6 +421,13 @@ fm_backend_cmux_create_task() {  # <label> <cwd> [harness]
   [ "${#FM_BACKEND_CMUX_ENV_ARGS[@]}" -eq 0 ] || new_workspace_args+=("${FM_BACKEND_CMUX_ENV_ARGS[@]}")
   new_workspace_args+=(--focus false --id-format uuids)
   out=$(fm_backend_cmux_cli "${new_workspace_args[@]}" 2>&1) || {
+    if [ "${#FM_BACKEND_CMUX_ENV_ARGS[@]}" -gt 0 ]; then
+      local env_arg
+      for env_arg in "${FM_BACKEND_CMUX_ENV_ARGS[@]}"; do
+        [ "$env_arg" = --env ] && continue
+        out=${out//"${env_arg#*=}"/[redacted]}
+      done
+    fi
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }

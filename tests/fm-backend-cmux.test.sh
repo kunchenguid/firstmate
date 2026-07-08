@@ -608,6 +608,44 @@ test_create_task_fails_when_secret_fetch_fails() {
   pass "fm_backend_cmux_create_task: fails before creating the workspace when the required secret cannot be fetched"
 }
 
+test_create_task_failure_output_redacts_fetched_secret() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-secret-redact"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  add_fake_aws "$fb"
+  # A `cmux` stub whose new-workspace fails with a usage-style error that
+  # echoes the full invocation back - the exact leak path this test guards:
+  # the --env FIREWORKS_API_KEY=<value> argument must never reach firstmate's
+  # own stderr through create_task's raw-output error message.
+  cat > "$fb/cmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = workspace ]; then
+  printf '{"workspaces":[]}'
+  exit 0
+fi
+if [ "${1:-}" = new-workspace ]; then
+  printf 'error: invalid arguments:' >&2
+  for a in "$@"; do printf ' %s' "$a" >&2; done
+  printf '\n' >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fb/cmux"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc-redact /tmp/proj opencode' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when new-workspace fails"
+  assert_contains "$out" "new-workspace failed" "create_task did not report the new-workspace failure"
+  assert_not_contains "$out" "s3cr3t-fireworks-key" \
+    "create_task's new-workspace failure message leaked the fetched secret value"
+  assert_contains "$out" "[redacted]" \
+    "create_task's new-workspace failure message should redact the secret value, not drop the diagnostics"
+  pass "fm_backend_cmux_create_task: redacts the fetched secret from a failed new-workspace's echoed-back error output"
+}
+
 test_fetch_secret_fails_when_aws_missing() {
   local dir out status
   dir="$TMP_ROOT/fetch-secret-no-aws"; mkdir -p "$dir/empty-fakebin"
@@ -1162,6 +1200,7 @@ test_secret_specs_for_harness_maps_opencode_only
 test_create_task_passes_fireworks_env_for_opencode
 test_create_task_omits_env_for_non_opencode_harness
 test_create_task_fails_when_secret_fetch_fails
+test_create_task_failure_output_redacts_fetched_secret
 test_fetch_secret_fails_when_aws_missing
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
