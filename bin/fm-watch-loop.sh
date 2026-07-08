@@ -69,6 +69,7 @@ printf '%s\n' "$LOOP_PATH" > "$LOOP_LOCK/loop-path" || true
 fm_pid_identity "${BASHPID:-$$}" > "$LOOP_LOCK/pid-identity" 2>/dev/null || true
 
 child=
+child_owned=0
 child_out=
 status=
 
@@ -147,6 +148,26 @@ output_has_wake() {
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$1" 2>/dev/null
 }
 
+adopt_healthy_watcher() {
+  fm_watcher_healthy "$STATE" "$WATCH" "${FM_GUARD_GRACE:-300}" "$FM_HOME" || return 1
+  child=$FM_WATCHER_HEALTHY_PID
+  record_child_marker "$child" || return 1
+  child_owned=0
+  say "adopted existing watcher pid=$child"
+  return 0
+}
+
+monitor_child() {
+  while fm_pid_alive "$child"; do
+    if [ -e "$STATE/.afk" ]; then
+      say "stopping because state/.afk appeared; away-mode daemon owns watcher supervision"
+      cleanup
+    fi
+    touch "$LOOP_BEAT"
+    sleep "$TICK"
+  done
+}
+
 last_status=
 while :; do
   if [ -e "$STATE/.afk" ]; then
@@ -165,20 +186,17 @@ while :; do
   }
   "$WATCH" >"$child_out" 2>>"$WATCH_ERR" &
   child=$!
+  child_owned=1
   record_child_marker "$child" || true
 
-  while fm_pid_alive "$child"; do
-    if [ -e "$STATE/.afk" ]; then
-      say "stopping because state/.afk appeared; away-mode daemon owns watcher supervision"
-      cleanup
-    fi
-    touch "$LOOP_BEAT"
-    sleep "$TICK"
-  done
+  monitor_child
 
   rc=0
-  wait "$child" || rc=$?
+  if [ "$child_owned" -eq 1 ]; then
+    wait "$child" || rc=$?
+  fi
   child=
+  child_owned=0
   clear_child_marker
   touch "$LOOP_BEAT"
 
@@ -200,6 +218,20 @@ while :; do
   status=$(cat "$child_out" 2>/dev/null || true)
   rm -f "$child_out" 2>/dev/null || true
   child_out=
+
+  case "$status" in
+    watcher:\ already\ running*)
+      if adopt_healthy_watcher; then
+        monitor_child
+        child=
+        child_owned=0
+        clear_child_marker
+        touch "$LOOP_BEAT"
+        drain_if_pending
+        continue
+      fi
+      ;;
+  esac
 
   if [ "$rc" -ne 0 ]; then
     say "watcher exited rc=$rc${status:+ ($status)}; retrying in ${ERROR_SLEEP}s"

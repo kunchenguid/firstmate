@@ -48,6 +48,20 @@ wait_for_watch_lock_pid() {
   return 1
 }
 
+wait_for_loop_child_pid() {
+  local state=$1 expected=${2:-} limit=${3:-80} i=0 pid
+  while [ "$i" -lt "$limit" ]; do
+    pid=$(cat "$state/.watch-loop.lock/child-pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && { [ -z "$expected" ] || [ "$pid" = "$expected" ]; }; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 stop_loop() {
   local pid=${1:-}
   [ -n "$pid" ] || return 0
@@ -142,6 +156,71 @@ test_loop_singleton_rejects_duplicate() {
   pass "watch loop singleton rejects duplicate instances"
 }
 
+test_loop_adopts_existing_watcher() {
+  local dir state fakebin out err one_out one_err status_file existing_pid loop_pid adopted_pid healthy_status second_watch health_home
+  dir=$(make_case adopts-existing)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/loop.out"
+  err="$dir/loop.err"
+  one_out="$dir/one-shot.out"
+  one_err="$dir/one-shot.err"
+  status_file="$state/task.status"
+  printf 'project=x\n' > "$state/task.meta"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.1 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$one_out" 2> "$one_err" &
+  existing_pid=$!
+  wait_for_watch_lock_pid "$state" >/dev/null || {
+    kill "$existing_pid" 2>/dev/null || true
+    wait "$existing_pid" 2>/dev/null || true
+    fail "one-shot watcher did not take the watcher lock"
+  }
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_LOOP_TICK=0.1 \
+    FM_WATCH_LOOP_IDLE_SLEEP=0.1 FM_POLL=0.1 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$LOOP" > "$out" 2> "$err" &
+  loop_pid=$!
+  wait_for_loop_lock "$state" || {
+    stop_loop "$loop_pid"
+    kill "$existing_pid" 2>/dev/null || true
+    wait "$existing_pid" 2>/dev/null || true
+    fail "watch loop did not take its singleton lock"
+  }
+  adopted_pid=$(wait_for_loop_child_pid "$state" "$existing_pid") || {
+    stop_loop "$loop_pid"
+    kill "$existing_pid" 2>/dev/null || true
+    wait "$existing_pid" 2>/dev/null || true
+    fail "watch loop did not adopt the existing watcher: $(cat "$out")"
+  }
+  [ "$adopted_pid" = "$existing_pid" ] || fail "watch loop adopted $adopted_pid instead of $existing_pid"
+
+  health_home="${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}"
+  healthy_status=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_watch_loop_healthy "$2" "$3" 300 "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$LOOP" "$health_home" || healthy_status=$?
+  expect_code 0 "$healthy_status" "adopted watcher should satisfy watch-loop health"
+
+  printf 'done: adopted watcher surfaced\n' > "$status_file"
+  wait "$existing_pid" 2>/dev/null || true
+  wait_for_pattern "$out" "$(printf '\tsignal\t')" || {
+    stop_loop "$loop_pid"
+    fail "watch loop did not drain the adopted watcher wake: $(cat "$out")"
+  }
+  second_watch=$(wait_for_watch_lock_pid "$state" "$existing_pid") || {
+    stop_loop "$loop_pid"
+    fail "watch loop did not re-arm after adopted watcher exited"
+  }
+  [ "$second_watch" != "$existing_pid" ] || fail "watch loop did not replace the adopted watcher"
+  grep -F "watch-loop: adopted existing watcher pid=$existing_pid" "$out" >/dev/null \
+    || fail "watch loop did not report adopting the existing watcher: $(cat "$out")"
+
+  stop_loop "$loop_pid"
+  pass "watch loop adopts an existing healthy one-shot watcher"
+}
+
 test_loop_refuses_afk() {
   local dir state out status
   dir=$(make_case afk-refusal)
@@ -187,5 +266,6 @@ test_loop_yields_when_afk_appears() {
 
 test_loop_drains_signal_and_rearms
 test_loop_singleton_rejects_duplicate
+test_loop_adopts_existing_watcher
 test_loop_refuses_afk
 test_loop_yields_when_afk_appears
