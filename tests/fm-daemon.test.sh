@@ -803,6 +803,22 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
 # for the duration of that one call only, so these tests are deterministic
 # regardless of what runtime backend is running this test suite itself.
 
+make_herdr_agent_list_fakebin() {  # <dir> <agent-list-json-file>
+  local dir=$1 json=$2 fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "agent" ] && [ "${2:-}" = "list" ]; then
+  cat "${FM_FAKE_HERDR_AGENT_LIST:?FM_FAKE_HERDR_AGENT_LIST unset}"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
 test_discover_supervisor_backend_precedence() {
   local out
   out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
@@ -842,6 +858,86 @@ test_discover_supervisor_target_herdr() {
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+test_discover_supervisor_target_from_herdr_agent_list() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr agent-list discovery skipped without jq"; return; }
+  local dir json fakebin home out
+  dir=$(make_supercase herdr-agent-list-primary)
+  home="$dir/home"
+  json="$dir/agents.json"
+  mkdir -p "$home"
+  cat > "$json" <<JSON
+{"result":{"agents":[
+  {"agent":"codex","agent_status":"working","cwd":"$home/projects/Social","foreground_cwd":"/root/.treehouse/Social-452543/1/Social","pane_id":"w1:p9","focused":false},
+  {"agent":"codex","agent_status":"idle","cwd":"$home","foreground_cwd":"$home","pane_id":"w1:p1","focused":true}
+]}}
+JSON
+  fakebin=$(make_herdr_agent_list_fakebin "$dir" "$json")
+
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_HERDR_AGENT_LIST="$json" FM_HOME="$home" \
+    FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' \
+    discover_supervisor_target)
+  [ "$out" = "default:w1:p1" ] || fail "herdr agent-list discovery picked wrong target: $out"
+
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_HERDR_AGENT_LIST="$json" FM_HOME="$home" \
+    FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' \
+    discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "herdr agent-list discovery did not select herdr backend: $out"
+
+  pass "discover_supervisor_target: no env markers discovers the firstmate-home Codex pane from herdr agent list"
+}
+
+test_discover_supervisor_target_rejects_crewmate_paths() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr crewmate-path rejection skipped without jq"; return; }
+  local dir json fakebin home out
+  dir=$(make_supercase herdr-agent-list-crewmates)
+  home="$dir/home"
+  json="$dir/agents.json"
+  mkdir -p "$home"
+  cat > "$json" <<JSON
+{"result":{"agents":[
+  {"agent":"codex","agent_status":"idle","cwd":"$home/projects/Social","foreground_cwd":"$home/projects/Social","pane_id":"w1:p2","focused":true},
+  {"agent":"codex","agent_status":"working","cwd":"$home/projects/API","foreground_cwd":"/root/.treehouse/API-111111/1/API","pane_id":"w1:p3","focused":false},
+  {"agent":"claude","agent_status":"idle","cwd":"$home","foreground_cwd":"$home","pane_id":"w1:p4","focused":false}
+]}}
+JSON
+  fakebin=$(make_herdr_agent_list_fakebin "$dir" "$json")
+
+  if out=$(PATH="$fakebin:$PATH" FM_FAKE_HERDR_AGENT_LIST="$json" FM_HOME="$home" \
+    FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' \
+    discover_supervisor_target); then
+    fail "herdr agent-list discovery selected a crewmate or non-Codex pane: $out"
+  fi
+  [ "$out" = "firstmate:0" ] || fail "no safe herdr primary should preserve fallback output for caller failure handling: $out"
+
+  pass "discover_supervisor_target: crewmate project/treehouse panes are not selected"
+}
+
+test_daemon_startup_refuses_herdr_fleet_tmux_fallback() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr fallback refusal skipped without jq"; return; }
+  local dir json fakebin home err
+  dir=$(make_supercase herdr-agent-list-hard-fail)
+  home="$dir/home"
+  json="$dir/agents.json"
+  err="$dir/daemon.err"
+  mkdir -p "$home"
+  cat > "$json" <<JSON
+{"result":{"agents":[
+  {"agent":"codex","agent_status":"working","cwd":"$home/projects/Social","foreground_cwd":"/root/.treehouse/Social-452543/1/Social","pane_id":"w1:p9","focused":false}
+]}}
+JSON
+  fakebin=$(make_herdr_agent_list_fakebin "$dir" "$json")
+
+  if PATH="$fakebin:$PATH" FM_FAKE_HERDR_AGENT_LIST="$json" FM_HOME="$home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_SUPERVISOR_BACKEND='' FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    "$DAEMON" >/dev/null 2>"$err"; then
+    fail "daemon startup silently accepted tmux fallback in a herdr fleet"
+  fi
+  grep -F 'herdr appears active' "$err" >/dev/null \
+    || fail "daemon startup did not explain refused herdr fallback: $(cat "$err")"
+
+  pass "daemon startup refuses tmux firstmate:0 fallback when herdr has agents but no safe primary"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -1015,6 +1111,9 @@ test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_target_from_herdr_agent_list
+test_discover_supervisor_target_rejects_crewmate_paths
+test_daemon_startup_refuses_herdr_fleet_tmux_fallback
 test_pane_is_busy_herdr_native_busy_state
 test_pane_is_busy_herdr_falls_back_to_capture_regex
 test_pane_is_busy_herdr_idle_falls_back_to_capture_regex

@@ -59,8 +59,9 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
+#                                   $HERDR_PANE_ID under herdr, then a safe
+#                                   firstmate-home match from herdr's agent
+#                                   list, then firstmate:0 fallback). Accepts either a
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
@@ -274,6 +275,64 @@ _collapse_newlines() {  # <text>
   printf '%s' "$s"
 }
 
+_physical_dir() {  # <path>
+  ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+}
+
+herdr_agent_list_json() {  # [session]
+  local session=${1:-${HERDR_SESSION:-default}}
+  command -v herdr >/dev/null 2>&1 || return 1
+  herdr agent list --session "$session" 2>/dev/null
+}
+
+herdr_agent_list_has_agents() {  # [session]
+  command -v jq >/dev/null 2>&1 || return 1
+  herdr_agent_list_json "${1:-${HERDR_SESSION:-default}}" \
+    | jq -e '(.result.agents // []) | length > 0' >/dev/null 2>&1
+}
+
+# Discover a herdr supervisor pane from `herdr agent list` when this process no
+# longer carries HERDR_ENV/HERDR_PANE_ID. The safe match is deliberately narrow:
+# a registered Codex agent whose cwd or foreground_cwd is exactly this
+# firstmate home, excluding project and treehouse-worktree panes.
+discover_herdr_supervisor_target() {
+  local session=${HERDR_SESSION:-default} home physical_home agents pane
+  command -v jq >/dev/null 2>&1 || return 1
+  home=$FM_HOME
+  physical_home=$(_physical_dir "$home")
+  agents=$(herdr_agent_list_json "$session") || return 1
+  pane=$(printf '%s' "$agents" | jq -r \
+    --arg home "$home" \
+    --arg physical_home "$physical_home" '
+      def at_home($p):
+        ($p == $home) or ($p == $physical_home);
+      def under($p; $r):
+        ($p | type == "string") and ($r | length > 0) and
+        (($p == $r) or ($p | startswith($r + "/")));
+      def rejected($p):
+        (($p | type == "string") and
+          (under($p; $home + "/projects") or
+           under($p; $physical_home + "/projects") or
+           (($p | startswith("/root/.treehouse/")) and
+            ($p != $home) and ($p != $physical_home))));
+      [ .result.agents[]?
+        | select(.agent == "codex")
+        | select((.pane_id // "") != "")
+        | select((.agent_status // "") as $s
+          | ($s == "idle" or $s == "done" or $s == "blocked" or $s == "working"))
+        | select(at_home(.cwd // "") or at_home(.foreground_cwd // ""))
+        | select((rejected(.cwd // "") or rejected(.foreground_cwd // "")) | not)
+        | . + {score:
+            ((if at_home(.cwd // "") then 100 else 0 end) +
+             (if at_home(.foreground_cwd // "") then 100 else 0 end) +
+             (if (.focused // false) then 20 else 0 end) +
+             (if ((.agent_status // "") == "working") then 5 else 10 end))}
+      ]
+      | sort_by(.score) | reverse | .[0].pane_id // empty' 2>/dev/null)
+  [ -n "$pane" ] || return 1
+  printf '%s:%s' "$session" "$pane"
+}
+
 # Auto-discover the supervisor pane at startup. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) — caller passes it in;
 #      may be a tmux target or a herdr "<session>:<pane-id>" target (paired
@@ -287,7 +346,9 @@ _collapse_newlines() {  # <text>
 #      bin/backends/herdr.sh's fm_backend_herdr_session) and $HERDR_PANE_ID.
 #      Checked after $TMUX_PANE so a tmux pane nested inside herdr still
 #      resolves to tmux, matching fm_backend_detect's innermost-first rule.
-#   4. firstmate:0 — legacy tmux fallback (may not resolve if the session is
+#   4. herdr agent list - only when no env markers survived, selecting a safe
+#      Codex pane whose cwd or foreground_cwd is this firstmate home.
+#   5. firstmate:0 - legacy tmux fallback (may not resolve if the session is
 #      named differently). The caller logs a warning in that case.
 # Returns the resolved target on stdout; returns 1 if only the fallback is left
 # AND the fallback does not resolve to a live pane.
@@ -304,6 +365,9 @@ discover_supervisor_target() {
     printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
     return 0
   fi
+  if discover_herdr_supervisor_target; then
+    return 0
+  fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
   return 1
 }
@@ -315,7 +379,8 @@ discover_supervisor_target() {
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
 #   2. $TMUX_PANE set — tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) — herdr.
-#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) — matches the target fallback above.
+#   4. herdr agent list discovers a safe primary pane - herdr.
+#   5. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback above.
 # Returns the resolved backend on stdout; returns 1 if only the fallback is left.
 discover_supervisor_backend() {
   if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
@@ -327,6 +392,10 @@ discover_supervisor_backend() {
     return 0
   fi
   if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    printf 'herdr'
+    return 0
+  fi
+  if discover_herdr_supervisor_target >/dev/null 2>&1; then
     printf 'herdr'
     return 0
   fi
@@ -896,6 +965,8 @@ fm_super_main() {
       backend_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"
+    elif discover_herdr_supervisor_target >/dev/null 2>&1; then
+      backend_source="HERDR_AGENT_LIST"
     else
       backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
     fi
@@ -920,9 +991,10 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > a safe
+  # firstmate-home pane from `herdr agent list` > firstmate:0 fallback.
+  # Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg (which
+  # reads that env var) use the discovered pane without an extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
@@ -930,6 +1002,8 @@ fm_super_main() {
       target_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
+    elif discover_herdr_supervisor_target >/dev/null 2>&1; then
+      target_source="HERDR_AGENT_LIST"
     else
       target_source="FALLBACK(firstmate:0)"
     fi
@@ -937,6 +1011,15 @@ fm_super_main() {
   if discovered=$(discover_supervisor_target); then
     : # resolved cleanly
   else
+    if [ -z "${FM_SUPERVISOR_TARGET:-}" ] \
+       && [ -z "${TMUX_PANE:-}" ] \
+       && { [ "${HERDR_ENV:-}" = "1" ] || herdr_agent_list_has_agents; }; then
+      echo "error: herdr appears active, but no safe firstmate supervisor pane was discoverable from HERDR_PANE_ID or herdr agent list; refusing tmux fallback '$discovered'. Set FM_SUPERVISOR_BACKEND=herdr and FM_SUPERVISOR_TARGET=<session>:<pane-id> explicitly." >&2
+      log "startup failed: herdr active but no safe supervisor target discovered; refused fallback '$discovered'"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
     echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
   fi
   FM_SUPERVISOR_TARGET="$discovered"
