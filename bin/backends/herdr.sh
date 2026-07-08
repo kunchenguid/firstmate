@@ -680,7 +680,9 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# bash 3.2 and grep don't handle multi-byte UTF-8 in character classes correctly,
+# so use alternation instead of [❯›].
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed stripped="" found=0 shape=""
@@ -718,10 +720,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
   # Strip a leading prompt glyph before judging what remains.
-  case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
+  # bash 3.2 doesn't handle multi-byte UTF-8 in ${str#...} patterns,
+  # so use sed with hex escapes for ❯ (U+276F = E2 9D AF) and › (U+2023 = E2 80 BA).
+  stripped=$(printf '%s' "$stripped" | sed $'s/^\xE2\x9D\xAF //; s/^\xE2\x9D\xAF//; s/^\xE2\x80\xBA //; s/^\xE2\x80\xBA//; s/^[> $%#] //; s/^[> $%#]//')
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   [ -n "$stripped" ] || { printf 'empty'; return 0; }

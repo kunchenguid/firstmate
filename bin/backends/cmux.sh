@@ -557,10 +557,10 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   case "$stripped" in
     '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
-  case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
+  # Strip a leading prompt glyph before judging what remains.
+  # bash 3.2 doesn't handle multi-byte UTF-8 in ${str#...} patterns,
+  # so use sed with hex escapes for ❯ (U+276F = E2 9D AF in UTF-8).
+  stripped=$(printf '%s' "$stripped" | sed $'s/^\xE2\x9D\xAF //; s/^\xE2\x9D\xAF//; s/^[> $%#] //; s/^[> $%#]//')
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   [ -n "$stripped" ] || { printf 'empty'; return 0; }
