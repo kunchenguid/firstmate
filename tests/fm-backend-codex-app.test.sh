@@ -78,6 +78,10 @@ rl.on("line", line => {
     const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
     if (!omitCwd) result.cwd = cwd;
     write({ id, result });
+  } else if (msg.method === "thread/resume") {
+    const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
+    if (!omitCwd) result.cwd = cwd;
+    write({ id, result });
   } else if (msg.method === "thread/name/set" || msg.method === "thread/goal/set") {
     if (metadataFail) write({ id, error: { code: -32000, message: "metadata failed" } });
     else write({ id, result: {} });
@@ -217,7 +221,7 @@ process.stdin.on("end", () => {
 }
 
 test_bridge_start_thread_uses_app_server_stdio() {
-  local dir fb log prompt out thread_id cwd status log_before
+  local dir fb log prompt out thread_id cwd status log_before resume_line turn_line
   dir="$TMP_ROOT/bridge-start"
   mkdir -p "$dir/wt"
   log="$dir/codex.log"
@@ -244,7 +248,13 @@ test_bridge_start_thread_uses_app_server_stdio() {
     "$ROOT/bin/fm-codex-bridge" send-turn --thread-id "$thread_id" --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "bridge send-turn should start the initial turn after validation"
+  assert_contains "$(cat "$log")" $'request\tthread/resume\t' "bridge should resume one-shot threads before turn/start"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the initial turn"
+  resume_line=$(grep -n $'request\tthread/resume\t' "$log" | head -1 | cut -d: -f1)
+  turn_line=$(grep -n $'request\tturn/start\t' "$log" | head -1 | cut -d: -f1)
+  [ "$resume_line" -lt "$turn_line" ] || fail "bridge should resume the thread before turn/start"
+  assert_contains "$(cat "$log")" '"excludeTurns":true' "bridge resume should avoid loading full turns before send"
+  assert_contains "$(cat "$log")" '"sandbox":"danger-full-access"' "bridge resume should use the app-server sandbox string shape"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input"
   pass "fm-codex-bridge: start-thread normalizes thread cwd before send-turn starts the first turn"
 }
@@ -270,6 +280,7 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
     sleep 0.05
   done
   assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep app-server alive after the startup status line"
+  assert_contains "$(cat "$log")" $'request\tthread/resume\t' "bridge should resume the thread before startup turn"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
