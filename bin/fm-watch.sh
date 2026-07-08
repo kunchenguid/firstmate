@@ -478,6 +478,7 @@ while :; do
     signal_snapshot=$(printf '%s\n' "$pending" | signal_signature_snapshot)
     while :; do
       sleep "$SIGNAL_GRACE"
+      touch "$STATE/.last-watcher-beat"
       latest=$(scan_signals)
       [ -n "$latest" ] || break
       latest_snapshot=$(printf '%s\n' "$latest" | signal_signature_snapshot)

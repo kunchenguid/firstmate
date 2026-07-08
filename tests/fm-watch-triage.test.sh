@@ -800,6 +800,53 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+test_beacon_stays_fresh_during_signal_coalescing() {
+  local dir state fakebin out status_file turn_file pid writer i m age max_age
+  dir=$(make_case beacon-fresh-coalescing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  turn_file="$state/task.turn-ended"
+
+  (
+    i=0
+    while [ "$i" -lt 30 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    sleep 0.2
+    printf 'done: first status\n' > "$status_file"
+    sleep 0.7
+    printf 'done: refined status\n' >> "$status_file"
+    sleep 1.2
+    : > "$turn_file"
+  ) &
+  writer=$!
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_SIGNAL_COALESCE_MAX=4 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+
+  # While the coalescing burst is in flight, the beacon must never go stale -
+  # the inner grace-wait loop (bin/fm-watch.sh) touches it every SIGNAL_GRACE tick,
+  # not just once per outer iteration.
+  max_age=0
+  i=0
+  while [ "$i" -lt 25 ] && kill -0 "$pid" 2>/dev/null; do
+    if [ -e "$state/.last-watcher-beat" ]; then
+      m=$(file_mtime "$state/.last-watcher-beat")
+      age=$(( $(date +%s) - m ))
+      [ "$age" -gt "$max_age" ] && max_age=$age
+    fi
+    sleep 0.2
+    i=$((i + 1))
+  done
+
+  wait_for_exit "$pid" 80 || fail "watcher did not surface the coalesced signal burst: $(cat "$out")"
+  wait "$writer" || fail "signal burst writer failed"
+  [ "$max_age" -lt 3 ] || fail "beacon went stale (max observed age ${max_age}s) during signal coalescing"
+  pass "the liveness beacon stays fresh during the signal-coalescing grace-wait loop"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_present_reverts_watcher_to_one_shot() {
@@ -848,4 +895,5 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_secondmate_only_uses_slower_base
 test_heartbeat_ship_fleet_keeps_base_cadence
 test_beacon_stays_fresh_while_absorbing
+test_beacon_stays_fresh_during_signal_coalescing
 test_afk_present_reverts_watcher_to_one_shot
