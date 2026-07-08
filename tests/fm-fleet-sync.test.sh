@@ -26,8 +26,9 @@ HOME_N=0
 # new_home: fresh isolated FM_HOME with an empty projects/ dir. Each test gets its
 # own so the whole-fleet form never sees another test's clones.
 new_home() {
+  local h
   HOME_N=$((HOME_N + 1))
-  local h="$TMP_ROOT/home-$HOME_N"
+  h="$TMP_ROOT/home-$HOME_N-$RANDOM-$$"
   mkdir -p "$h/projects"
   printf '%s\n' "$h"
 }
@@ -62,6 +63,47 @@ build_pair() {
   printf '%s\n' "$clone"
 }
 
+build_external_pair() {
+  local home=$1 name=$2 work remote clone remote_abs clone_abs
+  work="$home/work-external-$name"
+  remote="$home/remotes/external-$name.git"
+  clone="$home/external/$name"
+  mkdir -p "$home/remotes" "$home/external"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/dev
+  commit_file "$work" file.txt v0 C0
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin dev
+
+  git clone --quiet "file://$remote_abs" "$clone"
+  git -C "$clone" checkout -q dev
+  clone_abs=$(cd "$clone" && pwd -P)
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "$name",
+      "canonicalPath": "$clone_abs",
+      "gitCommonDir": "$clone_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "no-mistakes",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+  printf '%s\n' "$clone"
+}
+
 # advance_origin <home> <name> <msg>: push one more commit to <name>'s origin via
 # its work repo, so the clone (until it fetches) is one commit behind origin/main.
 advance_origin() {
@@ -78,6 +120,18 @@ run_sync() {
   local home=$1
   shift
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+make_failing_jq() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf 'jq unavailable\n' >&2
+exit 127
+SH
+  chmod +x "$fakebin/jq"
+  printf '%s\n' "$fakebin"
 }
 
 # --- tests ------------------------------------------------------------------
@@ -256,6 +310,37 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_mode_resolution_failure_skips_without_syncing() {
+  local home clone out before fakebin
+  home=$(new_home)
+  clone=$(build_pair "$home" mode-fail)
+  advance_origin "$home" mode-fail C1
+  before=$(head_sha "$clone")
+  fakebin=$(make_failing_jq "$home/fake-jq")
+
+  out=$(PATH="$fakebin:$PATH" run_sync "$home")
+
+  assert_contains "$out" "mode-fail: skipped: project mode resolution failed" "mode resolver failure should skip the project"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "mode resolver failure still allowed fleet sync to move the clone"
+  pass "project mode resolution failures fail closed in fleet sync"
+}
+
+test_whole_fleet_list_failure_skips_without_syncing() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" list-fail)
+  advance_origin "$home" list-fail C1
+  before=$(head_sha "$clone")
+  mkdir -p "$home/data"
+  printf '{ not json\n' > "$home/data/projects.json"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "fleet: skipped: project registry list failed" "list resolver failure should abort whole-fleet sync"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "list resolver failure still allowed fleet sync to move a clone"
+  pass "whole-fleet registry list failures fail closed"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -320,6 +405,37 @@ test_single_project_unresolvable_name_still_skips() {
   pass "single-project form leaves a genuinely bad name unresolved"
 }
 
+test_single_project_by_registry_id_resolves_external_path() {
+  local home out
+  home=$(new_home)
+  build_external_pair "$home" flow >/dev/null
+  commit_file "$home/work-external-flow" file.txt C1 C1
+  git -C "$home/work-external-flow" push -q origin dev
+
+  out=$(run_sync "$home" "flow")
+
+  assert_contains "$out" "flow: synced" "bare project id resolves to registry external canonical path"
+  pass "single-project form accepts a registry-backed external project id"
+}
+
+test_single_project_by_explicit_path_does_not_borrow_registry_basename() {
+  local home clone other out
+  home=$(new_home)
+  build_external_pair "$home" flow >/dev/null
+  other=$(build_pair "$home" other-flow)
+  clone="$home/other/flow"
+  mkdir -p "$home/other"
+  mv "$other" "$clone"
+  clone=$(cd "$clone" && pwd -P)
+  advance_origin "$home" other-flow C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "$clone: synced" "explicit path with registry basename should sync as that path"
+  assert_not_contains "$out" "refs/remotes/origin/dev does not exist" "explicit path should not borrow the JSON project's base ref"
+  pass "single-project explicit paths do not borrow registry metadata by basename"
+}
+
 test_whole_fleet_form() {
   local home behind current out
   home=$(new_home)
@@ -334,6 +450,36 @@ test_whole_fleet_form() {
   assert_contains "$out" "fleet-current: already current" "whole-fleet form reports a current clone"
   : "$behind $current"
   pass "whole-fleet form processes every clone under projects/"
+}
+
+test_whole_fleet_form_uses_registry_external_paths() {
+  local home out
+  home=$(new_home)
+  build_external_pair "$home" flow >/dev/null
+  commit_file "$home/work-external-flow" file.txt C1 C1
+  git -C "$home/work-external-flow" push -q origin dev
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "flow: synced" "whole-fleet form should sync registry-backed external projects"
+  pass "whole-fleet form processes registry-backed external canonical paths"
+}
+
+test_bootstrap_syncs_json_only_external_projects_without_projects_dir() {
+  local home clone before after
+  home=$(new_home)
+  clone=$(build_external_pair "$home" flow)
+  rm -rf "$home/projects"
+  commit_file "$home/work-external-flow" file.txt C1 C1
+  git -C "$home/work-external-flow" push -q origin dev
+  before=$(git -C "$clone" rev-parse HEAD)
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>/dev/null
+
+  after=$(git -C "$clone" rev-parse HEAD)
+  [ "$after" != "$before" ] || fail "bootstrap did not refresh JSON-only external project"
+  [ "$after" = "$(git -C "$clone" rev-parse refs/remotes/origin/dev)" ] || fail "bootstrap did not fast-forward external project to origin/dev"
+  pass "bootstrap fleet sync handles JSON-only homes without a legacy projects directory"
 }
 
 test_bootstrap_relays_recovered_and_stuck() {
@@ -366,10 +512,16 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_mode_resolution_failure_skips_without_syncing
+test_whole_fleet_list_failure_skips_without_syncing
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
+test_single_project_by_registry_id_resolves_external_path
+test_single_project_by_explicit_path_does_not_borrow_registry_basename
 test_whole_fleet_form
+test_whole_fleet_form_uses_registry_external_paths
+test_bootstrap_syncs_json_only_external_projects_without_projects_dir
 test_bootstrap_relays_recovered_and_stuck

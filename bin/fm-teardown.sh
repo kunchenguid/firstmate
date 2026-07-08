@@ -11,7 +11,7 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in the default branch.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -109,9 +109,27 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+PROJECT_BASE_REF=$(grep '^project_base_ref=' "$META" | tail -1 | cut -d= -f2- || true)
 
 default_branch() {
-  local ref branch
+  local ref branch remote_ref
+  if [ -n "$PROJECT_BASE_REF" ]; then
+    case "$PROJECT_BASE_REF" in
+      refs/remotes/*)
+        remote_ref=${PROJECT_BASE_REF#refs/remotes/}
+        branch=${remote_ref#*/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+      refs/heads/*)
+        branch=${PROJECT_BASE_REF#refs/heads/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+      origin/*)
+        branch=${PROJECT_BASE_REF#origin/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+    esac
+  fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
@@ -283,9 +301,28 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree merged_tree remote_ref
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  if [ -n "$PROJECT_BASE_REF" ]; then
+    case "$PROJECT_BASE_REF" in
+      refs/remotes/origin/*)
+        remote_ref=${PROJECT_BASE_REF#refs/remotes/origin/}
+        git -C "$WT" fetch --quiet origin "+refs/heads/$remote_ref:refs/remotes/origin/$remote_ref" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$remote_ref"
+        ;;
+      origin/*)
+        remote_ref=${PROJECT_BASE_REF#origin/}
+        git -C "$WT" fetch --quiet origin "+refs/heads/$remote_ref:refs/remotes/origin/$remote_ref" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$remote_ref"
+        ;;
+      refs/heads/*)
+        ref="$PROJECT_BASE_REF"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  elif git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then

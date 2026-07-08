@@ -67,7 +67,8 @@ Its full implementation notes, app-server evidence, bridge contract, and known g
 
 ## Worktrees, not branches in your checkout
 
-Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, Orca creates its own worktrees for `backend=orca`, and codex-app creates guarded plain git worktrees under the effective Firstmate projects directory.
+Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, Orca creates its own worktrees for `backend=orca`, and codex-app creates guarded Firstmate-owned plain git worktrees under the effective Firstmate projects directory.
+Codex Desktop-managed worktrees under `$CODEX_HOME/worktrees` are discovered separately and are not canonical project clones.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
@@ -98,7 +99,7 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
+`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects from their resolver-backed canonical paths into it, preserves JSON-backed project policy in the child registry, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 On the herdr backend, a secondmate launch lands in that secondmate home's labeled workspace, and crewmates spawned from that home land in the same workspace.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
@@ -139,7 +140,8 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 
 ## Project modes are explicit
 
-`data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
+`data/projects.md` records each project's human-readable delivery mode and optional `+yolo` autonomy flag, while optional `data/projects.json` records machine-readable canonical paths, base refs, remotes, and policy metadata.
+Scripts consume those fields through `bin/fm-project-resolve.sh` rather than guessing from basename or `origin/HEAD`.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
@@ -192,9 +194,9 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 
 ## Local clones stay fresh
 
-The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
-Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
-Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh registered remote-backed project clones when the clone is safe to move.
+Wake-time refreshes can target a single clone by project id or path, so the primary home also catches up when a secondmate reports a merge from its own home.
+Clean default-branch clones fast-forward to the registered base ref or legacy `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.

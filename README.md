@@ -42,6 +42,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
 - **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, Orca terminal, or Codex Desktop thread you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, an Orca-managed worktree when `backend=orca`, or a guarded git worktree when `backend=codex-app`, so parallel work on one repo never collides.
+- **Registry-backed projects** - projects can live under firstmate's default `projects/` directory or in explicit external canonical checkouts recorded in local registry metadata.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
@@ -69,7 +70,7 @@ Then just talk:
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in the active backend
+# registers or clones the project, then spawns two crewmates in the active backend
 # fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
@@ -89,7 +90,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
                   ▼
  ┌─────────────────────────────────────┐
  │ firstmate            (this repo)    │
- │ reads projects/ + firstmate routes  │
+ │ reads project registry + routes     │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
     │ backend sends / status files │

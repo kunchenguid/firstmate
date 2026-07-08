@@ -17,6 +17,9 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
+#       Project sources are resolved through fm-project-resolve.sh, so a parent
+#       data/projects.json can seed an external canonical checkout into the child
+#       home's projects/ directory and preserve its JSON-backed base ref and policy.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -30,7 +33,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
@@ -378,7 +380,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/projects.json" "data/charter.md" "$SUB_HOME_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -450,6 +452,11 @@ source_origin_url() {
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
   normalize_origin_url "$src" "$url"
+}
+
+project_source_path() {
+  local project=$1
+  "$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$project"
 }
 
 seeded_origin_url() {
@@ -530,7 +537,7 @@ EOF
 
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src="$PROJECTS/$project"
+  src=$(project_source_path "$project") || return 1
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -550,15 +557,67 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
+    validate_seeded_registry_base "$project" "$dst" || return 1
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  checkout_seeded_registry_base "$project" "$dst"
+}
+
+validate_seeded_registry_base() {
+  local project=$1 dst=$2 resolved source default_branch base_ref expected current_branch branch_head current_head
+  resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" "$project") || return 1
+  source=$(printf '%s\n' "$resolved" | jq -r '.source // empty') || return 1
+  [ "$source" = json ] || return 0
+  default_branch=$(printf '%s\n' "$resolved" | jq -r '.default_branch // empty') || return 1
+  base_ref=$(printf '%s\n' "$resolved" | jq -r '.base_ref // empty') || return 1
+  [ -n "$default_branch" ] || { echo "error: project $project resolved without defaultBranch" >&2; return 1; }
+  [ -n "$base_ref" ] || { echo "error: project $project resolved without baseRef" >&2; return 1; }
+  expected=$(git -C "$dst" rev-parse --verify --quiet "$base_ref^{commit}") || {
+    echo "error: seeded project $project at $dst is missing registered baseRef $base_ref" >&2
+    return 1
+  }
+  current_branch=$(git -C "$dst" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ "$current_branch" = "$default_branch" ] || {
+    echo "error: seeded project $project at $dst is on ${current_branch:-detached HEAD}; expected $default_branch at registered baseRef $base_ref" >&2
+    return 1
+  }
+  branch_head=$(git -C "$dst" rev-parse --verify --quiet "refs/heads/$default_branch^{commit}") || {
+    echo "error: seeded project $project at $dst is missing default branch $default_branch for registered baseRef $base_ref" >&2
+    return 1
+  }
+  [ "$branch_head" = "$expected" ] || {
+    echo "error: seeded project $project at $dst branch $default_branch does not match registered baseRef $base_ref" >&2
+    return 1
+  }
+  current_head=$(git -C "$dst" rev-parse --verify --quiet 'HEAD^{commit}') || return 1
+  [ "$current_head" = "$expected" ] || {
+    echo "error: seeded project $project at $dst HEAD does not match registered baseRef $base_ref" >&2
+    return 1
+  }
+}
+
+checkout_seeded_registry_base() {
+  local project=$1 dst=$2 resolved source default_branch base_ref
+  resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" "$project") || return 1
+  source=$(printf '%s\n' "$resolved" | jq -r '.source // empty') || return 1
+  [ "$source" = json ] || return 0
+  default_branch=$(printf '%s\n' "$resolved" | jq -r '.default_branch // empty') || return 1
+  base_ref=$(printf '%s\n' "$resolved" | jq -r '.base_ref // empty') || return 1
+  [ -n "$default_branch" ] || { echo "error: project $project resolved without defaultBranch" >&2; return 1; }
+  [ -n "$base_ref" ] || { echo "error: project $project resolved without baseRef" >&2; return 1; }
+  git -C "$dst" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null || {
+    echo "error: seeded project $project at $dst is missing registered baseRef $base_ref" >&2
+    return 1
+  }
+  git -C "$dst" checkout -q -B "$default_branch" "$base_ref" || return 1
+  git -C "$dst" branch --set-upstream-to="$base_ref" "$default_branch" >/dev/null 2>&1 || true
 }
 
 validate_seed_project() {
   local project=$1 src mode url
-  src="$PROJECTS/$project"
+  src=$(project_source_path "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
@@ -585,6 +644,7 @@ SEED_PARENT_BRIEF=
 SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
+SEED_SUB_JSON_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
 
@@ -708,6 +768,7 @@ seed_rollback() {
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
+        restore_seed_file "$SEED_SUB_JSON_EXISTED" "$SEED_BACKUP_DIR/sub-projects.json" "$SEED_HOME/data/projects.json"
       fi
     fi
   fi
@@ -726,6 +787,35 @@ registry_line_for_project() {
   printf '%s\n' "$line"
 }
 
+resolved_registry_line_for_project() {
+  local project=$1 today mode yolo policy line rest
+  today=$(date +%F)
+  mode=$("$SCRIPT_DIR/fm-project-resolve.sh" --field mode "$project") || return 1
+  yolo=$("$SCRIPT_DIR/fm-project-resolve.sh" --field yolo "$project") || return 1
+  case "$mode" in no-mistakes|direct-PR|local-only) ;; *) mode=no-mistakes; yolo=off ;; esac
+  case "$yolo" in on|off) ;; *) yolo=off ;; esac
+  policy=
+  if [ "$mode" != no-mistakes ] || [ "$yolo" = on ]; then
+    policy=" [$mode"
+    [ "$yolo" != on ] || policy="$policy +yolo"
+    policy="$policy]"
+  fi
+  line=$(registry_line_for_project "$project" || true)
+  if [ -n "$line" ]; then
+    rest=${line#"- $project"}
+    case "$rest" in
+      " ["*"] - "*) rest=${rest#*]} ;;
+    esac
+    case "$rest" in
+      " - "*) ;;
+      *) rest=" - cloned project (added $today)" ;;
+    esac
+    printf -- '- %s%s%s\n' "$project" "$policy" "$rest"
+    return 0
+  fi
+  printf -- '- %s%s - cloned project (added %s)\n' "$project" "$policy" "$today"
+}
+
 project_mode_in_home() {
   local home=$1 project=$2 mode
   read -r mode _ <<EOF
@@ -735,7 +825,7 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
+  local home=$1 sub_reg tmp project line names
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
@@ -751,15 +841,99 @@ sync_project_registry() {
   else
     : > "$tmp"
   fi
-  today=$(date +%F)
   for project in "$@"; do
-    line=$(registry_line_for_project "$project" || true)
-    if [ -z "$line" ]; then
-      line="- $project - cloned project (added $today)"
-    fi
+    line=$(resolved_registry_line_for_project "$project")
     printf '%s\n' "$line" >> "$tmp"
   done
   mv "$tmp" "$sub_reg"
+}
+
+resolved_registry_json_entry_for_project() {
+  local home=$1 project=$2 resolved source project_id dst canonical common origin fork default_branch base_ref mode yolo yolo_json worktree_policy
+  resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" "$project") || return 1
+  source=$(printf '%s\n' "$resolved" | jq -r '.source // empty') || return 1
+  [ "$source" = json ] || return 2
+  project_id=$(printf '%s\n' "$resolved" | jq -r '.project_id // empty') || return 1
+  [ -n "$project_id" ] || { echo "error: project $project resolved without project_id" >&2; return 1; }
+  dst=$(validate_project_destination "$home" "$project") || return 1
+  canonical=$(cd "$dst" && pwd -P) || { echo "error: seeded project $project destination is not a directory: $dst" >&2; return 1; }
+  common=$(git -C "$canonical" rev-parse --git-common-dir 2>/dev/null) || { echo "error: seeded project $project at $canonical is not a git repo" >&2; return 1; }
+  case "$common" in
+    /*) ;;
+    *) common="$canonical/$common" ;;
+  esac
+  common=$(cd "$common" && pwd -P) || { echo "error: seeded project $project git common dir cannot be resolved: $common" >&2; return 1; }
+  origin=$(git -C "$canonical" remote get-url origin 2>/dev/null || true)
+  [ -z "$origin" ] || origin=$(normalize_origin_url "$canonical" "$origin")
+  fork=$(printf '%s\n' "$resolved" | jq -r '.fork // empty') || return 1
+  default_branch=$(printf '%s\n' "$resolved" | jq -r '.default_branch // empty') || return 1
+  base_ref=$(printf '%s\n' "$resolved" | jq -r '.base_ref // empty') || return 1
+  mode=$(printf '%s\n' "$resolved" | jq -r '.mode // empty') || return 1
+  yolo=$(printf '%s\n' "$resolved" | jq -r '.yolo // empty') || return 1
+  worktree_policy=$(printf '%s\n' "$resolved" | jq -r '.worktree_policy // "firstmate-owned"') || return 1
+  [ -n "$default_branch" ] || { echo "error: project $project resolved without defaultBranch" >&2; return 1; }
+  [ -n "$base_ref" ] || { echo "error: project $project resolved without baseRef" >&2; return 1; }
+  case "$mode" in no-mistakes|direct-PR|local-only) ;; *) echo "error: project $project resolved with invalid mode: $mode" >&2; return 1 ;; esac
+  case "$yolo" in
+    on) yolo_json=true ;;
+    off) yolo_json=false ;;
+    *) echo "error: project $project resolved with invalid yolo: $yolo" >&2; return 1 ;;
+  esac
+  jq -n \
+    --arg project_id "$project_id" \
+    --arg canonical_path "$canonical" \
+    --arg git_common_dir "$common" \
+    --arg origin "$origin" \
+    --arg fork "$fork" \
+    --arg default_branch "$default_branch" \
+    --arg base_ref "$base_ref" \
+    --arg mode "$mode" \
+    --argjson yolo "$yolo_json" \
+    --arg worktree_policy "$worktree_policy" \
+    '{
+      projectId: $project_id,
+      canonicalPath: $canonical_path,
+      gitCommonDir: $git_common_dir,
+      remotes: { origin: $origin, fork: $fork },
+      defaultBranch: $default_branch,
+      baseRef: $base_ref,
+      mode: $mode,
+      yolo: $yolo,
+      worktreePolicy: $worktree_policy
+    }'
+}
+
+sync_project_json_registry() {
+  local home=$1 child_json tmp project entry status ids new_entries new_json
+  shift
+  ids=$(jq -n '$ARGS.positional' --args "$@") || return 1
+  new_entries=
+  for project in "$@"; do
+    if entry=$(resolved_registry_json_entry_for_project "$home" "$project"); then
+      new_entries="${new_entries}${new_entries:+,}$entry"
+    else
+      status=$?
+      [ "$status" -eq 2 ] && continue
+      return "$status"
+    fi
+  done
+  new_json="[]"
+  [ -z "$new_entries" ] || new_json="[$new_entries]"
+  child_json="$home/data/projects.json"
+  tmp="$child_json.tmp.$$"
+  if [ -f "$child_json" ]; then
+    jq --argjson ids "$ids" --argjson new "$new_json" '
+      if type != "object" then error("projects.json must be an object") else
+        (.projects // []) as $existing
+        | .schemaVersion = (.schemaVersion // 1)
+        | .projects = (($existing | map(select((.projectId // "") as $id | ($ids | index($id) | not)))) + $new)
+      end
+    ' "$child_json" > "$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    [ "$new_json" != "[]" ] || return 0
+    jq -n --argjson new "$new_json" '{ schemaVersion: 1, projects: $new }' > "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  mv "$tmp" "$child_json"
 }
 
 initialize_no_mistakes_project() {
@@ -826,6 +1000,7 @@ seed_home() {
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
+  SEED_SUB_JSON_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
   trap seed_rollback EXIT
@@ -856,6 +1031,10 @@ seed_home() {
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
+  fi
+  if [ -f "$home/data/projects.json" ]; then
+    SEED_SUB_JSON_EXISTED=1
+    cp "$home/data/projects.json" "$SEED_BACKUP_DIR/sub-projects.json"
   fi
   if [ -f "$home/data/charter.md" ]; then
     SEED_CHARTER_EXISTED=1
@@ -897,6 +1076,7 @@ seed_home() {
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
+  sync_project_json_registry "$home" "$@"
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     if seed_project_was_created "$project_dst"; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-id-or-path> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -16,8 +16,9 @@
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
+#   herdr, zellij, orca, cmux, and codex-app. Orca owns both the task worktree and
+#   terminal, so ship/scout Orca spawns do not run treehouse get; codex-app owns
+#   the visible Codex Desktop thread and uses a guarded plain git worktree; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawns print a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected
@@ -56,7 +57,7 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-# Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
+# Batch dispatch: pass one or more `id=project` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
@@ -74,7 +75,8 @@
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
-# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
+# mode/yolo are resolved per-project through fm-project-resolve.sh for ship/scout tasks;
+# JSON-backed projects also record project_id= and project_base_ref= in meta;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
@@ -241,6 +243,8 @@ codex_app_write_abort_meta() {
     echo "window=${CODEX_THREAD_ID:-$W}"
     echo "worktree=${WT:-}"
     echo "project=${PROJ_ABS:-}"
+    [ -z "${PROJECT_ID:-}" ] || echo "project_id=$PROJECT_ID"
+    [ -z "${PROJECT_BASE_REF:-}" ] || echo "project_base_ref=$PROJECT_BASE_REF"
     echo "harness=${HARNESS:-codex}"
     echo "kind=$KIND"
     echo "mode=${MODE:-no-mistakes}"
@@ -317,7 +321,7 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
+# Batch dispatch (see header): when the first positional is an `id=project` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
@@ -719,7 +723,17 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJECT_SHELL=$("$SCRIPT_DIR/fm-project-resolve.sh" --shell "$PROJ")
+  eval "$PROJECT_SHELL"
+  PROJECT_ID=${fm_project_project_id:-}
+  PROJECT_SOURCE=${fm_project_source:-}
+  PROJECT_BASE_REF=${fm_project_base_ref:-}
+  if [ "$PROJECT_SOURCE" != json ]; then
+    PROJECT_BASE_REF=
+  fi
+  PROJ_RESOLVED=${fm_project_canonical_path:-}
+  [ -n "$PROJ_RESOLVED" ] || { echo "error: project resolver returned empty canonical path for $PROJ" >&2; exit 1; }
+  PROJ_ABS="$(cd "$PROJ_RESOLVED" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -786,17 +800,25 @@ codex_app_create_git_worktree() {
     echo "error: codex-app task branch already exists: $branch" >&2
     exit 1
   fi
-  default=$(default_branch "$PROJ_ABS") || {
-    echo "error: cannot determine default branch for codex-app task $ID; expected origin/HEAD, main, or master" >&2
-    exit 1
-  }
-  base_ref="refs/remotes/origin/$default"
-  if ! base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null); then
-    base_ref="refs/heads/$default"
+  if [ -n "${PROJECT_BASE_REF:-}" ]; then
+    base_ref=$PROJECT_BASE_REF
     base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null) || {
-      echo "error: codex-app default branch '$default' cannot be resolved to a verified local commit for task $ID" >&2
+      echo "error: codex-app registered base ref '$base_ref' cannot be resolved to a verified local commit for task $ID" >&2
       exit 1
     }
+  else
+    default=$(default_branch "$PROJ_ABS") || {
+      echo "error: cannot determine default branch for codex-app task $ID; expected origin/HEAD, main, or master" >&2
+      exit 1
+    }
+    base_ref="refs/remotes/origin/$default"
+    if ! base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null); then
+      base_ref="refs/heads/$default"
+      base=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null) || {
+        echo "error: codex-app default branch '$default' cannot be resolved to a verified local commit for task $ID" >&2
+        exit 1
+      }
+    fi
   fi
   CODEX_WORKTREE_BASE=$base
   CODEX_WORKTREE_BASE_REF=$base_ref
@@ -1179,10 +1201,8 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
+  MODE=${fm_project_mode:-no-mistakes}
+  YOLO=${fm_project_yolo:-off}
 fi
 
 if [ "$BACKEND" = codex-app ]; then
@@ -1196,6 +1216,8 @@ META_WINDOW=$T
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "${PROJECT_ID:-}" ] || echo "project_id=$PROJECT_ID"
+  [ -z "${PROJECT_BASE_REF:-}" ] || echo "project_base_ref=$PROJECT_BASE_REF"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"

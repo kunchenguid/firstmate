@@ -18,12 +18,12 @@
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
+# (the project registry via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                firstmate reviews, captain approves, firstmate merges to local main
+#                firstmate reviews, captain approves, firstmate merges to the local default branch
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
@@ -128,6 +128,16 @@ fi
 
 REPO=${POS[1]}
 
+project_default_branch() {
+  local repo=$1 branch
+  branch=$("$FM_ROOT/bin/fm-project-resolve.sh" --field default_branch "$repo") || return 1
+  if [ -n "$branch" ]; then
+    printf '%s\n' "$branch"
+  else
+    printf '%s\n' main
+  fi
+}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -185,15 +195,16 @@ EOF
 )
     ;;
   local-only)
+    LOCAL_DEFAULT=$(project_default_branch "$REPO")
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$LOCAL_DEFAULT\`."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto the current default branch - if \`$LOCAL_DEFAULT\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
+Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`$LOCAL_DEFAULT\`.
 EOF
 )
     ;;

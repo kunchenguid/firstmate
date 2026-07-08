@@ -5,6 +5,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
+#                 "PROJECT_REGISTRY: invalid data/projects.json - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -38,7 +39,7 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
-#          Fleet sync fetches, fast-forwards safe default-branch states, reports
+#          Fleet sync fetches, fast-forwards safe registered/default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, default 20s.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -58,9 +59,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
@@ -76,7 +77,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
   monitor_was_on=0
@@ -189,9 +189,9 @@ install_cmd() {
 
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
-  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
-  codex-app) TOOLS="codex node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  orca) TOOLS="orca node gh jq no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  codex-app) TOOLS="codex node gh jq no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  *) TOOLS="tmux node gh jq treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
@@ -210,6 +210,10 @@ tool_required() {
     *" $1 "*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+first_line() {
+  printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
 no_mistakes_version_parts() {
@@ -337,7 +341,6 @@ crew_dispatch_validate() {
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
-    echo "MISSING: jq (install: $(install_cmd jq))"
     return 0
   fi
   if ! jq -e . "$file" >/dev/null 2>&1; then
@@ -398,6 +401,23 @@ crew_dispatch_validate() {
   ' "$file"
 }
 
+project_registry_validate() {
+  local file err
+  file="$DATA/projects.json"
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    echo "PROJECT_REGISTRY: invalid data/projects.json - malformed JSON"
+    return 0
+  fi
+  err=$("$SCRIPT_DIR/fm-project-resolve.sh" --list 2>&1 >/dev/null || true)
+  if [ -n "$err" ]; then
+    echo "PROJECT_REGISTRY: invalid data/projects.json - $(first_line "$err")"
+  fi
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -438,6 +458,7 @@ fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
+project_registry_validate
 crew_dispatch_validate
 if ! fm_backlog_backend_manual "$CONFIG"; then
   if fm_tasks_axi_compatible; then

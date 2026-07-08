@@ -113,6 +113,12 @@ make_case() {  # <name> <id> -> echoes case dir
 run_spawn_case() {  # <case-dir> <id> [extra args...]
   local case_dir=$1 id=$2
   shift 2
+  run_spawn_case_project "$case_dir" "$id" projects/app "$@"
+}
+
+run_spawn_case_project() {  # <case-dir> <id> <project-arg> [extra args...]
+  local case_dir=$1 id=$2 project_arg=$3
+  shift 3
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/home/state" \
@@ -123,7 +129,7 @@ run_spawn_case() {  # <case-dir> <id> [extra args...]
   FM_FAKE_BRIDGE_LOG="$case_dir/bridge.log" \
   FM_FAKE_BRIDGE_STATUS_FILE="$case_dir/home/state/$id.status" \
   FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$id" projects/app codex --backend codex-app "$@"
+    "$SPAWN" "$id" "$project_arg" codex --backend codex-app "$@"
 }
 
 run_teardown_case() {  # <case-dir> <id> [extra args...]
@@ -220,6 +226,104 @@ test_spawn_codex_app_uses_default_branch_when_project_on_feature() {
   [ "$(git -C "$wt" rev-parse HEAD)" != "$feature_head" ] || fail "codex-app worktree stacked on feature HEAD"
   assert_absent "$wt/feature.txt" "codex-app worktree should not include feature-only files"
   pass "fm-spawn.sh --backend codex-app: uses the default branch commit instead of feature HEAD"
+}
+
+test_spawn_codex_app_uses_registry_base_ref_for_external_project() {
+  local id case_dir work remote project remote_abs project_abs base_head feature_head out status meta wt log
+  id=codex-external-base-x13
+  case_dir=$(make_case external-base "$id")
+  work="$case_dir/work-flow"
+  remote="$case_dir/flow.git"
+  project="$case_dir/external/flow"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/dev
+  printf '# flow\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-dev
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd -P)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin dev
+  mkdir -p "$case_dir/external"
+  git clone --quiet "file://$remote_abs" "$project"
+  git -C "$project" checkout -q dev
+  project_abs=$(cd "$project" && pwd -P)
+  base_head=$(git -C "$project_abs" rev-parse refs/remotes/origin/dev)
+  git -C "$project_abs" checkout -q -b RA/dirty-flow-work
+  printf 'feature work\n' > "$project_abs/feature.txt"
+  git -C "$project_abs" add feature.txt
+  git -C "$project_abs" commit -q -m feature-work
+  feature_head=$(git -C "$project_abs" rev-parse HEAD)
+  printf 'dirty local edit\n' > "$project_abs/dirty.txt"
+  cat > "$case_dir/home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$project_abs",
+      "gitCommonDir": "$project_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "no-mistakes",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_FAKE_BRIDGE_WRITE_STATUS=1 run_spawn_case_project "$case_dir" "$id" flow 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex-app spawn should use registry base ref for external project: $out"
+  meta="$case_dir/home/state/$id.meta"
+  wt=$(meta_value "$meta" worktree)
+  [ "$(meta_value "$meta" project_id)" = flow ] || fail "meta should record stable project_id=flow"
+  [ "$(meta_value "$meta" project_base_ref)" = "refs/remotes/origin/dev" ] || fail "meta should record the registry base ref"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$base_head" ] || fail "codex-app worktree should start from registry origin/dev"
+  [ "$(git -C "$wt" rev-parse HEAD)" != "$feature_head" ] || fail "codex-app worktree stacked on feature HEAD"
+  assert_absent "$wt/feature.txt" "registry-based worktree should not include feature-only commits"
+  assert_absent "$wt/dirty.txt" "registry-based worktree should not copy dirty canonical checkout files"
+  log=$(cat "$case_dir/bridge.log")
+  assert_contains "$log" $'start-thread\x1f--cwd\x1f' "spawn should start Codex in the registry-based worktree"
+  pass "fm-spawn.sh --backend codex-app: external registry projects start from explicit baseRef, never dirty feature HEAD"
+}
+
+test_spawn_codex_app_abort_meta_records_registry_base_ref() {
+  local id case_dir project project_abs branch out status meta
+  id=codex-abort-base-x14
+  case_dir=$(make_case abort-base "$id")
+  project="$case_dir/home/projects/app"
+  project_abs=$(cd "$project" && pwd -P)
+  branch=$(git -C "$project_abs" symbolic-ref --short HEAD)
+  cat > "$case_dir/home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "app",
+      "canonicalPath": "$project_abs",
+      "gitCommonDir": "$project_abs/.git",
+      "defaultBranch": "$branch",
+      "baseRef": "refs/heads/$branch",
+      "mode": "no-mistakes",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(FM_FAKE_BRIDGE_WRITE_OTHER_STATUS=1 FM_FAKE_BRIDGE_ARCHIVE_FAIL=1 FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 run_spawn_case_project "$case_dir" "$id" app 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail when registry-backed startup cleanup cannot archive"
+  assert_contains "$out" "startup cleanup failed to archive thread thread-spawn-123" "abort should explain preserved registry-backed startup resources"
+  meta="$case_dir/home/state/$id.meta"
+  assert_present "$meta" "registry-backed abort should write recovery metadata"
+  [ "$(meta_value "$meta" project_base_ref)" = "refs/heads/$branch" ] || fail "abort meta should record the registry project_base_ref"
+  [ "$(meta_value "$meta" worktree_base_ref)" = "refs/heads/$branch" ] || fail "abort meta should retain the worktree base ref"
+  pass "fm-spawn.sh --backend codex-app: abort metadata preserves registry base ref"
 }
 
 test_spawn_codex_app_refuses_without_verifiable_default_branch() {
@@ -467,6 +571,8 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 
 test_spawn_codex_app_records_thread_and_worktree
 test_spawn_codex_app_uses_default_branch_when_project_on_feature
+test_spawn_codex_app_uses_registry_base_ref_for_external_project
+test_spawn_codex_app_abort_meta_records_registry_base_ref
 test_spawn_codex_app_refuses_without_verifiable_default_branch
 test_send_codex_app_uses_recorded_task_gotmpdir
 test_send_codex_app_uses_recorded_task_cwd
