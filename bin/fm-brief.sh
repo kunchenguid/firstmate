@@ -183,21 +183,42 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Visual-evidence section, shared by the two PR-producing modes (no-mistakes and
+# direct-PR). Built with a quoted heredoc so backticks and env-var names stay
+# literal and no apostrophe can break `bash -n` (issue #166). The leading and
+# trailing newlines give clean spacing when it is spliced into the brief; an
+# empty EVIDENCE (local-only, which has no PR) collapses to a single blank line.
+# local-only has no remote or PR, and scout produces a report, so neither carries it.
+EVIDENCE_SECTION=$'\n'"$(cat <<'EOF'
+# Visual evidence
+When your change affects something a person can see or run - a UI, a web page, a rendered output, or a visible CLI behavior - attach visual evidence to the PR so the reviewer can see it working. This is additive to the normal flow.
+Judge the surface the way the `verify` skill would: is there a runtime surface a human could actually look at? A pure backend, library, or internal change with no observable surface has no meaningful visual - skip evidence, note "no user-visible surface" in a one-line PR comment, and you are done with this step.
+When there is a visible surface, once the PR exists:
+1. Drive the surface and capture the key states as screenshots with `chrome-devtools-axi screenshot <path>` (before and after, for a change to existing UI). A short screen recording is best-effort: attach a short clip only when you have a working screen-capture tool and a headless-capturable surface; otherwise a sequence of screenshots that walks through the change stands in for the recording.
+2. Upload the artifacts with gh-image, a `gh` extension: `gh image <file>... --repo <owner>/<repo>`. It prints a Markdown image reference per image and a bare URL per video, which GitHub renders as an inline player.
+   gh-image needs a GitHub web session token. Its default browser-cookie auth can HANG in a headless shell, so prefer the `GH_SESSION_TOKEN` environment variable when it is set, and always run gh-image under a timeout, for example `timeout 60 gh image ...`. If gh-image is not installed, or cannot authenticate within the timeout, skip the upload and note in a one-line PR comment that evidence was captured but could not be attached.
+3. Post the uploaded references as a PR comment with `gh-axi pr comment <n> --repo <owner>/<repo> --body "<evidence>"`.
+This step must never block, delay, or fail the PR. On any tooling failure, skip gracefully with a one-line PR comment and finish.
+EOF
+)"$'\n'
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    EVIDENCE="$EVIDENCE_SECTION"
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, complete the Visual evidence step above against that PR, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
     ;;
   local-only)
     SETUP2=""
+    EVIDENCE=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
 # Definition of done
@@ -212,6 +233,7 @@ EOF
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    EVIDENCE="$EVIDENCE_SECTION"
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -228,6 +250,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
+Once /no-mistakes has opened the PR, complete the Visual evidence step above against that PR.
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
@@ -270,7 +293,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
+$EVIDENCE
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

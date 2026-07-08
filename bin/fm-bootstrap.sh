@@ -39,6 +39,10 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          gh-image (a gh extension used by crewmates to attach visual PR
+#          evidence) is reported MISSING when gh is present but the extension is
+#          not installed; it is offered like any other tool and never blocks work
+#          because the brief's evidence flow degrades gracefully when it is absent.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -314,6 +318,7 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    gh-image) echo "gh extension install drogers0/gh-image" ;;
     *) return 1 ;;
   esac
 }
@@ -559,6 +564,15 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+# gh-image is a `gh` extension (not a PATH binary), so it needs its own probe
+# rather than a spot in TOOLS. Crewmates use it to attach visual PR evidence
+# (screenshots, recordings; see bin/fm-brief.sh and docs/gh-image-evidence.md).
+# Offered like any other tool; the brief's evidence flow degrades gracefully when
+# it is absent, so a declined install never blocks work. Gated on gh being present
+# because the extension list needs it; if gh is missing that is already reported.
+if command -v gh >/dev/null 2>&1 && ! gh extension list 2>/dev/null | grep -q 'drogers0/gh-image'; then
+  echo "MISSING: gh-image (install: $(install_cmd gh-image))"
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

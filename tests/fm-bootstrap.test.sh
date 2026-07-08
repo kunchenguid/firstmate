@@ -31,6 +31,14 @@ make_fake_toolchain() {
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
   exit 0
 fi
+# gh-image is a gh extension; the healthy fixture reports it installed so
+# bootstrap stays silent. FM_FAKE_GH_IMAGE=0 simulates it not being installed.
+if [ "${1:-}" = extension ] && [ "${2:-}" = list ]; then
+  if [ "${FM_FAKE_GH_IMAGE:-1}" != 0 ]; then
+    printf '%s\t%s\t%s\n' 'gh image' 'drogers0/gh-image' 'v1.1.0'
+  fi
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
@@ -291,6 +299,30 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_gh_image_extension_detection() {
+  local case_dir fakebin out missing
+  missing="MISSING: gh-image (install: gh extension install drogers0/gh-image)"
+
+  # Installed extension: bootstrap stays silent about gh-image.
+  case_dir="$TMP_ROOT/gh-image-present"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: gh-image" "installed gh-image extension should not be reported missing"
+
+  # Extension not installed: bootstrap offers it via the MISSING contract.
+  case_dir="$TMP_ROOT/gh-image-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_IMAGE=0 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -Fx "$missing" >/dev/null || fail "absent gh-image should report '$missing' (got: $out)"
+  pass "bootstrap offers gh-image via the MISSING contract only when the gh extension is absent"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out expected
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -436,6 +468,7 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_gh_image_extension_detection
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

@@ -93,7 +93,50 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The visual-evidence step belongs only to the two PR-producing ship modes.
+# local-only has no remote or PR to attach to, and scout produces a report, so
+# neither carries it; both PR modes reference it from their definition of done.
+test_visual_evidence_section() {
+  local home id brief
+  home="$TMP_ROOT/evidence-home"
+  write_registry "$home"
+
+  # no-mistakes: section present, referenced by the DOD, gh-image + graceful skip.
+  id="brief-evidence-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Visual evidence" "$brief" "no-mistakes brief missing the Visual evidence section"
+  assert_grep "gh image <file>... --repo <owner>/<repo>" "$brief" \
+    "no-mistakes evidence section lost the gh-image upload command"
+  assert_grep "must never block, delay, or fail the PR" "$brief" \
+    "no-mistakes evidence section lost its graceful-degradation guarantee"
+  assert_grep "complete the Visual evidence step above" "$brief" \
+    "no-mistakes DOD does not reference the Visual evidence step"
+
+  # direct-PR: section present and referenced by the DOD.
+  id="brief-evidence-dp"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Visual evidence" "$brief" "direct-PR brief missing the Visual evidence section"
+  assert_grep "complete the Visual evidence step above" "$brief" \
+    "direct-PR DOD does not reference the Visual evidence step"
+
+  # local-only: no PR, so no evidence section.
+  id="brief-evidence-lo"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Visual evidence" "$brief" "local-only brief must not carry the Visual evidence section"
+
+  # scout: report deliverable, no PR, no evidence section.
+  id="brief-evidence-sc"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Visual evidence" "$brief" "scout brief must not carry the Visual evidence section"
+  pass "fm-brief.sh: Visual evidence rides the PR-producing ship modes only"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_visual_evidence_section
