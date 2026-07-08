@@ -49,6 +49,27 @@ write_json_registry() {
 EOF
 }
 
+write_json_registry_base_ref() {
+  local home=$1 id=$2 path=$3 default_branch=$4 base_ref=$5
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "$id",
+      "canonicalPath": "$path",
+      "gitCommonDir": "$path/.git",
+      "remotes": { "origin": "https://github.com/example/$id.git" },
+      "defaultBranch": "$default_branch",
+      "baseRef": "$base_ref",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+}
+
 run_resolve() {
   local home=$1
   shift
@@ -474,6 +495,54 @@ EOF
   pass "projects.json rejects invalid policy fields"
 }
 
+test_json_registry_validates_base_ref_default_branch_contract() {
+  local home repo repo_real out status
+  home=$(new_home base-ref-contract)
+  repo="$TMP_ROOT/base-ref-contract/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+
+  write_json_registry_base_ref "$home" flow "$repo_real" dev "origin/dev"
+  out=$(run_resolve "$home" --field base_ref flow)
+  [ "$out" = "origin/dev" ] || fail "resolver rejected supported origin/default baseRef"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" dev "refs/heads/dev"
+  out=$(run_resolve "$home" --field base_ref flow)
+  [ "$out" = "refs/heads/dev" ] || fail "resolver rejected supported refs/heads/default baseRef"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" main "refs/remotes/origin/dev"
+  out=$(run_resolve "$home" --field base_ref flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver accepted a baseRef for a different default branch"
+  assert_contains "$out" "baseRef must name defaultBranch main" "mismatched remote baseRef should fail closed"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" dev "origin/main"
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "list accepted a baseRef for a different default branch"
+  assert_contains "$out" "baseRef must name defaultBranch dev" "list should validate defaultBranch/baseRef mismatches"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" main "refs/heads/dev"
+  out=$(run_resolve "$home" --field base_ref flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver accepted a local baseRef for a different default branch"
+  assert_contains "$out" "baseRef must name defaultBranch main" "mismatched local baseRef should fail closed"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" dev "refs/remotes/upstream/dev"
+  out=$(run_resolve "$home" --field base_ref flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver accepted unsupported baseRef syntax"
+  assert_contains "$out" "unsupported baseRef" "unsupported baseRef syntax should fail closed"
+
+  write_json_registry_base_ref "$home" flow "$repo_real" "dev branch" "refs/remotes/origin/dev branch"
+  out=$(run_resolve "$home" --field base_ref flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver accepted invalid defaultBranch syntax"
+  assert_contains "$out" "invalid defaultBranch" "invalid defaultBranch should fail closed"
+
+  pass "projects.json validates baseRef against defaultBranch"
+}
+
 test_json_registry_matches_physical_canonical_path() {
   local home real_parent link_parent repo link repo_real out
   home=$(new_home symlink-roundtrip)
@@ -559,6 +628,7 @@ test_json_registry_list_rejects_missing_project_id
 test_json_registry_list_rejects_duplicate_ids_and_paths
 test_json_registry_direct_resolution_rejects_duplicate_matches
 test_json_registry_rejects_invalid_policy_fields
+test_json_registry_validates_base_ref_default_branch_contract
 test_json_registry_matches_physical_canonical_path
 test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy
 test_json_registry_list_merges_legacy_projects

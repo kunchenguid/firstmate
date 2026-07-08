@@ -311,6 +311,27 @@ json_required_yolo() {
   esac
 }
 
+validate_base_ref() {
+  local project_id=$1 default_branch=$2 base_ref=$3
+  if ! git check-ref-format --branch "$default_branch" >/dev/null 2>&1; then
+    echo "error: project $project_id has invalid defaultBranch: $default_branch" >&2
+    return 1
+  fi
+  case "$base_ref" in
+    "refs/remotes/origin/$default_branch"|"origin/$default_branch"|"refs/heads/$default_branch")
+      return 0
+      ;;
+    refs/remotes/origin/*|origin/*|refs/heads/*)
+      echo "error: project $project_id baseRef must name defaultBranch $default_branch: $base_ref" >&2
+      return 1
+      ;;
+    *)
+      echo "error: project $project_id has unsupported baseRef: $base_ref" >&2
+      return 1
+      ;;
+  esac
+}
+
 resolve_json() {
   local arg=$1 project status
   if project=$(json_registry_project "$arg"); then
@@ -339,6 +360,7 @@ normalize_json_project() {
   worktree_policy=$(printf '%s\n' "$project" | jq -r '.worktreePolicy // "firstmate-owned"')
   origin=$(printf '%s\n' "$project" | jq -r '.remotes.origin // empty')
   fork=$(printf '%s\n' "$project" | jq -r '.remotes.fork // empty')
+  validate_base_ref "$project_id" "$default_branch" "$base_ref" || return 1
 
   case "$canonical" in
     /*) ;;
