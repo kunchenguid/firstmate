@@ -142,6 +142,8 @@ META="$STATE/$ID.meta"
 RID=$(fmx_meta_get "$META" x_request)
 TS=$(fmx_meta_get "$META" x_request_ts)
 COUNT=$(fmx_meta_get "$META" x_followups)
+REQ_PLATFORM=$(fmx_meta_get "$META" x_platform)
+REQ_REPLY_MAX=$(fmx_meta_get "$META" x_reply_max_chars)
 case "$COUNT" in
   ''|*[!0-9]*) COUNT=0 ;;
 esac
@@ -191,8 +193,21 @@ if [ "$MODE" = check ]; then
 fi
 
 # Post the follow-up. fm-x-reply owns text reading, thread-split, dry-run, the
-# endpoint, and the never-inline safety; we only pass the text source through.
-"$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+# endpoint, and the never-inline safety; we only pass the text source and any
+# recorded reply-platform context through.
+declare -a REPLY_ENV=()
+case "$REQ_PLATFORM" in
+  discord|x) REPLY_ENV+=("FMX_REPLY_PLATFORM=$REQ_PLATFORM") ;;
+esac
+case "$REQ_REPLY_MAX" in
+  ''|*[!0-9]*) ;;
+  *) REPLY_ENV+=("FMX_REPLY_MAX_CHARS=$REQ_REPLY_MAX") ;;
+esac
+if [ "${#REPLY_ENV[@]}" -gt 0 ]; then
+  env "${REPLY_ENV[@]}" "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+else
+  "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+fi
 post_rc=$?
 
 case "$post_rc" in

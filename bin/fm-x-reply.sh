@@ -40,13 +40,15 @@
 # call can instead see a benign no-op 200, so fm-x-followup.sh's local
 # window/cap pruning remains the primary guard.
 #
-# Long replies auto-split into a numbered thread (premium-independent: each tweet
-# stays within FMX_X_REPLY_MAX_CHARS, default 280). A reply that fits in one tweet
-# sends {request_id, text}; a thread sends {request_id, text, texts:[chunk,...]}
-# where `texts` is the ordered "(k/n)" chunks for the relay to post as chained
-# replies, and `text` is the first chunk so a relay that only reads `text` still
-# posts the opener. If --image is present, the relay attaches it to this opener.
-# At most FMX_X_THREAD_MAX tweets (default 25) are produced.
+# Long replies auto-split into a numbered thread. X stays within
+# FMX_X_REPLY_MAX_CHARS, default 280. Discord uses
+# FMX_DISCORD_REPLY_MAX_CHARS, default 1900, safely below Discord's 2000
+# character message limit. A reply that fits in one message sends
+# {request_id, text}; a thread sends {request_id, text, texts:[chunk,...]} where
+# `texts` is the ordered "(k/n)" chunks for the relay to post as chained replies,
+# and `text` is the first chunk so a relay that only reads `text` still posts the
+# opener. If --image is present, the relay attaches it to this opener. At most
+# FMX_X_THREAD_MAX messages (default 25) are produced.
 #
 # Live post config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN
 # (required), FMX_RELAY_URL (default https://myfirstmate.io). Auth:
@@ -186,6 +188,19 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
+INBOX_CONTEXT=$(fmx_request_inbox_context "$STATE" "$REQ") || {
+  echo "fm-x-reply: failed to inspect request platform context" >&2
+  exit 1
+}
+REQ_PLATFORM=${FMX_REPLY_PLATFORM:-$(printf '%s' "$INBOX_CONTEXT" | jq -r '.platform // ""')}
+REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS:-$(printf '%s' "$INBOX_CONTEXT" | jq -r '.reply_max_chars // ""')}
+case "$REQ_PLATFORM" in
+  discord|x|'') ;;
+  twitter) REQ_PLATFORM=x ;;
+  *) REQ_PLATFORM= ;;
+esac
+REPLY_MAX=$(fmx_reply_limit_for_platform "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX")
+
 IMAGE_PAYLOAD_FILE=
 IMAGE_PREVIEW=
 PAYLOAD_FILE=
@@ -198,10 +213,10 @@ if [ -n "$IMAGE_PATH" ]; then
     echo "fm-x-reply: failed to build image preview" >&2; exit 1; }
 fi
 
-# Auto-split a long reply into a numbered thread (premium-independent: each tweet
-# stays within the per-tweet budget). A reply that fits in one tweet stays a
-# single, unnumbered tweet.
-CHUNKS=$(printf '%s' "$TEXT" | fmx_split_thread "$FMX_MAX" "$FMX_THREAD_MAX") || {
+# Auto-split a long reply into a numbered thread using the target platform's
+# per-message budget. A reply that fits in one message stays single and
+# unnumbered.
+CHUNKS=$(printf '%s' "$TEXT" | fmx_split_thread "$REPLY_MAX" "$FMX_THREAD_MAX") || {
   echo "fm-x-reply: failed to split reply into a thread" >&2
   exit 1
 }

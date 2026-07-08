@@ -4,11 +4,13 @@
 #
 # Usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch>]
 #
-# Records three lines in state/<task-id>.meta (replacing any prior link,
+# Records link lines in state/<task-id>.meta (replacing any prior link,
 # preserving every other meta line):
 #   x_request=<request_id>     the relay-issued id the follow-up posts against
 #   x_request_ts=<epoch>       link time, for the 7-day follow-up window
 #   x_followups=<n>            follow-ups already posted against this binding
+#   x_platform=<platform>      target platform, when known from the inbox payload
+#   x_reply_max_chars=<n>      target split budget, when known
 #
 # A fresh link always starts x_followups at 0 and uses the current time for
 # x_request_ts. --carry-count <n> and --carry-ts <epoch> are a required pair for
@@ -93,6 +95,24 @@ if [ ! -f "$META" ]; then
   exit 1
 fi
 
+command -v jq >/dev/null 2>&1 || { echo "fm-x-link: jq not found" >&2; exit 1; }
+fmx_load_config
+INBOX_CONTEXT=$(fmx_request_inbox_context "$STATE" "$RID") || {
+  echo "fm-x-link: failed to inspect request platform context" >&2
+  exit 1
+}
+REQ_PLATFORM=$(printf '%s' "$INBOX_CONTEXT" | jq -r '.platform // ""')
+REQ_EXPLICIT_MAX=$(printf '%s' "$INBOX_CONTEXT" | jq -r '.reply_max_chars // ""')
+case "$REQ_PLATFORM" in
+  discord|x|'') ;;
+  twitter) REQ_PLATFORM=x ;;
+  *) REQ_PLATFORM= ;;
+esac
+REQ_REPLY_MAX=
+if [ -n "$REQ_PLATFORM" ] || [ -n "$REQ_EXPLICIT_MAX" ]; then
+  REQ_REPLY_MAX=$(fmx_reply_limit_for_platform "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX")
+fi
+
 FOLLOWUPS=0
 if [ -n "$CARRY_TS" ]; then
   LINK_TS=$CARRY_TS
@@ -105,7 +125,7 @@ else
   esac
 fi
 
-if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS"; then
+if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX"; then
   echo "fm-x-link: failed to record the link in state/$ID.meta" >&2
   exit 1
 fi

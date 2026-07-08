@@ -706,7 +706,26 @@ test_split_thread_lib() {
   out=$(printf 'one two three four five six seven eight nine ten' | fmx_split_thread 20 2)
   [ "$(printf '%s' "$out" | jq 'length')" -le 2 ] || fail "thread must respect the cap"
   case "$(printf '%s' "$out" | jq -r '.[-1]')" in *…*) : ;; *) fail "a capped thread must mark truncation" ;; esac
-  pass "fmx_split_thread: word-boundary, within-limit, numbered, lossless, capped"
+  txt=$(cat <<'TXT'
+Intro paragraph has enough words to make the reply split before the fenced block.
+
+```bash
+printf '%s\n' "hello from a fenced block"
+printf '%s\n' "the marker must not land in here"
+```
+
+Final paragraph also has enough words to make the reply split after the fenced block.
+TXT
+)
+  out=$(printf '%s' "$txt" | fmx_split_thread 120 25)
+  [ "$(printf '%s' "$out" | jq 'length')" -gt 1 ] || fail "fenced markdown reply must split"
+  printf '%s' "$out" | jq -e \
+    'all(.[]; (((gsub(" \\([0-9]+/[0-9]+\\)$"; "") | split("```") | length) - 1) % 2) == 0)' \
+    >/dev/null || fail "thread chunks must not leave an open code fence"
+  printf '%s' "$out" | jq -e \
+    'any(.[]; contains("```bash\nprintf") and contains("marker must not land in here\"") and contains("\n```"))' \
+    >/dev/null || fail "the fenced code block must stay in one chunk"
+  pass "fmx_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
 }
 
 test_reply_single_no_texts() {
@@ -731,6 +750,60 @@ test_reply_thread_dry_run() {
   [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-t.json")" -le 50 ] || fail "each thread tweet must be within the limit"
   [ "$(jq -r '.text' "$home/state/x-outbox/req-t.json")" = "$(jq -r '.texts[0]' "$home/state/x-outbox/req-t.json")" ] || fail "text must equal the first chunk"
   pass "fm-x-reply auto-splits a long reply into a numbered thread (texts[])"
+}
+
+test_reply_discord_inbox_uses_discord_budget() {
+  local home out reply
+  home="$TMP_ROOT/reply-discord-budget"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-discord",tweet_id:"discord:channel:message",text:"question"}' \
+    > "$home/state/x-inbox/req-discord.json"
+  reply=$(cat <<'TXT'
+First paragraph stays intact in a single Discord reply even though it is comfortably over the X tweet budget.
+
+```bash
+printf '%s\n' "the code fence must remain intact"
+printf '%s\n' "no numbering marker belongs here"
+```
+
+Final paragraph also remains in the same public Discord message because the total is far below the 1900 character split budget.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-discord "$reply" 2>/dev/null)
+  [ "$out" = "req-discord" ] || fail "Discord dry-run must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord.json" >/dev/null \
+    || fail "Discord reply below its message budget must not be split into texts[]"
+  assert_contains "$(jq -r '.text' "$home/state/x-outbox/req-discord.json")" '```bash' \
+    "Discord reply must preserve the fenced code block"
+  pass "fm-x-reply uses the Discord inbox platform budget instead of the X tweet budget"
+}
+
+test_reply_x_inbox_still_uses_x_budget() {
+  local home out long
+  home="$TMP_ROOT/reply-x-budget"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-x",tweet_id:"1234567890",text:"question"}' > "$home/state/x-inbox/req-x.json"
+  long="This X reply intentionally runs beyond the default tweet budget so it still needs a numbered thread on X. It has enough plain words to cross the limit while staying easy to split at word boundaries without code fences or platform ambiguity. The old default must remain intact for numeric tweet ids."
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-x "$long" 2>/dev/null)
+  [ "$out" = "req-x" ] || fail "X dry-run must echo the request_id (got: $out)"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-x.json" >/dev/null \
+    || fail "X reply over 280 characters must still split into texts[]"
+  [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-x.json")" -le 280 ] \
+    || fail "X reply chunks must stay within the default X budget"
+  pass "fm-x-reply keeps numeric X requests on the X tweet budget"
+}
+
+test_reply_inbox_explicit_limit_wins() {
+  local home out long
+  home="$TMP_ROOT/reply-explicit-limit"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-limit",platform:"discord",reply_max_chars:90,text:"question"}' \
+    > "$home/state/x-inbox/req-limit.json"
+  long="Discord normally has a much larger budget, but an explicit relay-provided reply_max_chars value must be honored when the payload carries one."
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-limit "$long" 2>/dev/null)
+  [ "$out" = "req-limit" ] || fail "explicit-limit dry-run must echo the request_id (got: $out)"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-limit.json" >/dev/null \
+    || fail "explicit reply_max_chars must force a split even on Discord"
+  [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-limit.json")" -le 90 ] \
+    || fail "explicit-limit chunks must stay within the relay-provided budget"
+  pass "fm-x-reply prefers an explicit relay-provided reply limit"
 }
 
 test_reply_max_chars_floor_clamps_to_minimum() {
@@ -1208,6 +1281,38 @@ test_link_records_request_and_timestamp() {
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
 }
 
+test_link_records_discord_platform_for_followups() {
+  local home meta out rc reply
+  home="$TMP_ROOT/link-discord-platform"; mkdir -p "$home/state/x-inbox"
+  meta="$home/state/fix-discord.meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",text:"question"}' \
+    > "$home/state/x-inbox/req-discord-follow.json"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    "$ROOT/bin/fm-x-link.sh" fix-discord req-discord-follow >/dev/null; rc=$?
+  expect_code 0 "$rc" "Discord link exit"
+  assert_grep "x_platform=discord" "$meta" "link must record Discord platform context"
+  assert_grep "x_reply_max_chars=1900" "$meta" "link must record the Discord split budget for follow-ups"
+  rm -f "$home/state/x-inbox/req-discord-follow.json"
+  reply=$(cat <<'TXT'
+The follow-up is longer than an X tweet but should stay in one Discord message because the linked task meta recorded the platform before the inbox was drained.
+
+```bash
+printf '%s\n' "this fenced block should stay whole"
+```
+
+The final sentence confirms that the follow-up path did not fall back to the X budget after the inbox file disappeared.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-discord - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord follow-up dry-run exit"
+  [ "$out" = "req-discord-follow" ] || fail "Discord follow-up must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord-follow.json" >/dev/null \
+    || fail "Discord follow-up below its message budget must not split after inbox drain"
+  pass "fm-x-link records Discord platform context so follow-ups keep the Discord budget"
+}
+
 test_link_carry_count_and_ts_preserve_followup_binding() {
   local home meta rc
   home="$TMP_ROOT/link-carry"; mkdir -p "$home/state"
@@ -1625,6 +1730,9 @@ test_reply_dry_run_fails_when_outbox_unwritable
 test_split_thread_lib
 test_reply_single_no_texts
 test_reply_thread_dry_run
+test_reply_discord_inbox_uses_discord_budget
+test_reply_x_inbox_still_uses_x_budget
+test_reply_inbox_explicit_limit_wins
 test_reply_max_chars_floor_clamps_to_minimum
 test_reply_thread_live_posts_texts
 test_reply_image_live_posts_image_object
@@ -1649,6 +1757,7 @@ test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
+test_link_records_discord_platform_for_followups
 test_link_carry_count_and_ts_preserve_followup_binding
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
