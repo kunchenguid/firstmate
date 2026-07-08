@@ -56,7 +56,7 @@
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_RATELIMIT_REGEX_DEFAULT='(Claude[[:space:]]+)?((AI[[:space:]]+)?usage[[:space:]-]+limit|rate[[:space:]-]+limit|quota)[^[:cntrl:]]*(reached|exceeded|reset|try again)|limit[[:space:]-]+reached'
+FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+reached\.[[:space:]]+Your[[:space:]]+limit[[:space:]]+will[[:space:]]+reset[[:space:]]+at[[:space:]]+[^[:cntrl:]]+'
 FM_OVERLOAD_REGEX_DEFAULT='API Error: 529'
 
 # FM_INJECT_MARK: the away-mode daemon's in-band sentinel (U+2063 INVISIBLE
@@ -250,6 +250,10 @@ fm_ratelimit_footer_text() {  # <tail-text>
   printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -3
 }
 
+fm_ratelimit_footer_line_match() {  # <footer-text> <line-regex>
+  printf '%s\n' "$1" | grep -qiE "^[[:space:]]*($2)[[:space:]]*$"
+}
+
 # fm_ratelimit_render_match: classify only the footer-sized tail render.
 # Prints "<reset-epoch><TAB><reason>" on a limit/overload match.
 # A numeric [reuse-reset] pins the reset for an already-parked episode: the footer
@@ -263,7 +267,7 @@ fm_ratelimit_render_match() {  # <tail-text> [now-epoch] [reuse-reset]
   reuse=${3:-}
   footer=$(fm_ratelimit_footer_text "$tail")
   [ -n "$footer" ] || return 1
-  if printf '%s\n' "$footer" | grep -qiE "${FM_RATELIMIT_REGEX:-$FM_RATELIMIT_REGEX_DEFAULT}"; then
+  if fm_ratelimit_footer_line_match "$footer" "${FM_RATELIMIT_REGEX:-$FM_RATELIMIT_REGEX_DEFAULT}"; then
     case "$reuse" in
       ''|*[!0-9]*) reset=$(fm_ratelimit_reset_epoch "$footer" "$now") ;;
       *)           reset=$reuse ;;
@@ -271,7 +275,7 @@ fm_ratelimit_render_match() {  # <tail-text> [now-epoch] [reuse-reset]
     printf '%s\t%s\n' "$reset" ratelimit
     return 0
   fi
-  if printf '%s\n' "$footer" | grep -qiE "${FM_OVERLOAD_REGEX:-$FM_OVERLOAD_REGEX_DEFAULT}"; then
+  if fm_ratelimit_footer_line_match "$footer" "${FM_OVERLOAD_REGEX:-$FM_OVERLOAD_REGEX_DEFAULT}"; then
     case "$reuse" in
       ''|*[!0-9]*) reset=$((now + $(fm_ratelimit_numeric_or_default "${FM_OVERLOAD_FALLBACK:-120}" 120))) ;;
       *)           reset=$reuse ;;
@@ -355,7 +359,7 @@ fm_ratelimit_label_for_marker() {  # <state> <id>
   printf '%s' "$id"
 }
 
-fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label> -> prints limited|recovered
+fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label> -> prints limited|pending|recovered
   local backend=$1 window=$2 label=$3 bs tail state
   command -v fm_backend_target_exists >/dev/null 2>&1 || return 1
   fm_backend_target_exists "$backend" "$window" "$label" || return 1
@@ -364,16 +368,18 @@ fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label> -> prints
   tail=$(fm_backend_capture "$backend" "$window" 40 "$label" 2>/dev/null) || return 1
   printf '%s' "$tail" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}" && return 1
-  if fm_ratelimit_render_match "$tail" >/dev/null; then
-    printf 'limited'
-    return 0
-  fi
   state=$(fm_backend_composer_state "$backend" "$window" 2>/dev/null)
-  if [ "$state" = empty ]; then
+  if ! fm_ratelimit_render_match "$tail" >/dev/null; then
+    [ "$state" = empty ] || return 1
     printf 'recovered'
     return 0
   fi
-  return 1
+  if [ "$state" = empty ]; then
+    printf 'limited'
+    return 0
+  fi
+  printf 'pending'
+  return 0
 }
 
 fm_ratelimit_resume_scan() {  # <state> -> prints escalation reason on exhausted failure
@@ -411,9 +417,12 @@ EOF
     # and would prematurely clear state/.afk and stop the daemon. Prefix the inject
     # sentinel so firstmate's afk-exit contract treats the auto-resume as an
     # internal escalation; crew panes still receive a plain, unmarked continue.
-    resume_text='continue'
-    [ "$id" = firstmate ] && resume_text="${FM_INJECT_MARK}continue"
-    verdict=$(fm_backend_send_text_submit "$backend" "$window" "$resume_text" "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed
+    verdict=$ready
+    if [ "$ready" = limited ]; then
+      resume_text='continue'
+      [ "$id" = firstmate ] && resume_text="${FM_INJECT_MARK}continue"
+      verdict=$(fm_backend_send_text_submit "$backend" "$window" "$resume_text" "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed
+    fi
     if [ "$attempts" -ge "$max" ]; then
       reason="check: $marker: ratelimit auto-resume exhausted after $attempts attempts for $id ($window; verdict=$verdict)"
       {

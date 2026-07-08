@@ -405,18 +405,20 @@ test_terminal_stale_surfaced() {
 }
 
 test_ratelimit_stale_is_parked_not_wedged() {
-  local dir state fakebin out drain_out capture_file window key pane_hash pid marker_line reset marker_window marker_harness
+  local dir state fakebin out drain_out capture_file capture_text window key pane_hash pid marker_line reset marker_window marker_harness
   dir=$(make_case ratelimit-stale); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-limited"
-  printf 'Claude usage limit reached\n' > "$capture_file"
+  capture_text='Claude usage limit reached. Your limit will reset at 1 PM (UTC).
+│ > │'
+  printf '%s\n' "$capture_text" > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/limited.meta"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "Claude usage limit reached")
+  pane_hash=$(hash_text "$capture_text")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -435,7 +437,7 @@ EOF
     || fail "ratelimited wake was not queued"
 
   : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -448,6 +450,33 @@ EOF
   pass "a stale pane with a quota footer is parked as ratelimited, not wedged"
 }
 
+test_ratelimit_transcript_mentions_surface_as_stale() {
+  local dir state fakebin out drain_out capture_file capture_text window key pane_hash pid
+  dir=$(make_case ratelimit-transcript-mention); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-transcript"
+  capture_text='The response mentions Claude usage limit reached as a historical phrase.
+It also mentions API Error: 529 from yesterday'\''s logs.
+│ > │'
+  printf '%s\n' "$capture_text" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/transcript.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$capture_text")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=2 \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface stale transcript text that merely mentioned limits"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale for transcript mention: $(cat "$out")"
+  grep -F "ratelimited: $window" "$out" >/dev/null && fail "transcript mention was parked as ratelimited: $(cat "$out")"
+  [ ! -e "$state/transcript.ratelimit" ] || fail "transcript mention wrote a ratelimit marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after transcript stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "transcript stale was not queued"
+  pass "stale transcript text that merely mentions quota/529 is not parked as ratelimited"
+}
+
 # --- ratelimit auto-resume EXHAUSTED: pane returns to normal stale escalation ---
 # Once state/<id>.ratelimit.failed exists (auto-resume gave up after
 # FM_RATELIMIT_MAX_RESUMES attempts), a pane still rendering the quota footer must
@@ -455,17 +484,19 @@ EOF
 # escalation so a genuinely stuck crew keeps surfacing fail-safe instead of one
 # escalation then silence.
 test_ratelimit_failed_returns_to_stale_escalation() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  local dir state fakebin out drain_out capture_file capture_text window key pane_hash sig pid
   dir=$(make_case ratelimit-failed-stale); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-exhausted"
-  printf 'Claude usage limit reached\n' > "$capture_file"
+  capture_text='Claude usage limit reached. Your limit will reset at 1 PM (UTC).
+│ > │'
+  printf '%s\n' "$capture_text" > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/exhausted.meta"
   # Non-terminal status, .seen-* primed so the signal scan does not pre-empt the stale path.
   printf 'working: hit the quota wall\n' > "$state/exhausted.status"
   sig=$(seen_sig "$state/exhausted.status"); printf '%s' "$sig" > "$state/.seen-exhausted_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "Claude usage limit reached")
+  pane_hash=$(hash_text "$capture_text")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The pane was parked before auto-resume exhausted: .stale-$key already holds the
@@ -479,7 +510,7 @@ test_ratelimit_failed_returns_to_stale_escalation() {
   # Phase A: high escalation threshold. The pane is NOT re-parked (no ratelimited
   # wake, no new episode); it returns to normal stale handling and arms the wedge
   # timer, absorbing this poll rather than suppressing forever.
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -497,7 +528,7 @@ test_ratelimit_failed_returns_to_stale_escalation() {
   # stale wedge exactly like any other stuck pane - never another ratelimited park.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -516,14 +547,16 @@ test_ratelimit_failed_returns_to_stale_escalation() {
 # poll, but the reset already lives in <id>.ratelimit. It must reuse that recorded
 # reset rather than re-spawning python to re-derive a value it would only discard.
 test_ratelimit_parked_reuses_marker_reset_no_reparse() {
-  local dir state fakebin out capture_file window key pane_hash pid
+  local dir state fakebin out capture_file capture_text window key pane_hash pid
   dir=$(make_case ratelimit-reuse); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-reuse"
-  printf 'Claude usage limit reached\n' > "$capture_file"
+  capture_text='Claude usage limit reached. Your limit will reset at 1 PM (UTC).
+│ > │'
+  printf '%s\n' "$capture_text" > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/reuse.meta"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "Claude usage limit reached")
+  pane_hash=$(hash_text "$capture_text")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # A python3 shim that counts every reset-parse invocation. Its empty stdout makes
@@ -538,7 +571,7 @@ SH
 
   # Poll 1: first park. No marker to reuse yet, so render_match re-parses once.
   PATH="$fakebin:$PATH" FM_TEST_PYCOUNT="$dir/pycount" FM_FAKE_TMUX_WINDOW="$window" \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not park the ratelimit pane on the first poll"
@@ -550,7 +583,7 @@ SH
   # across several polls with NO further python re-parse and no new wake.
   : > "$out"
   PATH="$fakebin:$PATH" FM_TEST_PYCOUNT="$dir/pycount" FM_FAKE_TMUX_WINDOW="$window" \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_live "$pid" 30 || { reap "$pid"; fail "watcher exited while absorbing a parked reuse pane: $(cat "$out")"; }
@@ -569,7 +602,7 @@ SH
 # past reset cannot be reused by a later episode. A genuinely new episode then parks
 # and wakes fresh, proving the auto-resume feature survives across episodes.
 test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks() {
-  local dir state fakebin out drain_out capture_file window key old_hash pid marker_line reset marker_window marker_harness
+  local dir state fakebin out drain_out capture_file capture_text window key old_hash pid marker_line reset marker_window marker_harness
   dir=$(make_case ratelimit-marker-clear); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-recovered"
@@ -580,7 +613,7 @@ test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks() {
   printf '3\n' > "$state/recovered.ratelimit.attempts"
   printf 'ratelimit auto-resume exhausted\n' > "$state/recovered.ratelimit.failed"
   # The suppressor holds the old footer hash; the render is now new, active content.
-  old_hash=$(hash_text "Claude usage limit reached")
+  old_hash=$(hash_text 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).')
   printf '%s' "$old_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf 'building output, crew active again' > "$capture_file"
@@ -604,11 +637,13 @@ test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks() {
 
   # Phase B: a genuinely NEW quota episode on the same crew parks and wakes fresh -
   # proof the cleared .failed no longer forbids parking for the rest of the task.
-  printf 'Claude usage limit reached\n' > "$capture_file"
-  printf '%s' "$(hash_text "Claude usage limit reached")" > "$state/.hash-$key"
+  capture_text='Claude usage limit reached. Your limit will reset at 1 PM (UTC).
+│ > │'
+  printf '%s\n' "$capture_text" > "$capture_file"
+  printf '%s' "$(hash_text "$capture_text")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -643,10 +678,10 @@ test_ratelimit_markers_preserved_when_footer_still_rendered() {
   printf '2\n' > "$state/retrying.ratelimit.attempts"
   # Suppressor holds the footer-only hash; the render changed (a `continue` was
   # typed) but the footer is still within the last non-blank lines.
-  old_hash=$(hash_text "Claude usage limit reached")
+  old_hash=$(hash_text "Claude usage limit reached. Your limit will reset at 1 PM (UTC).")
   printf '%s' "$old_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  printf 'Claude usage limit reached\ncontinue' > "$capture_file"
+  printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n│ > continue │\n' > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1402,6 +1437,7 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_ratelimit_stale_is_parked_not_wedged
+test_ratelimit_transcript_mentions_surface_as_stale
 test_ratelimit_failed_returns_to_stale_escalation
 test_ratelimit_parked_reuses_marker_reset_no_reparse
 test_ratelimit_markers_clear_on_active_recovery_then_new_episode_parks

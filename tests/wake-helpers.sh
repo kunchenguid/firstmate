@@ -73,9 +73,33 @@ if [ "${1:-}" = "list-windows" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "display-message" ]; then
+  _print=0
+  for _a in "$@"; do
+    case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
+    [ "$_a" = "-p" ] && _print=1
+  done
+  [ "$_print" = 1 ] && printf 'fakepane\n'
+  exit 0
+fi
 if [ "${1:-}" = "capture-pane" ]; then
+  _S=""; _E=""; shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -S) _S="${2:-}"; shift 2; continue ;;
+      -E) _E="${2:-}"; shift 2; continue ;;
+      *) shift ;;
+    esac
+  done
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
-    cat "$FM_FAKE_TMUX_CAPTURE"
+    if [ -n "$_S" ] && [ -n "$_E" ]; then
+      case "$_S$_E" in
+        *[!0-9]*) cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
+        *) sed -n "$((_S + 1)),$((_E + 1))p" "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
+      esac
+    else
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    fi
   fi
   exit 0
 fi

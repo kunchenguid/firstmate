@@ -768,6 +768,9 @@ EOF
       # in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
         rl_task=$(window_to_task "$w" "$STATE")
+        rl_backend=$(window_backend "$w")
+        rl_harness=$(window_harness "$w")
+        rl_composer=$(fm_backend_composer_state "$rl_backend" "$w" 2>/dev/null || printf 'unknown')
         # Reuse an active episode's recorded reset when a valid marker already
         # exists for this window+harness, so a pane parked for ~an hour does not
         # re-spawn python every poll to re-parse a reset it would only discard. A
@@ -775,9 +778,12 @@ EOF
         # below) so the footer branch returns it to normal stale/wedge escalation.
         reuse_reset=""
         if [ -n "$rl_task" ] && [ ! -e "$STATE/$rl_task.ratelimit.failed" ]; then
-          reuse_reset=$(fm_ratelimit_marker_reset "$STATE" "$rl_task" "$w" "$(window_harness "$w")" 2>/dev/null || true)
+          reuse_reset=$(fm_ratelimit_marker_reset "$STATE" "$rl_task" "$w" "$rl_harness" 2>/dev/null || true)
         fi
-        limit_match=$(fm_ratelimit_render_match "$tail40" "" "$reuse_reset" || true)
+        limit_match=""
+        if [ "$rl_harness" = claude ] && [ "$rl_composer" = empty ]; then
+          limit_match=$(fm_ratelimit_render_match "$tail40" "" "$reuse_reset" || true)
+        fi
         if [ -n "$limit_match" ]; then
           if [ -n "$rl_task" ] && [ -e "$STATE/$rl_task.ratelimit.failed" ]; then
             # Auto-resume gave up (state/<id>.ratelimit.failed exists after
@@ -794,7 +800,7 @@ EOF
             IFS=$(printf '\t') read -r reset_epoch limit_kind <<EOF
 $limit_match
 EOF
-            if [ -n "$rl_task" ] && fm_ratelimit_marker_write "$STATE" "$rl_task" "$reset_epoch" "$w" "$(window_harness "$w")"; then
+            if [ -n "$rl_task" ] && fm_ratelimit_marker_write "$STATE" "$rl_task" "$reset_epoch" "$w" "$rl_harness"; then
               reason="ratelimited: $w until $reset_epoch ($limit_kind)"
               fm_wake_append ratelimited "$rl_task" "$reason" || exit 1
               printf '%s' "$h" > "$sf"

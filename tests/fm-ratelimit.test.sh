@@ -62,6 +62,18 @@ idle prompt'
   fi
   text='ordinary transcript line
 another ordinary line
+The previous outage was API Error: 529 in a log, not a live footer.'
+  if fm_ratelimit_render_match "$text" >/dev/null; then
+    fail "overload text inside ordinary transcript prose matched"
+  fi
+  text='ordinary transcript line
+another ordinary line
+In summary, Claude usage limit reached is just a phrase in this response.'
+  if fm_ratelimit_render_match "$text" >/dev/null; then
+    fail "quota text inside ordinary transcript prose matched"
+  fi
+  text='ordinary transcript line
+another ordinary line
 Claude usage limit reached. Your limit will reset at 4 PM (UTC).'
   match=$(fm_ratelimit_render_match "$text")
   case "$match" in
@@ -185,6 +197,52 @@ test_resume_exhaustion_escalates_and_leaves_marker() {
   pass "ratelimit auto-resume exhaustion escalates and leaves a durable marker"
 }
 
+test_resume_pending_input_does_not_type_continue() {
+  local dir state marker submitted now
+  dir="$TMP_ROOT/resume-pending-human"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  submitted="$dir/submitted"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n│ > human draft │\n'; }
+  fm_backend_composer_state() { printf 'pending'; }
+  fm_backend_send_text_submit() { printf '%s' "$3" > "$submitted"; printf 'pending'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state" >/dev/null \
+    || fail "pending-input resume scan returned non-zero before max attempts"
+  [ ! -e "$submitted" ] || fail "resume typed continue into a pending human composer: $(cat "$submitted")"
+  [ -e "$marker" ] || fail "pending-input resume cleared the marker"
+  [ "$(cat "$marker.attempts" 2>/dev/null)" = 1 ] \
+    || fail "pending-input resume did not count as a blocked attempt: $(cat "$marker.attempts" 2>/dev/null)"
+  pass "auto-resume does not type continue into pending human input"
+}
+
+test_resume_prior_pending_continue_does_not_double_type() {
+  local dir state marker submitted now out rc
+  dir="$TMP_ROOT/resume-pending-continue"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  submitted="$dir/submitted"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n│ > continue │\n'; }
+  fm_backend_composer_state() { printf 'pending'; }
+  fm_backend_send_text_submit() { printf '%s' "$3" > "$submitted"; printf 'pending'; }
+  out=$(FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=1 fm_ratelimit_resume_scan "$state") && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "pending continue did not exhaust visibly at max attempts: rc=$rc out=$out"
+  [ ! -e "$submitted" ] || fail "resume double-typed continue into an already pending continue: $(cat "$submitted")"
+  [ -e "$marker.failed" ] || fail "pending continue exhaustion did not leave a failed marker"
+  grep "$(printf '\tcheck\t')" "$state/.wake-queue" >/dev/null \
+    || fail "pending continue exhaustion did not append an escalation wake"
+  pass "a prior pending continue is blocked and escalated without double-typing"
+}
+
 test_marker_write_preserves_active_episode_reset() {
   local dir state marker got
   dir="$TMP_ROOT/marker-preserve"
@@ -235,7 +293,7 @@ please try again later' >/dev/null; then
   fi
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-API Error: 529 overloaded_error')
+API Error: 529')
   case "$match" in
     *"$(printf '\t')"overload) ;;
     *) fail "API Error: 529 footer did not match as overload: $match" ;;
@@ -253,14 +311,14 @@ test_overload_uses_short_fallback_distinct_from_quota() {
   now=1000000000
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-API Error: 529 overloaded_error' "$now")
+API Error: 529' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
   [ "$kind" = overload ] || fail "529 footer did not classify as overload: $match"
   [ "$reset" = "$((now + 120))" ] \
     || fail "overload used the wrong default fallback: reset=$reset, expected $((now + 120))"
-  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match 'API Error: 529 overloaded_error' "$now")
+  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match 'API Error: 529' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -268,7 +326,7 @@ EOF
   # A quota footer with no parseable reset time still falls back to the hourly 3600s.
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-Claude usage limit reached' "$now")
+Claude usage limit reached. Your limit will reset at an unspecified time.' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -290,14 +348,14 @@ test_render_match_reuses_marker_reset_without_reparsing() {
   # now+3600; with a reuse-reset the recorded epoch is returned verbatim instead.
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-Claude usage limit reached' "$now" 1234567890)
+Claude usage limit reached. Your limit will reset at 1 PM (UTC).' "$now" 1234567890)
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
   [ "$kind" = ratelimit ] || fail "reuse path did not classify footer as ratelimit: $match"
   [ "$reset" = 1234567890 ] || fail "render_match did not reuse the supplied quota reset: reset=$reset"
   # Overload reuse likewise pins the reset instead of sliding to now+120 each poll.
-  match=$(fm_ratelimit_render_match 'API Error: 529 overloaded_error' "$now" 1111111111)
+  match=$(fm_ratelimit_render_match 'API Error: 529' "$now" 1111111111)
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -305,7 +363,7 @@ EOF
   [ "$reset" = 1111111111 ] || fail "overload reuse did not pin the reset: reset=$reset"
   # A non-numeric reuse value is ignored: the footer is re-parsed (fallback here).
   match=$(fm_ratelimit_render_match 'ordinary line
-Claude usage limit reached' "$now" 'not-a-number')
+Claude usage limit reached. Your limit will reset at an unspecified time.' "$now" 'not-a-number')
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -400,6 +458,8 @@ test_accepted_submit_while_limited_counts_attempt_not_recovery
 test_accepted_submit_still_limited_exhausts_across_scans
 test_resume_submit_then_recovery_clears_marker
 test_resume_exhaustion_escalates_and_leaves_marker
+test_resume_pending_input_does_not_type_continue
+test_resume_prior_pending_continue_does_not_double_type
 test_marker_write_preserves_active_episode_reset
 test_resume_self_recovered_clears_without_submit
 test_overload_regex_matches_only_529

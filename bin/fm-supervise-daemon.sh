@@ -1053,11 +1053,13 @@ housekeeping() {  # <state>
 }
 
 detect_supervisor_ratelimit() {  # <state>
-  local state=$1 target backend tail match reset kind reuse_reset
+  local state=$1 target backend tail match reset kind reuse_reset composer
   target="${FM_SUPERVISOR_TARGET:-}"
   backend="${FM_SUPERVISOR_BACKEND:-}"
   [ -n "$target" ] && [ -n "$backend" ] || return 0
   fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1 || return 0
+  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+  [ "$composer" = empty ] || return 0
   tail=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 0
   reuse_reset=""
   if [ ! -e "$state/firstmate.ratelimit.failed" ]; then
