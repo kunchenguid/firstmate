@@ -92,7 +92,7 @@ tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-tri
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, read-only remediation suppression, and spawn/brief isolation tests
 tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression guard (issue #166) and clean no-mistakes/direct-PR/local-only brief generation tests
 tests/fm-dispatch-select.test.sh          # deterministic crew-dispatch profile selection, quota-balanced tie/stale/fallback behavior, and backward-compatible first-profile selection tests
-tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
+tests/fm-spawn-batch.test.sh              # spawn help, missing-positional usage, batch dispatch, and FM_HOME project-path scoping tests
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, stable nudge selectors after respawn, and spawn hook tests
