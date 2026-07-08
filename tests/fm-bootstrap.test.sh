@@ -3,11 +3,12 @@
 #
 # Bootstrap prints one block or line per problem or capability fact and is silent when all
 # is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', and 'TASKS_AXI: available' lines, so those
-# contracts are pinned verbatim. The cases are table-driven over the inputs that
-# vary: whether `treehouse get --help` advertises --lease, which (if any)
-# tasks-axi version is on PATH, whether the local backend config opts out, and
-# which no-mistakes version is on PATH.
+# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
+# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
+# are table-driven over the inputs that vary: whether `treehouse get --help`
+# advertises --lease, which (if any) tasks-axi version is on PATH, whether
+# quota-axi is on PATH, whether the local backend config opts out of tasks-axi
+# backlog mutations, and which no-mistakes version is on PATH.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -52,7 +53,18 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  add_tasks_axi "$fakebin" "0.1.1"
+  add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+add_quota_axi() {
+  local fakebin=$1
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
 }
 
 add_tasks_axi() {
@@ -78,14 +90,14 @@ SH
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<backend or ->^<mode>^<expect>^<notcontains>
+#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks backend mode expect notcontains case_dir fakebin out n
+  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
   n=0
-  while IFS='^' read -r label lease tasks backend mode expect notcontains; do
+  while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/case-$n"
@@ -95,7 +107,14 @@ test_bootstrap_reporting() {
       printf '%s\n' "$backend" > "$case_dir/home/config/backlog-backend"
     fi
     fakebin=$(make_fake_toolchain "$case_dir")
-    [ "$tasks" = "-" ] || add_tasks_axi "$fakebin" "$tasks"
+    if [ "$tasks" = "-" ]; then
+      rm -f "$fakebin/tasks-axi"
+    else
+      add_tasks_axi "$fakebin" "$tasks"
+    fi
+    if [ "$quota" = "0" ]; then
+      rm -f "$fakebin/quota-axi"
+    fi
     # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
     # it stays inert: this suite pins tool detection, not the tangle guard, and the
     # ambient checkout (CI runs on a feature branch) must not leak a TANGLE line in.
@@ -114,15 +133,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^-^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available by default^1^0.1.1^-^exact^TASKS_AXI: available^
-missing tasks-axi is suggested by default^1^-^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is suggested by default^1^0.1.0^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses missing tasks-axi^1^-^manual^empty^^
-manual backlog backend suppresses tasks-axi availability^1^0.1.1^manual^empty^^
+treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
+missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
 ROWS
-  pass "bootstrap reports treehouse lease + tasks-axi default/backend contracts"
+  pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
 
 test_no_mistakes_min_version() {

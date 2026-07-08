@@ -43,11 +43,13 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          tasks-axi is the default backlog-management backend. It is reported
-#          as TASKS_AXI: available when compatible (0.1.1+). Without
-#          config/backlog-backend=manual, a missing or incompatible tasks-axi is
-#          reported through the MISSING line and backlog operations fall back to
-#          manual editing until the captain approves installation.
+#          tasks-axi and quota-axi are required bootstrap tools (same class as
+#          lavish-axi). tasks-axi is also version-gated (0.1.1+); an installed
+#          but incompatible build reports MISSING like no-mistakes. When
+#          config/backlog-backend is not manual and tasks-axi is compatible,
+#          bootstrap prints TASKS_AXI: available. quota-axi is required because
+#          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
+#          degrades at runtime when quota data is unavailable.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -263,15 +265,15 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi) echo "npm install -g tasks-axi" ;;
+    tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
 
 BACKEND=$(fm_backend_name)
 case "$BACKEND" in
-  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi" ;;
+  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
+  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
 esac
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
@@ -505,6 +507,9 @@ fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
+if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
+  echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -522,12 +527,8 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
-if ! fm_backlog_backend_manual "$CONFIG"; then
-  if fm_tasks_axi_compatible; then
-    echo "TASKS_AXI: available"
-  else
-    echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
-  fi
+if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
+  echo "TASKS_AXI: available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync

@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation.
 Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
-If the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap suggests `npm install -g tasks-axi` through the normal consent flow and falls back to manual editing until it is installed.
+Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and `TASKS_AXI: available` behavior.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the install suggestion.
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
@@ -142,14 +142,13 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Toolchain
 
-On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi), lists it with the exact install commands, and installs only after you say go.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
-If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations.
-When it is absent or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and firstmate keeps hand-editing `data/backlog.md` until installation is approved and completed.
-When `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
+`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
+An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap also prints `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
+An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
