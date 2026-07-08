@@ -37,7 +37,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
      If the fleet is live, delegate this to a crewmate rather than doing it inline.
    - Knowledge generalizable to every firstmate user: this repo's own `AGENTS.md` (or other shared, tracked material), shipped through the normal branch -> no-mistakes -> PR -> captain-merge pipeline for this repo (section 1), never hand-committed straight to `main`.
    - Task-scoped notes: inspect the relevant backlog item with `tasks-axi show <id> --full`, judge whether the new note is new, duplicate, superseding, or obsolete, then write a considered replacement body with `tasks-axi update <id> --body-file <path>`.
-     Use `--archive-body` when the replacement intentionally supersedes prior state that should remain recoverable.
+     When the replacement intentionally supersedes prior state that should remain recoverable, carry that context into the replacement body before updating.
      Never append.
      If hand-editing `data/backlog.md` per the active backend, make the same inspect-then-update edit in place.
    - Undone next steps: file each as a queued backlog item (section 10), with `blocked-by` recorded if it genuinely depends on something else.
