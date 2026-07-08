@@ -398,6 +398,28 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_agent_alive: CONFIDENT liveness of a live harness-agent
+# PROCESS under <target> ("<session>:<pane_id>"), for the same
+# session-start secondmate-liveness sweep fm_backend_tmux_agent_alive serves
+# (bin/fm-bootstrap.sh; docs/herdr-backend.md "Agent liveness probe reuses the
+# husk classifier"). Reuses fm_backend_herdr_pane_agent_state, the
+# already-verified husk classifier ("Respawn idempotency" above): `dead`
+# (structurally gone pane) and `no-agent` (a restored, agent-less bare shell
+# - EXACTLY the shape a dead secondmate leaves behind) both collapse to
+# `dead`; `live` (a real registered agent_status, including idle/blocked)
+# maps to `alive`; `unknown` stays `unknown` - fail-safe toward refusal,
+# exactly like the husk check itself. Callers must never treat `unknown` as a
+# confirmed-dead signal.
+fm_backend_herdr_agent_alive() {  # <target>
+  local target=$1
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    dead|no-agent) printf 'dead' ;;
+    live) printf 'alive' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate

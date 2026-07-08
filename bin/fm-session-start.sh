@@ -26,10 +26,10 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - detect-only diagnostics always run. The three
-#                       MUTATING sweeps (secondmate fast-forward, X-mode
-#                       artifact writes, fleet sync) run only when this
-#                       session actually holds the lock.
+#   2. bootstrap      - detect-only diagnostics always run. The four
+#                       MUTATING sweeps (secondmate fast-forward, secondmate
+#                       liveness, X-mode artifact writes, fleet sync) run only
+#                       when this session actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
