@@ -111,6 +111,9 @@ test_stale_is_terminal_classifier() {
 test_scan_captain_relevant_statuses_classifier() {
   local dir state out
   dir=$(make_case classify-scan); state="$dir/state"
+  fm_write_meta "$state/one.meta" "window=sess:fm-one"
+  fm_write_meta "$state/two.meta" "window=sess:fm-two"
+  fm_write_meta "$state/three.meta" "window=sess:fm-three"
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
@@ -119,6 +122,18 @@ test_scan_captain_relevant_statuses_classifier() {
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+}
+
+test_scan_captain_relevant_statuses_orphan_guard() {
+  local dir state out
+  dir=$(make_case classify-scan-orphan); state="$dir/state"
+  fm_write_meta "$state/live.meta" "window=sess:fm-live"
+  printf 'done: PR https://x/y/pull/1\n' > "$state/live.status"
+  printf 'done: orphan PR\n' > "$state/ghost.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "live.status" >/dev/null || fail "scan missed the live task's done: status"
+  printf '%s' "$out" | grep -F "ghost.status" >/dev/null && fail "scan surfaced a no-meta orphan done: status"
+  pass "scan_captain_relevant_statuses skips a captain-relevant status with no matching .meta"
 }
 
 test_classifier_primitives() {
@@ -876,6 +891,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
+test_scan_captain_relevant_statuses_orphan_guard
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_signal_crew_provably_working_classifier

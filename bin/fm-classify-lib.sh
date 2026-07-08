@@ -162,13 +162,20 @@ stale_is_terminal() {  # <window> <state>
 # catch-all backstop for a captain-relevant status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+#
+# Same orphan guard as scan_signals in bin/fm-watch.sh: a .status surviving with
+# no matching state/<id>.meta belongs to a torn-down (or never-recorded) task and
+# has no owner for firstmate to act on, so it must never wake firstmate via this
+# catch-all either. Skipped here, not removed - scan_signals' own per-poll pass
+# already best-effort removes the file, so this pure read stays side-effect-free.
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    [ -e "$state/$task.meta" ] || continue
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
