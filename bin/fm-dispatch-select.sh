@@ -7,6 +7,8 @@
 # profile object, or an ordered array of profile objects.
 # Output is one compact JSON profile object on stdout.
 # quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
+# FM_DISPATCH_QUOTA_AXI overrides the quota command.
+# FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
 set -u
 
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
