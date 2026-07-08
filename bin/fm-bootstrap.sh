@@ -371,7 +371,7 @@ write_if_changed() {
 # user sees zero change. Prints one confirmation line on opt-in, and one on opt-out
 # only when it actually removed artifacts. It never touches the watcher itself;
 # applying a cadence transition to a running watcher is the caller's job via
-# 'bin/fm-watch-arm.sh --restart' (see AGENTS.md "X mode").
+# the emitted harness-aware supervision repair instruction.
 x_mode_setup() {
   local env_file token shim cadence shim_body cadence_body tool missing
   env_file="$FM_HOME/.env"
@@ -386,12 +386,19 @@ x_mode_setup() {
     [ ! -e "$shim" ] && [ ! -e "$cadence" ]
   }
 
+  x_mode_supervision_repair() {
+    local out
+    out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null) \
+      || out='resume supervision according to the session-start operating block.'
+    printf '%s\n' "$out"
+  }
+
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
     if [ -e "$shim" ] || [ -e "$cadence" ]; then
       if x_mode_remove_artifacts; then
-        echo "FMX: X mode off - removed relay poll shim and 30s cadence; restart the watcher (bin/fm-watch-arm.sh --restart) to drop back to the default cadence"
+        echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
         echo "FMX: X mode off - failed to remove relay poll shim or 30s cadence"
       fi

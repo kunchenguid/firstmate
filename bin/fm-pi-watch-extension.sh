@@ -100,6 +100,8 @@ export default function (pi: any) {
 
   function failureLine(stdout: string, stderr: string, code: number | null): string {
     const combined = `${stdout}\n${stderr}`.trim();
+    const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
+    if (healthy) return `watcher: FAILED - Pi extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`;
     const failed = combined.split(/\r?\n/).find((line) => /^watcher: FAILED/.test(line));
     if (failed) return failed;
     if (code && code !== 0) return `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`;

@@ -80,6 +80,68 @@ test_spawn_template_mentions_pi_watch_placeholder() {
   pass "Pi secondmate launch wiring includes both primary extensions"
 }
 
+test_pi_extension_reports_external_healthy_watcher() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-external-healthy-root"
+  home="$TMP_ROOT/pi-external-healthy-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" "$GEN" >/dev/null
+  out=$(PLUGIN="$home/state/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!handler) {
+  console.error("Pi watch command was not registered");
+  process.exit(1);
+}
+const result = await handler();
+if (!result.includes("started Pi extension arm child")) {
+  console.error(result);
+  process.exit(1);
+}
+for (let i = 0; i < 50 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
+  console.error(`missing follow-up prompt: ${prompt}`);
+  process.exit(1);
+}
+if (!prompt.includes("external healthy watcher")) {
+  console.error(prompt);
+  process.exit(1);
+}
+if (!prompt.includes("watcher: healthy pid=1")) {
+  console.error(prompt);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
+  [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
+  pass "Pi extension reports external healthy watcher output"
+}
+
 test_opencode_primary_watch_plugin_static_wiring() {
   local plugin text
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -504,6 +566,7 @@ test_generator_writes_extension
 test_generator_preserves_loaded_marker_when_unchanged
 test_generator_uses_portable_mktemp_template
 test_spawn_template_mentions_pi_watch_placeholder
+test_pi_extension_reports_external_healthy_watcher
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
