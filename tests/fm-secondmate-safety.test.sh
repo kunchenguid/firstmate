@@ -10,6 +10,8 @@ set -u
 # shellcheck source=tests/secondmate-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
+fm_git_identity fmtest fmtest@example.invalid
+
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
 
