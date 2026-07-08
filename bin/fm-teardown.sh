@@ -43,6 +43,13 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Treehouse return path spelling: treehouse can key managed worktrees by the
+# caller's $HOME spelling on systems where the physical home path differs from
+# $HOME (for example a symlinked home). If return says the recorded path is not
+# managed, teardown retries once with the $HOME-spelled path only when that
+# alternate resolves to the same physical directory; no hard-coded home prefix is
+# assumed.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -73,7 +80,8 @@
 # The same proof is used when non-force safety inspection cannot run because the lock
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
-# removal so the operator can see what happened.
+# removal, including alternate-spelling attempts, so the operator can see what
+# happened.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

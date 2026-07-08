@@ -57,6 +57,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   For treehouse-backed ship/scout spawns, the recorded worktree path is
+#   re-spelled through $HOME when that spelling resolves to the same physical
+#   directory, matching treehouse's registry while preserving the physical-path
+#   isolation guard above.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
