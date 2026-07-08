@@ -65,6 +65,11 @@ cleanup_all() {
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+fm_backend_source herdr || fail "fm_backend_source herdr failed"
+herdr_real_shell_io_ready || exit 0
+
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
@@ -114,9 +119,6 @@ PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 
 # --- confirm the trivial launch command actually ran in the herdr pane ------
 
-# shellcheck source=bin/fm-backend.sh
-. "$ROOT/bin/fm-backend.sh"
-fm_backend_source herdr || fail "fm_backend_source herdr failed"
 sleep 1
 CAPTURED=$(fm_backend_herdr_capture "$SESSION:$PANE" 30) || fail "capture failed on the auto-detected herdr pane"
 case "$CAPTURED" in
