@@ -14,6 +14,10 @@
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
+  orca --help 2>&1 | grep -Eq '(^|[[:space:]])(status|repo|worktree|terminal)([[:space:]]|$)' || {
+    echo "error: backend=orca selected but 'orca' is not the expected Orca CLI" >&2
+    return 1
+  }
 }
 
 fm_backend_orca_runtime_check() {

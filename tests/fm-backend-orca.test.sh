@@ -14,6 +14,10 @@ make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   cat > "$fb/orca" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Commands: status repo worktree terminal'
+  exit 0
+fi
 LOG="${FM_ORCA_LOG:?}"
 RESP="${FM_ORCA_RESPONSES:?}"
 COUNT_FILE="$RESP/.count"

@@ -352,6 +352,11 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+orca_cli_available() {
+  command -v orca >/dev/null 2>&1 || return 1
+  orca --help 2>&1 | grep -Eq '(^|[[:space:]])(status|repo|worktree|terminal)([[:space:]]|$)'
+}
+
 # Write CONTENT to DEST only when it differs, so re-running bootstrap does not
 # churn mtimes or duplicate generated files (idempotence).
 write_if_changed() {
@@ -556,7 +561,11 @@ if [ "${1:-}" = "install" ]; then
 fi
 
 for t in $TOOLS; do
-  command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+  if [ "$t" = orca ]; then
+    orca_cli_available || echo "MISSING: $t (install: $(install_cmd "$t"))"
+  else
+    command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+  fi
 done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
