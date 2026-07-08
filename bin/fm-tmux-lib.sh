@@ -36,7 +36,10 @@
 # footer set (mirrors fm-watch.sh / the daemon).
 # Claude quota parking override: FM_RATELIMIT_REGEX and FM_OVERLOAD_REGEX match
 # only the footer render inspected by fm_ratelimit_render_match, never the full
-# transcript. FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds.
+# transcript. FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds for a
+# quota wait (default 3600s, ~an hourly reset). FM_OVERLOAD_FALLBACK is the
+# separate, shorter fallback for a terminal "API Error: 529" overload (default
+# 120s), since overloads are transient rather than hourly.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -249,7 +252,7 @@ fm_ratelimit_render_match() {  # <tail-text> [now-epoch]
     return 0
   fi
   if printf '%s\n' "$footer" | grep -qiE "${FM_OVERLOAD_REGEX:-$FM_OVERLOAD_REGEX_DEFAULT}"; then
-    reset=$((now + $(fm_ratelimit_numeric_or_default "${FM_RATELIMIT_FALLBACK:-3600}" 3600)))
+    reset=$((now + $(fm_ratelimit_numeric_or_default "${FM_OVERLOAD_FALLBACK:-120}" 120)))
     printf '%s\t%s\n' "$reset" overload
     return 0
   fi

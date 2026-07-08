@@ -173,6 +173,41 @@ API Error: 529 overloaded_error')
   pass "overload matcher fires only on API Error: 529, not generic retry text"
 }
 
+# A transient API Error: 529 overload parks with the SHORT FM_OVERLOAD_FALLBACK
+# (default 120s), not the hourly FM_RATELIMIT_FALLBACK a quota reset uses, so an
+# idle overloaded pane is not suppressed for a full quota-reset window before the
+# first auto-resume attempt. The quota fallback stays 3600s (the two are
+# independent knobs).
+test_overload_uses_short_fallback_distinct_from_quota() {
+  local now match reset kind
+  now=1000000000
+  match=$(fm_ratelimit_render_match 'ordinary line
+another line
+API Error: 529 overloaded_error' "$now")
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$kind" = overload ] || fail "529 footer did not classify as overload: $match"
+  [ "$reset" = "$((now + 120))" ] \
+    || fail "overload used the wrong default fallback: reset=$reset, expected $((now + 120))"
+  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match 'API Error: 529 overloaded_error' "$now")
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$reset" = "$((now + 45))" ] || fail "FM_OVERLOAD_FALLBACK override not honored: reset=$reset"
+  # A quota footer with no parseable reset time still falls back to the hourly 3600s.
+  match=$(fm_ratelimit_render_match 'ordinary line
+another line
+Claude usage limit reached' "$now")
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$kind" = ratelimit ] || fail "quota footer did not classify as ratelimit: $match"
+  [ "$reset" = "$((now + 3600))" ] \
+    || fail "quota fallback changed from 3600s: reset=$reset, expected $((now + 3600))"
+  pass "API Error: 529 parks with the short overload fallback while quota reset fallback stays 3600s"
+}
+
 test_reset_parser_handles_iana_timezone_and_dst
 test_reset_parser_handles_utc_24h_and_fallback
 test_footer_match_is_tail_anchored
@@ -181,3 +216,4 @@ test_resume_exhaustion_escalates_and_leaves_marker
 test_marker_write_preserves_active_episode_reset
 test_resume_self_recovered_clears_without_submit
 test_overload_regex_matches_only_529
+test_overload_uses_short_fallback_distinct_from_quota

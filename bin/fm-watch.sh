@@ -769,21 +769,34 @@ EOF
       if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
         limit_match=$(fm_ratelimit_render_match "$tail40" || true)
         if [ -n "$limit_match" ]; then
-          IFS=$(printf '\t') read -r reset_epoch limit_kind <<EOF
+          rl_task=$(window_to_task "$w" "$STATE")
+          if [ -n "$rl_task" ] && [ -e "$STATE/$rl_task.ratelimit.failed" ]; then
+            # Auto-resume gave up (state/<id>.ratelimit.failed exists after
+            # FM_RATELIMIT_MAX_RESUMES attempts). Stop parking this pane: a still
+            # rendered quota/overload footer no longer suppresses stale detection,
+            # so it falls through to normal stale/wedge escalation below and a
+            # genuinely stuck crew keeps surfacing instead of one escalation then
+            # silence. Arm the wedge timer if idle so the terminal-status branch
+            # (which only re-checks when a timer is already running) escalates on
+            # a cadence too, not just the non-terminal one.
+            [ -e "$ssf" ] || date +%s > "$ssf"
+            triage_log "ratelimit resume exhausted; $w returned to normal stale escalation"
+          else
+            IFS=$(printf '\t') read -r reset_epoch limit_kind <<EOF
 $limit_match
 EOF
-          task=$(window_to_task "$w" "$STATE")
-          if [ -n "$task" ] && fm_ratelimit_marker_write "$STATE" "$task" "$reset_epoch" "$w" "$(window_harness "$w")"; then
-            reason="ratelimited: $w until $reset_epoch ($limit_kind)"
-            fm_wake_append ratelimited "$task" "$reason" || exit 1
+            if [ -n "$rl_task" ] && fm_ratelimit_marker_write "$STATE" "$rl_task" "$reset_epoch" "$w" "$(window_harness "$w")"; then
+              reason="ratelimited: $w until $reset_epoch ($limit_kind)"
+              fm_wake_append ratelimited "$rl_task" "$reason" || exit 1
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$ewf"
+              wake "$reason"
+            fi
             printf '%s' "$h" > "$sf"
             rm -f "$ssf" "$ewf"
-            wake "$reason"
+            triage_log "absorbed ratelimited stale: $w until $reset_epoch ($limit_kind)"
+            continue
           fi
-          printf '%s' "$h" > "$sf"
-          rm -f "$ssf" "$ewf"
-          triage_log "absorbed ratelimited stale: $w until $reset_epoch ($limit_kind)"
-          continue
         fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.

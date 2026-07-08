@@ -437,6 +437,69 @@ EOF
   pass "a stale pane with a quota footer is parked as ratelimited, not wedged"
 }
 
+# --- ratelimit auto-resume EXHAUSTED: pane returns to normal stale escalation ---
+# Once state/<id>.ratelimit.failed exists (auto-resume gave up after
+# FM_RATELIMIT_MAX_RESUMES attempts), a pane still rendering the quota footer must
+# no longer be parked/absorbed as ratelimited. It returns to normal stale/wedge
+# escalation so a genuinely stuck crew keeps surfacing fail-safe instead of one
+# escalation then silence.
+test_ratelimit_failed_returns_to_stale_escalation() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case ratelimit-failed-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-exhausted"
+  printf 'Claude usage limit reached\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/exhausted.meta"
+  # Non-terminal status, .seen-* primed so the signal scan does not pre-empt the stale path.
+  printf 'working: hit the quota wall\n' > "$state/exhausted.status"
+  sig=$(seen_sig "$state/exhausted.status"); printf '%s' "$sig" > "$state/.seen-exhausted_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Claude usage limit reached")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The pane was parked before auto-resume exhausted: .stale-$key already holds the
+  # footer hash (the ratelimit-parked suppressor), and auto-resume has since given up.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '%s\ttest:fm-exhausted\tclaude\n' "$(date +%s)" > "$state/exhausted.ratelimit"
+  printf 'ratelimit auto-resume exhausted\n' > "$state/exhausted.ratelimit.failed"
+  # Not provably working (stuck on the footer, no running pipeline).
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · stuck on quota footer'
+
+  # Phase A: high escalation threshold. The pane is NOT re-parked (no ratelimited
+  # wake, no new episode); it returns to normal stale handling and arms the wedge
+  # timer, absorbing this poll rather than suppressing forever.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 \
+    || { reap "$pid"; fail "a ratelimit-failed pane did not arm the wedge timer (return to normal stale handling): $(cat "$out")"; }
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "watcher exited on the first poll instead of arming the wedge timer for a failed pane: $(cat "$out")"
+  fi
+  grep -F "ratelimited: $window" "$out" >/dev/null && { reap "$pid"; fail "a ratelimit-failed pane was re-parked as ratelimited: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "ratelimit-failed pane enqueued a wake while arming the timer"; }
+  reap "$pid"
+
+  # Phase B: backdate the wedge timer past the threshold; the next poll escalates a
+  # stale wedge exactly like any other stuck pane - never another ratelimited park.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not wedge-escalate a ratelimit-failed pane past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge: $(cat "$out")"
+  grep -F "ratelimited: $window" "$out" >/dev/null && fail "the failed pane was mislabeled ratelimited on escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the failed-pane wedge escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "failed-pane wedge escalation was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a ratelimit-failed pane returns to normal stale/wedge escalation instead of being parked into silence"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1177,6 +1240,7 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_ratelimit_stale_is_parked_not_wedged
+test_ratelimit_failed_returns_to_stale_escalation
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
