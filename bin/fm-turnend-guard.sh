@@ -10,6 +10,9 @@
 # Claude and codex can block directly by preserving exit status 2 and stderr.
 # OpenCode, pi, and grok adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive.
+# On Codex surfaces with an unverified background-completion wake channel, a live
+# one-shot watcher is still degraded supervision outside away mode, so this guard
+# blocks instead of treating that watcher as fully healthy.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
