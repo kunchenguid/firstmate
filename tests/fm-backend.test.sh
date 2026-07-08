@@ -631,7 +631,9 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 }
 
 strip_send_preflight() {  # <log>
-  grep -v $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' "$1"
+  local preflight
+  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -650,7 +652,7 @@ test_send_conformance_old_vs_new() {
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
-  cp "$log_old" "$filtered_old"
+  strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
     || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
@@ -662,7 +664,7 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  cp "$log_old" "$filtered_old"
+  strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
     || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
@@ -678,7 +680,7 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  cp "$log_old" "$filtered_old"
+  strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
     || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
