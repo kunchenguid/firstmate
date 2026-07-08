@@ -41,6 +41,23 @@ test_help_exits_before_positional_parsing() {
   pass "fm-spawn --help exits before positional parsing"
 }
 
+test_missing_positionals_exit_before_backend_validation() {
+  local out status
+  out=$(FM_BACKEND=missing-backend run_spawn)
+  status=$?
+  expect_code 2 "$status" "fm-spawn with no args should exit with usage"
+  assert_contains "$out" "Usage:" "no-args output should include usage"
+  assert_not_contains "$out" "unknown backend" "no-args path should not validate backend"
+
+  out=$(FM_BACKEND=missing-backend run_spawn nope-no-project-z9)
+  status=$?
+  expect_code 2 "$status" "fm-spawn without project-dir should exit with usage"
+  assert_contains "$out" "error: missing project-dir for nope-no-project-z9" "missing project-dir should be reported"
+  assert_contains "$out" "Usage:" "missing project-dir output should include usage"
+  assert_not_contains "$out" "unknown backend" "missing project-dir path should not validate backend"
+  pass "missing positionals exit before backend validation"
+}
+
 # Every pair in a batch is dispatched even though the first one fails; the loop
 # must not stop early. This is the load-bearing batch guarantee, kept explicit.
 test_batch_dispatches_every_pair() {
@@ -116,6 +133,7 @@ ROWS
 }
 
 test_help_exits_before_positional_parsing
+test_missing_positionals_exit_before_backend_validation
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping

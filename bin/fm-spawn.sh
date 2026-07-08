@@ -164,6 +164,80 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
+# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
+# positional as one and spawn each by re-execing this script in single-task mode. We use
+# the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
+# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
+# exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
+# one (task ids are bare slugs), so they fall straight through to the logic below.
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  rc=0
+  shared_args=()
+  [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  for pair in "${POS[@]}"; do
+    case "$pair" in
+      *=*) : ;;
+      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
+    esac
+    if [ "$KIND" = secondmate ]; then
+      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
+      rc=2
+      continue
+    elif [ "$KIND" = scout ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"} --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    else
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    fi
+  done
+  exit "$rc"
+fi
+if [ "${#POS[@]}" -eq 0 ]; then
+  usage >&2
+  exit 2
+fi
+ID=${POS[0]}
+PROJ=
+ARG3=
+FIRSTMATE_HOME=
+
+if [ "$KIND" = secondmate ]; then
+  case "${POS[1]:-}" in
+    ''|claude|codex|opencode|pi|grok)
+      ARG3=${POS[1]:-}
+      ;;
+    *' '*)
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+      else
+        ARG3=${POS[1]}
+      fi
+      ;;
+    *)
+      FIRSTMATE_HOME=${POS[1]}
+      ARG3=${POS[2]:-}
+      ;;
+  esac
+else
+  if [ "${#POS[@]}" -lt 2 ]; then
+    echo "error: missing project-dir for $ID" >&2
+    usage >&2
+    exit 2
+  fi
+  PROJ=${POS[1]}
+  ARG3=${POS[2]:-}
+fi
+[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -242,80 +316,6 @@ orca_spawn_abort_cleanup() {
   return "$status"
 }
 trap orca_spawn_abort_cleanup EXIT
-
-# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
-# positional as one and spawn each by re-execing this script in single-task mode. We use
-# the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
-# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
-# exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
-# one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
-    exit 1
-  fi
-  rc=0
-  shared_args=()
-  [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
-  [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
-  [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
-  [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
-  for pair in "${POS[@]}"; do
-    case "$pair" in
-      *=*) : ;;
-      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
-    esac
-    if [ "$KIND" = secondmate ]; then
-      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
-      rc=2
-      continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"} --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    fi
-  done
-  exit "$rc"
-fi
-if [ "${#POS[@]}" -eq 0 ]; then
-  usage >&2
-  exit 2
-fi
-ID=${POS[0]}
-PROJ=
-ARG3=
-FIRSTMATE_HOME=
-
-if [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
-        ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
-else
-  if [ "${#POS[@]}" -lt 2 ]; then
-    echo "error: missing project-dir for $ID" >&2
-    usage >&2
-    exit 2
-  fi
-  PROJ=${POS[1]}
-  ARG3=${POS[2]:-}
-fi
-[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
