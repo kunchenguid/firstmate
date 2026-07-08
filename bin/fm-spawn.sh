@@ -701,6 +701,28 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+home_spelled_path_or_original() {  # <path>
+  local path=$1 path_real home_real suffix candidate candidate_real
+  path_real=$(real_path_or_raw "$path")
+  home_real=$(real_path_or_raw "$HOME")
+  [ -n "$path_real" ] || { printf '%s\n' "$path"; return 0; }
+  [ -n "$home_real" ] || { printf '%s\n' "$path"; return 0; }
+  [ "$path_real" != "$home_real" ] || { printf '%s\n' "$path"; return 0; }
+  case "$path_real" in
+    "$home_real"/*) ;;
+    *) printf '%s\n' "$path"; return 0 ;;
+  esac
+  suffix=${path_real#"$home_real"/}
+  candidate=$HOME/$suffix
+  [ "$candidate" != "$path" ] || { printf '%s\n' "$path"; return 0; }
+  candidate_real=$(real_path_or_raw "$candidate")
+  if [ "$candidate_real" = "$path_real" ]; then
+    printf '%s\n' "$candidate"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -903,6 +925,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  WT=$(home_spelled_path_or_original "$WT")
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

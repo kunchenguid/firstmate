@@ -386,6 +386,25 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+alternate_home_spelling_for_dir() {
+  local dir=$1 dir_real home_real suffix candidate candidate_real
+  [ -n "$dir" ] || return 1
+  [ -d "$dir" ] || return 1
+  dir_real=$(canonical_existing_dir "$dir") || return 1
+  home_real=$(canonical_existing_dir "$HOME") || return 1
+  [ "$dir_real" != "$home_real" ] || return 1
+  case "$dir_real" in
+    "$home_real"/*) ;;
+    *) return 1 ;;
+  esac
+  suffix=${dir_real#"$home_real"/}
+  candidate=$HOME/$suffix
+  [ "$candidate" != "$dir" ] || return 1
+  candidate_real=$(canonical_existing_dir "$candidate") || return 1
+  [ "$candidate_real" = "$dir_real" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-2}
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
@@ -503,16 +522,65 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+treehouse_return_once() {
+  local dir=$1 cd_dir=$2 out status
+  if out=$(cd "$cd_dir" && treehouse return --force "$dir" 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out"
+    return 0
+  else
+    status=$?
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+  return "$status"
+}
+
+treehouse_return_output_not_managed() {
+  case "$1" in
+    *"not managed by treehouse"*) return 0 ;;
+  esac
+  return 1
+}
+
+treehouse_return_output_git_process_lock() {
+  case "$1" in
+    *"Another git process seems to be running"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a stale git
 # lock left by a killed crew process. On failure: wait briefly and retry once
 # (the owning process may be exiting), then - only if the lock is provably
 # stale - remove it and retry once more. A lock that is not provably stale is
 # left untouched and the original failure is surfaced to the caller.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock out alt_dir
 
-  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+  if out=$(treehouse_return_once "$dir" "$cd_dir" 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out"
     return 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+
+  if treehouse_return_output_not_managed "$out"; then
+    alt_dir=$(alternate_home_spelling_for_dir "$dir" || true)
+    if [ -n "$alt_dir" ]; then
+      echo "teardown: $label return was not managed as $dir; retrying alternate home spelling $alt_dir" >&2
+      if treehouse_return_once "$alt_dir" "$cd_dir"; then
+        echo "teardown: $label return succeeded with alternate home spelling" >&2
+        return 0
+      fi
+    fi
+  fi
+
+  if treehouse_return_output_git_process_lock "$out"; then
+    echo "teardown: $label return failed with transient git process lock; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying once" >&2
+    sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
+    if treehouse_return_once "$dir" "$cd_dir"; then
+      echo "teardown: $label return succeeded on transient-lock retry" >&2
+      return 0
+    fi
+    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
@@ -523,7 +591,7 @@ teardown_treehouse_return() {
   echo "teardown: $label return failed with git lock $lock present; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
   sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
 
-  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+  if treehouse_return_once "$dir" "$cd_dir"; then
     echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
     return 0
   fi
@@ -538,7 +606,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+      if treehouse_return_once "$dir" "$cd_dir"; then
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi

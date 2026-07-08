@@ -315,6 +315,60 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+add_not_managed_then_logical_treehouse() {
+  local case_dir=$1 physical=$2 logical=$3
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "\$@"; do
+    case "\$a" in
+      --force) ;;
+      *) wt=\$a ;;
+    esac
+  done
+  printf '%s\n' "\$wt" >> "$case_dir/treehouse-calls"
+  case "\$wt" in
+    "$physical") echo "worktree \$wt is not managed by treehouse" >&2; exit 1 ;;
+    "$logical") exit 0 ;;
+  esac
+  echo "unexpected treehouse return path: \$wt" >&2
+  exit 2
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+add_transient_git_process_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  printf '%s\n' "$wt" >> "${FM_TREEHOUSE_CALL_LOG:?}"
+  if [ ! -s "${FM_TREEHOUSE_CALL_LOG:?}" ] || [ "$(wc -l < "${FM_TREEHOUSE_CALL_LOG:?}")" -eq 1 ]; then
+    echo "fatal: Unable to create 'index.lock': File exists." >&2
+    echo "Another git process seems to be running in this repository." >&2
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 git_index_lock_path() {
   local dir=$1 lock abs_dir
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
@@ -411,6 +465,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TREEHOUSE_CALL_LOG="$case_dir/treehouse-calls" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -998,6 +1053,70 @@ test_index_lock_mtime_read_failure_refuses() {
   pass "lock mtime read failures leave worktree index.lock in place and refuse teardown"
 }
 
+test_treehouse_return_retries_alternate_home_spelling() {
+  local case_dir rc real_home logical_home physical_wt logical_wt calls
+  case_dir=$(make_case alternate-home-spelling)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  real_home="$case_dir/real-home"
+  logical_home="$case_dir/logical-home"
+  mkdir -p "$real_home"
+  mv "$case_dir/wt" "$real_home/wt"
+  ln -s "$real_home" "$logical_home"
+  physical_wt="$real_home/wt"
+  logical_wt="$logical_home/wt"
+  write_meta "$case_dir" no-mistakes ship
+  sed -i "s|^worktree=.*|worktree=$physical_wt|" "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree repair "$real_home" >/dev/null 2>&1 || true
+
+  add_not_managed_then_logical_treehouse "$case_dir" "$physical_wt" "$logical_wt"
+
+  set +e
+  HOME="$logical_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "alternate-home-spelling: teardown should retry the HOME spelling"
+  calls=$(cat "$case_dir/treehouse-calls")
+  [ "$calls" = "$physical_wt"$'\n'"$logical_wt" ] \
+    || fail "alternate-home-spelling: wrong treehouse retry sequence"$'\n'"$calls"
+  assert_grep "retrying alternate home spelling $logical_wt" "$case_dir/stderr" \
+    "alternate-home-spelling: teardown did not report the alternate spelling retry"
+  pass "treehouse return retries the alternate HOME spelling after a not-managed failure"
+}
+
+test_treehouse_return_retries_git_process_lock_once_without_removing_lock() {
+  local case_dir rc lock calls
+  case_dir=$(make_case transient-git-process-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_git_process_treehouse "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-git-process-lock: teardown should succeed on one retry"
+  calls=$(cat "$case_dir/treehouse-calls")
+  [ "$calls" = "$case_dir/wt"$'\n'"$case_dir/wt" ] \
+    || fail "transient-git-process-lock: wrong treehouse retry sequence"$'\n'"$calls"
+  [ -e "$lock" ] || fail "transient-git-process-lock: retry path removed the lock file"
+  assert_grep "transient git process lock" "$case_dir/stderr" \
+    "transient-git-process-lock: teardown did not report the bounded retry"
+  pass "treehouse return retries a transient git-process lock once without removing the lock"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -1039,3 +1158,5 @@ test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
 test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
+test_treehouse_return_retries_alternate_home_spelling
+test_treehouse_return_retries_git_process_lock_once_without_removing_lock
