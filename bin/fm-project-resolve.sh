@@ -287,8 +287,16 @@ json_required_yolo() {
 }
 
 resolve_json() {
-  local arg=$1 project raw project_id canonical expected_common common default_branch base_ref mode yolo worktree_policy origin fork
-  project=$(json_registry_project "$arg") || return $?
+  local arg=$1 project status raw project_id canonical expected_common common default_branch base_ref mode yolo worktree_policy origin fork
+  if project=$(json_registry_project "$arg"); then
+    :
+  else
+    status=$?
+    case "$status" in
+      1) return 3 ;;
+      *) return "$status" ;;
+    esac
+  fi
   [ -n "$project" ] || return 3
 
   project_id=$(json_required_string "$project" "" projectId projectId) || return 1

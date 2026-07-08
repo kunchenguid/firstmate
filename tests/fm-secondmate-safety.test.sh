@@ -206,6 +206,58 @@ EOF
   pass "secondmate seed preserves mode/yolo for JSON-only projects"
 }
 
+test_home_seed_materializes_json_policy_over_stale_markdown() {
+  local home subhome work remote repo remote_abs repo_abs out status mode
+  home="$TMP_ROOT/json-stale-md-parent"
+  subhome="$TMP_ROOT/json-stale-md-sub"
+  work="$TMP_ROOT/json-stale-md-work-flow"
+  remote="$TMP_ROOT/json-stale-md-flow.git"
+  repo="$TMP_ROOT/json-stale-md-github/flow"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$TMP_ROOT/json-stale-md-github"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/dev
+  printf '# flow\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-dev
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd -P)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin dev
+  git clone --quiet "file://$remote_abs" "$repo"
+  git -C "$repo" checkout -q dev
+  repo_abs=$(cd "$repo" && pwd -P)
+
+  printf '%s\n' '- flow - Flow project (added 2026-07-07)' > "$home/data/projects.md"
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_abs",
+      "gitCommonDir": "$repo_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": true,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='flow engineering' FM_SECONDMATE_SCOPE='flow engineering' \
+    "$ROOT/bin/fm-home-seed.sh" flow-sm "$subhome" flow 2>&1)
+  status=$?
+  expect_code 0 "$status" "seed should clone JSON project despite stale markdown policy: $out"
+  assert_grep '- flow [direct-PR +yolo] - Flow project' "$subhome/data/projects.md" "seed should materialize JSON mode/yolo over stale projects.md policy"
+  mode=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" flow)
+  [ "$mode" = "direct-PR on" ] || fail "stale markdown seed resolved as $mode in child home"
+  pass "secondmate seed materializes JSON policy over stale markdown"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -1921,6 +1973,7 @@ test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_clones_registered_external_project
 test_home_seed_materializes_json_only_project_mode
+test_home_seed_materializes_json_policy_over_stale_markdown
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

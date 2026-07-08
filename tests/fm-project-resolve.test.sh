@@ -334,6 +334,26 @@ test_json_registry_list_merges_legacy_projects() {
   pass "project list merges JSON sidecar projects with legacy projects directory"
 }
 
+test_json_registry_miss_falls_back_to_legacy_project() {
+  local home repo repo_real app_real out
+  home=$(new_home json-miss-legacy)
+  repo="$TMP_ROOT/json-miss-legacy/github/flow"
+  make_repo "$repo" dev
+  repo_real=$(cd "$repo" && pwd -P)
+  write_json_registry "$home" flow "$repo_real"
+  mkdir -p "$home/projects/app"
+  app_real=$(cd "$home/projects/app" && pwd -P)
+  printf '%s\n' '- app [local-only +yolo] - legacy app (added 2026-07-07)' > "$home/data/projects.md"
+
+  out=$(run_resolve "$home" --field source app)
+  [ "$out" = legacy ] || fail "JSON miss did not fall back to legacy source"
+  out=$(run_resolve "$home" --field canonical_path app)
+  [ "$out" = "$app_real" ] || fail "JSON miss did not resolve legacy canonical path"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$MODE" app)
+  [ "$out" = "local-only on" ] || fail "JSON miss did not preserve legacy mode/yolo"
+  pass "JSON sidecar misses fall back to legacy projects"
+}
+
 test_json_registry_resolves_external_project_identity
 test_markdown_registry_fallback_still_works
 test_json_registry_refuses_linked_worktree_as_canonical
@@ -346,3 +366,4 @@ test_json_registry_rejects_invalid_policy_fields
 test_json_registry_matches_physical_canonical_path
 test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy
 test_json_registry_list_merges_legacy_projects
+test_json_registry_miss_falls_back_to_legacy_project

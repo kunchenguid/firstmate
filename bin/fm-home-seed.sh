@@ -731,7 +731,7 @@ registry_line_for_project() {
 }
 
 resolved_registry_line_for_project() {
-  local project=$1 today mode yolo policy
+  local project=$1 today mode yolo policy line rest
   today=$(date +%F)
   mode=$("$SCRIPT_DIR/fm-project-resolve.sh" --field mode "$project") || return 1
   yolo=$("$SCRIPT_DIR/fm-project-resolve.sh" --field yolo "$project") || return 1
@@ -742,6 +742,19 @@ resolved_registry_line_for_project() {
     policy=" [$mode"
     [ "$yolo" != on ] || policy="$policy +yolo"
     policy="$policy]"
+  fi
+  line=$(registry_line_for_project "$project" || true)
+  if [ -n "$line" ]; then
+    rest=${line#"- $project"}
+    case "$rest" in
+      " ["*"] - "*) rest=${rest#*]} ;;
+    esac
+    case "$rest" in
+      " - "*) ;;
+      *) rest=" - cloned project (added $today)" ;;
+    esac
+    printf -- '- %s%s%s\n' "$project" "$policy" "$rest"
+    return 0
   fi
   printf -- '- %s%s - cloned project (added %s)\n' "$project" "$policy" "$today"
 }
@@ -772,10 +785,7 @@ sync_project_registry() {
     : > "$tmp"
   fi
   for project in "$@"; do
-    line=$(registry_line_for_project "$project" || true)
-    if [ -z "$line" ]; then
-      line=$(resolved_registry_line_for_project "$project")
-    fi
+    line=$(resolved_registry_line_for_project "$project")
     printf '%s\n' "$line" >> "$tmp"
   done
   mv "$tmp" "$sub_reg"
