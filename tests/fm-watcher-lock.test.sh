@@ -167,6 +167,19 @@ test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher() {
   pass "guard warns when Codex cannot be trusted to wake on watcher background-task completion"
 }
 
+test_guard_skips_codex_unverified_background_wake_warning_in_afk() {
+  local dir state err
+  dir=$(make_case guard-codex-afk)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  : > "$state/.afk"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_CODEX_BACKGROUND_WAKE=unverified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  ! grep -F 'CODEX WATCH WAKE CHANNEL UNVERIFIED' "$err" >/dev/null || fail "guard warned about Codex degraded wake while away-mode owns supervision"
+  pass "guard skips the Codex degraded wake warning while away mode owns supervision"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -699,6 +712,7 @@ test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher
+test_guard_skips_codex_unverified_background_wake_warning_in_afk
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency

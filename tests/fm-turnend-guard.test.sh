@@ -245,6 +245,28 @@ test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher() {
   pass "fm-turnend-guard: Codex no-auto-wake path does not treat a live one-shot watcher as fully healthy"
 }
 
+test_hook_allows_afk_with_codex_unverified_background_wake() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-afk")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(printf '{"stop_hook_active":false}' | CODEX_CI=1 CODEX_THREAD_ID=thread-test bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must not block Codex degraded wake checks while away-mode owns supervision"
+  [ -z "$out" ] || fail "hook produced output while away-mode owns supervision: $out"
+  pass "fm-turnend-guard: away mode exempts the Codex degraded wake block"
+}
+
 test_hook_blocks_with_live_lock_and_stale_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
@@ -635,6 +657,7 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher
+test_hook_allows_afk_with_codex_unverified_background_wake
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
