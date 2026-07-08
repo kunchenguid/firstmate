@@ -115,11 +115,16 @@ meta_val() {  # <meta-file> <key>
 #  15 pr          full https PR url when recorded
 #  16 branch      worktree branch, when readable
 emit_record() {
-  local f out=""
+  local f out="" first=1
   for f in "$@"; do
     f=${f//$SEP/ }
     f=${f//$'\n'/ }
-    out="$out$f$SEP"
+    if [ "$first" = 1 ]; then
+      out="$f"
+      first=0
+    else
+      out="$out$SEP$f"
+    fi
   done
   printf '%s\n' "$out"
 }
