@@ -11,8 +11,10 @@
 # that errors is warned and swallowed, and the spawn continues) and it never runs
 # against the primary checkout. A hang cannot gate a launch either: the hook
 # runs under a time budget of FM_HOOK_TIMEOUT seconds (default 120) via 'timeout'
-# or 'gtimeout', and a timed-out hook is warned and skipped exactly like a
-# failing one. When neither binary exists the hook runs unbounded with a stderr
+# or 'gtimeout' with a 5s kill-after grace, so even a hook that traps or ignores
+# SIGTERM is stopped, and a timed-out hook is warned and skipped exactly like a
+# failing one. FM_HOOK_TIMEOUT=0 is a deliberate opt-out that runs the hook with
+# no time limit. When neither binary exists the hook runs unbounded with a stderr
 # warning - a missing timeout binary never fails the spawn.
 # The hook receives the worktree path, project
 # name, task id, and kind as both positional arguments ($1..$4) and environment
@@ -29,10 +31,12 @@
 # A no-op (return 0) when it is absent. Non-fatal: a hook that exits non-zero is
 # warned to stderr and this function still returns 0 so the spawn continues.
 # Bounded: the hook runs under 'timeout' (or macOS 'gtimeout') with a budget of
-# FM_HOOK_TIMEOUT seconds (default 120), and a timed-out hook is warned and
-# skipped like a failing one, so a hang cannot gate a launch either. When
-# neither timeout binary exists the hook runs unbounded after a stderr warning;
-# a missing timeout binary never fails the spawn.
+# FM_HOOK_TIMEOUT seconds (default 120) and a 5s kill-after grace so a
+# TERM-ignoring hook is still stopped, and a timed-out hook is warned and
+# skipped like a failing one, so a hang cannot gate a launch either.
+# FM_HOOK_TIMEOUT=0 deliberately disables the bound and runs the hook with no
+# time limit. When neither timeout binary exists the hook runs unbounded after
+# a stderr warning; a missing timeout binary never fails the spawn.
 # Refuses to run when <worktree> resolves to <primary-root> - a defense-in-depth
 # backstop for "never against the primary checkout" independent of the call
 # site's own isolation assertion. Always returns 0.
@@ -58,14 +62,14 @@ fm_run_post_worktree_create_hook() {
   hook_status=0
   if [ -n "$timeout_bin" ]; then
     FM_HOOK_WORKTREE="$wt" FM_HOOK_PROJECT="$project" FM_HOOK_TASK_ID="$task_id" FM_HOOK_KIND="$kind" \
-      "$timeout_bin" "$budget" "$hook" "$wt" "$project" "$task_id" "$kind" || hook_status=$?
+      "$timeout_bin" -k 5 "$budget" "$hook" "$wt" "$project" "$task_id" "$kind" || hook_status=$?
   else
     echo "warning: neither 'timeout' nor 'gtimeout' on PATH; post-worktree-create hook for $task_id runs unbounded" >&2
     FM_HOOK_WORKTREE="$wt" FM_HOOK_PROJECT="$project" FM_HOOK_TASK_ID="$task_id" FM_HOOK_KIND="$kind" \
       "$hook" "$wt" "$project" "$task_id" "$kind" || hook_status=$?
   fi
   if [ "$hook_status" -ne 0 ]; then
-    if [ -n "$timeout_bin" ] && [ "$hook_status" -eq 124 ]; then
+    if [ -n "$timeout_bin" ] && { [ "$hook_status" -eq 124 ] || [ "$hook_status" -eq 137 ]; }; then
       echo "warning: post-worktree-create hook timed out after ${budget}s for $task_id; continuing spawn" >&2
     else
       echo "warning: post-worktree-create hook failed (exit $hook_status) for $task_id; continuing spawn" >&2

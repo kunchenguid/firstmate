@@ -5,7 +5,8 @@
 # config/hooks dir and a temp worktree, asserting: no-op when no hook is
 # installed, runs and receives the right args/env when present, skips the
 # primary checkout, is non-fatal (returns 0, warns) when the hook errors, and
-# is non-fatal when the hook hangs past FM_HOOK_TIMEOUT.
+# is non-fatal when the hook hangs past FM_HOOK_TIMEOUT - including a hook
+# that traps SIGTERM, which the kill-after grace still stops.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -100,8 +101,55 @@ test_nonfatal_on_hung_hook() {
   pass "non-fatal when the hook hangs: killed at FM_HOOK_TIMEOUT, warns and returns 0"
 }
 
+test_nonfatal_on_term_ignoring_hook() {
+  local root config primary wt out status
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP: no timeout/gtimeout on PATH; kill-after grace not testable here"
+    return 0
+  fi
+  root=$(fm_test_tmproot fm-hooks-term-ignore)
+  read -r config primary wt < <(fixture "$root")
+  # A hook that ignores SIGTERM (sleep inherits the ignored disposition), so
+  # only the kill-after grace's SIGKILL can stop it; the sleep bounds the test
+  # at 30s if that SIGKILL never comes.
+  install_hook "$config" "trap '' TERM; sleep 30"
+
+  out=$(FM_HOOK_TIMEOUT=1 fm_run_post_worktree_create_hook "$config" "$primary" "$wt" alpha task-a1 ship 2>&1)
+  status=$?
+  expect_code 0 "$status" "a TERM-ignoring hung hook must not fail the spawn"
+  assert_contains "$out" "timed out after 1s" "should warn that the TERM-ignoring hook timed out"
+  pass "non-fatal when the hook ignores SIGTERM: kill-after grace stops it, warns and returns 0"
+}
+
+# Fake-timeout tests: assert the invocation contract without needing a real
+# timeout binary, so the kill-after grace stays covered on hosts that SKIP the
+# real-binary tests above.
+test_timeout_invoked_with_kill_after_grace() {
+  local root config primary wt fakebin argslog out status
+  root=$(fm_test_tmproot fm-hooks-fake-timeout)
+  read -r config primary wt < <(fixture "$root")
+  fakebin=$(fm_fakebin "$root")
+  argslog="$root/timeout-args"
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > '$argslog'
+exit 137
+SH
+  chmod +x "$fakebin/timeout"
+  install_hook "$config" "exit 0"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOOK_TIMEOUT=7 fm_run_post_worktree_create_hook "$config" "$primary" "$wt" alpha task-a1 ship 2>&1)
+  status=$?
+  expect_code 0 "$status" "a timeout-killed hook must not fail the spawn"
+  assert_grep "-k 5 7 " "$argslog" "timeout must be invoked with the kill-after grace before the budget"
+  assert_contains "$out" "timed out after 7s" "a kill-after SIGKILL (exit 137) must be reported as a timeout"
+  pass "invokes timeout with '-k 5 <budget>' and treats exit 137 as a timeout"
+}
+
 test_noop_when_absent
 test_runs_with_args_and_env
 test_skips_primary_checkout
 test_nonfatal_on_hook_error
 test_nonfatal_on_hung_hook
+test_nonfatal_on_term_ignoring_hook
+test_timeout_invoked_with_kill_after_grace

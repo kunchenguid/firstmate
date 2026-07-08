@@ -164,7 +164,8 @@ The hook receives the same four values as positional arguments and as environmen
 | `$4` | `FM_HOOK_KIND` | `ship`, `scout`, or `secondmate` |
 
 The hook is purely additive and never gates a launch: a hook that exits non-zero is warned to stderr and the spawn continues, so it must not be relied on to block a spawn.
-A hang cannot gate a launch either: the hook runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120) via `timeout` or macOS `gtimeout`, and a timed-out hook is warned to stderr and skipped exactly like a failing one.
+A hang cannot gate a launch either: the hook runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120) via `timeout` or macOS `gtimeout` with a 5-second kill-after grace, so even a hook that traps or ignores `SIGTERM` is stopped, and a timed-out hook is warned to stderr and skipped exactly like a failing one.
+Setting `FM_HOOK_TIMEOUT=0` is a deliberate opt-out: it disables the time bound and runs the hook with no time limit.
 When neither timeout binary is on `PATH`, the hook runs unbounded after a stderr warning; a missing timeout binary never fails the spawn.
 It never runs against the primary checkout - the call site only reaches it past the isolation assertion, and `fm-hooks-lib.sh` additionally refuses to run when the worktree resolves to the firstmate primary root as a backstop.
 `config/hooks/` is gitignored, so an installed hook stays fleet-local and is never committed.

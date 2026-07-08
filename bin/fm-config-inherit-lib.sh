@@ -30,6 +30,10 @@
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend hooks/post-worktree-create}"
 
+inheritable_file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
   if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then
@@ -79,9 +83,11 @@ destination_allows_inherited_item() {
 # secondmate home's config dir (dest). SILENT on stdout - callers parse stdout,
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
-# present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
-# destination item, so clearing the primary's value clears it downstream too
+# present is copied only when its content or permission bits differ (idempotent:
+# a re-run never churns mtimes; mode matters because the post-worktree-create
+# hook is only honored while executable, so an exec-bit-stripped destination is
+# repaired on the next convergence). A source item that is absent is mirrored
+# as a missing destination item, so clearing the primary's value clears it downstream too
 # (primary-authoritative). The destination dir is created lazily, only when there
 # is actually something to write, so a primary with no inheritable config set is a
 # complete no-op (it leaves the secondmate home exactly as it was - the
@@ -129,7 +135,8 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+      if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest" \
+        || [ "$(inheritable_file_mode "$src")" != "$(inheritable_file_mode "$dest")" ]; then
         if copy_inheritable_file "$src" "$dest"; then
           record_inheritable_config_result "$item" pushed ""
         else
