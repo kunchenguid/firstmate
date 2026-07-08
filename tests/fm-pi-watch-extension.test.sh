@@ -72,11 +72,12 @@ test_generator_uses_portable_mktemp_template() {
 test_spawn_template_mentions_pi_watch_placeholder() {
   local text
   text=$(cat "$ROOT/bin/fm-spawn.sh")
-  assert_contains "$text" "-e __PIWATCH__" "Pi secondmate launch template does not include the primary watch extension"
+  assert_contains "$text" "-e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include both primary extensions"
   assert_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn does not generate the Pi watch extension before launch"
   assert_contains "$text" "env FM_HOME=\"\$PROJ_ABS\" FM_ROOT_OVERRIDE=\"\$PROJ_ABS\" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \"\$SCRIPT_DIR/fm-pi-watch-extension.sh\"" "fm-spawn lets primary operational overrides leak into Pi secondmate watch generation"
+  assert_contains "$text" "__PITURNEND__" "fm-spawn does not replace the Pi turn-end guard extension placeholder"
   assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
-  pass "Pi secondmate launch wiring includes the generated primary watcher extension"
+  pass "Pi secondmate launch wiring includes both primary extensions"
 }
 
 test_opencode_primary_watch_plugin_static_wiring() {

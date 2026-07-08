@@ -11,4 +11,4 @@ When this session owns supervision and away mode is not active:
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The generated watcher extension lives at `__FM_PI_EXT__`.
-`bin/fm-session-start.sh` creates or refreshes it for Pi primaries and reports when the running Pi session has not loaded it.
+`bin/fm-session-start.sh` creates or refreshes the generated watcher extension for Pi primaries and reports when the running Pi session has not loaded both required extensions.
