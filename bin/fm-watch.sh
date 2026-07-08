@@ -106,11 +106,34 @@ fi
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
+if [ -n "${FM_HEARTBEAT_SECONDMATE_ONLY:-}" ]; then
+  HEARTBEAT_SECONDMATE_ONLY=$FM_HEARTBEAT_SECONDMATE_ONLY
+elif [ -n "${FM_HEARTBEAT:-}" ]; then
+  HEARTBEAT_SECONDMATE_ONLY=$HEARTBEAT
+else
+  HEARTBEAT_SECONDMATE_ONLY=1800
+fi
+if [ -n "${FM_HEARTBEAT_SECONDMATE_ONLY_MAX:-}" ]; then
+  HEARTBEAT_SECONDMATE_ONLY_MAX=$FM_HEARTBEAT_SECONDMATE_ONLY_MAX
+elif [ -n "${FM_HEARTBEAT_MAX:-}" ]; then
+  HEARTBEAT_SECONDMATE_ONLY_MAX=$HEARTBEAT_MAX
+else
+  HEARTBEAT_SECONDMATE_ONLY_MAX=14400
+fi
+[ "$HEARTBEAT_SECONDMATE_ONLY_MAX" -lt "$HEARTBEAT_SECONDMATE_ONLY" ] && HEARTBEAT_SECONDMATE_ONLY_MAX=$HEARTBEAT_SECONDMATE_ONLY
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+if [ -n "${FM_SIGNAL_COALESCE_MAX:-}" ]; then
+  SIGNAL_COALESCE_MAX=$FM_SIGNAL_COALESCE_MAX
+elif [ -n "${FM_SIGNAL_GRACE:-}" ]; then
+  SIGNAL_COALESCE_MAX=$SIGNAL_GRACE
+else
+  SIGNAL_COALESCE_MAX=90
+fi
+[ "$SIGNAL_COALESCE_MAX" -lt "$SIGNAL_GRACE" ] && SIGNAL_COALESCE_MAX=$SIGNAL_GRACE
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -230,6 +253,16 @@ recorded_windows() {
   done
 }
 
+fleet_is_secondmate_only() {
+  local w seen=0
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    seen=1
+    [ "$(window_kind "$w")" = secondmate ] || return 1
+  done < <(recorded_windows)
+  [ "$seen" -eq 1 ]
+}
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
@@ -317,6 +350,19 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+signal_signature_snapshot() {
+  awk -F '\t' '
+    NF >= 3 && $1 != "" {
+      sig[$1] = $2
+    }
+    END {
+      for (s in sig) {
+        print s "\t" sig[s]
+      }
+    }
+  ' | sort
 }
 
 run_check() {
@@ -418,15 +464,28 @@ while :; do
     touch "$STATE/.last-check"
   fi
 
-  # On the first changed signal, linger one grace period and re-scan before
-  # classifying: a crewmate's final status write and the same turn's turn-end
-  # hook land seconds apart, and reporting them as separate actionable wakes
-  # costs a full firstmate turn each. The re-scan also picks up a newer
-  # signature for an already-pending file (last write wins below).
+  # On the first changed signal, linger until one quiet grace period has passed,
+  # capped by SIGNAL_COALESCE_MAX, before classifying: a crewmate's final status
+  # write and the same turn's turn-end hook can land more than one grace apart
+  # when the harness is busy, and reporting them as separate actionable wakes
+  # costs a full firstmate turn each. Each re-scan also picks up a newer
+  # signature for an already-pending file (last write wins below). Explicit
+  # FM_SIGNAL_GRACE overrides keep their historical single-window behavior unless
+  # FM_SIGNAL_COALESCE_MAX is also set.
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    signal_started=$(date +%s)
+    signal_snapshot=$(printf '%s\n' "$pending" | signal_signature_snapshot)
+    while :; do
+      sleep "$SIGNAL_GRACE"
+      latest=$(scan_signals)
+      [ -n "$latest" ] || break
+      latest_snapshot=$(printf '%s\n' "$latest" | signal_signature_snapshot)
+      pending=$(printf '%s\n%s' "$pending" "$latest")
+      [ "$latest_snapshot" = "$signal_snapshot" ] && break
+      signal_snapshot=$latest_snapshot
+      [ "$(( $(date +%s) - signal_started ))" -ge "$SIGNAL_COALESCE_MAX" ] && break
+    done
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
@@ -589,12 +648,20 @@ EOF
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
-  # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
-  # surfaced non-heartbeat wake.
+  # no-change heartbeat (idle fleet) up to the active cap, and resets on any
+  # surfaced non-heartbeat wake. Fleets made only of secondmates use a slower
+  # heartbeat fail-safe by default because parent supervision of secondmates is
+  # status-write driven and their idle panes intentionally skip stale detection.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
-  hb=$(( HEARTBEAT * (1 << streak) ))
-  [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
+  hb_base=$HEARTBEAT
+  hb_max=$HEARTBEAT_MAX
+  if fleet_is_secondmate_only; then
+    hb_base=$HEARTBEAT_SECONDMATE_ONLY
+    hb_max=$HEARTBEAT_SECONDMATE_ONLY_MAX
+  fi
+  hb=$(( hb_base * (1 << streak) ))
+  [ "$hb" -gt "$hb_max" ] && hb=$hb_max
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the

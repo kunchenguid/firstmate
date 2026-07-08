@@ -91,6 +91,24 @@ SH
   done
 }
 
+fm_filtered_path_without() {
+  local dest=$1 hidden name entry skip
+  shift
+  mkdir -p "$dest"
+  for entry in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
+    [ -x "$entry" ] || continue
+    name=$(basename "$entry")
+    skip=0
+    for hidden in "$@"; do
+      [ "$name" = "$hidden" ] && skip=1
+    done
+    [ "$skip" -eq 0 ] || continue
+    [ -e "$dest/$name" ] && continue
+    ln -s "$entry" "$dest/$name" 2>/dev/null || true
+  done
+  printf '%s\n' "$dest"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

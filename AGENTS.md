@@ -710,7 +710,8 @@ bin/fm-fleet-view.sh                # read-only Markdown whole-fleet view render
 On wake, in order of cheapness:
 
 1. Read the reason line and drain queued wake records with `bin/fm-wake-drain.sh`.
-2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
+2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing quiet window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
+   By default the watcher waits for 30 seconds of quiet, up to a 90 second total cap, so a late turn-end marker in the same burst does not fire a second LLM wake; `FM_SIGNAL_GRACE` and `FM_SIGNAL_COALESCE_MAX` tune those bounds.
    A status line is the wake *event*, not the crewmate's current state; when you need the live state - especially to confirm a `needs-decision`/`blocked` is still real and not already resolved-and-resumed - read it with `bin/fm-crew-state.sh <id>`, which reconciles the authoritative run-step over the possibly-stale log line, and never `tail` the status log as the current-state source.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
    If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before resuming supervision.
@@ -723,6 +724,7 @@ When a task reaches a terminal state on any of these wakes (a `done`/merge `chec
 When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as part of handling the wake, so the primary's clone never sits stale until the next session start or teardown.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
+When every recorded in-flight window is `kind=secondmate`, the heartbeat fail-safe uses the quieter secondmate-only defaults (1800s doubling to a 4h cap, configurable with `FM_HEARTBEAT_SECONDMATE_ONLY` and `FM_HEARTBEAT_SECONDMATE_ONLY_MAX`), because secondmate panes are expected to idle and parent supervision is status-write driven.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.

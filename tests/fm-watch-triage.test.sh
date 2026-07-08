@@ -70,6 +70,10 @@ file_mtime() {
   if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
+touch_age() {
+  perl -e 'my ($age, $path) = @ARGV; my $t = time - $age; utime $t, $t, $path or die "utime failed\n"' "$1" "$2"
+}
+
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
@@ -293,6 +297,41 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+test_signal_coalescing_extends_until_quiet() {
+  local dir state fakebin out drain_out status_file turn_file pid writer i
+  dir=$(make_case signal-coalescing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  turn_file="$state/task.turn-ended"
+
+  (
+    i=0
+    while [ "$i" -lt 30 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    sleep 0.2
+    printf 'done: first status\n' > "$status_file"
+    sleep 0.7
+    printf 'done: refined status\n' >> "$status_file"
+    sleep 1.2
+    : > "$turn_file"
+  ) &
+  writer=$!
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_SIGNAL_COALESCE_MAX=4 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "watcher did not surface the coalesced signal burst: $(cat "$out")"
+  wait "$writer" || fail "signal burst writer failed"
+  grep -F "signal:" "$out" | grep -F "$status_file" | grep -F "$turn_file" >/dev/null \
+    || fail "coalesced signal reason did not include both the status and late turn-end: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the coalesced signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "coalesced status signal was not queued"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$turn_file" >/dev/null || fail "coalesced turn-end signal was not queued"
+  pass "signal coalescing waits for a quiet grace window, capped by FM_SIGNAL_COALESCE_MAX"
 }
 
 test_terminal_stale_surfaced() {
@@ -687,6 +726,50 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_heartbeat_secondmate_only_uses_slower_base() {
+  local dir state fakebin out sig pid
+  dir=$(make_case heartbeat-secondmate-only); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  mkdir -p "$dir/subhome"
+  fm_write_secondmate_meta "$state/design.meta" "$dir/subhome" "test:fm-design"
+  printf 'done: answer ready on status path\n' > "$state/design.status"
+  sig=$(seen_sig "$state/design.status"); printf '%s' "$sig" > "$state/.seen-design_status"
+  : > "$state/.last-heartbeat"
+  touch_age 1200 "$state/.last-heartbeat"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 FM_HEARTBEAT_MAX=7200 \
+    FM_HEARTBEAT_SECONDMATE_ONLY=1800 FM_HEARTBEAT_SECONDMATE_ONLY_MAX=14400 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "secondmate-only fleet used the ordinary heartbeat base instead of staying live: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "secondmate-only heartbeat printed a wake before its slower base: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "secondmate-only heartbeat queued before its slower base"; }
+  reap "$pid"
+  pass "secondmate-only fleets use the slower heartbeat base before the catch-all backstop fires"
+}
+
+test_heartbeat_ship_fleet_keeps_base_cadence() {
+  local dir state fakebin out drain_out sig pid window
+  dir=$(make_case heartbeat-ship-base); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; window="test:fm-ship"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/ship.meta"
+  printf 'done: PR https://example.test/pr/7\n' > "$state/ship.status"
+  sig=$(seen_sig "$state/ship.status"); printf '%s' "$sig" > "$state/.seen-ship_status"
+  : > "$state/.last-heartbeat"
+  touch_age 1200 "$state/.last-heartbeat"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 FM_HEARTBEAT_MAX=7200 \
+    FM_HEARTBEAT_SECONDMATE_ONLY=1800 FM_HEARTBEAT_SECONDMATE_ONLY_MAX=14400 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "ordinary ship fleet did not use the normal heartbeat base"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "ordinary ship heartbeat did not surface the missed status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after ordinary ship heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "ordinary ship heartbeat was not queued"
+  pass "ordinary ship fleets keep the normal heartbeat base cadence"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -751,6 +834,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_signal_coalescing_extends_until_quiet
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
@@ -761,5 +845,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_secondmate_only_uses_slower_base
+test_heartbeat_ship_fleet_keeps_base_cadence
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
