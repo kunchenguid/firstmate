@@ -378,6 +378,8 @@ EOF
   assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
   assert_contains "$(cat "$log")" '<--resume>' "grok adapter must resume the current session"
   assert_contains "$(cat "$log")" '<session-test>' "grok adapter must pass the hook session id"
+  assert_not_contains "$(cat "$log")" '<--permission-mode>' "grok adapter must not add a stronger permission mode"
+  assert_not_contains "$(cat "$log")" '<bypassPermissions>' "grok adapter must not bypass permissions on forced resume"
   assert_contains "$(cat "$log")" 'TURN WOULD END BLIND' "grok adapter must carry the guard reason into the forced resume"
   pass "fm-turnend-guard-grok: forces one same-session resume when the shared predicate blocks"
 }

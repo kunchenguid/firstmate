@@ -40,7 +40,6 @@ GROK_TURNEND_GUARD_ACTIVE=1 \
   GROK_HOME="${GROK_HOME:-$HOME/.grok}" \
   grok --resume "$SESSION_ID" \
     --cwd "$ROOT" \
-    --permission-mode bypassPermissions \
     --output-format plain \
     -p "TURN WOULD END BLIND - supervision is off. Run bin/fm-watch-arm.sh as a background task before ending the turn.
 
