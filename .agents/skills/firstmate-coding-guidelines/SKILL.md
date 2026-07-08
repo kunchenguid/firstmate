@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, bash 3.2 compatibility, colocated tests, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -74,6 +74,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
+- Every script must parse and run under bash 3.2 (stock macOS `/bin/bash`), not just Linux CI's newer bash; see CONTRIBUTING.md for the two traps (unbalanced quote in a `$(...)`-nested heredoc, and empty-array expansion under `set -u`) and their guards, gated by `tests/fm-bash32-parse.test.sh` plus the `bash32` docker job in `ci.yml`.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
