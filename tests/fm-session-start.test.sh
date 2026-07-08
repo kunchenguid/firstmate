@@ -77,7 +77,26 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'tasks-axi 0.1.1'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  fm_fake_exit0 "$fakebin" quota-axi
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
+}
+
+make_fake_broken_tasks_axi() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
 }
 
 # make_fake_ps_claude <fakebin>: harness_pid()/holder_alive() (fm-lock.sh) walk
@@ -192,6 +211,7 @@ test_lock_refusal_read_only_path() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
+  make_fake_broken_tasks_axi "$fakebin"
   make_fake_ps_claude "$fakebin"
 
   # A live secondmate meta with a window pointed at nothing real - if the
@@ -228,8 +248,8 @@ EOF
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
 
-  # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
-  # tasks-axi, so bootstrap's own read-only tool-detection line fires
+  # Detect-only bootstrap diagnostics still ran (the fake tasks-axi is
+  # intentionally broken, so bootstrap's own read-only tool-detection line fires
   # deterministically regardless of what is installed on the test host).
   assert_contains "$out" "MISSING: tasks-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
 
@@ -255,9 +275,9 @@ test_output_ordering_diagnostics_lead() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
+  make_fake_broken_tasks_axi "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
@@ -280,7 +300,7 @@ EOF
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: tasks-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
@@ -399,8 +419,8 @@ test_composition_invokes_real_scripts() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
+  make_fake_broken_tasks_axi "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
 
   append_wake "$home/state" signal task-z "needs-decision: pick a library"
 
@@ -409,7 +429,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: tasks-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
 
