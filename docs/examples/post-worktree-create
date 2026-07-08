@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Example post-worktree-create hook for fm-spawn.
+#
+# Copy this to config/hooks/post-worktree-create in your firstmate home and make
+# it executable to have fm-spawn run it right after it creates and validates a
+# task's worktree (or a secondmate's home), for every task kind. config/hooks/ is
+# gitignored, so an installed hook is fleet-local and never committed. firstmate
+# ships no hook, so this seam is a no-op until you install one.
+#
+# Contract:
+#   argv:  $1 worktree path   $2 project name   $3 task id   $4 kind
+#   env:   FM_HOOK_WORKTREE    FM_HOOK_PROJECT   FM_HOOK_TASK_ID  FM_HOOK_KIND
+#          (kind is one of: ship, scout, secondmate)
+#   - Runs only against an isolated worktree, never the primary checkout.
+#   - A non-zero exit is warned and ignored: the spawn always continues, so the
+#     hook must never be relied on to gate a launch.
+#   - Keep it fast and idempotent; it runs on every spawn.
+set -eu
+
+worktree=${1:?worktree path}
+project=${2:-}
+task_id=${3:-}
+kind=${4:-}
+
+# Replace the body below with your own provisioning. This sample just records
+# that the hook fired, into the worktree's git-ignored info/exclude scratch area.
+echo "post-worktree-create: task=$task_id project=$project kind=$kind wt=$worktree" >&2

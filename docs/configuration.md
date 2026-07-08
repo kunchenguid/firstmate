@@ -148,6 +148,26 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Post-worktree-create hook (config/hooks/post-worktree-create)
+
+`config/hooks/post-worktree-create` is an optional local, gitignored executable that `fm-spawn.sh` runs right after it has created a task's worktree - or a secondmate's home - and asserted it is a genuine isolated worktree distinct from the primary checkout.
+It is a general extension seam for fleet-local worktree provisioning that should not live in tracked code; firstmate ships no hook, so an absent hook is a complete no-op with zero behavior change.
+The hook runs for every task kind: `ship`, `scout`, and `secondmate`.
+
+The hook receives the same four values as positional arguments and as environment variables, so it can read whichever is convenient:
+
+| position | environment | value |
+| --- | --- | --- |
+| `$1` | `FM_HOOK_WORKTREE` | absolute path to the created worktree (or secondmate home) |
+| `$2` | `FM_HOOK_PROJECT` | project name (`basename` of the project dir; for a secondmate, the home's directory name) |
+| `$3` | `FM_HOOK_TASK_ID` | task id |
+| `$4` | `FM_HOOK_KIND` | `ship`, `scout`, or `secondmate` |
+
+The hook is purely additive and never gates a launch: a hook that exits non-zero is warned to stderr and the spawn continues, so it must not be relied on to block a spawn.
+It never runs against the primary checkout - the call site only reaches it past the isolation assertion, and `fm-hooks-lib.sh` additionally refuses to run when the worktree resolves to the firstmate primary root as a backstop.
+`config/hooks/` is gitignored, so an installed hook stays fleet-local and is never committed.
+See [`docs/examples/post-worktree-create`](examples/post-worktree-create) for a runnable sample to copy into `config/hooks/post-worktree-create` and `chmod +x`.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi), lists it with the exact install commands, and installs only after you say go.

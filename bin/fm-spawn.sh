@@ -100,6 +100,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
@@ -946,6 +948,15 @@ EOF
       ;;
   esac
 fi
+
+# Post-worktree-create hook seam (bin/fm-hooks-lib.sh): the worktree - or the
+# secondmate home - now exists and has been asserted to be a genuine isolated
+# worktree (never the primary checkout), for every kind. Run a local, gitignored
+# hook if the operator installed one, so fleet-specific worktree provisioning
+# stays out of tracked code. firstmate ships none, so absent = zero behavior
+# change; a hook error is non-fatal and never blocks the launch. Passing FM_ROOT
+# as the primary is the hook's own "never against the primary checkout" backstop.
+fm_run_post_worktree_create_hook "$CONFIG" "$FM_ROOT" "$WT" "$(basename "$PROJ_ABS")" "$ID" "$KIND"
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
