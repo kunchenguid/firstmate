@@ -96,12 +96,12 @@ SH
 # This keeps missing-tool tests deterministic on hosts that have optional tools
 # like node or orca installed in /usr/bin.
 fm_path_without_tools() {
-  local dest=$1 base_path=$2 old_ifs dir path name tool skip
+  local dest=$1 base_path=$2 dir path name tool skip
+  local -a dirs
   shift 2
   mkdir -p "$dest"
-  old_ifs=$IFS
-  IFS=:
-  for dir in $base_path; do
+  IFS=: read -r -a dirs <<< "$base_path"
+  for dir in "${dirs[@]}"; do
     [ -d "$dir" ] || continue
     for path in "$dir"/*; do
       [ -e "$path" ] || [ -L "$path" ] || continue
@@ -115,7 +115,6 @@ fm_path_without_tools() {
       [ -e "$dest/$name" ] || [ -L "$dest/$name" ] || ln -s "$path" "$dest/$name" 2>/dev/null || true
     done
   done
-  IFS=$old_ifs
   printf '%s\n' "$dest"
 }
 
