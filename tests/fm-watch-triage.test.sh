@@ -500,6 +500,56 @@ test_ratelimit_failed_returns_to_stale_escalation() {
   pass "a ratelimit-failed pane returns to normal stale/wedge escalation instead of being parked into silence"
 }
 
+# --- parked pane REUSES its recorded reset instead of re-parsing every poll ---
+# While a quota pane stays parked, the watcher still re-classifies its footer every
+# poll, but the reset already lives in <id>.ratelimit. It must reuse that recorded
+# reset rather than re-spawning python to re-derive a value it would only discard.
+test_ratelimit_parked_reuses_marker_reset_no_reparse() {
+  local dir state fakebin out capture_file window key pane_hash pid
+  dir=$(make_case ratelimit-reuse); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-reuse"
+  printf 'Claude usage limit reached\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/reuse.meta"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Claude usage limit reached")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A python3 shim that counts every reset-parse invocation. Its empty stdout makes
+  # fm_ratelimit_reset_epoch fall back to now+FM_RATELIMIT_FALLBACK (a numeric reset
+  # that gets recorded), so python3 is spawned only when the footer is re-parsed.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'x' >> "$FM_TEST_PYCOUNT"
+exit 0
+SH
+  chmod +x "$fakebin/python3"
+
+  # Poll 1: first park. No marker to reuse yet, so render_match re-parses once.
+  PATH="$fakebin:$PATH" FM_TEST_PYCOUNT="$dir/pycount" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not park the ratelimit pane on the first poll"
+  grep -F "ratelimited: $window" "$out" >/dev/null || fail "first poll did not park the pane: $(cat "$out")"
+  [ "$(wc -c < "$dir/pycount" 2>/dev/null | tr -d ' ')" = 1 ] \
+    || fail "first park did not re-parse the reset exactly once: count=$(cat "$dir/pycount" 2>/dev/null | wc -c)"
+
+  # Poll 2+: the marker now holds the reset, so the parked pane is absorbed by reuse
+  # across several polls with NO further python re-parse and no new wake.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_TEST_PYCOUNT="$dir/pycount" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_RATELIMIT_FALLBACK=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "watcher exited while absorbing a parked reuse pane: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(wc -c < "$dir/pycount" 2>/dev/null | tr -d ' ')" = 1 ] \
+    || fail "parked pane re-spawned python to re-parse the reset: count=$(cat "$dir/pycount" 2>/dev/null | wc -c)"
+  [ ! -s "$out" ] || fail "parked reuse pane printed another wake: $(cat "$out")"
+  pass "a parked ratelimit pane reuses its recorded reset instead of re-parsing every poll"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1241,6 +1291,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_ratelimit_stale_is_parked_not_wedged
 test_ratelimit_failed_returns_to_stale_escalation
+test_ratelimit_parked_reuses_marker_reset_no_reparse
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

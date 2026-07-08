@@ -208,6 +208,121 @@ EOF
   pass "API Error: 529 parks with the short overload fallback while quota reset fallback stays 3600s"
 }
 
+# While a pane stays parked, the watcher re-classifies its footer every poll but
+# already holds the reset in <id>.ratelimit. Passing that reset back to
+# fm_ratelimit_render_match must pin it verbatim - never re-derive it - so a pane
+# parked for ~an hour does not re-spawn python (quota) or slide its reset forward
+# (overload) once per poll only to discard the recomputed value.
+test_render_match_reuses_marker_reset_without_reparsing() {
+  local now match reset kind
+  now=1000000000
+  # A quota footer with no parseable reset time would normally fall back to
+  # now+3600; with a reuse-reset the recorded epoch is returned verbatim instead.
+  match=$(fm_ratelimit_render_match 'ordinary line
+another line
+Claude usage limit reached' "$now" 1234567890)
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$kind" = ratelimit ] || fail "reuse path did not classify footer as ratelimit: $match"
+  [ "$reset" = 1234567890 ] || fail "render_match did not reuse the supplied quota reset: reset=$reset"
+  # Overload reuse likewise pins the reset instead of sliding to now+120 each poll.
+  match=$(fm_ratelimit_render_match 'API Error: 529 overloaded_error' "$now" 1111111111)
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$kind" = overload ] || fail "reuse path did not classify 529 footer as overload: $match"
+  [ "$reset" = 1111111111 ] || fail "overload reuse did not pin the reset: reset=$reset"
+  # A non-numeric reuse value is ignored: the footer is re-parsed (fallback here).
+  match=$(fm_ratelimit_render_match 'ordinary line
+Claude usage limit reached' "$now" 'not-a-number')
+  IFS=$(printf '\t') read -r reset kind <<EOF
+$match
+EOF
+  [ "$reset" = "$((now + 3600))" ] || fail "non-numeric reuse was not ignored: reset=$reset"
+  pass "render_match reuses an active marker reset verbatim without re-parsing the footer"
+}
+
+test_marker_reset_reads_only_matching_episode() {
+  local dir state marker got
+  dir="$TMP_ROOT/marker-reset"
+  state="$dir/state"
+  mkdir -p "$state"
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' 4242 > "$marker"
+  got=$(fm_ratelimit_marker_reset "$state" task "test:fm-task" claude) \
+    || fail "marker_reset failed to read a matching episode"
+  [ "$got" = 4242 ] || fail "marker_reset returned the wrong reset: $got"
+  # A different window or harness is a different episode; do not reuse its reset.
+  if fm_ratelimit_marker_reset "$state" task "test:fm-other" claude >/dev/null; then
+    fail "marker_reset reused a reset across a different window"
+  fi
+  if fm_ratelimit_marker_reset "$state" task "test:fm-task" codex >/dev/null; then
+    fail "marker_reset reused a reset across a different harness"
+  fi
+  # A non-numeric or absent marker never yields a reset.
+  printf 'garbage\ttest:fm-task\tclaude\n' > "$marker"
+  if fm_ratelimit_marker_reset "$state" task "test:fm-task" claude >/dev/null; then
+    fail "marker_reset returned a reset for a corrupt marker"
+  fi
+  rm -f "$marker"
+  if fm_ratelimit_marker_reset "$state" task "test:fm-task" claude >/dev/null; then
+    fail "marker_reset returned a reset with no marker present"
+  fi
+  pass "marker_reset returns a reset only for the same active window+harness episode"
+}
+
+# firstmate's OWN supervisor pane is parked as firstmate.ratelimit during away
+# mode and resumed by the same shared scan. A BARE continue there would read as
+# "captain is back" and prematurely exit afk / stop the daemon, so the resume must
+# prefix the inject sentinel (FM_INJECT_MARK) that marks it as an internal
+# escalation. Crew panes still get a plain, unmarked continue.
+test_supervisor_resume_marks_continue_for_firstmate() {
+  local dir state marker submitted now
+  dir="$TMP_ROOT/resume-firstmate-mark"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/firstmate.ratelimit"
+  printf '%s\tfirstmate:0\tclaude\n' "$((now - 10))" > "$marker"
+  submitted="$dir/submitted"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf '%s' "$3" > "$submitted"; printf 'pending'; }
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=9 \
+    fm_ratelimit_resume_scan "$state" >/dev/null || true
+  [ -s "$submitted" ] || fail "firstmate supervisor resume never submitted a continue"
+  case "$(cat "$submitted")" in
+    "${FM_INJECT_MARK}continue") ;;
+    *) fail "firstmate resume text was not the marked continue: $(od -An -tx1 "$submitted")" ;;
+  esac
+  pass "firstmate supervisor-pane auto-resume submits an inject-marked continue"
+}
+
+test_crew_resume_submits_plain_unmarked_continue() {
+  local dir state marker submitted now
+  dir="$TMP_ROOT/resume-crew-plain"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  submitted="$dir/submitted"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf '%s' "$3" > "$submitted"; printf 'pending'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=9 \
+    fm_ratelimit_resume_scan "$state" >/dev/null || true
+  [ -s "$submitted" ] || fail "crew resume never submitted a continue"
+  [ "$(cat "$submitted")" = continue ] \
+    || fail "crew resume text was not a plain continue: $(od -An -tx1 "$submitted")"
+  pass "a crew pane auto-resume submits a plain, unmarked continue"
+}
+
 test_reset_parser_handles_iana_timezone_and_dst
 test_reset_parser_handles_utc_24h_and_fallback
 test_footer_match_is_tail_anchored
@@ -217,3 +332,7 @@ test_marker_write_preserves_active_episode_reset
 test_resume_self_recovered_clears_without_submit
 test_overload_regex_matches_only_529
 test_overload_uses_short_fallback_distinct_from_quota
+test_render_match_reuses_marker_reset_without_reparsing
+test_marker_reset_reads_only_matching_episode
+test_supervisor_resume_marks_continue_for_firstmate
+test_crew_resume_submits_plain_unmarked_continue

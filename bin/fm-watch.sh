@@ -767,9 +767,18 @@ EOF
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
-        limit_match=$(fm_ratelimit_render_match "$tail40" || true)
+        rl_task=$(window_to_task "$w" "$STATE")
+        # Reuse an active episode's recorded reset when a valid marker already
+        # exists for this window+harness, so a pane parked for ~an hour does not
+        # re-spawn python every poll to re-parse a reset it would only discard. A
+        # .failed marker means auto-resume gave up: skip reuse (and the re-park
+        # below) so the footer branch returns it to normal stale/wedge escalation.
+        reuse_reset=""
+        if [ -n "$rl_task" ] && [ ! -e "$STATE/$rl_task.ratelimit.failed" ]; then
+          reuse_reset=$(fm_ratelimit_marker_reset "$STATE" "$rl_task" "$w" "$(window_harness "$w")" 2>/dev/null || true)
+        fi
+        limit_match=$(fm_ratelimit_render_match "$tail40" "" "$reuse_reset" || true)
         if [ -n "$limit_match" ]; then
-          rl_task=$(window_to_task "$w" "$STATE")
           if [ -n "$rl_task" ] && [ -e "$STATE/$rl_task.ratelimit.failed" ]; then
             # Auto-resume gave up (state/<id>.ratelimit.failed exists after
             # FM_RATELIMIT_MAX_RESUMES attempts). Stop parking this pane: a still

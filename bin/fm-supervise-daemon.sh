@@ -214,7 +214,10 @@ LOG_KEEP_LINES_DEFAULT=2000
 # as an internal escalation (stay afk) and its absence as "captain is back"
 # (exit afk). Portable across harnesses: it travels with the message text,
 # independent of any harness-level typed-vs-injected distinction.
-FM_INJECT_MARK=$'\xE2\x81\xA3'
+# Single source of truth: bin/fm-tmux-lib.sh (sourced above) sets this sentinel so
+# the shared rate-limit resume scan can mark firstmate's own pane; the fallback
+# keeps any context that sourced this file without the lib working unchanged.
+FM_INJECT_MARK=${FM_INJECT_MARK:-$'\xE2\x81\xA3'}
 AFK_FLAG_NAME=".afk"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise

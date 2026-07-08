@@ -59,6 +59,18 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_RATELIMIT_REGEX_DEFAULT='(Claude[[:space:]]+)?((AI[[:space:]]+)?usage[[:space:]-]+limit|rate[[:space:]-]+limit|quota)[^[:cntrl:]]*(reached|exceeded|reset|try again)|limit[[:space:]-]+reached'
 FM_OVERLOAD_REGEX_DEFAULT='API Error: 529'
 
+# FM_INJECT_MARK: the away-mode daemon's in-band sentinel (U+2063 INVISIBLE
+# SEPARATOR, UTF-8 e2 81 a3, untypable on a normal keyboard and - unlike the
+# original ASCII 0x1f unit separator - transported through Pi's terminal editor
+# as text rather than consumed as a control action). firstmate treats a LEADING
+# marker as an internal escalation (stay afk) and its absence as "captain is
+# back" (exit afk). Defined here in the shared lib so fm_ratelimit_resume_scan
+# can mark firstmate's OWN supervisor-pane auto-resume as internal in every
+# context (watcher or daemon): a bare `continue` submitted there would otherwise
+# read as a captain return and prematurely exit away mode.
+# bin/fm-supervise-daemon.sh documents and inherits it.
+FM_INJECT_MARK=${FM_INJECT_MARK:-$'\xE2\x81\xA3'}
+
 fm_ratelimit_numeric_or_default() {  # <value> <default>
   case "${1:-}" in
     ''|*[!0-9]*) printf '%s' "$2" ;;
@@ -240,19 +252,30 @@ fm_ratelimit_footer_text() {  # <tail-text>
 
 # fm_ratelimit_render_match: classify only the footer-sized tail render.
 # Prints "<reset-epoch><TAB><reason>" on a limit/overload match.
-fm_ratelimit_render_match() {  # <tail-text> [now-epoch]
-  local tail footer now reset
+# A numeric [reuse-reset] pins the reset for an already-parked episode: the footer
+# is still re-classified (a cheap grep, so a recovered pane stops matching) but the
+# recorded reset is reused instead of re-derived, so a pane parked for ~an hour
+# does not re-spawn python (quota) or slide its reset forward (overload) every poll.
+fm_ratelimit_render_match() {  # <tail-text> [now-epoch] [reuse-reset]
+  local tail footer now reuse reset
   tail=$1
   now=${2:-$(date +%s)}
+  reuse=${3:-}
   footer=$(fm_ratelimit_footer_text "$tail")
   [ -n "$footer" ] || return 1
   if printf '%s\n' "$footer" | grep -qiE "${FM_RATELIMIT_REGEX:-$FM_RATELIMIT_REGEX_DEFAULT}"; then
-    reset=$(fm_ratelimit_reset_epoch "$footer" "$now")
+    case "$reuse" in
+      ''|*[!0-9]*) reset=$(fm_ratelimit_reset_epoch "$footer" "$now") ;;
+      *)           reset=$reuse ;;
+    esac
     printf '%s\t%s\n' "$reset" ratelimit
     return 0
   fi
   if printf '%s\n' "$footer" | grep -qiE "${FM_OVERLOAD_REGEX:-$FM_OVERLOAD_REGEX_DEFAULT}"; then
-    reset=$((now + $(fm_ratelimit_numeric_or_default "${FM_OVERLOAD_FALLBACK:-120}" 120)))
+    case "$reuse" in
+      ''|*[!0-9]*) reset=$((now + $(fm_ratelimit_numeric_or_default "${FM_OVERLOAD_FALLBACK:-120}" 120))) ;;
+      *)           reset=$reuse ;;
+    esac
     printf '%s\t%s\n' "$reset" overload
     return 0
   fi
@@ -282,6 +305,23 @@ EOF
   mv -f "$tmp" "$marker" || return 1
   rm -f "$marker.attempts" "$marker.failed" 2>/dev/null || true
   return 0
+}
+
+# fm_ratelimit_marker_reset: print the recorded reset epoch iff <id>.ratelimit
+# already tracks the SAME active window+harness episode, else fail. Lets a caller
+# reuse an active episode's reset (skipping a re-parse) while still treating a
+# different window or harness as a genuinely new episode that must be re-derived.
+fm_ratelimit_marker_reset() {  # <state> <id> <window> <harness>
+  local state=$1 id=$2 window=$3 harness=$4 marker line reset old_window old_harness
+  marker="$state/$id.ratelimit"
+  [ -e "$marker" ] || return 1
+  line=$(cat "$marker" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r reset old_window old_harness <<EOF
+$line
+EOF
+  case "$reset" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$old_window" = "$window" ] && [ "$old_harness" = "$harness" ] || return 1
+  printf '%s' "$reset"
 }
 
 fm_ratelimit_id_from_marker() {  # <marker-path>
@@ -337,7 +377,7 @@ fm_ratelimit_target_ready_for_resume() {  # <backend> <window> <label> -> prints
 }
 
 fm_ratelimit_resume_scan() {  # <state> -> prints escalation reason on exhausted failure
-  local state=$1 now margin max marker id line reset window harness backend label due attempts_file attempts verdict reason ready
+  local state=$1 now margin max marker id line reset window harness backend label due attempts_file attempts verdict reason ready resume_text
   now=$(date +%s)
   margin=$(fm_ratelimit_numeric_or_default "${FM_RATELIMIT_MARGIN:-60}" 60)
   max=$(fm_ratelimit_numeric_or_default "${FM_RATELIMIT_MAX_RESUMES:-3}" 3)
@@ -366,7 +406,14 @@ EOF
     fi
     attempts=$(( $(cat "$attempts_file" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$attempts" > "$attempts_file" 2>/dev/null || true
-    verdict=$(fm_backend_send_text_submit "$backend" "$window" continue "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed
+    # firstmate's OWN supervisor pane (id=firstmate) is parked and resumed just
+    # like any crew pane, but a BARE `continue` there reads as "captain is back"
+    # and would prematurely clear state/.afk and stop the daemon. Prefix the inject
+    # sentinel so firstmate's afk-exit contract treats the auto-resume as an
+    # internal escalation; crew panes still receive a plain, unmarked continue.
+    resume_text='continue'
+    [ "$id" = firstmate ] && resume_text="${FM_INJECT_MARK}continue"
+    verdict=$(fm_backend_send_text_submit "$backend" "$window" "$resume_text" "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed
     if [ "$verdict" = empty ]; then
       rm -f "$marker" "$attempts_file" "$marker.failed" 2>/dev/null || true
       if command -v fm_wake_append >/dev/null 2>&1; then
