@@ -177,6 +177,7 @@ json_registry_project() {
     return 2
   fi
   if [ "$count" -eq 1 ]; then
+    json_registry_validate_unique_identity || return 2
     printf '%s\n' "$matches" | jq -c '.[0]'
     return 0
   fi
@@ -188,6 +189,7 @@ json_registry_project() {
     return 2
   fi
   if [ "$count" -eq 1 ]; then
+    json_registry_validate_unique_identity || return 2
     printf '%s\n' "$matches" | jq -c '.[0]'
     return 0
   fi
@@ -213,10 +215,45 @@ EOF
     return 2
   fi
   if [ "$matched_count" -eq 1 ]; then
+    json_registry_validate_unique_identity || return 2
     printf '%s\n' "$matched_entry"
     return 0
   fi
   return 1
+}
+
+json_registry_validate_unique_identity() {
+  local entries entry id canonical canonical_real seen_ids seen_paths
+  seen_ids=
+  seen_paths=
+  entries=$(jq -c '.projects[]?' "$JSON_REG") || return 2
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    id=$(json_required_string "$entry" "" projectId projectId) || return 2
+    if printf '%s\n' "$seen_ids" | grep -Fxq -- "$id"; then
+      echo "error: duplicate projectId in $JSON_REG: $id" >&2
+      return 2
+    fi
+    canonical=$(json_required_string "$entry" "$id" canonicalPath canonicalPath) || return 2
+    case "$canonical" in
+      /*) ;;
+      *) echo "error: project $id canonicalPath must be absolute: $canonical" >&2; return 2 ;;
+    esac
+    canonical_real=$(real_existing_dir "$canonical" 2>/dev/null) || {
+      echo "error: project $id canonicalPath is not a directory: $canonical" >&2
+      return 2
+    }
+    if printf '%s\n' "$seen_paths" | grep -Fxq -- "$canonical_real"; then
+      echo "error: duplicate canonicalPath in $JSON_REG: $canonical_real" >&2
+      return 2
+    fi
+    seen_ids="${seen_ids}${seen_ids:+
+}$id"
+    seen_paths="${seen_paths}${seen_paths:+
+}$canonical_real"
+  done <<EOF
+$entries
+EOF
 }
 
 validate_canonical_path() {

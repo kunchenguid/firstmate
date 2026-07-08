@@ -372,7 +372,7 @@ EOF
 }
 
 test_json_registry_direct_resolution_rejects_duplicate_matches() {
-  local home first second first_real second_real out status
+  local home first second first_real second_real link_parent link out status
   home=$(new_home duplicate-json-direct)
   first="$TMP_ROOT/duplicate-json-direct/github/flow"
   second="$TMP_ROOT/duplicate-json-direct/github/other-flow"
@@ -442,6 +442,40 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "direct canonicalPath resolution accepted duplicate canonicalPath entries"
   assert_contains "$out" "duplicate canonicalPath" "direct canonicalPath lookup should reject duplicate paths"
+
+  link_parent="$TMP_ROOT/duplicate-json-direct/github-link"
+  ln -s "$TMP_ROOT/duplicate-json-direct/github" "$link_parent"
+  link="$link_parent/flow"
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    },
+    {
+      "projectId": "flow-copy",
+      "canonicalPath": "$link",
+      "gitCommonDir": "$link/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --field canonical_path flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "direct projectId resolution accepted duplicate normalized canonicalPath entries"
+  assert_contains "$out" "duplicate canonicalPath" "direct projectId lookup should validate global canonical path uniqueness"
   pass "projects.json direct resolution rejects duplicate project ids and canonical paths"
 }
 
