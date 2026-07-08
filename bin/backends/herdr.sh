@@ -703,7 +703,10 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Alternation, not a bracket expression: under a non-UTF-8 locale grep matches
+# [❯›] byte-wise, so any character sharing the E2 lead byte (e.g. the ╰ border
+# glyph) would false-match.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
@@ -745,10 +748,16 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   case "$stripped" in
     '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
-  # Strip a leading prompt glyph before judging what remains.
+  # Strip a leading prompt glyph before judging what remains. Strip the
+  # literal glyph, not `?` chars: under a non-UTF-8 locale bash counts bytes,
+  # so `${stripped#??}` would leave part of a multibyte ❯/› behind.
   case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '❯'*) stripped=${stripped#'❯'} ;;
+    '›'*) stripped=${stripped#'›'} ;;
+    '>'*) stripped=${stripped#'>'} ;;
+    '$'*) stripped=${stripped#'$'} ;;
+    '%'*) stripped=${stripped#'%'} ;;
+    '#'*) stripped=${stripped#'#'} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"

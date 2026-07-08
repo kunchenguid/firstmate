@@ -286,9 +286,14 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   case "$stripped" in
     '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
+  # Strip the literal glyph, not `?` chars: under a non-UTF-8 locale bash
+  # counts bytes, so `${stripped#??}` would leave part of a multibyte ❯ behind.
   case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '❯'*) stripped=${stripped#'❯'} ;;
+    '>'*) stripped=${stripped#'>'} ;;
+    '$'*) stripped=${stripped#'$'} ;;
+    '%'*) stripped=${stripped#'%'} ;;
+    '#'*) stripped=${stripped#'#'} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
