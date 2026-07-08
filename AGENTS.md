@@ -896,6 +896,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `board-automation` - load before arming, killing, restarting, or supervising the board-driven automation daemon (`bin/fm-board-daemon.sh`, which auto-launches agents when the captain drags a card on the Azure board), editing the board lane->project map, or reconciling board-spawned tasks.
 
 ## 14. X mode
 

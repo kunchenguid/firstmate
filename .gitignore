@@ -12,3 +12,4 @@ config/backlog-backend
 config/backend
 config/x-mode.env
 config/cmux-socket-password
+config/board-lane-map

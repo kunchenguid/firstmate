@@ -1,0 +1,18 @@
+# Board lane -> fleet project map for the board-automation daemon.
+# Copy to config/board-lane-map (local, gitignored) and edit for your fleet.
+#
+# One "Lane Name = project-name" per line. The lane name is the board
+# Kanban.Lane value exactly as it appears on the card; the project name must be
+# a clone under projects/. Lines here override / extend the daemon's built-in
+# defaults. '#' starts a comment.
+#
+# A card with no resolvable project is left untouched and flagged in the log
+# (the daemon never guesses) - so it is fine to leave a lane unmapped until you
+# know which repo it belongs to. An explicit "repo:<name>" tag/title token on a
+# card always wins over this map.
+
+AI Knowledge Base = ai-knowledge-base
+Greenhouse / IT Screener = greenhouse-auto
+# Smart Qualify = <project>
+# Churn Analysis = <project>
+# Publisher & Prospecting = <project>
