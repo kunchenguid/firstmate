@@ -682,7 +682,8 @@ The printed reason line is still useful, but the drained queue is the lossless b
 The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
 Each cycle is one harness-tracked background task that blocks until an actionable wake is due (benign wakes are absorbed in bash without ending the task), fires with one reason line, and ends, so the chain survives only when firstmate starts the next cycle after each fire.
 After handling the drained wakes, re-arm before you end the turn by running `bin/fm-watch-arm.sh` as its own background task.
-Arm or re-arm the watcher only through the harness's own tracked background mechanism - the one that survives the call and notifies you when the process exits - so the cycle actually persists and the next wake reaches you.
+Arm or re-arm the watcher only through a harness background mechanism verified to survive the call and notify you when the process exits, so the cycle actually persists and the next wake reaches you.
+On Codex surfaces where background-task completion wake is unverified, `fm-watch-arm.sh`, `fm-guard.sh`, and `fm-turnend-guard.sh` report degraded supervision instead of treating a live one-shot watcher as fully reliable; see `docs/turnend-guard.md`.
 Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
 **Standalone, never bundled.**
 Run `bin/fm-watch-arm.sh` as its OWN background task with nothing else in that bash, never tacked onto the tail of a multi-command call: bundled, its self-verifying status line is buried in unrelated output and it can silently no-op as a side effect of those other commands, so no fresh cycle gets established and supervision lapses unnoticed.

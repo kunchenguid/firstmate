@@ -139,9 +139,22 @@ test_guard_warnings() {
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_CODEX_BACKGROUND_WAKE=verified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
+}
+
+test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher() {
+  local dir state err
+  dir=$(make_case guard-codex-degraded)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_CODEX_BACKGROUND_WAKE=unverified "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'CODEX WATCH WAKE CHANNEL UNVERIFIED' "$err" >/dev/null || fail "guard did not warn about the Codex background wake gap"
+  grep -F 'Codex background task completion is not a verified wake channel' "$err" >/dev/null || fail "guard did not explain the degraded wake channel"
+  pass "guard warns when Codex cannot be trusted to wake on watcher background-task completion"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -465,6 +478,32 @@ test_arm_reports_healthy_for_live_fresh_watcher() {
   pass "arm reports a live fresh watcher as healthy and exits zero"
 }
 
+test_arm_reports_codex_unverified_wake_degraded_for_live_fresh_watcher() {
+  local dir state fakebin out armout i wpid status
+  dir=$(make_case arm-codex-degraded)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CODEX_BACKGROUND_WAKE=unverified "$WATCH_ARM" > "$armout" || status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit zero for a live watcher with degraded wake channel (status $status)"
+  grep -F "watcher: healthy pid=$wpid" "$armout" >/dev/null || fail "arm did not report the live watcher"
+  grep -F 'DEGRADED: Codex background task completion is not a verified wake channel' "$armout" >/dev/null || fail "arm did not include the Codex degraded wake diagnostic"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "arm reports Codex unverified background wake as degraded, not fully healthy"
+}
+
 test_arm_starts_and_self_heals() {
   # Arming with no confirmable watcher must FORK one and confirm it live + fresh
   # before reporting 'started' - whether the lock is empty (clean start) or held
@@ -649,6 +688,7 @@ test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_warns_on_codex_unverified_background_wake_with_fresh_watcher
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
@@ -660,6 +700,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_arm_reports_healthy_for_live_fresh_watcher
+test_arm_reports_codex_unverified_wake_degraded_for_live_fresh_watcher
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

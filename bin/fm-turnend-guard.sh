@@ -76,7 +76,21 @@ GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || ex
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  if ! fm_codex_background_wake_degraded; then
+    exit 0
+  fi
+  REASON="$(fm_codex_background_wake_degraded_text)"
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END WITH DEGRADED SUPERVISION\n'
+    printf '●  %s task(s) in flight and a live watcher holds this home lock, but %s.\n' "$FM_SUP_IN_FLIGHT" "$REASON"
+    printf '●  Keep the Codex exec session manually polled, use an empirically verified wake channel, or set FM_CODEX_BACKGROUND_WAKE=verified only after that smoke passes.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+fi
 
 REASON='tasks in flight, no live watcher - run bin/fm-watch-arm.sh as a background task before ending the turn'
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'

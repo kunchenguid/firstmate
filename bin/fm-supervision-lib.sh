@@ -56,6 +56,28 @@ fm_supervision_status() {
   return 0
 }
 
+# fm_codex_background_wake_degraded
+# Exit 0 when the current Codex surface must not be treated as a verified
+# background-task completion wake channel.
+# Set FM_CODEX_BACKGROUND_WAKE=verified only after an empirical local smoke shows
+# a long-running background watcher exit starts a new assistant turn without
+# manual polling.
+# Set FM_CODEX_BACKGROUND_WAKE=unverified in tests or diagnostics to force the
+# degraded path even outside Codex.
+fm_codex_background_wake_degraded() {
+  case "${FM_CODEX_BACKGROUND_WAKE:-}" in
+    verified|supported) return 1 ;;
+    unverified|unsupported|degraded) return 0 ;;
+  esac
+  [ -n "${CODEX_CI:-}" ] && return 0
+  [ -n "${CODEX_THREAD_ID:-}" ] && return 0
+  return 1
+}
+
+fm_codex_background_wake_degraded_text() {
+  printf 'Codex background task completion is not a verified wake channel on this surface; a one-shot watcher may queue wakes and exit without starting a new assistant turn'
+}
+
 # fm_supervision_unhealthy <state-dir> [grace-seconds]
 # Exit 0 (true) exactly in the dangerous state: in-flight work exists and no
 # watcher has a fresh beacon. Exit 1 (false) otherwise, including zero in-flight.

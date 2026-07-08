@@ -135,7 +135,10 @@ make_crewmate_worktree_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  (
+    unset CODEX_CI CODEX_THREAD_ID
+    printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  )
 }
 
 nonexistent_pid() {
@@ -214,6 +217,28 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
   [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
+}
+
+test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unverified-wake")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(printf '{"stop_hook_active":false}' | CODEX_CI=1 CODEX_THREAD_ID=thread-test bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must block on Codex surfaces whose background-completion wake is unverified"
+  assert_contains "$out" "Codex background task completion is not a verified wake channel" "block reason must explain the Codex wake gap"
+  assert_contains "$out" "TURN WOULD END WITH DEGRADED SUPERVISION" "block banner must distinguish degraded Codex wake semantics from no watcher"
+  pass "fm-turnend-guard: Codex no-auto-wake path does not treat a live one-shot watcher as fully healthy"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -586,6 +611,7 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
+test_hook_blocks_on_codex_unverified_background_wake_even_with_live_watcher
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_ignores_repo_state_when_fm_home_set
