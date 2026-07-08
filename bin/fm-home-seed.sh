@@ -554,11 +554,45 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
+    validate_seeded_registry_base "$project" "$dst" || return 1
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
   checkout_seeded_registry_base "$project" "$dst"
+}
+
+validate_seeded_registry_base() {
+  local project=$1 dst=$2 resolved source default_branch base_ref expected current_branch branch_head current_head
+  resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" "$project") || return 1
+  source=$(printf '%s\n' "$resolved" | jq -r '.source // empty') || return 1
+  [ "$source" = json ] || return 0
+  default_branch=$(printf '%s\n' "$resolved" | jq -r '.default_branch // empty') || return 1
+  base_ref=$(printf '%s\n' "$resolved" | jq -r '.base_ref // empty') || return 1
+  [ -n "$default_branch" ] || { echo "error: project $project resolved without defaultBranch" >&2; return 1; }
+  [ -n "$base_ref" ] || { echo "error: project $project resolved without baseRef" >&2; return 1; }
+  expected=$(git -C "$dst" rev-parse --verify --quiet "$base_ref^{commit}") || {
+    echo "error: seeded project $project at $dst is missing registered baseRef $base_ref" >&2
+    return 1
+  }
+  current_branch=$(git -C "$dst" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ "$current_branch" = "$default_branch" ] || {
+    echo "error: seeded project $project at $dst is on ${current_branch:-detached HEAD}; expected $default_branch at registered baseRef $base_ref" >&2
+    return 1
+  }
+  branch_head=$(git -C "$dst" rev-parse --verify --quiet "refs/heads/$default_branch^{commit}") || {
+    echo "error: seeded project $project at $dst is missing default branch $default_branch for registered baseRef $base_ref" >&2
+    return 1
+  }
+  [ "$branch_head" = "$expected" ] || {
+    echo "error: seeded project $project at $dst branch $default_branch does not match registered baseRef $base_ref" >&2
+    return 1
+  }
+  current_head=$(git -C "$dst" rev-parse --verify --quiet 'HEAD^{commit}') || return 1
+  [ "$current_head" = "$expected" ] || {
+    echo "error: seeded project $project at $dst HEAD does not match registered baseRef $base_ref" >&2
+    return 1
+  }
 }
 
 checkout_seeded_registry_base() {

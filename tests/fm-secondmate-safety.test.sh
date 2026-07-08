@@ -270,6 +270,68 @@ EOF
   pass "secondmate seed checks out the registered JSON base ref"
 }
 
+test_home_seed_refuses_existing_json_clone_on_wrong_base_ref() {
+  local home subhome work remote repo child remote_abs repo_abs out status child_branch
+  home="$TMP_ROOT/json-existing-wrong-base-parent"
+  subhome="$TMP_ROOT/json-existing-wrong-base-sub"
+  work="$TMP_ROOT/json-existing-wrong-base-work-flow"
+  remote="$TMP_ROOT/json-existing-wrong-base-flow.git"
+  repo="$TMP_ROOT/json-existing-wrong-base-github/flow"
+  child="$subhome/projects/flow"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$TMP_ROOT/json-existing-wrong-base-github"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  printf 'main branch\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-main
+  git -C "$work" checkout -q -b dev
+  printf 'dev branch\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-dev
+  git clone --quiet --bare "$work" "$remote"
+  git -C "$remote" symbolic-ref HEAD refs/heads/main
+  remote_abs=$(cd "$remote" && pwd -P)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin main dev
+  git clone --quiet "file://$remote_abs" "$repo"
+  git -C "$repo" checkout -q dev
+  repo_abs=$(cd "$repo" && pwd -P)
+
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/data" "$subhome/state" "$subhome/projects"
+  git clone --quiet "file://$remote_abs" "$child"
+  git -C "$child" checkout -q main
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_abs",
+      "gitCommonDir": "$repo_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='flow engineering' FM_SECONDMATE_SCOPE='flow engineering' \
+    "$ROOT/bin/fm-home-seed.sh" flow-sm "$subhome" flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "seed accepted existing JSON-backed clone on the wrong registered base"
+  assert_contains "$out" "registered baseRef" "seed should explain the registered baseRef mismatch"
+  child_branch=$(git -C "$child" branch --show-current)
+  [ "$child_branch" = main ] || fail "failed seed mutated existing child clone branch to $child_branch"
+  pass "secondmate seed refuses existing JSON-backed clones on the wrong base ref"
+}
+
 test_home_seed_materializes_json_policy_over_stale_markdown() {
   local home subhome work remote repo remote_abs repo_abs out status mode source base
   home="$TMP_ROOT/json-stale-md-parent"
@@ -2105,6 +2167,7 @@ test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_clones_registered_external_project
 test_home_seed_materializes_json_only_project_mode
 test_home_seed_checks_out_json_base_ref
+test_home_seed_refuses_existing_json_clone_on_wrong_base_ref
 test_home_seed_materializes_json_policy_over_stale_markdown
 test_home_seed_removes_stale_child_json_for_legacy_seed
 test_home_seed_validate_rejects_duplicate_homes

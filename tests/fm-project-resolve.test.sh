@@ -245,6 +245,80 @@ EOF
   pass "projects.json list rejects entries missing projectId"
 }
 
+test_json_registry_list_rejects_duplicate_ids_and_paths() {
+  local home first second first_real second_real out status
+  home=$(new_home duplicate-json-list)
+  first="$TMP_ROOT/duplicate-json-list/github/flow"
+  second="$TMP_ROOT/duplicate-json-list/github/other-flow"
+  make_repo "$first" dev
+  make_repo "$second" dev
+  first_real=$(cd "$first" && pwd -P)
+  second_real=$(cd "$second" && pwd -P)
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    },
+    {
+      "projectId": "flow",
+      "canonicalPath": "$second_real",
+      "gitCommonDir": "$second_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json list accepted duplicate projectId entries"
+  assert_contains "$out" "duplicate projectId" "list should reject duplicate project ids before bootstrap uses the registry"
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    },
+    {
+      "projectId": "flow-copy",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projects.json list accepted duplicate canonicalPath entries"
+  assert_contains "$out" "duplicate canonicalPath" "list should reject duplicate canonical paths before bootstrap uses the registry"
+  pass "projects.json list rejects duplicate project ids and canonical paths"
+}
+
 test_json_registry_rejects_invalid_policy_fields() {
   local home repo repo_real out status
   home=$(new_home invalid-policy)
@@ -376,6 +450,7 @@ test_json_registry_malformed_file_fails_closed
 test_json_registry_list_malformed_file_fails_closed
 test_json_registry_requires_explicit_policy_fields
 test_json_registry_list_rejects_missing_project_id
+test_json_registry_list_rejects_duplicate_ids_and_paths
 test_json_registry_rejects_invalid_policy_fields
 test_json_registry_matches_physical_canonical_path
 test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy

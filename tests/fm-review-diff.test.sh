@@ -141,7 +141,45 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_registered_project_base_ref_overrides_origin_head() {
+  local case_dir out
+  case_dir="$TMP_ROOT/registered-base-ref"
+  mkdir -p "$case_dir/state"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  printf 'initial\n' > "$case_dir/_seed/feature.txt"
+  git -C "$case_dir/_seed" add feature.txt
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t commit -qm "initial"
+  git -C "$case_dir/_seed" push -q origin main
+  git -C "$case_dir/_seed" checkout -q -b dev
+  printf 'dev baseline\n' > "$case_dir/_seed/feature.txt"
+  git -C "$case_dir/_seed" add feature.txt
+  git -C "$case_dir/_seed" commit -qm "dev baseline"
+  git -C "$case_dir/_seed" push -q origin dev
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" origin/dev
+  printf 'task change\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "task change"
+
+  touch "$case_dir/state/.last-watcher-beat"
+  write_task_meta "$case_dir" "project_base_ref=refs/remotes/origin/dev"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/dev' "registered-base-ref: diff should use the recorded project base ref"
+  assert_contains "$out" '+task change' "registered-base-ref: diff should include the task change"
+  assert_not_contains "$out" 'dev baseline' "registered-base-ref: diff must not include dev-vs-main baseline changes"
+  pass "fm-review-diff prefers recorded project_base_ref over origin/HEAD"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_registered_project_base_ref_overrides_origin_head

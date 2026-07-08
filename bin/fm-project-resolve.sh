@@ -287,7 +287,7 @@ json_required_yolo() {
 }
 
 resolve_json() {
-  local arg=$1 project status raw project_id canonical expected_common common default_branch base_ref mode yolo worktree_policy origin fork
+  local arg=$1 project status
   if project=$(json_registry_project "$arg"); then
     :
   else
@@ -299,6 +299,11 @@ resolve_json() {
   fi
   [ -n "$project" ] || return 3
 
+  normalize_json_project "$project"
+}
+
+normalize_json_project() {
+  local project=$1 raw project_id canonical expected_common common default_branch base_ref mode yolo worktree_policy origin fork
   project_id=$(json_required_string "$project" "" projectId projectId) || return 1
   canonical=$(json_required_string "$project" "$project_id" canonicalPath canonicalPath) || return 1
   expected_common=$(printf '%s\n' "$project" | jq -r '.gitCommonDir // empty')
@@ -426,8 +431,16 @@ list_projects() {
       [ -n "$entry" ] || continue
       id=$(json_required_string "$entry" "" projectId projectId) || return 1
       [ -n "$id" ] || continue
-      proj=$(resolve_json "$id") || return 1
+      if printf '%s\n' "$seen_ids" | grep -Fxq -- "$id"; then
+        echo "error: duplicate projectId in $JSON_REG: $id" >&2
+        return 1
+      fi
+      proj=$(normalize_json_project "$entry") || return 1
       path=$(printf '%s\n' "$proj" | jq -r '.canonical_path')
+      if printf '%s\n' "$seen_paths" | grep -Fxq -- "$path"; then
+        echo "error: duplicate canonicalPath in $JSON_REG: $path" >&2
+        return 1
+      fi
       json_lines="${json_lines}${json_lines:+
 }$id	$path"
       seen_ids="${seen_ids}${seen_ids:+
