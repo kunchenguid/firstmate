@@ -707,22 +707,31 @@ case "$BACKEND" in
     WT_TARGET="$WID"
     ;;
   herdr)
-    # fm_backend_herdr_workspace_label resolves the target workspace from
-    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
-    # already the right home (the primary spawning its own crewmate/scout, or
-    # a secondmate spawning ITS OWN crewmate/scout from its own process's
-    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
-    # one case that does: it is the PRIMARY's own fm-spawn.sh process
-    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
-    # secondmate's home), so FM_HOME here still names the primary. Shadow it
-    # to PROJ_ABS for just these two calls (bash restores it automatically
-    # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    # fm_backend_herdr_workspace_label (the shared home-tag) resolves the
+    # target workspace from BOTH FM_HOME (readable prefix / secondmate marker)
+    # and FM_ROOT (the path hash). For every KIND except secondmate, this
+    # process's own FM_HOME/FM_ROOT already name the right home (the primary
+    # spawning its own crewmate/scout, or a secondmate spawning ITS OWN
+    # crewmate/scout from its own process, whose FM_HOME/FM_ROOT already ARE
+    # that secondmate's home - no glue needed). A --secondmate spawn is the one
+    # case that does: it is the PRIMARY's own fm-spawn.sh process launching a
+    # DIFFERENT home (PROJ_ABS, already validated above as the secondmate's
+    # home), so FM_HOME/FM_ROOT here still name the primary. Shadow BOTH to
+    # PROJ_ABS for just these two calls (bash restores them automatically after
+    # each prefixed simple-command call) so the secondmate's tab lands in the
+    # secondmate's own workspace, computing the SAME hash the secondmate's own
+    # process will when it later spawns its own crewmates (whose FM_ROOT is
+    # that same home). Shadow only FM_HOME and the two processes would disagree
+    # on the hash and split the secondmate across two workspaces. This matches
+    # fm-teardown.sh's zellij child cleanup, which shadows FM_HOME AND FM_ROOT
+    # to the child home for the same cross-home home-tag reason.
     HERDR_LABEL_HOME=$FM_HOME
+    HERDR_LABEL_ROOT=$FM_ROOT
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
+      HERDR_LABEL_ROOT=$PROJ_ABS
     fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" FM_ROOT="$HERDR_LABEL_ROOT" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
     # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
     # (the second field empty when this call ADOPTED a pre-existing workspace
     # rather than creating a fresh one). Split on the guaranteed single tab
@@ -733,7 +742,7 @@ case "$BACKEND" in
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" FM_ROOT="$HERDR_LABEL_ROOT" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF

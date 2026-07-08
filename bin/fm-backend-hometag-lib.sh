@@ -10,7 +10,11 @@
 # captain-directed no-mistakes review gate caught for cmux
 # (docs/cmux-backend.md) and this same tag mechanism was later ported to
 # zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
-# tab titles").
+# tab titles"). Herdr, which DOES split one workspace per home, uses the
+# same tag for that one workspace-container label instead of per-tab titles,
+# so two independent primary installations resolve to distinct workspaces
+# rather than one shared bare-"firstmate" space (docs/herdr-backend.md
+# "Label derivation").
 #
 # fm_backend_hometag() derives a short, stable tag: a readable prefix
 # ("firstmate" for the primary home, "2ndmate-<id>" for a secondmate home
@@ -18,8 +22,8 @@
 # path, so distinct installations - including multiple primaries on one
 # machine - never collide even though they share one backend-global
 # namespace. Callers source this file AFTER resolving their own
-# FM_HOME/FM_ROOT fallbacks (both adapters already do this for their own
-# purposes before any other function runs).
+# FM_HOME/FM_ROOT fallbacks (all three adapters already do this for their
+# own purposes before any other function runs).
 #
 # Moving/relocating a firstmate installation changes its FM_ROOT path and
 # therefore its tag; titles created under the old tag simply stop matching -

@@ -84,11 +84,27 @@ mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'trivial e2e primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm1/brief.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
-mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
+mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects"
+# A real secondmate home is a worktree of the firstmate repo, so its own bin/
+# holds the same scripts as the primary and its FM_ROOT is its own home. Model
+# that faithfully with a bin symlink, so section 3 below can run the
+# secondmate's own crewmate spawn with FM_ROOT set to $SM_HOME (not the primary
+# repo) - which is exactly what makes the secondmate's own workspace home-tag
+# hash agree with the one the primary computed when it created that workspace.
+ln -s "$ROOT/bin" "$SM_HOME/bin"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
+
+# Expected home-tag workspace labels (bin/fm-backend-hometag-lib.sh), computed
+# rather than hardcoded since each carries a path hash. cm1 (primary) spawns
+# with FM_ROOT=$ROOT; the secondmate workspace's hash is over the secondmate's
+# OWN home ($SM_HOME) - what BOTH the primary's --secondmate spawn (shadowing
+# FM_ROOT to the secondmate home) and the secondmate's own crewmate spawn (its
+# FM_ROOT IS its home) resolve to.
+EXPECTED_CM1_LABEL=$(FM_HOME="$PRIMARY_HOME" fm_backend_hometag)
+EXPECTED_SM_LABEL=$(FM_HOME="$SM_HOME" FM_ROOT="$SM_HOME" fm_backend_hometag)
 
 make_scratch_project() {  # <dir>
   local dir=$1
@@ -126,8 +142,9 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
-pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
+case "$EXPECTED_CM1_LABEL" in firstmate-*) : ;; *) fail "test setup: the primary home-tag should be 'firstmate-<hash>', got '$EXPECTED_CM1_LABEL'" ;; esac
+[ "$CM1_WS_LABEL" = "$EXPECTED_CM1_LABEL" ] || fail "a primary-shaped home's crewmate should land in the primary home-tag workspace ('$EXPECTED_CM1_LABEL'), got '$CM1_WS_LABEL'"
+pass "real herdr E2E: the primary-shaped home's crewmate landed in its own 'firstmate-<hash>' workspace"
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
@@ -153,14 +170,22 @@ SM_WSID=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.r
 [ -n "$SM_WSID" ] || fail "could not read e2esm1's pane workspace_id"
 [ "$SM_WSID" != "$CM1_WSID" ] || fail "the secondmate's tab must NOT land in the primary's workspace, but it shares $CM1_WSID"
 SM_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$SM_WS_LABEL" = "2ndmate-e2esm1" ] || fail "a --secondmate spawn should land in '2ndmate-<id>', got '$SM_WS_LABEL'"
-pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMATE's own labeled workspace, distinct from the primary's"
+case "$EXPECTED_SM_LABEL" in 2ndmate-e2esm1-*) : ;; *) fail "test setup: the secondmate home-tag should be '2ndmate-e2esm1-<hash>', got '$EXPECTED_SM_LABEL'" ;; esac
+[ "$SM_WS_LABEL" = "$EXPECTED_SM_LABEL" ] || fail "a --secondmate spawn should land in the secondmate home-tag workspace ('$EXPECTED_SM_LABEL'), got '$SM_WS_LABEL'"
+pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMATE's own '2ndmate-<id>-<hash>' workspace, distinct from the primary's"
 
 # --- 3. a crewmate spawned FROM the secondmate-shaped home lands in the SAME
 # secondmate workspace (this exact path has never run before this test) -----
 
+# FM_ROOT_OVERRIDE is the SECONDMATE's own home here, not $ROOT: a real
+# secondmate runs its own fm-spawn.sh from its own home worktree, so its
+# FM_ROOT IS its home. The bin symlink created above lets the real fm-spawn.sh
+# script still resolve its helpers ($FM_ROOT/bin/*). This is what makes cm2's
+# workspace home-tag hash (over $SM_HOME) agree with the one the primary's
+# --secondmate spawn computed (which shadowed FM_ROOT to the same home), so cm2
+# adopts the SAME workspace instead of minting a second one.
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"
-FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$SM_HOME" \
   "$ROOT/bin/fm-spawn.sh" cm2 "$PROJ2" "sh -c 'echo sm-crew-ok'" --backend herdr \
   >"$CM2_OUT" 2>"$CM2_ERR"
 rc=$?
@@ -191,7 +216,10 @@ assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_l
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
 
-SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
+# FM_ROOT is the secondmate's own home here too (as its own recovery process
+# would have it), so list_live derives the SAME home-tag the secondmate's
+# workspace was created under - the hash is over $SM_HOME, not $ROOT.
+SM_LIVE=$(FM_HOME="$SM_HOME" FM_ROOT="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
 assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
 assert_contains_local "$SM_LIVE" "fm-cm2" "the secondmate home's list_live did not see the crewmate spawned from it"
 assert_not_contains_local "$SM_LIVE" "fm-cm1" "the secondmate home's list_live must not see the primary's task"

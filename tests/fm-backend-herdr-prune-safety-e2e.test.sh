@@ -4,12 +4,14 @@
 # (bin/backends/herdr.sh's created-vs-adopted default-tab-prune gate; see
 # docs/herdr-backend.md "Default-tab prune" / the incident writeup there).
 #
-# Reproduces the exact collision shape against a private, throwaway
-# HERDR_SESSION (never the captain's default): a startup-workspace-shaped
-# layout - one tab labeled "1" in a pre-existing workspace labeled
-# "firstmate" - with a live long-running process in that pane, exactly as
-# the captain's own live crewmate session looked at incident time. Then
-# drives the real spawn-time container_ensure +
+# Reproduces the incident's danger shape against a private, throwaway
+# HERDR_SESSION (NEVER the captain's default): a pre-existing workspace whose
+# label coincidentally equals the primary firstmate home's own derived
+# home-tag, holding one tab labeled "1" with a live long-running process in its
+# pane. (The original 2026-07-02 trigger - a bare cwd-basename "firstmate"
+# label - no longer collides now that the home-tag carries a path hash; this
+# exercises the residual exact-home-tag-match surface the created-vs-adopted
+# gate still has to survive.) Then drives the real spawn-time container_ensure +
 # create_task path and asserts the live pane (and its live process) survive
 # untouched. Also exercises the normal happy path (a genuinely fresh
 # workspace's seeded default tab gets pruned, leaving exactly one clean
@@ -49,29 +51,32 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
-# --- 1. reproduce the label-collision startup-workspace shape ---------------
-# Explicitly label the startup workspace "firstmate" to create the collision
-# deterministically. Herdr's unlabeled workspace-label derivation is not a
-# stable test contract, while the adopted-workspace state is the behavior
-# this regression must exercise. The seeded tab remains labeled "1".
+# --- 1. reproduce the exact-home-tag-collision workspace shape --------------
+# Create a workspace whose label EXACTLY equals the primary firstmate home's
+# own derived home-tag (bin/fm-backend-hometag-lib.sh), modeling a pre-existing
+# captain-owned workspace that firstmate's next spawn will adopt by label
+# match. The original cwd-basename "firstmate" trigger no longer collides now
+# that the home-tag carries a path hash, so the label is passed explicitly
+# here. The seeded tab itself is still labeled "1" regardless.
 
-LIVE_CWD="$SCRATCH/firstmate"
+FM_DERIVED_LABEL=$(fm_backend_hometag)
+LIVE_CWD="$SCRATCH/captain-space"
 mkdir -p "$LIVE_CWD"
 
 fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
 
-CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate --no-focus) \
-  || fail "could not create the label-collision startup workspace"
+CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label "$FM_DERIVED_LABEL" --no-focus) \
+  || fail "could not create the home-tag-colliding workspace"
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 LIVE_TAB_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.tab.tab_id // empty')
 LIVE_PANE_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.root_pane.pane_id // empty')
 if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
-  fail "could not parse the startup workspace's ids from workspace create: $CREATE_OUT"
+  fail "could not parse the workspace's ids from workspace create: $CREATE_OUT"
 fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
-pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
+[ "$LIVE_LABEL" = "$FM_DERIVED_LABEL" ] || fail "the workspace's label should equal the primary home-tag ('$FM_DERIVED_LABEL'), got '$LIVE_LABEL' - repro setup is wrong"
+pass "repro setup: a workspace whose label exactly equals the primary home's derived home-tag collides with firstmate's own space"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just

@@ -44,8 +44,9 @@
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
 # default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
-# pre-P3 behavior when a test does not care about home-specific labeling).
+# fm_backend_herdr_workspace_label falls through to the primary hometag
+# (`firstmate-<hash>`) exactly like pre-hometag behavior when a test does not
+# care about home-specific labeling).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -64,6 +65,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# Shared per-firstmate-HOME tag derivation, the SAME one cmux and zellij use,
+# so the three adapters' labels cannot drift. Owns the .fm-secondmate-home
+# marker read and the home-path hash (see fm_backend_herdr_workspace_label).
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-backend-hometag-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -79,34 +86,29 @@ FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
 # ->blocked edge and a reconnect level-reconcile never re-delivers a still-
 # blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
-# .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
-# at a seeded secondmate home's root, containing exactly that secondmate's id.
-# The primary firstmate home never carries this marker.
-FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
+# label (docs/herdr-backend.md "Label derivation"), delegated to the shared
+# home-tag derivation in bin/fm-backend-hometag-lib.sh - the SAME tag cmux and
+# zellij use, so the three adapters cannot drift. fm_backend_hometag returns a
+# readable prefix plus a short hash of the resolved home path:
+#   - the PRIMARY home (no .fm-secondmate-home marker) -> "firstmate-<hash>"
+#   - a SECONDMATE home (carrying .fm-secondmate-home, written by
+#     bin/fm-home-seed.sh with that secondmate's id) -> "2ndmate-<id>-<hash>"
+# The readable prefix comes from $FM_HOME's marker; the hash from $FM_ROOT. The
+# hash is what makes two INDEPENDENT PRIMARY homes on one machine (e.g.
+# ~/code/firstmate and ~/code/firstmate-herdr) resolve to two DISTINCT
+# workspaces instead of both collapsing into one shared space: before it, every
+# primary returned the bare constant "firstmate" and fm_backend_herdr_workspace_find
+# adopted the first such workspace in the shared session, commingling both
+# fleets' tabs. Read fresh from FM_HOME/FM_ROOT on every call rather than cached
+# at source time, so the label is automatically stable across every respawn and
+# recovery for the life of that home. fm-spawn.sh briefly shadows BOTH FM_HOME
+# and FM_ROOT to a secondmate's own home when the PRIMARY spawns that secondmate
+# (the primary's own process still names the primary at that point) - see
+# fm-spawn.sh's herdr case arm.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      printf '2ndmate-%s' "$id"
-      return 0
-    fi
-  fi
-  printf 'firstmate'
+  fm_backend_hometag
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -202,8 +204,8 @@ fm_backend_herdr_workspace_find() {  # <session>
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
   # compile error that `2>/dev/null` would silently swallow, making this find
-  # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
-  # (the workspace leak).
+  # ALWAYS return empty and every spawn mint a fresh home-tag-labeled
+  # workspace (the workspace leak).
   printf '%s' "$list" | jq -r --arg want "$label" \
     '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
 }
@@ -223,9 +225,12 @@ fm_backend_herdr_workspace_find() {  # <session>
 # had just resolved. Herdr enforces no label uniqueness (docs/herdr-backend.md
 # "Label collisions") and derives an unlabeled workspace's DISPLAYED label from
 # its pane cwd's basename, so a captain launching herdr directly inside a
-# directory named "firstmate" produces a workspace that looks byte-identical,
-# by label alone, to firstmate's own auto-created container - one tab, label
-# "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
+# directory named "firstmate" produced a workspace that looked byte-identical,
+# by label alone, to firstmate's own auto-created container - the primary's
+# label was the bare constant "firstmate" then; the home-tag's path hash now
+# defuses this specific cwd-basename trigger, though the created-vs-adopted
+# gate below remains the real fix for a full home-tag collision - one tab,
+# label "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
 # by the label match, the heuristic matched too, and the very next spawn
 # closed the captain's own live pane 27ms after creating its task tab. The
 # fix is structural, not another heuristic: only a workspace THIS SAME

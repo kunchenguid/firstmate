@@ -177,6 +177,12 @@ SM_HOME="$SM_SCRATCH/secondmate-home"
 mkdir -p "$SM_HOME"
 printf 'smoketest-sm1\n' > "$SM_HOME/.fm-secondmate-home"
 
+# Expected home-tag labels (bin/fm-backend-hometag-lib.sh): the primary home
+# (this test's ambient FM_HOME/FM_ROOT, no marker) and the secondmate-shaped
+# home. Both carry a path hash now, so they are computed rather than hardcoded.
+PRIMARY_LABEL_EXPECTED=$(fm_backend_hometag)
+SM_LABEL_EXPECTED=$(FM_HOME="$SM_HOME" fm_backend_hometag)
+
 SM_CONTAINER_RAW=$(FM_HOME="$SM_HOME" fm_backend_herdr_container_ensure /tmp) || fail "secondmate-shaped container_ensure failed"
 SM_CONTAINER=${SM_CONTAINER_RAW%%$'\t'*}
 SM_SEEDED_TAB_ID=${SM_CONTAINER_RAW#*$'\t'}
@@ -190,8 +196,9 @@ pass "real herdr: a secondmate-shaped home (.fm-secondmate-home) gets its OWN he
 
 SM_WSID=${SM_CONTAINER#*:}
 SM_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$SM_LABEL_REAL" = "2ndmate-smoketest-sm1" ] || fail "the secondmate workspace's real herdr label should be 2ndmate-smoketest-sm1, got '$SM_LABEL_REAL'"
-pass "real herdr: the secondmate-shaped home's workspace is labeled 2ndmate-<secondmate-id> in herdr itself"
+case "$SM_LABEL_EXPECTED" in 2ndmate-smoketest-sm1-*) : ;; *) fail "test setup: the secondmate home-tag should be '2ndmate-smoketest-sm1-<hash>', got '$SM_LABEL_EXPECTED'" ;; esac
+[ "$SM_LABEL_REAL" = "$SM_LABEL_EXPECTED" ] || fail "the secondmate workspace's real herdr label should be $SM_LABEL_EXPECTED (2ndmate-<id>-<hash>), got '$SM_LABEL_REAL'"
+pass "real herdr: the secondmate-shaped home's workspace is labeled 2ndmate-<secondmate-id>-<hash> in herdr itself"
 
 SM_TASK_LABEL="fm-smtask1"
 SM_TASK_IDS=$(FM_HOME="$SM_HOME" fm_backend_herdr_create_task "$SM_CONTAINER" "$SM_TASK_LABEL" /tmp "$SM_SEEDED_TAB_ID") || fail "secondmate create_task failed"
@@ -230,8 +237,8 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
-POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
-POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
+POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "$PRIMARY_LABEL_EXPECTED" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
+POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "$SM_LABEL_EXPECTED" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
 [ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
 [ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"
 
