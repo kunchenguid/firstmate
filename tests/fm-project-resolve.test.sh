@@ -213,6 +213,35 @@ test_json_registry_rejects_codex_owned_canonical_path() {
   pass "projects.json refuses CODEX_HOME worktree roots as canonical project paths"
 }
 
+test_legacy_fallback_rejects_codex_owned_git_path() {
+  local home repo codex_home out status
+  home=$(new_home legacy-codex-root)
+  codex_home="$TMP_ROOT/legacy-codex-root/codex-home"
+  repo="$codex_home/worktrees/abcd/flow"
+  make_repo "$repo" main
+
+  out=$(CODEX_HOME="$codex_home" run_resolve "$home" --field canonical_path "$repo" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy fallback accepted a CODEX_HOME worktree as canonical"
+  assert_contains "$out" "Codex-owned worktree roots cannot be canonical project paths" "legacy Codex-owned refusal should explain the safety invariant"
+  pass "legacy fallback refuses CODEX_HOME worktree roots as canonical project paths"
+}
+
+test_legacy_fallback_rejects_linked_worktree_path() {
+  local home repo wt out status
+  home=$(new_home legacy-linked-worktree)
+  repo="$TMP_ROOT/legacy-linked-worktree/github/flow"
+  wt="$TMP_ROOT/legacy-linked-worktree/wt/flow"
+  make_repo "$repo" main
+  git -C "$repo" worktree add -q --detach "$wt" HEAD
+
+  out=$(run_resolve "$home" --field canonical_path "$wt" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy fallback accepted a linked worktree as canonical"
+  assert_contains "$out" "linked git worktree cannot be a canonical project path" "legacy linked-worktree refusal should explain the safety invariant"
+  pass "legacy fallback refuses linked worktrees as canonical project paths"
+}
+
 test_json_registry_malformed_file_fails_closed() {
   local home out status
   home=$(new_home malformed-json)
@@ -680,6 +709,8 @@ test_json_registry_refuses_subdirectory_canonical_path
 test_json_registry_rejects_relative_canonical_path
 test_real_existing_dir_preserves_resolver_cwd
 test_json_registry_rejects_codex_owned_canonical_path
+test_legacy_fallback_rejects_codex_owned_git_path
+test_legacy_fallback_rejects_linked_worktree_path
 test_json_registry_malformed_file_fails_closed
 test_json_registry_list_malformed_file_fails_closed
 test_json_registry_requires_explicit_policy_fields

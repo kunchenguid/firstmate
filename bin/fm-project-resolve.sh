@@ -452,10 +452,7 @@ resolve_fallback() {
   [ -z "$default_branch" ] || base_ref="refs/remotes/origin/$default_branch"
   common=
   if [ -d "$canonical" ] && git -C "$canonical" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    common=$(git -C "$canonical" rev-parse --git-common-dir 2>/dev/null || true)
-    if [ -n "$common" ]; then
-      common=$(git_path_real "$canonical" "$common" 2>/dev/null || true)
-    fi
+    common=$(validate_canonical_path "$project_id" "$canonical" "") || return 1
   fi
   jq -n \
     --arg project_id "$project_id" \

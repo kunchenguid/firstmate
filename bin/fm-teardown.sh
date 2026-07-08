@@ -301,9 +301,28 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree merged_tree remote_ref
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  if [ -n "$PROJECT_BASE_REF" ]; then
+    case "$PROJECT_BASE_REF" in
+      refs/remotes/origin/*)
+        remote_ref=${PROJECT_BASE_REF#refs/remotes/origin/}
+        git -C "$WT" fetch --quiet origin "+refs/heads/$remote_ref:refs/remotes/origin/$remote_ref" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$remote_ref"
+        ;;
+      origin/*)
+        remote_ref=${PROJECT_BASE_REF#origin/}
+        git -C "$WT" fetch --quiet origin "+refs/heads/$remote_ref:refs/remotes/origin/$remote_ref" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$remote_ref"
+        ;;
+      refs/heads/*)
+        ref="$PROJECT_BASE_REF"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  elif git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then

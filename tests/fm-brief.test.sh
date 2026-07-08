@@ -35,6 +35,28 @@ write_registry() {
 EOF
 }
 
+write_json_local_registry() {
+  local home=$1 repo=$2 repo_real
+  repo_real=$(cd "$repo" && pwd -P)
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "local-dev-proj",
+      "canonicalPath": "$repo_real",
+      "gitCommonDir": "$repo_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/heads/dev",
+      "mode": "local-only",
+      "yolo": false
+    }
+  ]
+}
+EOF
+}
+
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
 # metacharacter corruption for every ship delivery mode. This also guards
 # against any *new* unescaped apostrophe or unbalanced quote later added to
@@ -76,6 +98,29 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_local_only_brief_uses_registry_default_branch() {
+  local home repo id brief
+  home="$TMP_ROOT/local-default-home"
+  repo="$TMP_ROOT/local-default-repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" symbolic-ref HEAD refs/heads/dev
+  write_json_local_registry "$home" "$repo"
+
+  id="brief-local-dev-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-dev-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+
+  assert_grep "firstmate handles the merge into local \`dev\`" "$brief" \
+    "local-only brief did not name the registry default branch in Rule 1"
+  assert_grep "if \`dev\` has advanced" "$brief" \
+    "local-only DOD did not name the registry default branch in rebase guidance"
+  assert_no_grep "local \`main\`" "$brief" \
+    "local-only brief should not hardcode main for registry defaultBranch=dev"
+  pass "fm-brief.sh: local-only briefs honor registry defaultBranch"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_local_only_brief_uses_registry_default_branch

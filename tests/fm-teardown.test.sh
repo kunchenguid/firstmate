@@ -561,6 +561,25 @@ test_no_mistakes_content_fallback_uses_registered_base_ref() {
   pass "content fallback uses registered base ref branch"
 }
 
+test_no_mistakes_content_fallback_honors_local_base_ref() {
+  local case_dir rc wt_head
+  case_dir=$(make_case content-local-dev)
+  add_registered_dev_base "$case_dir"
+  write_meta "$case_dir" no-mistakes ship "project_base_ref=refs/heads/dev"
+  wt_commit_file "$case_dir" feature.txt hello "local dev feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/dev "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-local-dev: teardown should compare against local refs/heads/dev"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-local-dev: teardown printed a REFUSED line"
+  pass "content fallback honors local registered base ref even when origin exists"
+}
+
 test_merge_local_registered_base_ref_uses_local_branch() {
   local case_dir rc wt_head
   case_dir=$(make_case merge-local-dev)
@@ -1108,6 +1127,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_no_mistakes_content_fallback_uses_registered_base_ref
+test_no_mistakes_content_fallback_honors_local_base_ref
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
