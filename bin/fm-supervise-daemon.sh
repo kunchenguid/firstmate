@@ -1066,7 +1066,14 @@ detect_supervisor_ratelimit() {  # <state>
     reuse_reset=$(fm_ratelimit_marker_reset "$state" firstmate "$target" firstmate 2>/dev/null || true)
   fi
   match=$(fm_ratelimit_render_match "$tail" "" "$reuse_reset" || true)
-  [ -n "$match" ] || return 0
+  if [ -z "$match" ]; then
+    if [ -e "$state/firstmate.ratelimit.failed" ]; then
+      rm -f "$state/firstmate.ratelimit" "$state/firstmate.ratelimit.attempts" \
+        "$state/firstmate.ratelimit.failed" 2>/dev/null || true
+      log "self-handle: cleared exhausted ratelimit marker for recovered supervisor pane $target"
+    fi
+    return 0
+  fi
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF

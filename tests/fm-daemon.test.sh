@@ -188,6 +188,49 @@ test_supervisor_ratelimit_ignores_pending_composer() {
   pass "supervisor ratelimit detection ignores a pending composer"
 }
 
+# firstmate's own supervisor pane is never a recorded window, so the watcher's
+# crew cleanup path never clears its markers. Once auto-resume exhaustion writes
+# firstmate.ratelimit.failed the resume scan skips the marker forever, so a
+# subsequent episode's matching window+harness would make marker_write no-op and
+# firstmate's auto-resume stays permanently disabled. detect_supervisor_ratelimit
+# owns this cleanup: on a recovered pane (empty composer, no limit footer) it
+# clears the exhausted marker set, but while still limited it preserves .failed so
+# the exhaustion fail-safe holds.
+test_supervisor_ratelimit_clears_failed_marker_on_recovery() {
+  local dir state target
+  dir=$(make_supercase super-rl-recover)
+  state="$dir/state"
+  target="sess:0"
+  printf '%s\t%s\tfirstmate\n' 4242 "$target" > "$state/firstmate.ratelimit"
+  printf '3\n' > "$state/firstmate.ratelimit.attempts"
+  : > "$state/firstmate.ratelimit.failed"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_capture() { printf 'ready to help\n'; }
+    fm_ratelimit_render_match() { return 1; }
+    fm_ratelimit_marker_write() { fail "recovered supervisor pane must not be re-parked"; }
+    fm_wake_append() { fail "recovered supervisor pane must not emit a ratelimited wake"; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" detect_supervisor_ratelimit "$state"
+  )
+  [ ! -e "$state/firstmate.ratelimit" ] || fail "recovery left the firstmate.ratelimit marker"
+  [ ! -e "$state/firstmate.ratelimit.attempts" ] || fail "recovery left the .attempts marker"
+  [ ! -e "$state/firstmate.ratelimit.failed" ] || fail "recovery left the exhausted .failed marker"
+  printf '%s\t%s\tfirstmate\n' 4242 "$target" > "$state/firstmate.ratelimit"
+  : > "$state/firstmate.ratelimit.failed"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+    fm_ratelimit_render_match() { printf '%s\tratelimit\n' 4242; }
+    fm_ratelimit_marker_write() { return 1; }
+    fm_wake_append() { :; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" detect_supervisor_ratelimit "$state"
+  )
+  [ -e "$state/firstmate.ratelimit.failed" ] || fail "still-limited pane cleared the .failed fail-safe marker"
+  pass "recovered supervisor pane clears the exhausted ratelimit marker set while a still-limited pane keeps .failed"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1726,6 +1769,7 @@ test_classify_check_and_unknown_escalate
 test_ratelimited_wake_self_handles
 test_supervisor_ratelimit_reuses_marker_reset
 test_supervisor_ratelimit_ignores_pending_composer
+test_supervisor_ratelimit_clears_failed_marker_on_recovery
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
