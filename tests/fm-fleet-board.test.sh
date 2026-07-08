@@ -248,6 +248,7 @@ SH
   run_bad_snapshot() {  # <label> <tasks-json>
     local label=$1 json=$2 stub out
     stub="$TMP_ROOT/badsnap-$label"
+    # shellcheck disable=SC2016  # deliberate: $1 must stay literal in the generated stub script
     printf '#!/usr/bin/env bash\n[ "$1" = "--json" ] && printf "%%s\\n" %q\n' "$json" > "$stub"
     chmod +x "$stub"
     out="$TMP_ROOT/board7-$label.html"
