@@ -50,7 +50,6 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
-Codex Stop-hook blocking is separate from Codex background-task completion wake reliability; `docs/turnend-guard.md` owns the unverified background-wake caveat and `FM_CODEX_BACKGROUND_WAKE` override.
 `opencode`, `pi`, and `grok` expose passive turn-end events for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -139,7 +138,6 @@ Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-
 Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
 Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
-The same validation did not prove that a long-running watcher background task wakes Codex when it exits; on Codex surfaces with `CODEX_CI` or `CODEX_THREAD_ID`, firstmate treats that background-completion channel as degraded until `FM_CODEX_BACKGROUND_WAKE=verified` is set after an empirical smoke.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 

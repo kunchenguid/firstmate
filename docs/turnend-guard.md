@@ -11,25 +11,15 @@ The primary can otherwise end a turn after handling wakes without re-arming the 
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, or when Codex would end with degraded one-shot supervision outside away mode, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to restore reliable supervision.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to arm `bin/fm-watch-arm.sh`.
 
 ## Codex Background Wake Caveat
 
-The Codex Stop hook validation below proves Codex can block or continue a turn through hook exit status.
-It does not prove a long-running `exec_command` or PTY background task will start a new assistant turn when the process later exits.
-On 2026-07-08, the Codex API/tool surface kept the watcher PTY process alive but did not wake the assistant when `bin/fm-watch-arm.sh` exited with real watcher reasons.
-Manual polling with `write_stdin` was required to see `signal: state/akua-secondmate.status state/minekube-secondmate.status`, and later `signal: state/akua-secondmate.status`.
-After each exit the watcher lock disappeared correctly, so ordinary one-shot supervision would have stayed down if nobody polled and re-armed it.
-
-Firstmate therefore treats Codex surfaces carrying `CODEX_CI` or `CODEX_THREAD_ID` as an unverified background-completion wake channel by default.
-`bin/fm-watch-arm.sh` still starts and confirms the live watcher, but its `started` or `healthy` line includes a `DEGRADED` diagnostic on that surface.
-`bin/fm-guard.sh` prints a pull-based `CODEX WATCH WAKE CHANNEL UNVERIFIED` banner while work is in flight and the watcher beacon is fresh.
-`bin/fm-turnend-guard.sh` blocks the turn with `TURN WOULD END WITH DEGRADED SUPERVISION` rather than treating a live one-shot watcher as fully healthy.
-Set `FM_CODEX_BACKGROUND_WAKE=verified` only after a local smoke demonstrates that a long-running watcher background task can exit and start a new assistant turn without manual polling.
-Set `FM_CODEX_BACKGROUND_WAKE=unverified` to force the degraded path in tests or diagnostics.
-
+The Codex Stop hook validation below proves Codex can block or continue a turn through hook exit status, but it does not prove a long-running background watcher task wakes the assistant when that task exits.
+On Codex API/unified-exec surfaces, a background watcher process can exit with a wake reason without automatically waking the assistant, so Firstmate must not treat that wake channel as verified.
+Firstmate treats Codex surfaces carrying `CODEX_CI` or `CODEX_THREAD_ID` as degraded by default: `fm-watch-arm.sh` labels confirmed live watcher status as `DEGRADED`, `fm-guard.sh` warns while work is in flight, and `fm-turnend-guard.sh` blocks turn end outside `state/.afk` where the away-mode daemon owns re-arm semantics.
+Set `FM_CODEX_BACKGROUND_WAKE=verified` only after a local smoke demonstrates automatic wake-on-exit for a long-running watcher task; `FM_CODEX_BACKGROUND_WAKE=unverified` forces the degraded path in tests.
 The ideal Codex-side fix is an agent-callable monitor or event tool like <https://github.com/openai/codex/issues/29922>, backed by unified-exec process and output events.
-Related upstream history includes process-lifetime and background-task issues at <https://github.com/openai/codex/issues/10767>, <https://github.com/openai/codex/issues/10860>, <https://github.com/openai/codex/issues/10957>, and polling-token waste in <https://github.com/openai/codex/issues/13733>.
 
 ## Shared Predicate
 
@@ -44,7 +34,6 @@ If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
-On Codex surfaces with an unverified background-completion wake channel, a healthy watcher still blocks as degraded supervision unless `state/.afk` exists and the away-mode daemon owns supervision.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
@@ -121,7 +110,6 @@ If Grok declines to load project hooks, this primary guard fails open and `fm-gu
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, the Codex unverified-background-wake turn-end block, the away-mode exemption, and the Grok adapter's forced-resume loop guard and permission-mode regression.
-`tests/fm-watcher-lock.test.sh` covers the matching Codex degraded diagnostics in `fm-watch-arm.sh` and `fm-guard.sh`, plus the away-mode guard exemption.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 These tests do not invoke live harnesses.
 Live harness validation is the empirical evidence recorded above.
