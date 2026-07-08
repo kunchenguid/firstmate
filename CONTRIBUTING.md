@@ -65,7 +65,7 @@ Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistak
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 
 Every script must run on bash 3.2 (`/bin/bash` on macOS, where `#!/usr/bin/env bash` usually resolves), not just the newer bash on Linux CI.
-Two traps CI's own bash silently accepts: an unbalanced single quote inside a heredoc nested in `$(...)` breaks 3.2's parser for the whole file (issue #166), and expanding an empty array under `set -u` (`"${arr[@]}"` or `"${arr[*]}"`) is an unbound-variable error until bash 4.4 - guard it as `"${arr[@]+"${arr[@]}"}"` or check `${#arr[@]}` first.
+Two traps CI's own bash silently accepts: an unbalanced single quote inside a heredoc nested in `$(...)` breaks 3.2's parser for the whole file (issue #166), and expanding an empty array under `set -u` (`"${arr[@]}"` or `"${arr[*]}"`) is an unbound-variable error until bash 4.4 - guard it as `${arr[@]+"${arr[@]}"}` or check `${#arr[@]}` first.
 The parse class is gated by `tests/fm-bash32-parse.test.sh` locally and the `bash32` docker job in CI; the runtime class is only caught by running the behavior suite on a bash 3.2 machine, so run it on macOS before shipping array-handling changes.
 
 Check and test the toolbelt before pushing:
