@@ -719,10 +719,6 @@ while :; do
     touch "$STATE/.last-check"
   fi
 
-  if ! afk_present; then
-    runstep_followup_scan
-  fi
-
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
@@ -782,6 +778,10 @@ $pending
 EOF
       triage_log "absorbed benign $reason"
     fi
+  fi
+
+  if ! afk_present; then
+    runstep_followup_scan
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy

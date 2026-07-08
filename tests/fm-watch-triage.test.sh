@@ -402,9 +402,12 @@ test_actionable_signal_surfaced() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   marker="$state/.runstep-followup-task"
   printf 'task\n' > "$marker"
-  watch_bg "$state" "$fakebin" "$out"
+  watch_bg "$state" "$fakebin" "$out" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review gate' \
+    FM_RUNSTEP_FOLLOWUP_INTERVAL=0
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not exit for an actionable needs-decision signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
