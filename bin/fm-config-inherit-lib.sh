@@ -28,7 +28,7 @@
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend hooks/post-worktree-create}"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
@@ -39,7 +39,9 @@ copy_inheritable_file() {
   [ -n "$dest_parent" ] && [ "$dest_parent" != "$dest" ] || return 1
   mkdir -p "$dest_parent" 2>/dev/null || return 1
   tmp=$(mktemp "$dest_parent/.fm-inherit.XXXXXX" 2>/dev/null) || return 1
-  if ! cp "$src" "$tmp" 2>/dev/null; then
+  # -p keeps the source mode so an executable item (the post-worktree-create
+  # hook) stays executable downstream; mktemp's 0600 would strip it
+  if ! cp -p "$src" "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi

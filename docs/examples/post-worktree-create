@@ -14,7 +14,9 @@
 #   - Runs only against an isolated worktree, never the primary checkout.
 #   - A non-zero exit is warned and ignored: the spawn always continues, so the
 #     hook must never be relied on to gate a launch.
-#   - Keep it fast and idempotent; it runs on every spawn.
+#   - Keep it fast and idempotent; it runs on every spawn, bounded by
+#     FM_HOOK_TIMEOUT seconds (default 120) - a timed-out hook is warned and
+#     skipped like a failing one.
 set -eu
 
 worktree=${1:?worktree path}
@@ -22,6 +24,6 @@ project=${2:-}
 task_id=${3:-}
 kind=${4:-}
 
-# Replace the body below with your own provisioning. This sample just records
-# that the hook fired, into the worktree's git-ignored info/exclude scratch area.
+# Replace the body below with your own provisioning. This sample just echoes a
+# line to stderr recording that the hook fired.
 echo "post-worktree-create: task=$task_id project=$project kind=$kind wt=$worktree" >&2

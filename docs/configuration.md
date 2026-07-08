@@ -128,7 +128,7 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
+The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/hooks/post-worktree-create` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, backlog backend, and spawn hook use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 
@@ -164,8 +164,11 @@ The hook receives the same four values as positional arguments and as environmen
 | `$4` | `FM_HOOK_KIND` | `ship`, `scout`, or `secondmate` |
 
 The hook is purely additive and never gates a launch: a hook that exits non-zero is warned to stderr and the spawn continues, so it must not be relied on to block a spawn.
+A hang cannot gate a launch either: the hook runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120) via `timeout` or macOS `gtimeout`, and a timed-out hook is warned to stderr and skipped exactly like a failing one.
+When neither timeout binary is on `PATH`, the hook runs unbounded after a stderr warning; a missing timeout binary never fails the spawn.
 It never runs against the primary checkout - the call site only reaches it past the isolation assertion, and `fm-hooks-lib.sh` additionally refuses to run when the worktree resolves to the firstmate primary root as a backstop.
 `config/hooks/` is gitignored, so an installed hook stays fleet-local and is never committed.
+`config/hooks/post-worktree-create` propagates to secondmate homes like the other crew-affecting config (`crew-dispatch.json`, `crew-harness`, `backlog-backend`), so crewmates spawned by a secondmate get the same provisioning.
 See [`docs/examples/post-worktree-create`](examples/post-worktree-create) for a runnable sample to copy into `config/hooks/post-worktree-create` and `chmod +x`.
 
 ## Toolchain
@@ -188,7 +191,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 `NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; `AGENTS.md` section 3 owns the send procedure.
 The same bootstrap run also emits `SECONDMATE_LIVENESS:` for live secondmate endpoints: `already-live` and `respawned` are handled states, while `skipped` or `respawn failed` means the secondmate still needs attention.
 For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, and `backlog-backend` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `hooks/post-worktree-create` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

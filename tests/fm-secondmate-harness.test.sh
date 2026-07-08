@@ -227,7 +227,19 @@ test_propagate_lib() {
     "guard skip did not emit a stderr warning"
   [ ! -e "$guard_repo/config/crew-dispatch.json" ] || fail "guard skip still copied the unignored item"
 
-  pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
+  # 8. a nested executable item (hooks/post-worktree-create) is inherited with
+  # its mode preserved, and its absence is mirrored downstream like any other item
+  mkdir -p "$src/hooks"
+  printf '#!/bin/sh\nexit 0\n' > "$src/hooks/post-worktree-create"
+  chmod 755 "$src/hooks/post-worktree-create"
+  propagate_inheritable_config "$src" "$dest"
+  [ -f "$dest/hooks/post-worktree-create" ] || fail "nested hook item not propagated"
+  [ -x "$dest/hooks/post-worktree-create" ] || fail "inherited hook lost its executable bit"
+  rm -f "$src/hooks/post-worktree-create"
+  propagate_inheritable_config "$src" "$dest"
+  [ -e "$dest/hooks/post-worktree-create" ] && fail "hook absence not mirrored downstream"
+
+  pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics, nested executable mode"
 }
 
 # ===========================================================================

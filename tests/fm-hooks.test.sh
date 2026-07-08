@@ -4,7 +4,8 @@
 # These call fm_run_post_worktree_create_hook directly against a temp
 # config/hooks dir and a temp worktree, asserting: no-op when no hook is
 # installed, runs and receives the right args/env when present, skips the
-# primary checkout, and is non-fatal (returns 0, warns) when the hook errors.
+# primary checkout, is non-fatal (returns 0, warns) when the hook errors, and
+# is non-fatal when the hook hangs past FM_HOOK_TIMEOUT.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -82,7 +83,25 @@ test_nonfatal_on_hook_error() {
   pass "non-fatal when the hook errors: warns and returns 0"
 }
 
+test_nonfatal_on_hung_hook() {
+  local root config primary wt out status
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP: no timeout/gtimeout on PATH; hung-hook bound not testable here"
+    return 0
+  fi
+  root=$(fm_test_tmproot fm-hooks-hang)
+  read -r config primary wt < <(fixture "$root")
+  install_hook "$config" "sleep 30"
+
+  out=$(FM_HOOK_TIMEOUT=1 fm_run_post_worktree_create_hook "$config" "$primary" "$wt" alpha task-a1 ship 2>&1)
+  status=$?
+  expect_code 0 "$status" "a hung hook must not fail the spawn"
+  assert_contains "$out" "timed out after 1s" "should warn that the hook timed out"
+  pass "non-fatal when the hook hangs: killed at FM_HOOK_TIMEOUT, warns and returns 0"
+}
+
 test_noop_when_absent
 test_runs_with_args_and_env
 test_skips_primary_checkout
 test_nonfatal_on_hook_error
+test_nonfatal_on_hung_hook
