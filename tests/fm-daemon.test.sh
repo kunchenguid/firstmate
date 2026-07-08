@@ -944,6 +944,31 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   pass "pane_input_pending: text inside a bordered composer is still pending"
 }
 
+test_pane_input_pending_codex_dim_placeholder_not_pending() {
+  # Verified against real codex/gpt-5.5 in tmux on 2026-07-08: an idle composer
+  # row is a bold prompt glyph followed by a dim rotating suggestion.
+  local dir fakebin capture
+  dir=$(make_supercase pending-codex-dim-placeholder)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '\033[1m›\033[0m \033[2mExplain this codebase\033[0m\n' > "$capture"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    pane_input_pending "fakepane"; then
+    fail "codex dim placeholder composer falsely detected as pending"
+  fi
+  pass "pane_input_pending: codex's dim idle placeholder after a bold › prompt is NOT pending"
+}
+
+test_pane_input_pending_codex_real_text_is_pending() {
+  local dir fakebin capture
+  dir=$(make_supercase pending-codex-real-text)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '\033[1m›\033[0m reply with exactly READY\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    pane_input_pending "fakepane" \
+    || fail "codex real composer text was not detected as pending"
+  pass "pane_input_pending: codex real text after the › prompt is still pending"
+}
+
 test_submit_ack_confirms_on_bordered_empty_composer() {
   # RC2: the submit acknowledgement must recognize a bordered-EMPTY composer as
   # "submitted." The old ACK reused the broken check, so on claude it could never
@@ -957,6 +982,22 @@ test_submit_ack_confirms_on_bordered_empty_composer() {
   [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest typed more than once (retype)"
   [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "expected exactly one submitted Enter"
   pass "submit-ACK confirms a submit when the composer returns to a bordered-empty box"
+}
+
+test_submit_ack_confirms_on_codex_dim_placeholder_after_submit() {
+  # Regression from real codex/gpt-5.5 on 2026-07-08: after Enter, codex
+  # accepts the prompt and returns to an idle composer whose suggestion text is
+  # dim. The old classifier left the bold › glyph and reported pending anyway.
+  local dir fakebin sent verdict
+  dir=$(make_bordered_case ack-codex-dim-placeholder)
+  fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_CODEX_IDLE_AFTER_ENTER=1 \
+    fm_tmux_submit_core "win" "reply with exactly READY" 3 0.05 0.05)
+  [ "$verdict" = empty ] || fail "submit-ACK did not confirm on a codex dim-placeholder composer: $verdict"
+  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "codex prompt typed more than once (retype)"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "expected exactly one submitted Enter"
+  pass "submit-ACK confirms codex submit when the composer returns to a dim idle placeholder"
 }
 
 test_submit_ack_reports_pending_on_persistent_swallow() {
@@ -1368,7 +1409,10 @@ test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
+test_pane_input_pending_codex_dim_placeholder_not_pending
+test_pane_input_pending_codex_real_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer
+test_submit_ack_confirms_on_codex_dim_placeholder_after_submit
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane

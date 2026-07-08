@@ -198,7 +198,11 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '│ > │\n' > "$COMPOSER"
+        if [ "${FM_FAKE_CODEX_IDLE_AFTER_ENTER:-0}" = 1 ]; then
+          printf '\033[1m›\033[0m \033[2mExplain this codebase\033[0m\n' > "$COMPOSER"
+        else
+          printf '│ > │\n' > "$COMPOSER"
+        fi
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
