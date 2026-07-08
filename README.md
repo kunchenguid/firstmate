@@ -127,6 +127,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Generate a "pick up where I left off" status report from the read-only fleet snapshot - backlog, per-task crew state, open PRs, scout reports, pending decisions, and date-gated queued work - written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
+| `/fleet`           | Render the whole fleet as one dark, clickable HTML board and open it for review; strictly read-only, mutates no task, state, or data file |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
@@ -134,7 +135,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 
 Firstmate's skills live in two separate places with different audiences:
 
-- `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
+- `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Almost every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader. The one deliberate exception is the `fleet` skill, which omits the flag so installers ship it.
 - `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
   Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
   Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback in the current directory, and closes with a resume pointer for the next session.
