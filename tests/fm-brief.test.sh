@@ -76,6 +76,22 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# The no-mistakes DOD must point crewmates at the gate-recovery skill by
+# absolute path, because crewmates in project worktrees cannot load firstmate
+# skills by slash-name (same mechanism as the fm-ensure-agents-md.sh pointer).
+test_no_mistakes_gate_recovery_pointer() {
+  local home id brief
+  home="$TMP_ROOT/gate-recovery-home"
+  mkdir -p "$home/data"
+  id="brief-gaterec-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "$ROOT/.agents/skills/no-mistakes-gate-recovery/SKILL.md" "$brief" \
+    "no-mistakes DOD lost the absolute-path gate-recovery skill pointer"
+  pass "fm-brief.sh: no-mistakes DOD points at the gate-recovery skill by absolute path"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -96,4 +112,5 @@ test_ship_project_memory_wording() {
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_no_mistakes_gate_recovery_pointer
 test_ship_project_memory_wording
