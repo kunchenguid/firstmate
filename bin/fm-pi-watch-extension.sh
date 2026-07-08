@@ -26,6 +26,7 @@ export default function (pi: any) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || process.cwd();
   const fmRoot = process.env.FM_ROOT_OVERRIDE || process.cwd();
   const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+  const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const marker = `${state}/.pi-watch-extension-loaded`;
   let child: any = null;
@@ -64,8 +65,10 @@ export default function (pi: any) {
       ...process.env,
       FM_HOME: fmHome,
       FM_ROOT_OVERRIDE: fmRoot,
+      FM_CONFIG_OVERRIDE: config,
+      FM_WATCH_ARM_SCRIPT: armScript,
     };
-    child = spawn("bash", ["-lc", "[ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh"], {
+    child = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\""], {
       cwd: fmRoot,
       env,
       stdio: ["ignore", "pipe", "pipe"],

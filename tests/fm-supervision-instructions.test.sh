@@ -28,15 +28,18 @@ test_unknown_fallback() {
 }
 
 test_conditional_stanzas() {
-  local home out
+  local home config out
   home="$TMP_ROOT/conditional-home"
-  mkdir -p "$home/state" "$home/config"
-  out=$(FM_HOME="$home" "$RENDER" --harness pi --read-only 1 --afk 1 --x-mode 1)
+  config="$TMP_ROOT/conditional-config"
+  mkdir -p "$home/state" "$home/config" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --afk 1 --x-mode 1)
   assert_contains "$out" "- Lock: read-only" "read-only stanza missing"
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
-  assert_contains "$out" "Mode: Pi extension background wake." "pi snippet missing"
-  pass "renderer includes read-only, afk, and x-mode current-state stanzas"
+  assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
+  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
+  assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
+  pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
 
 test_repair_lines() {
@@ -62,10 +65,21 @@ test_grok_is_background_notify() {
   assert_contains "$out" "background: true" "grok snippet missing tracked background tool instruction"
   assert_contains "$out" "synthetic_reason: task_completed" "grok snippet missing auto-wake synthetic prompt detail"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok snippet missing watcher arm"
+  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder"
   assert_not_contains "$out" "foreground checkpoint" "grok snippet must not be Codex-style foreground checkpoint"
   out=$("$RENDER" --harness grok --repair-line)
   assert_contains "$out" "Grok tracked background task" "grok repair line is not background-notify shaped"
   pass "grok supervision is Claude-shaped background notify with passive Stop-hook backstop"
+}
+
+test_grok_command_sources_effective_config() {
+  local home config out
+  home="$TMP_ROOT/grok-home"
+  config="$TMP_ROOT/grok-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --x-mode 1)
+  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective x-mode config path"
+  pass "grok rendered command sources the effective x-mode config"
 }
 
 test_selected_harness_block_only
@@ -73,3 +87,4 @@ test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_grok_is_background_notify
+test_grok_command_sources_effective_config

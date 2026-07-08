@@ -9,11 +9,12 @@ TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 GEN="$ROOT/bin/fm-pi-watch-extension.sh"
 
 test_generator_writes_extension() {
-  local home out file text
+  local home out file text expected_config_source
   home="$TMP_ROOT/home"
   mkdir -p "$home/state"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN")
   file="$home/state/fm-primary-pi-watch.ts"
+  expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
   [ "$out" = "$file" ] || fail "generator printed '$out', expected '$file'"
   assert_present "$file" "generator did not write the Pi watch extension"
   text=$(cat "$file")
@@ -23,6 +24,11 @@ test_generator_writes_extension() {
   assert_contains "$text" "sendUserMessage" "generated extension missing Pi wake API"
   assert_contains "$text" "deliverAs: \"followUp\"" "generated extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "generated extension missing loaded marker"
+  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "generated extension missing effective config resolution"
+  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "generated extension does not pass the effective config to the watcher arm"
+  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "generated extension does not pass the effective watcher arm script"
+  assert_contains "$text" "$expected_config_source" "generated extension does not source the effective x-mode config"
+  assert_not_contains "$text" "[ -f config/x-mode.env ]" "generated extension kept a repo-relative x-mode config path"
   pass "Pi extension generator writes the firstmate-owned watcher bridge"
 }
 
@@ -215,6 +221,78 @@ EOF
   pass "OpenCode watcher plugin rearms after a watcher wake"
 }
 
+test_opencode_watch_arm_coordinates_with_turnend_guard() {
+  local arm_plugin guard_plugin repo home log guard_log out status
+  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  repo="$TMP_ROOT/opencode-coordinate-root"
+  home="$TMP_ROOT/opencode-coordinate-home"
+  log="$TMP_ROOT/opencode-coordinate-arm.log"
+  guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'guard should not run\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
+const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+await armMod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const guardHooks = await guardMod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run");
+  process.exit(1);
+}
+if (existsSync(process.env.FM_GUARD_LOG)) {
+  console.error("turn-end guard ran before the watch arm could establish supervision");
+  process.exit(1);
+}
+if (promptBody) {
+  console.error(`unexpected prompt: ${promptBody}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"
+  [ -z "$out" ] || fail "OpenCode coordination test printed output: $out"
+  pass "OpenCode watcher plugin coordinates with the turn-end guard"
+}
+
 test_generator_writes_extension
 test_generator_preserves_loaded_marker_when_unchanged
 test_spawn_template_mentions_pi_watch_placeholder
@@ -222,3 +300,4 @@ test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_watch_arm_coordinates_with_turnend_guard

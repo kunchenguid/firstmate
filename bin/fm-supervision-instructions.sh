@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
@@ -88,6 +89,24 @@ esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$STATE/fm-primary-pi-watch.ts"
+x_mode_env="$CONFIG/x-mode.env"
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+x_mode_env_sh=$(shell_quote "$x_mode_env")
+
+render_snippet() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
+    line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    printf '%s\n' "$line"
+  done < "$SNIPPET"
+}
 
 repair_line() {
   if [ "$READ_ONLY" -eq 1 ]; then
@@ -147,11 +166,11 @@ else
   printf '%s\n' '- Away mode: inactive.'
 fi
 if [ "$X_MODE" -eq 1 ]; then
-  printf '%s\n' '- X mode: active; source config/x-mode.env before launching any watcher process so the 30s cadence is inherited.'
+  printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 printf '%s\n' '- After every handled wake, resume this emitted harness protocol instead of following a hardcoded background-arm recipe.'
 printf '\n'
-cat "$SNIPPET"
+render_snippet
 printf '\n'

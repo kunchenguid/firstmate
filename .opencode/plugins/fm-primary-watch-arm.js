@@ -1,7 +1,41 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 
+const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
+
 let child = null;
+let armStatus = "idle";
+let waiters = new Set();
+
+function setArmStatus(status) {
+  armStatus = status;
+  for (const resolve of waiters) resolve(status);
+  waiters.clear();
+}
+
+function readyStatus() {
+  if (armStatus === "armed" || armStatus === "wake" || armStatus === "failed") return armStatus;
+  return "";
+}
+
+function waitForArmReady() {
+  const ready = readyStatus();
+  if (ready) return Promise.resolve(ready);
+  return new Promise((resolve) => {
+    let timer = null;
+    const waiter = (status) => {
+      if (timer) clearTimeout(timer);
+      waiters.delete(waiter);
+      resolve(status);
+    };
+    timer = setTimeout(() => {
+      waiters.delete(waiter);
+      resolve("timeout");
+    }, ARM_READY_TIMEOUT_MS);
+    waiters.add(waiter);
+  });
+}
 
 function runProcess(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -70,7 +104,33 @@ function firstWakeOrFailure(stdout, stderr, code) {
   return "";
 }
 
+function observeArmOutput(stdout, stderr) {
+  const combined = `${stdout}\n${stderr}`;
+  if (combined.split(/\r?\n/).some((line) => /^watcher: (started|healthy)\b/.test(line))) {
+    setArmStatus("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: FAILED/.test(line))) {
+    setArmStatus("failed");
+  }
+}
+
+async function sendPrompt(client, sessionID, text) {
+  await client.session.promptAsync({
+    path: { id: sessionID },
+    body: {
+      parts: [
+        {
+          type: "text",
+          text,
+        },
+      ],
+    },
+  });
+}
+
 function spawnArm(paths, sessionID, client) {
+  setArmStatus("starting");
   const env = {
     ...process.env,
     FM_HOME: paths.home,
@@ -85,34 +145,55 @@ function spawnArm(paths, sessionID, client) {
   let stderr = "";
   child.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
+    observeArmOutput(stdout, stderr);
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
+    observeArmOutput(stdout, stderr);
   });
   child.on("close", async (code) => {
     child = null;
     const reason = firstWakeOrFailure(stdout, stderr, code);
+    if (reason) setArmStatus(reason.startsWith("watcher: FAILED") ? "failed" : "wake");
+    else if (!readyStatus()) setArmStatus("idle");
     if (!reason) return;
     try {
-      await client.session.promptAsync({
-        path: { id: sessionID },
-        body: {
-          parts: [
-            {
-              type: "text",
-              text: `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh, handle the reported wake, and continue normal supervision.\n\n${reason}`,
-            },
-          ],
-        },
-      });
+      await sendPrompt(
+        client,
+        sessionID,
+        `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh, handle the reported wake, and continue normal supervision.\n\n${reason}`,
+      );
+    } catch {
+    }
+  });
+  child.on("error", async (error) => {
+    child = null;
+    setArmStatus("failed");
+    try {
+      await sendPrompt(
+        client,
+        sessionID,
+        `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh, handle the reported wake, and continue normal supervision.\n\nwatcher: FAILED - OpenCode arm child failed: ${error.message}`,
+      );
     } catch {
     }
   });
 }
 
+async function ensureArm(paths, sessionID, client) {
+  if (!sessionID) return "skipped";
+  if (child) return waitForArmReady();
+  if (!shouldArm(paths)) return "not-needed";
+  spawnArm(paths, sessionID, client);
+  return waitForArmReady();
+}
+
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = await resolveRoot(worktree ?? directory);
   const paths = effectivePaths(root);
+  globalThis[COORDINATOR_KEY] = {
+    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
+  };
 
   return {
     event: async ({ event }) => {
@@ -121,8 +202,7 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (child) return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
-      if (!shouldArm(paths)) return;
-      spawnArm(paths, sessionID, client);
+      void ensureArm(paths, sessionID, client);
     },
   };
 };

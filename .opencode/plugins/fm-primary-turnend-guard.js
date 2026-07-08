@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+
 let skipNextIdle = false;
 
 function runProcess(command, args, input = "") {
@@ -34,6 +36,13 @@ function runGuard(root) {
   return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
 }
 
+async function letWatchArmRun(sessionID, client) {
+  const coordinator = globalThis[COORDINATOR_KEY];
+  if (!coordinator?.ensureArmed) return false;
+  const status = await coordinator.ensureArmed(sessionID, client);
+  return status === "armed" || status === "wake" || status === "failed";
+}
+
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
   const root = await resolveRoot(worktree ?? directory);
 
@@ -48,6 +57,8 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
 
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
+
+      if (await letWatchArmRun(sessionID, client)) return;
 
       const result = await runGuard(root);
       if (result.code !== 2) return;
