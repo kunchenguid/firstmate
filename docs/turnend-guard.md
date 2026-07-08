@@ -7,11 +7,11 @@ Harness-specific tracked hook files only adapt each verified harness's real turn
 ## Gap Closed
 
 `bin/fm-guard.sh` is pull-based: it warns whenever some other supervision script happens to run, and prints nothing otherwise.
-The primary can otherwise end a turn after handling wakes without re-arming the watcher, then sit blind until another fleet command happens to run.
+The primary can otherwise end a turn after handling wakes without resuming supervision, then sit blind until another fleet command happens to run.
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to arm `bin/fm-watch-arm.sh`.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.
 
 ## Shared Predicate
 
@@ -37,8 +37,8 @@ All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
-- `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, runs the shared guard, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
-- `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `turn_end`, runs the shared guard, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
+- `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
+- `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `turn_end`, marks the extension version loaded for session-start checks, runs the shared guard, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
@@ -51,6 +51,7 @@ OpenCode, Pi, and Grok expose passive turn-end events for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
+That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
 
 ## Empirical Validation
 

@@ -24,15 +24,14 @@
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine re-arm. Unless
-#                          afk is active.
+#                          closer look instead of another routine supervision
+#                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
-# For normal supervision, re-arm after each printed reason by running
-# bin/fm-watch-arm.sh through the harness's tracked background mechanism. Direct
-# duplicate invocations of this script still no-op through the watcher singleton
-# lock.
+# For normal supervision, resume the session-start primary-harness protocol
+# after each printed reason. Direct duplicate invocations of this script still
+# no-op through the watcher singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -250,8 +249,9 @@ wake() {
 # no longer a one-off. At the threshold, wedge_timer_check appends a
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
 # (not just repetition the supervisor has to notice on its own) forces a closer
-# look instead of another routine re-arm. Reset wherever a window's pane/hash
-# state resets to genuinely active (see the two rm-on-reset call sites below).
+# look instead of another routine supervision resume. Reset wherever a window's
+# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
+# below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash

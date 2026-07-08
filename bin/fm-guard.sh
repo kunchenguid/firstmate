@@ -10,8 +10,9 @@
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. Normal wake handling (watcher
-# briefly down between a wake and its re-arm) stays inside the grace window and
-# stays silent. Always exits 0: the guard warns, it never blocks.
+# briefly down between a wake and the next supervision resume) stays inside the
+# grace window and stays silent. Always exits 0: the guard warns, it never
+# blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
