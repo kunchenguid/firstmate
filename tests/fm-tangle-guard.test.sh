@@ -92,9 +92,30 @@ test_guard_banner() {
 
 # --- GUARD 2b: fm-bootstrap problem line ------------------------------------
 
+# Bootstrap probes the host toolbelt, including a real `no-mistakes --version`,
+# and that probe can block indefinitely when this suite itself runs inside a
+# no-mistakes pipeline step (the CLI phones the daemon that is busy executing
+# the test step). Pin PATH to a stub toolchain plus system dirs so these cases
+# never touch the host CLIs, matching every other bootstrap-invoking suite.
+TANGLE_BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+make_bootstrap_fakebin() {
+  local fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/bootstrap-tools")
+  fm_fake_exit0 "$fakebin" tmux node gh treehouse gh-axi chrome-devtools-axi lavish-axi jq tasks-axi
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf '%s\n' "$fakebin"
+}
+BOOTSTRAP_FAKEBIN=$(make_bootstrap_fakebin)
+
 run_bootstrap() {
   # No projects/ under the home keeps fleet sync inert; grep isolates the line.
-  FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+  PATH="$BOOTSTRAP_FAKEBIN:$TANGLE_BASE_PATH" FM_ROOT_OVERRIDE="$1" FM_HOME="$1" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
 test_bootstrap_line() {
@@ -112,7 +133,8 @@ test_bootstrap_line() {
   out=$(run_bootstrap "$repo" | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "bootstrap did not report the tangled branch"
   assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
-  out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
+  out=$(PATH="$BOOTSTRAP_FAKEBIN:$TANGLE_BASE_PATH" FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "detect-only bootstrap did not report the tangled branch"
   assert_contains "$out" "read-only session must leave restore work" "detect-only bootstrap did not explain restore ownership"
   assert_not_contains "$out" "checkout main" "detect-only bootstrap printed a state-changing restore command"
