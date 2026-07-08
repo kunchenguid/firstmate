@@ -211,6 +211,65 @@ EOF
   pass "secondmate seed preserves mode/yolo for JSON-only projects"
 }
 
+test_home_seed_checks_out_json_base_ref() {
+  local home subhome work remote repo remote_abs repo_abs out status seeded_branch seeded_head dev_head
+  home="$TMP_ROOT/json-base-parent"
+  subhome="$TMP_ROOT/json-base-sub"
+  work="$TMP_ROOT/json-base-work-flow"
+  remote="$TMP_ROOT/json-base-flow.git"
+  repo="$TMP_ROOT/json-base-github/flow"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$TMP_ROOT/json-base-github"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  printf 'main branch\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-main
+  git -C "$work" checkout -q -b dev
+  printf 'dev branch\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m initial-dev
+  git clone --quiet --bare "$work" "$remote"
+  git -C "$remote" symbolic-ref HEAD refs/heads/main
+  remote_abs=$(cd "$remote" && pwd -P)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin main dev
+  git clone --quiet "file://$remote_abs" "$repo"
+  git -C "$repo" checkout -q dev
+  repo_abs=$(cd "$repo" && pwd -P)
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$repo_abs",
+      "gitCommonDir": "$repo_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='flow engineering' FM_SECONDMATE_SCOPE='flow engineering' \
+    "$ROOT/bin/fm-home-seed.sh" flow-sm "$subhome" flow 2>&1)
+  status=$?
+  expect_code 0 "$status" "seed should checkout registered JSON baseRef: $out"
+  seeded_branch=$(git -C "$subhome/projects/flow" branch --show-current)
+  [ "$seeded_branch" = dev ] || fail "seeded JSON project branch was $seeded_branch, expected dev"
+  seeded_head=$(git -C "$subhome/projects/flow" rev-parse HEAD)
+  dev_head=$(git -C "$subhome/projects/flow" rev-parse refs/remotes/origin/dev)
+  [ "$seeded_head" = "$dev_head" ] || fail "seeded JSON project HEAD did not match origin/dev"
+  grep -F 'dev branch' "$subhome/projects/flow/README.md" >/dev/null || fail "seeded JSON project did not checkout dev contents"
+  pass "secondmate seed checks out the registered JSON base ref"
+}
+
 test_home_seed_materializes_json_policy_over_stale_markdown() {
   local home subhome work remote repo remote_abs repo_abs out status mode source base
   home="$TMP_ROOT/json-stale-md-parent"
@@ -266,6 +325,68 @@ EOF
   mode=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" flow)
   [ "$mode" = "direct-PR on" ] || fail "stale markdown seed resolved as $mode in child home"
   pass "secondmate seed materializes JSON policy over stale markdown"
+}
+
+test_home_seed_removes_stale_child_json_for_legacy_seed() {
+  local home subhome remote repo remote_abs repo_abs child_project out status mode source stale_count
+  home="$TMP_ROOT/stale-child-json-parent"
+  subhome="$TMP_ROOT/stale-child-json-sub"
+  remote="$TMP_ROOT/stale-child-json-flow.git"
+  repo="$home/projects/flow"
+  child_project="$subhome/projects/flow"
+  mkdir -p "$home/data" "$home/state" "$home/projects"
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/data" "$subhome/state" "$subhome/projects"
+
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$remote"
+  remote_abs=$(cd "$remote" && pwd -P)
+  repo_abs=$(cd "$repo" && pwd -P)
+  printf '%s\n' '- flow [direct-PR +yolo] - Flow project (added 2026-07-07)' > "$home/data/projects.md"
+
+  cat > "$subhome/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$child_project",
+      "gitCommonDir": "$child_project/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "main",
+      "baseRef": "refs/remotes/origin/main",
+      "mode": "no-mistakes",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    },
+    {
+      "projectId": "other",
+      "canonicalPath": "$repo_abs",
+      "gitCommonDir": "$repo_abs/.git",
+      "remotes": { "origin": "file://$remote_abs" },
+      "defaultBranch": "main",
+      "baseRef": "refs/remotes/origin/main",
+      "mode": "direct-PR",
+      "yolo": false,
+      "worktreePolicy": "firstmate-owned"
+    }
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='flow engineering' FM_SECONDMATE_SCOPE='flow engineering' \
+    "$ROOT/bin/fm-home-seed.sh" flow-sm "$subhome" flow 2>&1)
+  status=$?
+  expect_code 0 "$status" "seed should remove stale child JSON for legacy project: $out"
+  mode=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" flow)
+  [ "$mode" = "direct-PR on" ] || fail "legacy seed resolved through stale child JSON as $mode"
+  source=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-resolve.sh" --field source flow)
+  [ "$source" = "legacy" ] || fail "legacy seed still resolved from stale child JSON"
+  stale_count=$(jq '[.projects[]? | select(.projectId == "flow")] | length' "$subhome/data/projects.json")
+  [ "$stale_count" = 0 ] || fail "stale child projects.json entry for flow was not removed"
+  stale_count=$(jq '[.projects[]? | select(.projectId == "other")] | length' "$subhome/data/projects.json")
+  [ "$stale_count" = 1 ] || fail "unselected child projects.json entry was removed"
+  pass "secondmate seed removes stale child JSON for markdown-backed projects"
 }
 
 test_home_seed_validate_rejects_duplicate_homes() {
@@ -1983,7 +2104,9 @@ test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_clones_registered_external_project
 test_home_seed_materializes_json_only_project_mode
+test_home_seed_checks_out_json_base_ref
 test_home_seed_materializes_json_policy_over_stale_markdown
+test_home_seed_removes_stale_child_json_for_legacy_seed
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

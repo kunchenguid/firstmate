@@ -558,6 +558,24 @@ EOF
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  checkout_seeded_registry_base "$project" "$dst"
+}
+
+checkout_seeded_registry_base() {
+  local project=$1 dst=$2 resolved source default_branch base_ref
+  resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" "$project") || return 1
+  source=$(printf '%s\n' "$resolved" | jq -r '.source // empty') || return 1
+  [ "$source" = json ] || return 0
+  default_branch=$(printf '%s\n' "$resolved" | jq -r '.default_branch // empty') || return 1
+  base_ref=$(printf '%s\n' "$resolved" | jq -r '.base_ref // empty') || return 1
+  [ -n "$default_branch" ] || { echo "error: project $project resolved without defaultBranch" >&2; return 1; }
+  [ -n "$base_ref" ] || { echo "error: project $project resolved without baseRef" >&2; return 1; }
+  git -C "$dst" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null || {
+    echo "error: seeded project $project at $dst is missing registered baseRef $base_ref" >&2
+    return 1
+  }
+  git -C "$dst" checkout -q -B "$default_branch" "$base_ref" || return 1
+  git -C "$dst" branch --set-upstream-to="$base_ref" "$default_branch" >/dev/null 2>&1 || true
 }
 
 validate_seed_project() {
@@ -849,8 +867,9 @@ resolved_registry_json_entry_for_project() {
 }
 
 sync_project_json_registry() {
-  local home=$1 child_json tmp project entry status new_entries
+  local home=$1 child_json tmp project entry status ids new_entries new_json
   shift
+  ids=$(jq -n '$ARGS.positional' --args "$@") || return 1
   new_entries=
   for project in "$@"; do
     if entry=$(resolved_registry_json_entry_for_project "$home" "$project"); then
@@ -861,20 +880,21 @@ sync_project_json_registry() {
       return "$status"
     fi
   done
-  [ -n "$new_entries" ] || return 0
+  new_json="[]"
+  [ -z "$new_entries" ] || new_json="[$new_entries]"
   child_json="$home/data/projects.json"
   tmp="$child_json.tmp.$$"
   if [ -f "$child_json" ]; then
-    jq --argjson new "[$new_entries]" '
+    jq --argjson ids "$ids" --argjson new "$new_json" '
       if type != "object" then error("projects.json must be an object") else
         (.projects // []) as $existing
-        | ($new | map(.projectId)) as $ids
         | .schemaVersion = (.schemaVersion // 1)
         | .projects = (($existing | map(select((.projectId // "") as $id | ($ids | index($id) | not)))) + $new)
       end
     ' "$child_json" > "$tmp" || { rm -f "$tmp"; return 1; }
   else
-    jq -n --argjson new "[$new_entries]" '{ schemaVersion: 1, projects: $new }' > "$tmp" || { rm -f "$tmp"; return 1; }
+    [ "$new_json" != "[]" ] || return 0
+    jq -n --argjson new "$new_json" '{ schemaVersion: 1, projects: $new }' > "$tmp" || { rm -f "$tmp"; return 1; }
   fi
   mv "$tmp" "$child_json"
 }
