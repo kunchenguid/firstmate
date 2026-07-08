@@ -193,6 +193,7 @@ X_MODE_PRESENT=0
 
 if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$STATE/fm-primary-pi-watch.ts"
+  PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   PI_MARKER="$STATE/.pi-watch-extension-loaded"
   PI_VERSION="$STATE/.pi-watch-extension-version"
   PI_LOCK="$STATE/.lock"
@@ -202,7 +203,7 @@ if [ "$PRIMARY_HARNESS" = pi ]; then
     fi
   fi
   if ! pi_watch_extension_loaded "$PI_MARKER" "$PI_VERSION" "$PI_LOCK"; then
-    printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s for background wake supervision\n' "$PI_EXT"
+    printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s -e %s for background wake supervision and turn-end guard coverage\n' "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

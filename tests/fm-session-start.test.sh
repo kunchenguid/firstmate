@@ -500,6 +500,7 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" "pi supervision block missing"
   assert_contains "$out" "Mode: Pi extension background wake." "pi snippet missing from session start"
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi extension load diagnostic missing"
+  assert_contains "$out" "restart pi with -e $root/.pi/extensions/fm-primary-turnend-guard.ts -e $home/state/fm-primary-pi-watch.ts" "pi extension load diagnostic omits the turn-end guard extension"
   assert_present "$home/state/fm-primary-pi-watch.ts" "session start did not generate the Pi watch extension"
 
   wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
@@ -530,6 +531,62 @@ EOF
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a stale loaded marker"
 
   pass "session start rejects stale Pi loaded markers"
+}
+
+test_pi_diagnostic_accepts_prelock_loaded_marker() {
+  local rec root home fakebin out marker version holder_pid
+  rec=$(new_world pi-prelock-loaded-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+pid=""
+prev=""
+for arg in "\$@"; do
+  [ "\$prev" = "-p" ] && pid="\$arg"
+  prev="\$arg"
+done
+case "\$*" in
+  *"comm="*)
+    if [ "\$pid" = "$holder_pid" ]; then
+      printf '/usr/local/bin/pi\n'
+    else
+      printf '/bin/zsh\n'
+    fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ "\$pid" = "$holder_pid" ]; then
+      printf 'pi\n'
+    else
+      printf 'zsh\n'
+    fi
+    exit 0
+    ;;
+  *"ppid="*) printf '%s\n' "$holder_pid"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-pi-watch-extension.sh" >/dev/null
+  marker="$home/state/.pi-watch-extension-loaded"
+  version=$(cat "$home/state/.pi-watch-extension-version")
+  printf '%s\n%s\n' "$version" "$holder_pid" > "$marker"
+
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_not_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic rejected a current pre-lock loaded marker"
+
+  pass "session start accepts current Pi markers written before lock acquisition"
 }
 
 test_pi_diagnostic_rejects_previous_session_loaded_marker() {
@@ -566,4 +623,5 @@ test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker
+test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker

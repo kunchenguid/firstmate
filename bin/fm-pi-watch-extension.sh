@@ -37,6 +37,8 @@ type ArmResult = {
   message: string;
 };
 
+type LockOwnership = "owned" | "missing" | "other";
+
 export default function (pi: any) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || process.cwd();
   const fmRoot = process.env.FM_ROOT_OVERRIDE || process.cwd();
@@ -54,25 +56,38 @@ export default function (pi: any) {
     return result.stdout.trim();
   }
 
-  function sessionOwnsLock(): boolean {
+  function pidAlive(pid: string): boolean {
+    try {
+      process.kill(Number(pid), 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function lockOwnership(): LockOwnership {
     let lockPid = "";
     try {
       lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
     } catch {
-      return false;
+      return "missing";
     }
-    if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
+    if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
     let pid = String(process.pid);
     for (let i = 0; i < 8; i += 1) {
-      if (pid === lockPid) return true;
+      if (pid === lockPid) return "owned";
       pid = parentPid(pid);
-      if (!pid || pid === "1") return false;
+      if (!pid || pid === "1") break;
     }
-    return false;
+    return pidAlive(lockPid) ? "other" : "missing";
+  }
+
+  function sessionOwnsLock(): boolean {
+    return lockOwnership() === "owned";
   }
 
   function markLoaded() {
-    if (!sessionOwnsLock()) return false;
+    if (lockOwnership() === "other") return false;
     mkdirSync(state, { recursive: true });
     writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
     return true;
