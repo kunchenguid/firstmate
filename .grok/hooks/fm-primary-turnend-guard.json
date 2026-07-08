@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'root=${GROK_WORKSPACE_ROOT:-}; [ -n \"$root\" ] || exit 0; bash \"$root/bin/fm-turnend-guard-grok.sh\"'",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

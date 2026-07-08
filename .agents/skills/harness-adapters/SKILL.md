@@ -25,7 +25,8 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The mechanics, including launch command, autonomy flag, and turn-end hook, live in `bin/fm-spawn.sh`.
+The per-task mechanics, including launch command, autonomy flag, and crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
@@ -44,6 +45,14 @@ When verifying a new adapter, record its env marker and command name in `bin/fm-
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
+
+## Primary turn-end guard
+
+Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
+`claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+`opencode`, `pi`, and `grok` expose passive turn-end events for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
+When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Launch profile axes
 
@@ -94,9 +103,9 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
-**Primary-session Stop hook (verified 2026-07-04, Claude Code 2.1.201).**
+**Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
-The firstmate PRIMARY's own `.claude/settings.json` (tracked at the repo root) registers a second, structural Stop hook, `bin/fm-turnend-guard.sh` (docs/turnend-guard.md), that can genuinely block a turn from ending: exiting the hook command with status 2 and a reason on stderr reliably forces the model to continue and act on that reason - verified live with `claude -p`, both interactively and headless.
+The firstmate PRIMARY's own `.claude/settings.json` registers `bin/fm-turnend-guard.sh` as a Stop hook, and exiting with status 2 plus stderr reliably forces the model to continue.
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` exactly when the current stop attempt is itself a forced continuation from an earlier block this turn; a hook can and should use that as its own loop-guard (always allow the stop when it is already `true`) rather than tracking state itself.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh` and see `docs/turnend-guard.md` for the verified Stop-hook details.
@@ -123,6 +132,11 @@ The decision persists for the repo, so later worktrees of the same project skip 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 
+**Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
+The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.
+Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-block loop safety Claude uses.
+Codex's Stop payload includes `cwd`, which the tracked hook uses to anchor script resolution to the project root.
+
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 
 | Fact | Value |
@@ -135,6 +149,11 @@ No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
+
+**Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
+The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
+Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `bin/fm-turnend-guard.sh` returns 2.
+The follow-up was verified in the interactive TUI; `opencode run` can exit before displaying a queued follow-up, so the adapter is fail-open in headless mode.
 
 ## pi (VERIFIED 2026-06-11)
 
@@ -155,6 +174,11 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
+
+**Primary-session guard fact (verified 2026-07-08, Pi 0.80.2).**
+The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens for `turn_end`.
+Pi's `turn_end` cannot block directly, so the primary adapter uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up turn when `bin/fm-turnend-guard.sh` returns 2.
+Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit behavior re-verified 2026-07-03, grok 0.2.82)
 
@@ -192,3 +216,9 @@ The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals 
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+**Primary-session guard fact (verified 2026-07-08, Grok 0.2.91).**
+The firstmate PRIMARY's own `.grok/hooks/fm-primary-turnend-guard.json` invokes `bin/fm-turnend-guard-grok.sh`.
+Grok Stop hooks are passive for this purpose: exit 2 does not make the model continue.
+The adapter therefore runs the shared predicate and, when it returns 2, forces one same-session follow-up with `grok --resume <sessionId> -p <guard-reason>` while setting `GROK_TURNEND_GUARD_ACTIVE=1` so the nested Stop hook does not recurse.
+Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.

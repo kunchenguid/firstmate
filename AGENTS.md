@@ -749,11 +749,11 @@ The check is scoped precisely to the primary: detached HEAD (the legitimate rest
 The same assertion runs at session start as the bootstrap `TANGLE:` line inside the `bin/fm-session-start.sh` digest (section 3), with read-only wording when this session does not hold the fleet lock.
 Two further guards prevent the tangle upstream: `fm-spawn` refuses to launch unless treehouse or Orca yields a genuine isolated worktree distinct from the primary checkout, and every ship brief's first instruction has the crewmate verify it is in its own worktree before branching (section 11).
 
-On the `claude` harness, "no turn ends blind" has a structural backstop beyond the pull-based `fm-guard.sh` banner: `bin/fm-turnend-guard.sh`, a Claude Code Stop hook registered in the tracked `.claude/settings.json`, fires on every primary turn end and, when tasks are in flight without a live identity-matched watcher lock and fresh beacon, blocks the stop (exit 2 with a reason) so the turn cannot end without acting on it first.
-It shares status fields with `fm-guard.sh` via `bin/fm-supervision-lib.sh`, uses `bin/fm-wake-lib.sh` for live watcher lock health, and never blocks more than once per turn (Claude Code's own `stop_hook_active` loop-guard field lets it always allow the retry).
+On every verified primary harness (`claude`, `codex`, `opencode`, `pi`, and `grok`), "no turn ends blind" has a structural backstop beyond the pull-based `fm-guard.sh` banner.
+The shared predicate is `bin/fm-turnend-guard.sh`: when tasks are in flight without a live identity-matched watcher lock and fresh beacon, direct-blocking harnesses block the turn end and passive harnesses force one bounded follow-up turn.
+It shares status fields with `fm-guard.sh` via `bin/fm-supervision-lib.sh`, uses `bin/fm-wake-lib.sh` for live watcher lock health, and never blocks or follows up more than once per turn.
 It is scoped to fire only in the actual primary checkout - never in a crewmate/scout worktree or a secondmate home - and stays silent when supervision is healthy.
-See `docs/turnend-guard.md` for the verified Stop-hook mechanism and the scoping details.
-This backstop exists only for `claude` today; other harnesses still rely on the pull-based guard alone (future work, same empirical-verification-first pattern as every other harness fact in `harness-adapters`).
+See `docs/turnend-guard.md` for the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
 Watcher liveness is not enough if you are foreground-blocked.
 Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
 This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
