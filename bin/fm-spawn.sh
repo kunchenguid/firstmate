@@ -1020,6 +1020,17 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+# Normalize PWD to an absolute path in the crewmate's pane shell before launch.
+# A relative PWD=. inherited from the spawn environment is kept verbatim by bash
+# and macOS /bin/sh (only zsh rewrites it), and /bin/sh's pwd/pwd -P then echo
+# "." to no-mistakes' git-push gate hook, which computes --gate . and the daemon
+# silently rejects the run (no run object is ever created). /bin/pwd calls
+# getcwd() directly, ignoring the inherited $PWD, so it always yields the real
+# absolute cwd that the harness and every child process (git push included) then
+# inherit. Sent before the launch command so the env is set when the agent starts.
+# shellcheck disable=SC2016  # single quotes are deliberate: $(/bin/pwd) expands in the crewmate pane, not here
+spawn_send_text_line "$T" 'export PWD="$(/bin/pwd)"'
+sleep 0.3
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

@@ -102,6 +102,53 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+# Pre-launch PWD hygiene: fm-spawn.sh must normalize the crewmate pane's PWD to
+# an absolute path before the harness launches, or a relative PWD=. inherited
+# from the spawn environment reaches no-mistakes' git-push gate hook as
+# `--gate .` and the daemon silently rejects the run (data/nm-gatepath-g2). This
+# guards both that the normalization is wired in ahead of the launch send, and
+# that the normalization primitive actually defends a poisoned PWD=..
+test_launch_pwd_normalization() {
+  local norm_ln launch_ln absdir baseline sh_child bash_parent
+  # Static: the `export PWD="$(/bin/pwd)"` send exists and precedes the launch.
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings to match
+  norm_ln=$(grep -nF 'export PWD="$(/bin/pwd)"' "$SPAWN" | head -1 | cut -d: -f1)
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string to match
+  launch_ln=$(grep -nF 'spawn_send_literal "$T" "$LAUNCH"' "$SPAWN" | head -1 | cut -d: -f1)
+  [ -n "$norm_ln" ] || fail "fm-spawn.sh no longer normalizes PWD before launch (missing export PWD=\"\$(/bin/pwd)\" send)"
+  [ -n "$launch_ln" ] || fail "could not locate the harness launch send (spawn_send_literal) in fm-spawn.sh"
+  [ "$norm_ln" -lt "$launch_ln" ] || fail "PWD normalization (line $norm_ln) must precede the harness launch (line $launch_ln)"
+
+  # Behavioral: reproduce the poisoned condition and prove the fix defends it.
+  # macOS /bin/sh (bash 3.2) trusts a relative $PWD and echoes '.' verbatim - the
+  # gate-breaking case; other /bin/sh (dash) call getcwd() and never exhibit it,
+  # so assert the reproduction only where the platform actually shows it.
+  absdir=$ROOT
+  baseline=$(cd "$absdir" && PWD=. /bin/sh -c 'pwd' 2>/dev/null)
+  if [ "$baseline" = "." ]; then
+    pass "reproduces the macOS /bin/sh relative-PWD bug (baseline /bin/sh pwd is '.')"
+  else
+    printf 'note: /bin/sh does not trust a relative PWD here (baseline %s); the gate bug is macOS-specific, checking the normalization postcondition only\n' "${baseline:-empty}" >&2
+  fi
+  # After the exact normalization fm-spawn.sh sends, a /bin/sh grandchild (the
+  # gate hook's own shell) computes an absolute path, never '.'.
+  sh_child=$(cd "$absdir" && PWD=. /bin/sh -c 'export PWD="$(/bin/pwd)"; /bin/sh -c pwd')
+  case "$sh_child" in
+    /*) : ;;
+    *) fail "after PWD normalization, a /bin/sh child's pwd must be absolute, got '$sh_child'" ;;
+  esac
+  [ "$sh_child" != "." ] || fail "after PWD normalization, a /bin/sh child's pwd must never be '.'"
+  # A bash parent poisoned the same way (a harness tool subprocess) also ends up
+  # with an absolute PWD after normalization, so its own children inherit it.
+  bash_parent=$(cd "$absdir" && PWD=. bash -c 'export PWD="$(/bin/pwd)"; printf %s "$PWD"')
+  case "$bash_parent" in
+    /*) : ;;
+    *) fail "after PWD normalization, a poisoned bash shell's PWD must be absolute, got '$bash_parent'" ;;
+  esac
+  pass "fm-spawn PWD normalization turns a poisoned PWD=. into an absolute PWD for /bin/sh and bash crewmate processes"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping
+test_launch_pwd_normalization

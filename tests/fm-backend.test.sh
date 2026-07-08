@@ -795,13 +795,24 @@ test_spawn_conformance_old_vs_new() {
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
-    || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
+  # fm-spawn.sh now issues one send the BASE_REF version did not: the pre-launch
+  # PWD normalization (export PWD="$(/bin/pwd)"), which defends no-mistakes'
+  # git-push gate against a poisoned relative PWD=. (data/nm-gatepath-g2). It
+  # rides the SAME backend send primitive as every other spawn-time command, so
+  # the P1 extraction stays conformant for the rest of the sequence; filter that
+  # one intentional new line out before the byte-for-byte old-vs-new diff, and
+  # assert it is present on its own below.
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string to filter
+  grep -vF 'export PWD="$(/bin/pwd)"' "$log_new" > "$TMP_ROOT/spawn-new-filtered.log"
+  diff -u "$log_old" "$TMP_ROOT/spawn-new-filtered.log" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+    || fail "fm-spawn.sh: tmux command log differs old vs new beyond the intentional PWD normalization"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
   assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal logged send string
+  assert_contains "$(cat "$log_new")" $'\x1f''export PWD="$(/bin/pwd)"' "spawn tmux log missing the pre-launch PWD normalization send"
   assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
     "spawn tmux log missing the literal launch-command send"
 

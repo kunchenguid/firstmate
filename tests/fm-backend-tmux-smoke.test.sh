@@ -127,6 +127,55 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- pre-launch PWD normalization (gate-failure regression) ------------------
+# A crewmate pane can inherit a relative PWD=. from the spawn environment; bash
+# and macOS /bin/sh keep it verbatim (only zsh rewrites it), so /bin/sh's pwd
+# echoes '.' to no-mistakes' git-push gate hook, which then rejects `--gate .`
+# and silently creates no run (data/nm-gatepath-g2). fm-spawn.sh sends
+# `export PWD="$(/bin/pwd)"` into the crewmate pane before the harness launch.
+# This exercises the whole poison -> normalize -> check chain inside a bash
+# "crewmate shell" in a REAL pane (bash, unlike the zsh pane shell, actually
+# holds a relative PWD, so it faithfully reproduces the vulnerable shape), with
+# the scenario in a script file so no quoting is mangled in transit.
+PWDWIN="fm-pwd-norm1"
+fm_backend_tmux_create_task "$SESSION" "$PWDWIN" "$ROOT" \
+  || fail "could not create the PWD-normalization test window"
+PWDTGT="$SESSION:$PWDWIN"
+PWDOUT="$SHIM_DIR/pwd-out"
+PWDSCRIPT="$SHIM_DIR/pwd-scenario.sh"
+cat > "$PWDSCRIPT" <<'SCENARIO'
+#!/usr/bin/env bash
+# $1 is an absolute dir. Enter it, poison PWD with a relative value, capture the
+# gate hook's shell (/bin/sh pwd) before and after fm-spawn's normalization.
+cd "$1" || exit 1
+export PWD=.
+before=$(/bin/sh -c pwd)
+export PWD="$(/bin/pwd)"
+after=$(/bin/sh -c pwd)
+printf '%s|%s' "$before" "$after"
+SCENARIO
+fm_backend_tmux_send_text_line "$PWDTGT" "bash '$PWDSCRIPT' '$ROOT' > '$PWDOUT'"
+for _ in $(seq 1 20); do [ -s "$PWDOUT" ] && break; sleep 0.3; done
+pwd_result=$(cat "$PWDOUT" 2>/dev/null)
+[ -n "$pwd_result" ] || fail "real tmux: PWD-normalization scenario produced no output"
+pwd_before=${pwd_result%%|*}
+pwd_after=${pwd_result#*|}
+# The poisoned baseline reproduces the bug ('.') only where /bin/sh trusts a
+# relative $PWD (macOS bash 3.2); other /bin/sh (dash) call getcwd() instead, so
+# assert the reproduction only where the platform actually exhibits it.
+case "$pwd_before" in
+  .) pass "real tmux: a poisoned crewmate pane reproduces the /bin/sh pwd='.' gate bug (macOS)" ;;
+  /*) printf 'note: /bin/sh does not trust a relative PWD here (before=%s); the gate bug is macOS-specific\n' "$pwd_before" >&2 ;;
+  *) fail "real tmux: unexpected baseline /bin/sh pwd '$pwd_before'" ;;
+esac
+case "$pwd_after" in
+  /*) : ;;
+  *) fail "real tmux: after fm-spawn's PWD normalization, /bin/sh pwd must be absolute, got '$pwd_after'" ;;
+esac
+[ "$pwd_after" != "." ] || fail "real tmux: after PWD normalization, /bin/sh pwd must never be '.'"
+fm_backend_tmux_kill "$PWDTGT"
+pass "real tmux: fm-spawn's pre-launch PWD normalization clears a poisoned PWD=. so the gate hook's /bin/sh shell sees an absolute cwd"
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"
