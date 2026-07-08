@@ -15,9 +15,12 @@
 #   (h) the run is READ-ONLY: no state/data file is created or modified
 #   (i) the default output path is $FM_HOME/.lavish/fleet-board.html
 #   (j) shellcheck passes on the script when shellcheck is installed
-#   (k) the snapshot seam consumes a valid schema and falls back on a mismatch
+#   (k) the opt-in snapshot seam consumes a valid schema and falls back on a
+#       mismatch (missing id, object-valued pr, missing desc)
 #   (l) the fast default derives in-flight state from the status tail, not the probe
 #   (m) the `fleet` wrapper forwards to fm-fleet-board.sh
+#   (n) the default path never invokes the snapshot, even when one is present;
+#       FM_FLEET_BOARD_USE_SNAPSHOT=1 opts in
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -58,6 +61,7 @@ make_home() {  # <home>
 - [x] scoutdone - Investigation write-up data/scoutdone/report.md (repo: alpha) (kind: scout) (reported 2026-07-08)
 - [x] scoutmix - Investigated https://github.com/acme/alpha/issues/9 - data/scoutmix/report.md (repo: alpha) (kind: scout) (reported 2026-07-08)
 - [x] donelink - Published notes https://example.com/notes (merged 2026-07-08) (repo: alpha) (kind: ship)
+- [x] scoutplain - Canonical write-up data/scoutplain/report.md (reported 2026-07-08)
 EOF
   fm_write_meta "$home/state/taskone.meta" \
     "window=firstmate:fm-taskone" \
@@ -135,6 +139,14 @@ assert_not_contains "$html" '<b>PR:</b> <a href="https://github.com/acme/alpha/i
 assert_contains "$html" 'https://example.com/notes' "non-PR done url surfaces in Done detail"
 assert_not_contains "$html" '<b>PR:</b> <a href="https://example.com/notes"' "non-PR done url must not render as a PR chip"
 
+# the "merged" chip appears only on the Done row with a genuine PR (taskdone);
+# canonical scout rows without a (kind: scout) group and non-PR ship rows say
+# "done"
+assert_contains "$html" '<span class="id">scoutplain</span>' "canonical scout done row renders"
+assert_contains "$html" 'data/scoutplain/report.md' "canonical scout report path surfaces"
+merged_count=$(printf '%s' "$html" | grep -c '<span class="chip st-done">merged</span>' || true)
+[ "$merged_count" = 1 ] || fail "exactly one Done row (taskdone) should show the merged chip (got: $merged_count)"
+
 # (d) HTML escaping of description special characters
 assert_contains "$html" '&quot;quotes&quot; &amp; &lt;angles&gt;' "description special chars escaped"
 assert_not_contains "$html" '"quotes" & <angles>' "raw unescaped description must not appear"
@@ -202,13 +214,15 @@ default_out=$(FM_HOME="$HOME5" FM_CREW_STATE_CMD="$FAKE_CS" "$BOARD")
 
 pass "default output path is \$FM_HOME/.lavish/fleet-board.html"
 
-# --- (k) snapshot seam: valid schema consumed, mismatched schema falls back --
+# --- (k) opt-in snapshot seam: valid schema consumed, mismatch falls back ----
 #
-# Exercises the gather_from_snapshot jq path, which the direct-gather cases above
-# never touch. Guards two contracts: a valid snapshot is consumed verbatim (with
-# field content preserved byte-for-byte, catching regex corruption of the
-# separator/newline scrub), and a differently-named schema is rejected so the
-# board falls back to the authoritative direct gather instead of rendering ghosts.
+# Exercises the gather_from_snapshot jq path, which is reachable only via
+# FM_FLEET_BOARD_USE_SNAPSHOT=1. Guards two contracts: a valid snapshot is
+# consumed verbatim (with field content preserved byte-for-byte, catching regex
+# corruption of the separator/newline scrub), and a mismatched schema - missing
+# id, an object-valued pr like the real fm-fleet-snapshot.sh v1 emits, or a
+# missing desc - is rejected deterministically so the board falls back to the
+# authoritative direct gather instead of rendering ghosts.
 
 if command -v jq >/dev/null 2>&1; then
   HOME6="$TMP_ROOT/home6"
@@ -224,29 +238,63 @@ if command -v jq >/dev/null 2>&1; then
 SH
   chmod +x "$GOODSNAP"
   OUT6="$TMP_ROOT/board6.html"
-  FM_HOME="$HOME6" FM_FLEET_SNAPSHOT_CMD="$GOODSNAP" "$BOARD" --out "$OUT6" >/dev/null || fail "snapshot render exited non-zero"
+  FM_HOME="$HOME6" FM_FLEET_BOARD_USE_SNAPSHOT=1 FM_FLEET_SNAPSHOT_CMD="$GOODSNAP" "$BOARD" --out "$OUT6" >/dev/null || fail "snapshot render exited non-zero"
   snap_html=$(cat "$OUT6")
   assert_contains "$snap_html" '<span class="id">snaptask</span>' "valid snapshot task rendered"
   assert_contains "$snap_html" 'stuff full of uufff001' "snapshot field content preserved byte-for-byte"
   assert_not_contains "$snap_html" '<span class="id">directitem</span>' "valid snapshot supersedes direct gather"
 
-  # A mismatched schema (no id field) must fail the guard and fall back.
-  BADSNAP="$TMP_ROOT/badsnap"
-  cat > "$BADSNAP" <<'SH'
-#!/usr/bin/env bash
-[ "$1" = "--json" ] && printf '%s\n' '{"tasks":[{"name":"ghost","section":"queued"}]}'
-SH
-  chmod +x "$BADSNAP"
-  OUT7="$TMP_ROOT/board7.html"
-  FM_HOME="$HOME6" FM_FLEET_SNAPSHOT_CMD="$BADSNAP" "$BOARD" --out "$OUT7" >/dev/null || fail "bad-snapshot render exited non-zero"
-  bad_html=$(cat "$OUT7")
-  assert_contains "$bad_html" '<span class="id">directitem</span>' "mismatched snapshot falls back to direct gather"
-  assert_not_contains "$bad_html" 'ghost' "mismatched snapshot record must not render"
+  # Mismatched schemas must fail the guard and fall back.
+  run_bad_snapshot() {  # <label> <tasks-json>
+    local label=$1 json=$2 stub out
+    stub="$TMP_ROOT/badsnap-$label"
+    printf '#!/usr/bin/env bash\n[ "$1" = "--json" ] && printf "%%s\\n" %q\n' "$json" > "$stub"
+    chmod +x "$stub"
+    out="$TMP_ROOT/board7-$label.html"
+    FM_HOME="$HOME6" FM_FLEET_BOARD_USE_SNAPSHOT=1 FM_FLEET_SNAPSHOT_CMD="$stub" "$BOARD" --out "$out" >/dev/null \
+      || fail "bad-snapshot ($label) render exited non-zero"
+    bad_html=$(cat "$out")
+    assert_contains "$bad_html" '<span class="id">directitem</span>' "mismatched snapshot ($label) falls back to direct gather"
+    assert_not_contains "$bad_html" 'ghost' "mismatched snapshot ($label) record must not render"
+  }
+  run_bad_snapshot no-id '{"tasks":[{"name":"ghost","section":"queued"}]}'
+  run_bad_snapshot object-pr '{"tasks":[{"id":"ghost","section":"queued","desc":"x","pr":{"url":"https://example.com/pull/1","source":"meta"}}]}'
+  run_bad_snapshot no-desc '{"tasks":[{"id":"ghost","section":"queued"}]}'
 
-  pass "snapshot seam consumes a valid schema and falls back on a mismatch"
+  pass "opt-in snapshot seam consumes a valid schema and falls back on a mismatch"
 else
   pass "jq not installed - skipping snapshot-seam assertion"
 fi
+
+# --- (n) the default path never invokes the snapshot -------------------------
+#
+# The captain's hard requirement: a bare invocation must be a fast direct
+# gather with no per-task subprocess probe, even when a real (slow)
+# bin/fm-fleet-snapshot.sh is present. A tattling stub proves the snapshot is
+# only consulted under the explicit FM_FLEET_BOARD_USE_SNAPSHOT=1 opt-in.
+
+TATTLE="$TMP_ROOT/snapshot-ran"
+TATTLESNAP="$TMP_ROOT/tattlesnap"
+cat > "$TATTLESNAP" <<SH
+#!/usr/bin/env bash
+touch "$TATTLE"
+printf '%s\n' '{"tasks":[]}'
+SH
+chmod +x "$TATTLESNAP"
+
+OUT11="$TMP_ROOT/board11.html"
+FM_HOME="$HOME1" FM_FLEET_SNAPSHOT_CMD="$TATTLESNAP" "$BOARD" --out "$OUT11" >/dev/null || fail "default render with snapshot present exited non-zero"
+assert_absent "$TATTLE" "default path must not invoke the snapshot"
+assert_contains "$(cat "$OUT11")" '<span class="id">taskone</span>' "default path renders via direct gather"
+
+[ -x "$ROOT/bin/fm-fleet-snapshot.sh" ] || fail "expected the real bin/fm-fleet-snapshot.sh to exist for this guard to matter"
+
+if command -v jq >/dev/null 2>&1; then
+  FM_HOME="$HOME1" FM_FLEET_BOARD_USE_SNAPSHOT=1 FM_FLEET_SNAPSHOT_CMD="$TATTLESNAP" "$BOARD" --out "$OUT11" >/dev/null || fail "opt-in snapshot render exited non-zero"
+  [ -f "$TATTLE" ] || fail "FM_FLEET_BOARD_USE_SNAPSHOT=1 must invoke the snapshot"
+fi
+
+pass "default path never invokes the snapshot; FM_FLEET_BOARD_USE_SNAPSHOT=1 opts in"
 
 # --- (l) fast default path vs opt-in --live ---------------------------------
 #

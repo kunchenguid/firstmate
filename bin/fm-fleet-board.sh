@@ -26,20 +26,24 @@
 # Environment:
 #   FM_FLEET_BOARD_LIVE=1          default in-flight state to the reconciled
 #                                  --live read (same effect as passing --live).
-#   FM_FLEET_BOARD_USE_SNAPSHOT=0  ignore bin/fm-fleet-snapshot.sh and always
-#                                  gather directly.
+#   FM_FLEET_BOARD_USE_SNAPSHOT=1  opt in to gathering via
+#                                  bin/fm-fleet-snapshot.sh --json (a slow
+#                                  per-task reconciled read); default off.
 #
-# Data sources, in order of preference. The internal per-task record shape is
-# identical either way, so the snapshot path slots in without a render rewrite:
-#   1. bin/fm-fleet-snapshot.sh --json, when that script exists (upstream). Its
-#      JSON is normalized into the same unit-separator-delimited task records
-#      used below; on any parse trouble it falls back to (2).
-#   2. Direct gather: data/backlog.md sections (In flight / Queued / Done), each
-#      state/<id>.meta (window=, harness=, model=, effort=, kind=, mode=, pr=),
-#      and each in-flight task's latest state/<id>.status line for its current
-#      state. With --live, that cheap status-tail read is replaced by the
-#      reconciled bin/fm-crew-state.sh <id> probe.
-#   Set FM_FLEET_BOARD_USE_SNAPSHOT=0 to skip (1) and force the direct gather.
+# Data sources. The internal per-task record shape is identical either way, so
+# the snapshot path slots in without a render rewrite:
+#   1. Direct gather (the default): data/backlog.md sections (In flight /
+#      Queued / Done), each state/<id>.meta (window=, harness=, model=,
+#      effort=, kind=, mode=, pr=), and each in-flight task's latest
+#      state/<id>.status line for its current state. With --live, that cheap
+#      status-tail read is replaced by the reconciled bin/fm-crew-state.sh <id>
+#      probe. This keeps the default invocation free of per-task subprocess
+#      probes.
+#   2. Snapshot gather (opt-in via FM_FLEET_BOARD_USE_SNAPSHOT=1):
+#      bin/fm-fleet-snapshot.sh --json, normalized into the same
+#      unit-separator-delimited task records; on any schema mismatch or parse
+#      trouble it falls back to (1). The snapshot runs bin/fm-crew-state.sh per
+#      task plus endpoint probes, so it is never used by default.
 #
 # The HTML is self-contained (inline CSS, no external assets, dark monospace)
 # and renders standalone in any browser; firstmate may open it via lavish-axi,
@@ -298,19 +302,22 @@ gather_direct() {
   done < "$backlog"
 }
 
-# --- snapshot gather (upstream seam) ----------------------------------------
+# --- snapshot gather (opt-in) -------------------------------------------------
 #
-# When bin/fm-fleet-snapshot.sh (upstream PR #343) is present, prefer its
-# --json output. The exact field names are confirmed against that snapshot's
-# schema at integration time; this maps the expected shape and returns non-zero
-# on any mismatch so gather_direct stays authoritative until then. It emits the
-# same normalized records as gather_direct, so the renderer needs no change.
+# bin/fm-fleet-snapshot.sh exists in this repo and is slow: it runs
+# bin/fm-crew-state.sh per task plus endpoint-liveness probes. It is therefore
+# never consulted by default; only FM_FLEET_BOARD_USE_SNAPSHOT=1 selects it.
+# This maps the expected flat shape and returns non-zero on any mismatch so
+# gather_direct stays authoritative. It emits the same normalized records as
+# gather_direct, so the renderer needs no change.
 #
-# The schema guard requires `.tasks` to be an array whose every element carries a
-# non-empty string `id`. A different upstream shape (a `tasks` array of
-# differently-named fields) therefore fails the guard and falls back to
-# gather_direct, rather than emitting empty-id records that would render as empty
-# groups with counts that disagree with the visible rows.
+# The schema guard requires `.tasks` to be an array whose every element carries
+# a non-empty string `id` plus the fields the renderer depends on as strings:
+# `section`, `desc`, and (when present) `pr`. A different shape - such as the
+# current fm-fleet-snapshot.sh v1 schema, whose `pr` is an object and whose
+# section/desc live in `.backlog` records - fails the guard deterministically
+# and falls back to gather_direct, rather than emitting malformed records that
+# would render as empty rows with counts that disagree with the visible rows.
 gather_from_snapshot() {
   command -v jq >/dev/null 2>&1 || return 1
   local json
@@ -319,7 +326,12 @@ gather_from_snapshot() {
   printf '%s' "$json" | jq -e '
     has("tasks")
     and (.tasks | type == "array")
-    and (.tasks | all(.id? | (type == "string") and (length > 0)))
+    and (.tasks | all(
+      ((.id? | (type == "string") and (length > 0)))
+      and ((.section? | type == "string"))
+      and (((.desc? // .description?) | type == "string"))
+      and ((.pr? | type) as $t | $t == "string" or $t == "null")
+    ))
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$json" | jq -r '
     .tasks[]? |
@@ -344,7 +356,7 @@ gather_from_snapshot() {
 }
 
 gather_tasks() {
-  if [ -x "$SNAPSHOT_BIN" ] && [ "${FM_FLEET_BOARD_USE_SNAPSHOT:-1}" != 0 ]; then
+  if [ "${FM_FLEET_BOARD_USE_SNAPSHOT:-0}" = 1 ] && [ -x "$SNAPSHOT_BIN" ]; then
     local snap
     if snap=$(gather_from_snapshot) && [ -n "$snap" ]; then
       printf '%s\n' "$snap"
@@ -431,7 +443,7 @@ EOF
       ;;
     "done")
       chip_cls=st-done
-      if [ "$kind" = scout ]; then chip_lbl="done"; else chip_lbl=merged; fi
+      if [ -n "$pr" ]; then chip_lbl=merged; else chip_lbl="done"; fi
       ;;
     *)
       chip_cls=st-idle; chip_lbl=$section
