@@ -187,9 +187,25 @@ parse_backlog_line() {  # <section> <raw-line>
   pr=""
   done_ref=""
   if [ "$section" = "done" ]; then
-    if [ -n "$url" ]; then done_ref=$url; pr=$url
-    elif [ -n "$report" ]; then done_ref=$report
-    elif printf '%s' "$rest" | grep -q 'local main'; then done_ref="local main"
+    # A URL is promoted to the PR chip only when it is a genuine pull-request
+    # URL or matches the task's recorded meta pr=; a scout row's report path is
+    # the deliverable and is never displaced by an inline reference link.
+    local meta_pr pr_url=""
+    meta_pr=$(meta_val "$STATE/$id.meta" pr)
+    if [ -n "$url" ]; then
+      case "$url" in *'/pull/'*) pr_url=$url ;; esac
+      [ -z "$pr_url" ] && [ -n "$meta_pr" ] && [ "$url" = "$meta_pr" ] && pr_url=$url
+    fi
+    if [ "$kind" = scout ] && [ -n "$report" ]; then
+      done_ref=$report
+    elif [ -n "$pr_url" ]; then
+      done_ref=$pr_url; pr=$pr_url
+    elif [ -n "$report" ]; then
+      done_ref=$report
+    elif [ -n "$url" ]; then
+      done_ref=$url
+    elif printf '%s' "$rest" | grep -q 'local main'; then
+      done_ref="local main"
     fi
   elif [ "$section" = inflight ]; then
     local meta_pr
@@ -202,7 +218,7 @@ parse_backlog_line() {  # <section> <raw-line>
   # promoted to the PR chip; queued/in-flight inline links remain visible.
   desc=$(printf '%s\n' "$rest" | sed -E \
     's/\(repo:[^)]*\)//g; s/\(kind:[^)]*\)//g; s/\(since[^)]*\)//g; s/\(added[^)]*\)//g; s/\(merged[^)]*\)//g; s/\(reported[^)]*\)//g; s/blocked-by: [A-Za-z0-9_-]+//g')
-  if [ -n "$url" ] && [ "$url" = "$pr" ]; then desc=${desc//"$url"/}; fi
+  if [ -n "$url" ] && { [ "$url" = "$pr" ] || [ "$url" = "$done_ref" ]; }; then desc=${desc//"$url"/}; fi
   [ -n "$report" ] && desc=${desc//"$report"/}
   desc=$(printf '%s\n' "$desc" | sed -E 's/[[:space:]]+/ /g')
   desc=$(trim "$desc")

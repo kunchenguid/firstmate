@@ -56,6 +56,8 @@ make_home() {  # <home>
 ## Done
 - [x] taskdone - Landed change - https://github.com/acme/alpha/pull/42 (merged 2026-07-08) (repo: alpha) (kind: ship)
 - [x] scoutdone - Investigation write-up data/scoutdone/report.md (repo: alpha) (kind: scout) (reported 2026-07-08)
+- [x] scoutmix - Investigated https://github.com/acme/alpha/issues/9 - data/scoutmix/report.md (repo: alpha) (kind: scout) (reported 2026-07-08)
+- [x] donelink - Published notes https://example.com/notes (merged 2026-07-08) (repo: alpha) (kind: ship)
 EOF
   fm_write_meta "$home/state/taskone.meta" \
     "window=firstmate:fm-taskone" \
@@ -121,6 +123,17 @@ assert_contains "$html" 'data/scoutdone/report.md' "scout report path in Done de
 # promoted to (or stripped for) a PR chip
 assert_contains "$html" 'Investigate https://github.com/acme/alpha/issues/5' "queued inline url stays in description"
 assert_not_contains "$html" '<b>PR:</b> <a href="https://github.com/acme/alpha/issues/5"' "queued inline url must not render as a PR chip"
+
+# a Done scout row with both an inline reference url and a report path keeps
+# the report as the deliverable and the url visible in the description
+assert_contains "$html" 'data/scoutmix/report.md' "mixed scout row report path stays the deliverable"
+assert_contains "$html" 'Investigated https://github.com/acme/alpha/issues/9' "mixed scout row inline url stays in description"
+assert_not_contains "$html" '<b>PR:</b> <a href="https://github.com/acme/alpha/issues/9"' "mixed scout row inline url must not render as a PR chip"
+
+# a Done row whose only url is not a pull-request url shows it as the result,
+# never under a PR label
+assert_contains "$html" 'https://example.com/notes' "non-PR done url surfaces in Done detail"
+assert_not_contains "$html" '<b>PR:</b> <a href="https://example.com/notes"' "non-PR done url must not render as a PR chip"
 
 # (d) HTML escaping of description special characters
 assert_contains "$html" '&quot;quotes&quot; &amp; &lt;angles&gt;' "description special chars escaped"
