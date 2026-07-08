@@ -298,6 +298,23 @@ API Error: 529')
     *"$(printf '\t')"overload) ;;
     *) fail "API Error: 529 footer did not match as overload: $match" ;;
   esac
+  # A realistic idle-529 render: claude draws the overload as a tool-result line
+  # with a leading continuation glyph and trailing overloaded_error JSON. The
+  # loosened default must still classify it as overload.
+  match=$(fm_ratelimit_render_match 'ordinary line
+another line
+  ⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}')
+  case "$match" in
+    *"$(printf '\t')"overload) ;;
+    *) fail "realistic glyph+JSON 529 render did not match as overload: $match" ;;
+  esac
+  # A 529 merely mentioned mid-transcript (preceded by words) must NOT match, so
+  # the loosened prefix stays anchored near line start rather than matching prose.
+  if fm_ratelimit_render_match 'ordinary line
+another line
+The previous outage was API Error: 529 in a log, not a live footer.' >/dev/null; then
+    fail "mid-transcript API Error: 529 mention matched as overload"
+  fi
   pass "overload matcher fires only on API Error: 529, not generic retry text"
 }
 
