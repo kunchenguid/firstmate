@@ -210,7 +210,7 @@ test_version_check_refuses_missing_herdr() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
   out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+    "$BASH" -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
   assert_contains "$out" "not installed" "version_check did not report herdr as missing"
@@ -1157,6 +1157,57 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
+# Core regression for the 2026-07-08 incident (docs/herdr-backend.md): the
+# away-mode daemon injects into a SUPERVISOR pane that is normally parked on a
+# tool/permission prompt, so its PRE-Enter baseline reads `blocked`. `blocked`
+# uniquely (a) clears the daemon's pane_is_busy inject guard - classify_AGENT
+# maps blocked->idle - yet (b) classifies submit-active - classify_SUBMIT maps
+# blocked->busy - so before the fix it fell to the composer-content path, which
+# returns `unknown` for a claude permission-dialog screen (no composer row).
+# The daemon read that landed injection as unconfirmed and redelivered the same
+# escalation every cycle. The fix confirms a blocked baseline by native
+# agent-state ONLY, on a genuine blocked->working transition, never composer
+# content.
+test_send_text_submit_blocked_baseline_confirms_on_working_transition() {
+  local dir log resp fb out enter_count read_count
+  dir="$TMP_ROOT/submit-blocked-baseline-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text  2: agent get - pre-Enter baseline is BLOCKED (parked pane)
+  # 3: send-keys enter  4: agent get -> working (the injection started a turn)
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "escalation digest" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a blocked baseline that transitions to working after Enter is a confirmed submit, got '$out' (before the fix a blocked baseline fell to composer_state, which returns 'unknown' on a claude dialog screen and drove the redelivery loop)"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a confirmed blocked->working transition must not provoke a retry, sent $enter_count Enter(s)"
+  read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  [ "$read_count" -eq 0 ] || fail "a blocked baseline must confirm via native agent-state, never by reading the composer (the path that returns 'unknown' for a claude dialog), made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: a blocked baseline confirms on a blocked->working transition via native agent-state, never composer content (2026-07-08 redelivery-loop regression)"
+}
+
+# The false-positive guard for the same fix: a blocked baseline that STAYS
+# blocked after Enter proves nothing (the pane was already submit-active), so
+# confirmation must NOT fire - the escalation stays unconfirmed (pending) and
+# the daemon keeps the buffer, rather than falsely clearing an undelivered
+# escalation. This is the direction that must never regress: losing an
+# escalation is worse than redelivering one.
+test_send_text_submit_blocked_baseline_stays_blocked_is_pending_not_false_confirm() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-blocked-baseline-stuck"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # baseline blocked; every post-Enter poll still blocked (no new turn started)
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "escalation digest" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a blocked baseline that never transitions to working must read pending (unconfirmed), not a false 'empty', got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "an unconfirmed blocked baseline should retry Enter up to the configured count, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a blocked baseline that stays blocked reads pending (buffer preserved), never a false confirm that would drop the escalation"
+}
+
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
   local dir log resp fb out enter_count read_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1652,6 +1703,8 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
+test_send_text_submit_blocked_baseline_confirms_on_working_transition
+test_send_text_submit_blocked_baseline_stays_blocked_is_pending_not_false_confirm
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_still_reads_pending
