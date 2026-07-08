@@ -291,6 +291,41 @@ EOF
   pass "fm-spawn.sh --backend codex-app: external registry projects start from explicit baseRef, never dirty feature HEAD"
 }
 
+test_spawn_codex_app_abort_meta_records_registry_base_ref() {
+  local id case_dir project project_abs branch out status meta
+  id=codex-abort-base-x14
+  case_dir=$(make_case abort-base "$id")
+  project="$case_dir/home/projects/app"
+  project_abs=$(cd "$project" && pwd -P)
+  branch=$(git -C "$project_abs" symbolic-ref --short HEAD)
+  cat > "$case_dir/home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "app",
+      "canonicalPath": "$project_abs",
+      "gitCommonDir": "$project_abs/.git",
+      "defaultBranch": "$branch",
+      "baseRef": "refs/heads/$branch",
+      "mode": "no-mistakes",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(FM_FAKE_BRIDGE_WRITE_OTHER_STATUS=1 FM_FAKE_BRIDGE_ARCHIVE_FAIL=1 FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.01 run_spawn_case_project "$case_dir" "$id" app 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail when registry-backed startup cleanup cannot archive"
+  assert_contains "$out" "startup cleanup failed to archive thread thread-spawn-123" "abort should explain preserved registry-backed startup resources"
+  meta="$case_dir/home/state/$id.meta"
+  assert_present "$meta" "registry-backed abort should write recovery metadata"
+  [ "$(meta_value "$meta" project_base_ref)" = "refs/heads/$branch" ] || fail "abort meta should record the registry project_base_ref"
+  [ "$(meta_value "$meta" worktree_base_ref)" = "refs/heads/$branch" ] || fail "abort meta should retain the worktree base ref"
+  pass "fm-spawn.sh --backend codex-app: abort metadata preserves registry base ref"
+}
+
 test_spawn_codex_app_refuses_without_verifiable_default_branch() {
   local id case_dir project out status wt
   id=codex-no-default-x12
@@ -537,6 +572,7 @@ test_teardown_codex_app_refuses_to_remove_worktree_when_archive_fails() {
 test_spawn_codex_app_records_thread_and_worktree
 test_spawn_codex_app_uses_default_branch_when_project_on_feature
 test_spawn_codex_app_uses_registry_base_ref_for_external_project
+test_spawn_codex_app_abort_meta_records_registry_base_ref
 test_spawn_codex_app_refuses_without_verifiable_default_branch
 test_send_codex_app_uses_recorded_task_gotmpdir
 test_send_codex_app_uses_recorded_task_cwd

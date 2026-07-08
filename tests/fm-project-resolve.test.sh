@@ -174,6 +174,30 @@ EOF
   pass "projects.json rejects relative canonicalPath values"
 }
 
+test_real_existing_dir_preserves_resolver_cwd() {
+  local case_dir start target helper out status expected
+  case_dir="$TMP_ROOT/real-existing-cwd"
+  start="$case_dir/start"
+  target="$case_dir/target"
+  helper="$case_dir/resolve-functions.sh"
+  mkdir -p "$start" "$target"
+
+  out=$(FM_RESOLVE="$RESOLVE" FM_HELPER="$helper" FM_START="$start" FM_TARGET="$target" bash -eu <<'EOS'
+sed '/^OUTPUT=json$/,$d' "$FM_RESOLVE" > "$FM_HELPER"
+cd "$FM_START"
+. "$FM_HELPER"
+real_existing_dir "$FM_TARGET" >/dev/null
+pwd -P
+EOS
+)
+  status=$?
+
+  expect_code 0 "$status" "real_existing_dir direct call should succeed: $out"
+  expected=$(cd "$start" && pwd -P)
+  [ "$out" = "$expected" ] || fail "real_existing_dir changed resolver cwd: $out"
+  pass "real_existing_dir normalizes without changing resolver cwd"
+}
+
 test_json_registry_rejects_codex_owned_canonical_path() {
   local home repo codex_home out status
   home=$(new_home codex-root)
@@ -654,6 +678,7 @@ test_markdown_registry_fallback_still_works
 test_json_registry_refuses_linked_worktree_as_canonical
 test_json_registry_refuses_subdirectory_canonical_path
 test_json_registry_rejects_relative_canonical_path
+test_real_existing_dir_preserves_resolver_cwd
 test_json_registry_rejects_codex_owned_canonical_path
 test_json_registry_malformed_file_fails_closed
 test_json_registry_list_malformed_file_fails_closed

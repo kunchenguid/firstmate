@@ -241,6 +241,8 @@ codex_app_write_abort_meta() {
     echo "window=${CODEX_THREAD_ID:-$W}"
     echo "worktree=${WT:-}"
     echo "project=${PROJ_ABS:-}"
+    [ -z "${PROJECT_ID:-}" ] || echo "project_id=$PROJECT_ID"
+    [ -z "${PROJECT_BASE_REF:-}" ] || echo "project_base_ref=$PROJECT_BASE_REF"
     echo "harness=${HARNESS:-codex}"
     echo "kind=$KIND"
     echo "mode=${MODE:-no-mistakes}"

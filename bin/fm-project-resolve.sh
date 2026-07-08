@@ -58,7 +58,7 @@ path_is_ancestor_or_self() {
 real_existing_dir() {
   local path=$1
   [ -d "$path" ] || return 1
-  cd "$path" && pwd -P
+  (cd "$path" && pwd -P)
 }
 
 git_path_real() {
