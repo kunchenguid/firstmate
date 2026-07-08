@@ -348,6 +348,19 @@ function turnParams(threadId, prompt, opts) {
   return params;
 }
 
+function threadResumeParams(threadId, opts) {
+  const params = {
+    threadId,
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+    sandbox: "danger-full-access",
+    excludeTurns: true,
+  };
+  if (opts.cwd) params.cwd = opts.cwd;
+  if (opts.model && opts.model !== "default") params.model = opts.model;
+  return params;
+}
+
 async function withServer(fn) {
   const server = new AppServer();
   try {
@@ -403,7 +416,7 @@ async function sendTurnDetached(opts) {
     detached: true,
     stdio: "ignore",
   });
-  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 2) + statusWaitBudgetMs(opts) + 5000;
+  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 3) + statusWaitBudgetMs(opts) + 5000;
   let ready;
   try {
     ready = await waitForReadyFile(readyFile, child, readyTimeoutMs);
@@ -498,6 +511,7 @@ async function sendTurnWorker(opts, readyFile) {
   return withServer(async server => {
     try {
       const statusStartOffset = statusFileOffset(opts["wait-status-file"]);
+      await server.request("thread/resume", threadResumeParams(threadId, opts));
       const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
       await waitForStatusFile(threadId, opts, statusStartOffset);
       const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };

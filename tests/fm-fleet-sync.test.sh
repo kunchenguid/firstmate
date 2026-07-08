@@ -119,7 +119,21 @@ head_sha() { git -C "$1" rev-parse HEAD; }
 run_sync() {
   local home=$1
   shift
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+  FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+run_bootstrap() {
+  local home=$1
+  shift
+  FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-bootstrap.sh" "$@"
 }
 
 make_failing_jq() {
@@ -474,7 +488,7 @@ test_bootstrap_syncs_json_only_external_projects_without_projects_dir() {
   git -C "$home/work-external-flow" push -q origin dev
   before=$(git -C "$clone" rev-parse HEAD)
 
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>/dev/null
+  run_bootstrap "$home" >/dev/null 2>/dev/null
 
   after=$(git -C "$clone" rev-parse HEAD)
   [ "$after" != "$before" ] || fail "bootstrap did not refresh JSON-only external project"
@@ -495,7 +509,7 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(run_bootstrap "$home" 2>/dev/null)
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"

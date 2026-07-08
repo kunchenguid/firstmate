@@ -50,11 +50,14 @@ Relevant facts from that pass:
 - An `initialize` request returned `Codex Desktop/0.135.0`, `codexHome=/Users/ra/.codex`, `platformFamily=unix`, and `platformOs=macos`.
 - `model/list`, `thread/loaded/list`, and `thread/list` work over direct stdio.
 - `thread/list` with `useStateDbOnly:true` returned promptly and avoided the slow rollout repair scan that appeared with the default listing path.
-- The generated schema contains `thread/start`, `turn/start`, `turn/steer`, `thread/read`, `thread/turns/list`, `thread/list`, `thread/search`, `thread/archive`, `thread/unarchive`, `thread/name/set`, `thread/goal/set`, `turn/interrupt`, `thread/rollback`, and `thread/status/changed`.
+- The generated schema contains `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `thread/read`, `thread/turns/list`, `thread/list`, `thread/search`, `thread/archive`, `thread/unarchive`, `thread/name/set`, `thread/goal/set`, `turn/interrupt`, `thread/rollback`, and `thread/status/changed`.
 - `ThreadStatus` has `idle`, `active`, `systemError`, and `notLoaded` variants.
 - `TurnStatus` has `completed`, `interrupted`, `failed`, and `inProgress` variants.
 - `ThreadStartResponse` returns a `thread` object and an effective `cwd`.
+- A thread created by one direct-stdio app-server process is visible to later processes through state as `notLoaded`, but `turn/start` against that id fails with `thread not found` until the new process calls `thread/resume`.
+- `thread/resume` accepts `sandbox: "danger-full-access"` as a string for this Codex version; the object-shaped sandbox used by other request paths is rejected.
 - On this machine, `codex app-server daemon version` failed because `/Users/ra/.codex/app-server-control/app-server-control.sock` did not exist, so the first pass uses direct stdio and bootstrap probes `codex app-server --help` instead of depending on the daemon.
+- A real Flow smoke on 2026-07-08 spawned thread `019f42e2-d486-7d93-acde-cc77270a05e4` in `/Users/ra/Documents/GitHub/firstmate/projects/.firstmate-worktrees/codex-smoke-flow-a1`, started from registered `refs/remotes/origin/dev` at `dc6bfbefb058e88c314386dfade6e16844cf1c25`, wrote the status/report artifacts, accepted a follow-up send, was readable with `fm-peek.sh fm-codex-smoke-flow-a1`, and archived/removed cleanly through teardown.
 
 This checkout is also registered as a Codex Desktop project in the app's project list.
 
@@ -112,6 +115,7 @@ bin/fm-codex-bridge list-live [--cwd <path>]
 
 The bridge starts by launching `codex app-server --listen stdio://` and sending schema-native newline-delimited request objects.
 Every bridge process begins with `initialize` and opts into experimental APIs.
+Every `send-turn` worker calls `thread/resume` before `turn/start`, because one-shot stdio processes do not share loaded thread memory.
 Read-only thread listing passes `useStateDbOnly:true` to avoid rollout repair scans in the current first-pass bridge.
 
 ## Backend metadata
@@ -167,7 +171,7 @@ First pass spawn flow:
 9. Set the thread name to `fm-<id>`.
 10. Set the thread goal to the Firstmate task objective.
 11. Validate that `codex_cwd` is the isolated worktree, not the primary checkout.
-12. Start the initial prompt turn through `send-turn`.
+12. Start the initial prompt turn through `send-turn`, whose worker resumes the just-created thread in its own app-server process before `turn/start`.
 13. Keep the app-server process alive in a detached `send-turn` worker until the return channel writes the expected status line.
 14. Verify the return channel before treating the thread as supervised.
 15. Record meta with `backend=codex-app`, `thread_id=`, `codex_cwd=`, `project_id=`, optional `project_base_ref=`, and `worktree_provider=git-worktree`.
@@ -182,7 +186,7 @@ working: Codex thread started
 to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits up to 60 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 240 polls at 0.25 seconds.
-The startup `send-turn` parent receives that same file, expected line, and timeout budget, records the status-file byte offset before `turn/start`, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified from new status output.
+The startup `send-turn` parent receives that same file, expected line, and timeout budget, records the status-file byte offset before `thread/resume` and `turn/start`, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified from new status output.
 The worker keeps the same Codex app-server stdio process alive after that handshake while it polls the thread status until the turn leaves an active state.
 The lifecycle hold is controlled by `FM_CODEX_APP_TURN_LIFECYCLE_POLLS` and `FM_CODEX_APP_TURN_LIFECYCLE_SLEEP`, defaulting to 4320 polls at 5 seconds.
 If the expected line does not appear, the spawn archives the thread, removes the startup worktree only when the worktree is clean and still at the verified base commit, and fails with a diagnostic naming the thread id and the missing status file write.
@@ -197,7 +201,7 @@ If the startup worktree is dirty or its git state cannot be verified, startup cl
 fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt> [--cwd <path>]
 ```
 
-The first implementation starts a new turn through `turn/start` in a detached bridge worker.
+The first implementation starts a new turn by calling `thread/resume` and then `turn/start` in a detached bridge worker.
 The CLI returns after the turn is accepted, while the worker keeps the app-server alive until the thread leaves an active state.
 Follow-up sends pass the recorded `codex_cwd` as `cwd`, propagate the recorded model and effort when they are not `default`, and run with the task's `GOTMPDIR` when `tasktmp=` is present in meta.
 A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt-plus-new-turn behavior, but that should require an explicit design decision rather than surprising interruption.
@@ -285,6 +289,7 @@ Implemented tests:
 - Spawn records `backend=codex-app`, `thread_id=`, `codex_cwd=`, `project_id=`, optional `project_base_ref=`, and `worktree_provider=git-worktree`.
 - Spawn uses a registered `baseRef` as the git-worktree base when `data/projects.json` supplies one.
 - Spawn refuses when the returned `codex_cwd` equals the primary checkout.
+- Bridge `send-turn` resumes one-shot direct-stdio threads before `turn/start`.
 - Spawn accepts a status-file return-channel write that arrives after the old five-second startup window.
 - Spawn refuses when the status-file return channel is not verified.
 - Spawn ignores stale return-channel status lines written before the current turn.

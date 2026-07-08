@@ -22,6 +22,7 @@ const omitCwd = process.env.FM_FAKE_CODEX_OMIT_CWD === "1";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
 const statusDelayMs = Number(process.env.FM_FAKE_CODEX_STATUS_DELAY_MS || "0");
 const initializeDelayMs = Number(process.env.FM_FAKE_CODEX_INITIALIZE_DELAY_MS || "0");
+const resumeDelayMs = Number(process.env.FM_FAKE_CODEX_RESUME_DELAY_MS || "0");
 const turnStartDelayMs = Number(process.env.FM_FAKE_CODEX_TURN_START_DELAY_MS || "0");
 const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
 const substantiveDelayMs = Number(process.env.FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS || "0");
@@ -78,6 +79,10 @@ rl.on("line", line => {
     const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
     if (!omitCwd) result.cwd = cwd;
     write({ id, result });
+  } else if (msg.method === "thread/resume") {
+    const result = { thread: thread(cwd), model: params.model || "gpt-5", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { mode: "danger-full-access" } };
+    if (!omitCwd) result.cwd = cwd;
+    respond({ id, result }, resumeDelayMs);
   } else if (msg.method === "thread/name/set" || msg.method === "thread/goal/set") {
     if (metadataFail) write({ id, error: { code: -32000, message: "metadata failed" } });
     else write({ id, result: {} });
@@ -217,7 +222,7 @@ process.stdin.on("end", () => {
 }
 
 test_bridge_start_thread_uses_app_server_stdio() {
-  local dir fb log prompt out thread_id cwd status log_before
+  local dir fb log prompt out thread_id cwd status log_before resume_line turn_line
   dir="$TMP_ROOT/bridge-start"
   mkdir -p "$dir/wt"
   log="$dir/codex.log"
@@ -244,7 +249,13 @@ test_bridge_start_thread_uses_app_server_stdio() {
     "$ROOT/bin/fm-codex-bridge" send-turn --thread-id "$thread_id" --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "bridge send-turn should start the initial turn after validation"
+  assert_contains "$(cat "$log")" $'request\tthread/resume\t' "bridge should resume one-shot threads before turn/start"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the initial turn"
+  resume_line=$(grep -n $'request\tthread/resume\t' "$log" | head -1 | cut -d: -f1)
+  turn_line=$(grep -n $'request\tturn/start\t' "$log" | head -1 | cut -d: -f1)
+  [ "$resume_line" -lt "$turn_line" ] || fail "bridge should resume the thread before turn/start"
+  assert_contains "$(cat "$log")" '"excludeTurns":true' "bridge resume should avoid loading full turns before send"
+  assert_contains "$(cat "$log")" '"sandbox":"danger-full-access"' "bridge resume should use the app-server sandbox string shape"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input"
   pass "fm-codex-bridge: start-thread normalizes thread cwd before send-turn starts the first turn"
 }
@@ -270,6 +281,7 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
     sleep 0.05
   done
   assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep app-server alive after the startup status line"
+  assert_contains "$(cat "$log")" $'request\tthread/resume\t' "bridge should resume the thread before startup turn"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
@@ -285,12 +297,13 @@ test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
   printf 'Start slowly but within budget, captain.\n' > "$prompt"
   fb=$(make_fake_codex_bin "$dir")
 
-  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_INITIALIZE_DELAY_MS=6400 FM_FAKE_CODEX_TURN_START_DELAY_MS=6400 FM_FAKE_CODEX_STATUS_DELAY_MS=50 FM_CODEX_BRIDGE_TIMEOUT_MS=7000 FM_CODEX_APP_RETURN_CHANNEL_POLLS=5 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.05 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=1 \
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS_FILE="$status_file" FM_FAKE_CODEX_INITIALIZE_DELAY_MS=6400 FM_FAKE_CODEX_RESUME_DELAY_MS=6400 FM_FAKE_CODEX_TURN_START_DELAY_MS=6400 FM_FAKE_CODEX_STATUS_DELAY_MS=50 FM_CODEX_BRIDGE_TIMEOUT_MS=7000 FM_CODEX_APP_RETURN_CHANNEL_POLLS=2 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.1 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=1 \
     "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 --wait-status-file "$status_file" --wait-status-line 'working: Codex thread started' 2>&1)
   status=$?
-  expect_code 0 "$status" "bridge send-turn should wait for initialize, turn/start, and status-file budgets before worker ready: $out"
+  expect_code 0 "$status" "bridge send-turn should wait for initialize, thread/resume, turn/start, and status-file budgets before worker ready: $out"
   assert_grep "working: Codex thread started" "$status_file" "bridge should see the delayed status-file handshake"
   assert_contains "$(cat "$log")" $'request\tinitialize\t' "bridge did not initialize before delayed ready"
+  assert_contains "$(cat "$log")" $'request\tthread/resume\t' "bridge did not resume before delayed ready"
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start turn before delayed ready"
   pass "fm-codex-bridge: send-turn ready timeout covers slow pre-ready requests"
 }
