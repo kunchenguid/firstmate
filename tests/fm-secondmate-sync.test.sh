@@ -385,7 +385,7 @@ SH
 }
 
 test_nudge_selector_stable_after_herdr_respawn() {
-  local w c1 stale fresh fakebin herdrfb toolchain out nudge_line meta resolved stale_send fresh_send spawn_stub
+  local w c1 stale fresh fakebin herdrfb toolchain out nudge_line meta window resolved stale_send fresh_send spawn_stub
   stale=default:w9:pY
   fresh=default:wA:p2
   w=$(new_world nudge-herdr-rotate)
@@ -437,13 +437,16 @@ SH
   window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$window" = "$fresh" ] || fail "respawn stub did not rotate meta window to '$fresh' (got '$window')"
 
+  # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   resolved=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_resolve_selector fm-sm-instr "$1"' "$ROOT" "$w/home/state")
   [ "$resolved" = "$fresh" ] || fail "fm-<id> should resolve through post-respawn meta, got '$resolved'"
 
+  # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   stale_send=$(PATH="$herdrfb:$toolchain:$BASE_PATH" bash -c \
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$stale" 2>/dev/null; printf '%s' "$?")
   [ "$stale_send" != 0 ] || fail "explicit stale herdr endpoint send should fail"
 
+  # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   fresh_send=$(PATH="$herdrfb:$toolchain:$BASE_PATH" bash -c \
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$fresh" 2>/dev/null; printf '%s' "$?")
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
