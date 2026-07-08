@@ -81,6 +81,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+For treehouse-backed tasks, spawn performs that isolation check on physical paths, then records `worktree=` with the `$HOME` spelling when that spelling resolves to the same directory; teardown uses the same alternate spelling only after a "not managed by treehouse" return failure.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -166,6 +167,7 @@ PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and an
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 If a git `index.lock` blocks safety inspection or `treehouse return`, teardown waits, retries, and only removes the lock when `bin/fm-teardown.sh` can prove it stale; otherwise it leaves the lock and state intact and fails closed.
+When treehouse returns Git's "Another git process seems to be running" lock message, teardown makes one bounded retry without deleting the lock before falling back to the same provably-stale cleanup rules.
 Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched default branch.
 PR-head containment covers an exact PR head match, a local `HEAD` that is an ancestor of the PR head, or unpushed local patches whose patch IDs appear in the PR head after no-mistakes replayed the branch.
 GitHub lookup errors fall back to the content check and still refuse if that check is inconclusive.

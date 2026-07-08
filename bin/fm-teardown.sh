@@ -43,14 +43,24 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Treehouse return path spelling: treehouse can key managed worktrees by the
+# caller's $HOME spelling on systems where the physical home path differs from
+# $HOME (for example a symlinked home). If return says the recorded path is not
+# managed, teardown retries once with the $HOME-spelled path only when that
+# alternate resolves to the same physical directory; no hard-coded home prefix is
+# assumed.
+#
 # Stale worktree git lock recovery (backlog teardown-lock-race-l2): a crew
 # process killed mid-git-operation can leave a stale .git/worktrees/<wt>/index.lock
 # (or, for a non-linked worktree, .git/index.lock) that makes `treehouse return
-# --force` fail with a "File exists" error. On that failure, teardown_treehouse_return
-# waits FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS (default 2s) and retries once, since the
-# owning process may simply be exiting. If the lock is still present, it is removed and
-# the return retried ONE more time, but ONLY when the lock is provably stale, meaning
-# ALL of the following hold:
+# --force` fail with a "File exists" error, or treehouse can surface Git's
+# "Another git process seems to be running" message while another process still
+# owns the lock. On a transient Git-process message, teardown waits
+# FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS (default 2s) and retries once without
+# removing any lock. On lock-backed failures, teardown_treehouse_return waits and
+# retries once, since the owning process may simply be exiting. If the lock is
+# still present, it is removed and the return retried ONE more time, but ONLY
+# when the lock is provably stale, meaning ALL of the following hold:
 #   1. the lock file still exists after the retry wait above;
 #   2. its mtime age is at least FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) - a
 #      freshly created lock might belong to a process `lsof` has not yet reflected;
@@ -64,7 +74,8 @@
 # checks before any destructive return. A missing `lsof`, or a lock that fails any of
 # the three checks, is treated as NOT provably stale (fail safe): the lock is left
 # untouched and the original failure is surfaced, exactly as before this fix. Teardown
-# output notes every wait, retry, and removal so the captain can see what happened.
+# output notes every alternate-spelling attempt, wait, retry, and removal so the
+# captain can see what happened.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -611,11 +622,13 @@ recover_treehouse_return_failure() {
   finish_treehouse_return_after_retry_failed "$dir" "$cd_dir" "$label" "$post_cleanup_check" "$lock"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a stale git
-# lock left by a killed crew process. On failure: wait briefly and retry once
-# (the owning process may be exiting), then - only if the lock is provably
-# stale - remove it and retry once more. A lock that is not provably stale is
-# left untouched and the original failure is surfaced to the caller.
+# Return a worktree/home via `treehouse return --force`, tolerating treehouse's
+# HOME-spelled registry paths and a stale git lock left by a killed crew process.
+# A "not managed" failure retries a physically equivalent $HOME spelling when
+# one exists. Lock failures wait briefly and retry once (the owning process may
+# be exiting), then - only if the lock is provably stale - remove it and retry
+# once more. A lock that is not provably stale is left untouched and the original
+# failure is surfaced to the caller.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} out alt_dir alt_out status
 
