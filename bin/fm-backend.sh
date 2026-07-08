@@ -335,14 +335,36 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
   return 1
 }
 
-fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
-  local raw=$1 resolved=$2 state=$3 meta
+fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
+  local raw=$1 state=$2 id
+  case "$raw" in
+    *:*) return 1 ;;
+  esac
+  if [ -f "$state/$raw.meta" ]; then
+    printf '%s' "$raw"
+    return 0
+  fi
   case "$raw" in
     fm-*)
-      meta="$state/${raw#fm-}.meta"
-      [ -f "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
+      id=${raw#fm-}
+      [ -f "$state/$id.meta" ] || return 1
+      printf '%s' "$id"
+      return 0
       ;;
   esac
+  return 1
+}
+
+fm_backend_meta_for_selector() {  # <raw-target> <state-dir>
+  local raw=$1 state=$2 id
+  id=$(fm_backend_task_id_for_selector "$raw" "$state") || return 1
+  printf '%s/%s.meta' "$state" "$id"
+}
+
+fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
+  local raw=$1 resolved=$2 state=$3 meta
+  meta=$(fm_backend_meta_for_selector "$raw" "$state" 2>/dev/null || true)
+  [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
   if [ -n "$resolved" ]; then
     meta=$(fm_backend_meta_for_window "$resolved" "$state" 2>/dev/null || true)
     [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
@@ -351,13 +373,10 @@ fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
 }
 
 fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta
-  case "$raw" in
-    fm-*)
-      meta="$state/${raw#fm-}.meta"
-      [ -f "$meta" ] && printf '%s' "$raw"
-      ;;
-  esac
+  local raw=$1 state=$2 id
+  id=$(fm_backend_task_id_for_selector "$raw" "$state" 2>/dev/null || true)
+  [ -n "$id" ] && printf 'fm-%s' "$id"
+  return 0
 }
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
@@ -404,15 +423,18 @@ fm_backend_source() {  # <name>
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
-# selector to a live session-provider target. Three forms, in order:
+# selector to a live session-provider target. Four forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
 #                      this firstmate home) - backend-independent, a literal string.
-#   "fm-<id>"          routed through <state-dir>/<id>.meta's backend target
+#   exact task id      routed through <state-dir>/<id>.meta's backend target
 #                      (`window=` normally, `terminal=` for Orca) -
 #                      backend-independent, a stored value, NOT re-verified
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
 #                      without a live re-check).
+#   "fm-<id>"          legacy task window label fallback routed through
+#                      <state-dir>/<id>.meta when no exact
+#                      <state-dir>/fm-<id>.meta exists.
 #   anything else      first matched against recorded `window=`/`terminal=`
 #                      metadata, then treated as an ad hoc bare window name and
 #                      resolved by searching the legacy tmux live inventory.
@@ -423,16 +445,18 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       printf '%s' "$raw"
       return 0
       ;;
+  esac
+  meta=$(fm_backend_meta_for_selector "$raw" "$state" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    window=$(fm_backend_target_of_meta "$meta")
+    [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
+    printf '%s' "$window"
+    return 0
+  fi
+  case "$raw" in
     fm-*)
-      meta="$state/${raw#fm-}.meta"
-      if [ ! -f "$meta" ]; then
-        echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
-        return 1
-      fi
-      window=$(fm_backend_target_of_meta "$meta")
-      [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
-      printf '%s' "$window"
-      return 0
+      echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
+      return 1
       ;;
     *)
       meta=$(fm_backend_meta_for_window "$raw" "$state" 2>/dev/null || true)

@@ -18,7 +18,7 @@
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
-# From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
+# From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
 # (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
 # or a status-pointed doc instead of stranding it in chat the main firstmate
@@ -46,40 +46,31 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 RAW_TARGET=$1
 T=$(fm_backend_resolve_selector "$1" "$STATE")
+TARGET_META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
 shift
 
-# Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
-# resolved through this home's meta and recording kind=secondmate, is marked: the
+# Mark a from-firstmate -> secondmate request. Only a task selector resolved
+# through this home's meta and recording kind=secondmate is marked: the
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).
 # An explicit backend target (the escape hatch for endpoints outside this home)
 # and any crewmate/scout target are left unmarked, and so is the --key path.
 MARK_PREFIX=""
-case "$RAW_TARGET" in
-  fm-*)
-    meta="$STATE/${RAW_TARGET#fm-}.meta"
-    if [ -f "$meta" ] && grep -q '^kind=secondmate$' "$meta" 2>/dev/null; then
-      MARK_PREFIX="$FM_FROMFIRST_MARK"
-    fi
-    ;;
-esac
+if [ -n "$TARGET_META" ] && grep -q '^kind=secondmate$' "$TARGET_META" 2>/dev/null; then
+  MARK_PREFIX="$FM_FROMFIRST_MARK"
+fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A bare fm-<id> target carries
+# scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
-# The target's BACKEND comes from fm-<id> meta, or from matching the resolved
+# The target's BACKEND comes from selector meta, or from matching the resolved
 # explicit target back to recorded meta, then falls back to tmux.
 TARGET_HARNESS=""
 TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
-case "$RAW_TARGET" in
-  fm-*)
-    meta="$STATE/${RAW_TARGET#fm-}.meta"
-    if [ -f "$meta" ]; then
-      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
-    fi
-    ;;
-esac
+if [ -n "$TARGET_META" ]; then
+  TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+fi
 
 if [ "${1:-}" = "--key" ]; then
   fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"
