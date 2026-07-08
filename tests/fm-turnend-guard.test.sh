@@ -454,7 +454,52 @@ test_opencode_plugin_forces_followup() {
   assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
   assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
   assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
+  assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
   pass ".opencode primary plugin: session.idle forces one follow-up through the shared guard"
+}
+
+test_opencode_plugin_anchors_guard_to_worktree() {
+  local plugin worktree_dir wrong_dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
+  worktree_dir="$TMP_ROOT/opencode-plugin-worktree"
+  wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
+  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.DIRECTORY,
+  worktree: process.env.WORKTREE,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!promptBody.includes("guard-fired")) {
+  console.error(`missing prompt body: ${promptBody}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
+  [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
+  pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
 test_pi_extension_forces_followup() {
@@ -507,5 +552,6 @@ test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
 test_codex_hook_resolves_payload_cwd_to_git_root
 test_opencode_plugin_forces_followup
+test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_forces_followup
 test_grok_hook_invokes_adapter
