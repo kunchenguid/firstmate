@@ -142,7 +142,7 @@ run_hook() {
   home=$(cd "$dir" && pwd)
   (
     unset CODEX_CI CODEX_THREAD_ID
-    printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+    printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
   )
 }
 
@@ -390,7 +390,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -415,7 +415,7 @@ test_hook_ignores_repo_state_when_fm_home_set() {
   home="$TMP_ROOT/hook-fm-home-quiet"
   mkdir -p "$home/state"
   : > "$dir/state/task1.meta"
-  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 0 "$status" "hook must ignore repo-root state when FM_HOME selects another state dir"
   [ -z "$out" ] || fail "hook produced output from stale repo-root state despite FM_HOME: $out"
   pass "fm-turnend-guard: ignores stale repo-root state when FM_HOME is set"
@@ -428,7 +428,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(unset CODEX_CI CODEX_THREAD_ID; printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"

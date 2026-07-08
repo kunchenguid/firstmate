@@ -722,7 +722,7 @@ On wake, in order of cheapness:
    If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before resuming supervision.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
-5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` only for targeted follow-up, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then resume the emitted supervision protocol.
+5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` for targeted follow-up (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then restore the active watcher supervision mode.
    Do not report that the fleet is unchanged.
 
 When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, load `fmx-respond` (section 13) and post the X-mode mention's **final** completion follow-up if that task is X-mode-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --final --text-file <path>`, so the link always clears here regardless of how many of the up-to-three follow-ups were already spent on earlier milestones.
@@ -749,7 +749,7 @@ When the guarded operation is `fm-send`, `fm-send` sets the banner's continuatio
 So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and the next supervision resume) silent.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
-If a guard warning says watcher liveness is stale, drain any queued wakes and then resume the emitted supervision protocol.
+If a guard warning says watcher liveness is stale, restore the supervision mode it names after draining any queued wakes: `bin/fm-watch-loop.sh` on a degraded Codex surface, otherwise `bin/fm-watch-arm.sh`.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
@@ -922,11 +922,19 @@ Bootstrap wires the relay poll automatically and purely additively from `.env` p
 
 **Cadence.**
 An X instance polls every 30s instead of the default 300s.
-The session-start supervision operating block includes the X-mode cadence instruction when `config/x-mode.env` exists.
-The sourced file exports `FM_CHECK_INTERVAL=30` into whichever watcher process the active harness protocol starts, so only an X instance speeds up; a non-X instance has no such file and keeps the 300s default.
-Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence **transition** (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher through the emitted harness protocol.
-Bootstrap deliberately does not restart the watcher itself.
-X mode is also a reason to keep the watcher armed even with no fleet work, so an X-only user is still served.
+To get that, arm the watcher with the X cadence sourced, exactly as section 8 describes but prefixed:
+
+```sh
+[ -f config/x-mode.env ] && . config/x-mode.env
+bin/fm-watch-arm.sh        # as the harness's tracked background task
+```
+
+On a degraded Codex surface, source the same file before starting `bin/fm-watch-loop.sh` instead of `bin/fm-watch-arm.sh`.
+The sourced file exports `FM_CHECK_INTERVAL=30` into the arm or present-mode loop, which the watcher it forks inherits, so only an X instance speeds up; a non-X instance has no such file and keeps the 300s default.
+Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start and the arm no-ops on an already-healthy watcher, a cadence **transition** (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher with the new environment: `[ -f config/x-mode.env ] && . config/x-mode.env; bin/fm-watch-arm.sh --restart` (omit the source on opt-out so the 300s default returns), run as the harness's tracked background task.
+On a degraded Codex surface, stop and restart the present-mode loop with the desired environment instead of using the one-shot arm's restart path.
+Bootstrap deliberately does not restart the watcher itself - it must never block, and `fm-watch-arm.sh --restart` is home-scoped (never a broad `pkill`).
+X mode is also a reason to keep watcher supervision running even with no fleet work, so an X-only user is still served.
 Cadence under away-mode (the supervise daemon owns the watcher then) is a separate follow-up and out of scope here; while afk is active the daemon's default cadence applies.
 
 **Answering.**

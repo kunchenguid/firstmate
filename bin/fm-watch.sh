@@ -30,8 +30,11 @@
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
-# after each printed reason. Direct duplicate invocations of this script still
-# no-op through the watcher singleton lock.
+# after each printed reason. On a Codex surface whose background-task completion
+# wake channel is unverified, run bin/fm-watch-loop.sh instead so the
+# present-mode loop drains and re-arms.
+# Direct duplicate invocations of this script still no-op through the watcher
+# singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -130,8 +133,10 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
+# threshold, or anything unknown) is written to the durable queue and exits.
+# On verified wake channels, that background-task completion wakes the LLM; on
+# degraded Codex surfaces, bin/fm-watch-loop.sh observes the exit, drains the
+# queue, and re-arms in the same present-mode command. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
