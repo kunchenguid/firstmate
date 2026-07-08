@@ -50,7 +50,7 @@ export default function (pi: any) {
 
   function markLoaded() {
     mkdirSync(state, { recursive: true });
-    writeFileSync(marker, `${extensionVersion}\n`);
+    writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
   }
 
   function actionableLine(output: string): string {

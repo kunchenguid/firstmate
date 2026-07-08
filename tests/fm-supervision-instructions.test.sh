@@ -87,9 +87,22 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_pi_snippet_uses_effective_extension_path() {
+  local home out
+  home="$TMP_ROOT/pi-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness pi)
+  assert_contains "$out" "-e $home/state/fm-primary-pi-watch.ts" "pi snippet did not render the effective extension launch path"
+  assert_contains "$out" "The generated extension lives at \`$home/state/fm-primary-pi-watch.ts\`" "pi snippet did not render the effective extension state path"
+  assert_not_contains "$out" "__FM_PI_EXT__" "renderer leaked the Pi extension path placeholder"
+  assert_not_contains "$out" "-e state/fm-primary-pi-watch.ts" "pi snippet kept the repo-relative extension launch path"
+  pass "pi supervision snippet renders the effective extension path"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_pi_snippet_uses_effective_extension_path

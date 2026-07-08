@@ -532,6 +532,27 @@ EOF
   pass "session start rejects stale Pi loaded markers"
 }
 
+test_pi_diagnostic_rejects_previous_session_loaded_marker() {
+  local rec root home fakebin out marker version
+  rec=$(new_world pi-previous-session-loaded-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-pi-watch-extension.sh" >/dev/null
+  marker="$home/state/.pi-watch-extension-loaded"
+  version=$(cat "$home/state/.pi-watch-extension-version")
+  printf '%s\n999999\n' "$version" > "$marker"
+
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a marker from a previous Pi process"
+
+  pass "session start rejects Pi loaded markers from previous sessions"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
@@ -545,3 +566,4 @@ test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker
+test_pi_diagnostic_rejects_previous_session_loaded_marker

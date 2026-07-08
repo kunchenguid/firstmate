@@ -113,6 +113,17 @@ print_status_tail() {
   tail -n "$STATUS_TAIL" "$status"
 }
 
+pi_watch_extension_loaded() {
+  local marker=$1 version=$2 lock=$3 marker_version marker_pid expected_version lock_pid
+  [ -f "$marker" ] && [ -f "$version" ] && [ -f "$lock" ] || return 1
+  marker_version=$(sed -n '1p' "$marker")
+  marker_pid=$(sed -n '2p' "$marker")
+  expected_version=$(sed -n '1p' "$version")
+  lock_pid=$(sed -n '1p' "$lock")
+  [ -n "$marker_pid" ] || return 1
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+}
+
 section "SESSION START - $FM_HOME"
 
 # --- 1. lock -----------------------------------------------------------
@@ -184,12 +195,13 @@ if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$STATE/fm-primary-pi-watch.ts"
   PI_MARKER="$STATE/.pi-watch-extension-loaded"
   PI_VERSION="$STATE/.pi-watch-extension-version"
+  PI_LOCK="$STATE/.lock"
   if [ "$READ_ONLY" -eq 0 ]; then
     if ! "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null 2>&1; then
       printf 'PI_WATCH_EXTENSION: generation failed - run %s/fm-pi-watch-extension.sh before relying on Pi background wake supervision\n' "$SCRIPT_DIR"
     fi
   fi
-  if [ ! -f "$PI_MARKER" ] || [ ! -f "$PI_VERSION" ] || ! cmp -s "$PI_MARKER" "$PI_VERSION"; then
+  if ! pi_watch_extension_loaded "$PI_MARKER" "$PI_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s for background wake supervision\n' "$PI_EXT"
   fi
 fi
