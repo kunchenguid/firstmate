@@ -619,6 +619,66 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_arm_self_heals_wedged_incumbent() {
+  # A WEDGED watcher: a live process still holding THIS home's lock with a matching
+  # identity, but whose beacon has gone stale (it stopped beating). Before this fix a
+  # plain arm fell through to fork a child that could not steal the still-live lock,
+  # self-evicted, and returned FAILED with the wedge left in place, forcing a manual
+  # --restart. Now a plain arm must run the same home-scoped stop --restart does,
+  # then fork and confirm a fresh watcher: recover to 'started', exit zero, replace
+  # the wedged pid with a live one - never FAILED, never 'healthy' off the stale
+  # beacon. An unrelated foreign live pid running alongside must be untouched, proving
+  # the stop only ever targets this home's recorded watcher pid.
+  local dir state fakebin armout foreign wedge identity armpid i lock_pid
+  dir=$(make_case arm-wedge-selfheal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  # A foreign live process that must never be signalled by this home's stop.
+  sleep 300 &
+  foreign=$!
+  # The wedged watcher stand-in: a live process whose identity is recorded in the
+  # lock, so it passes the identity match that gates the home-scoped stop.
+  sleep 300 &
+  wedge=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$wedge") \
+    || fail "could not identify wedge pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$wedge"    > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir"      > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH"    > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=8 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # The arm blocks on wait(child) after printing 'started', so read the confirmed
+  # lock pid while the arm is still running: killing the arm would tear the child
+  # down with it. The 'started' line prints only after the fresh watcher passed the
+  # live-pid + fresh-beacon gate, so it doubles as proof the beacon was confirmed.
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not recover a wedged watcher to 'started': $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm returned FAILED for a wedged watcher instead of self-healing"
+  ! grep -qF 'watcher: healthy' "$armout" || fail "arm reported healthy off the wedged watcher's stale beacon"
+  grep -F "watcher: started pid=$lock_pid (beacon fresh)" "$armout" >/dev/null \
+    || fail "arm's started line did not name the confirmed fresh watcher (lock '$lock_pid')"
+  if [ -z "$lock_pid" ] || [ "$lock_pid" = "$wedge" ]; then
+    fail "arm did not replace the wedged pid (still '$lock_pid')"
+  fi
+  kill -0 "$lock_pid" 2>/dev/null || fail "arm's confirmed fresh watcher is not actually alive"
+  ! is_live_non_zombie "$wedge" || fail "arm did not stop the wedged watcher"
+  is_live_non_zombie "$foreign" || fail "arm's stop signalled a pid outside this home"
+  kill "$armpid" "$lock_pid" "$wedge" "$foreign" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$foreign" 2>/dev/null || true
+  pass "arm self-heals a wedged incumbent to a fresh watcher and never signals outside this home"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The watcher records its process identity under one locale; arm/guard/turn-end
   # re-read it under the machine's ambient locale. ps's lstart date format follows
@@ -663,3 +723,4 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_arm_self_heals_wedged_incumbent
