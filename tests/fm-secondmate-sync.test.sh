@@ -291,6 +291,16 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+add_real_jq() {
+  local fakebin=$1 real_jq
+  real_jq=$(command -v jq 2>/dev/null) || return 1
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+exec '$real_jq' "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
 test_bootstrap_sweep_nudges_only_instruction_change() {
   local w c1 c2 c3 fakebin out nudge_line
   w=$(new_world boot-sweep)
@@ -409,6 +419,10 @@ SH
 
   herdrfb=$(make_nudge_herdr_fake "$w/herdr" "$stale" "$fresh")
   toolchain=$(make_fake_toolchain "$w")
+  if ! add_real_jq "$toolchain"; then
+    pass "T8b nudge selector herdr respawn skipped without jq"
+    return
+  fi
   out=$(PATH="$herdrfb:$toolchain:$BASE_PATH" HERDR_ENV=1 FM_BACKEND=herdr \
     FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
@@ -426,11 +440,11 @@ SH
   resolved=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_resolve_selector fm-sm-instr "$1"' "$ROOT" "$w/home/state")
   [ "$resolved" = "$fresh" ] || fail "fm-<id> should resolve through post-respawn meta, got '$resolved'"
 
-  stale_send=$(PATH="$herdrfb:$BASE_PATH" bash -c \
+  stale_send=$(PATH="$herdrfb:$toolchain:$BASE_PATH" bash -c \
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$stale" 2>/dev/null; printf '%s' "$?")
   [ "$stale_send" != 0 ] || fail "explicit stale herdr endpoint send should fail"
 
-  fresh_send=$(PATH="$herdrfb:$BASE_PATH" bash -c \
+  fresh_send=$(PATH="$herdrfb:$toolchain:$BASE_PATH" bash -c \
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$fresh" 2>/dev/null; printf '%s' "$?")
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
 
