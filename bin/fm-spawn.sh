@@ -3,6 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh [--help]
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -87,6 +88,23 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+  fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+  fm-spawn.sh <id=repo> [<id=repo> ...] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+  fm-spawn.sh [--help]
+USAGE
+}
+
+for a in "$@"; do
+  case "$a" in
+    -h|--help) usage; exit 0 ;;
+  esac
+done
+
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -261,6 +279,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+if [ "${#POS[@]}" -eq 0 ]; then
+  usage >&2
+  exit 2
+fi
 ID=${POS[0]}
 PROJ=
 ARG3=
@@ -285,6 +307,11 @@ if [ "$KIND" = secondmate ]; then
       ;;
   esac
 else
+  if [ "${#POS[@]}" -lt 2 ]; then
+    echo "error: missing project-dir for $ID" >&2
+    usage >&2
+    exit 2
+  fi
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi

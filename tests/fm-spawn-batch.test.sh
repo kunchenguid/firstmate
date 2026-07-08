@@ -14,18 +14,31 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+RUN_HOME="$TMP_ROOT/run-home"
 export FM_BACKEND=tmux
+mkdir -p "$RUN_HOME/data" "$RUN_HOME/state" "$RUN_HOME/projects" "$RUN_HOME/config"
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
-    FM_HOME='' \
+    FM_HOME="$RUN_HOME" \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
     FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
+}
+
+test_help_exits_before_positional_parsing() {
+  local out status
+  out=$(run_spawn --help k-)
+  status=$?
+  expect_code 0 "$status" "fm-spawn --help should exit successfully"
+  assert_contains "$out" "Usage:" "help output should include usage"
+  assert_contains "$out" "fm-spawn.sh <task-id> <project-dir>" "help output should include ship usage"
+  assert_not_contains "$out" "unbound variable" "help path should not reach positional parsing"
+  pass "fm-spawn --help exits before positional parsing"
 }
 
 # Every pair in a batch is dispatched even though the first one fails; the loop
@@ -102,6 +115,7 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+test_help_exits_before_positional_parsing
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping
