@@ -159,8 +159,8 @@ fleet_sync() {
 
   start=$SECONDS
   while jobs -r -p | grep -qx "$pid"; do
-    if [ $((SECONDS - start)) -ge "$timeout" ]; then
-      elapsed=$((SECONDS - start))
+    elapsed=$((SECONDS - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
       kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
