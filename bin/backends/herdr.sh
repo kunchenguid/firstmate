@@ -56,6 +56,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
+FM_BACKEND_HERDR_INPUT_SETTLE=${FM_BACKEND_HERDR_INPUT_SETTLE:-0.2}
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
@@ -87,24 +88,23 @@ fm_backend_herdr_workspace_label() {
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
-# BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
+# BOTH the HERDR_SESSION env var AND passing a leading `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the
 # --session flag, not HERDR_SESSION alone"): on the installed herdr 0.7.1
 # client, the HERDR_SESSION env var is NOT reliably honored by CLI subcommands
 # once ANY other herdr server is already bound on the machine - queries
 # silently fall back to whatever server IS running (the wrong one) instead of
 # routing to the requested session or refusing. The `--session <name>` global
-# flag (verified in both leading and trailing position; trailing used here to
-# keep every call site a minimal, append-only diff) always routes correctly,
-# including starting a genuinely separate, isolated server process. The env
-# var is kept alongside it - harmless, self-documenting, and forward-
-# compatible if a future herdr build honors it. Never used by
-# fm_backend_herdr_version_check, which is intentionally session-independent
-# (reads only .client.* fields).
+# flag must precede the subcommand on newer herdr builds: 0.7.3 accepts the
+# old trailing spelling syntactically, but `pane run` does not execute the
+# command under it. The env var is kept alongside the flag - harmless,
+# self-documenting, and forward-compatible if a future herdr build honors it.
+# Never used by fm_backend_herdr_version_check, which is intentionally
+# session-independent (reads only .client.* fields).
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1
   shift
-  HERDR_SESSION="$session" herdr "$@" --session "$session"
+  HERDR_SESSION="$session" herdr --session "$session" "$@"
 }
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
@@ -566,6 +566,7 @@ fm_backend_herdr_current_path() {  # <target>
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
+  sleep "$FM_BACKEND_HERDR_INPUT_SETTLE"
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -575,6 +576,7 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
+  sleep "$FM_BACKEND_HERDR_INPUT_SETTLE"
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -598,6 +600,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_target_ready "$1" || return 1
   local key
   key=$(fm_backend_herdr_normalize_key "$2")
+  sleep "$FM_BACKEND_HERDR_INPUT_SETTLE"
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 

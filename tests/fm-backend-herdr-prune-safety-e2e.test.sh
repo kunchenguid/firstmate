@@ -78,10 +78,13 @@ pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with th
 # appends to a marker file, so liveness is independently verifiable (not just
 # "the pane object still exists").
 MARKER="$SCRATCH/heartbeat.log"
-fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
-  "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
-  || fail "could not start the live heartbeat process in the startup workspace's pane"
-sleep 2
+for _ in $(seq 1 5); do
+  [ -s "$MARKER" ] && break
+  fm_backend_herdr_send_text_line "$SESSION:$LIVE_PANE_ID" \
+    "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" \
+    || fail "could not start the live heartbeat process in the startup workspace's pane"
+  sleep 1
+done
 [ -s "$MARKER" ] || fail "the live heartbeat process did not start writing its marker file"
 BEFORE_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 pass "repro setup: a live long-running process is running in the startup workspace's single tab (label '1'), heartbeating to a marker file"
