@@ -341,6 +341,57 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+# fm_backend_cmux_secret_specs_for_harness: zero or more "ENV_VAR
+# secret-name" lines naming the provider credentials that must be explicitly
+# injected into a cmux workspace for <harness>. Needed only for cmux: unlike
+# tmux/herdr/zellij (which fork a task inside the same host shell and so
+# inherit firstmate's own process environment), a cmux terminal surface's
+# environment is heavily scrubbed at spawn time (docs/cmux-backend.md
+# "Provider credential passthrough (--env)") - ambient provider API keys
+# never reach it. One pairing exists today: opencode's Fireworks-backed
+# models (e.g. GLM 5.2) need FIREWORKS_API_KEY. Expressed as a lookup table
+# so a second pairing is a one-line addition rather than a new framework.
+fm_backend_cmux_secret_specs_for_harness() {  # <harness>
+  case "$1" in
+    opencode) printf 'FIREWORKS_API_KEY opencode/fireworks-api-key\n' ;;
+  esac
+}
+
+# fm_backend_cmux_fetch_secret: print <secret-name>'s current value from AWS
+# Secrets Manager (region us-east-1) on stdout, using whatever AWS
+# credentials/profile are already ambient in this process's environment -
+# never a hardcoded profile. Fails loudly rather than continuing without the
+# key: a missing 'aws' CLI, a failed call (including no credentials
+# configured), or an empty secret are all refused.
+fm_backend_cmux_fetch_secret() {  # <secret-name>
+  local secret_name=$1 value
+  command -v aws >/dev/null 2>&1 || { echo "error: cmux env passthrough needs secret '$secret_name' but the 'aws' CLI is not installed" >&2; return 1; }
+  value=$(aws secretsmanager get-secret-value --secret-id "$secret_name" --region us-east-1 --query SecretString --output text 2>/dev/null) \
+    || { echo "error: failed to fetch secret '$secret_name' from AWS Secrets Manager (region us-east-1) - check that AWS credentials/profile are configured" >&2; return 1; }
+  [ -n "$value" ] && [ "$value" != None ] || { echo "error: secret '$secret_name' from AWS Secrets Manager returned an empty value" >&2; return 1; }
+  printf '%s' "$value"
+}
+
+# fm_backend_cmux_env_args_for_harness: resolve <harness>'s secret specs (if
+# any, per fm_backend_cmux_secret_specs_for_harness) and set
+# FM_BACKEND_CMUX_ENV_ARGS to the "--env KEY=VALUE" pairs to pass to
+# `new-workspace`. A fetched value only ever lands in this array - never
+# printed, logged, or written to a file - mirroring how
+# fm_backend_cmux_password/CMUX_SOCKET_PASSWORD above handles the socket
+# password. Empty array (success) when the harness needs no injected secret.
+fm_backend_cmux_env_args_for_harness() {  # <harness>
+  FM_BACKEND_CMUX_ENV_ARGS=()
+  local harness=$1 spec env_var secret_name value
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    env_var=${spec%% *}
+    secret_name=${spec#* }
+    value=$(fm_backend_cmux_fetch_secret "$secret_name") || return 1
+    FM_BACKEND_CMUX_ENV_ARGS+=(--env "$env_var=$value")
+  done < <(fm_backend_cmux_secret_specs_for_harness "$harness")
+  return 0
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
 # itself). Resolves the fresh workspace's default surface via one list-panes
@@ -348,17 +399,28 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # so no separate new-surface call is needed). --focus false is passed for
 # defense in depth though verified to already be the default (finding:
 # workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
-fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+# focus-restore dance is needed, unlike zellij. When <harness> is given and
+# needs provider credentials (fm_backend_cmux_secret_specs_for_harness), they
+# are fetched and passed as `--env KEY=VALUE` (verified flag: cmux-control's
+# own bin/cmuxctl, cmuxNewWorkspace). Echoes "<workspace_id> <surface_id>" on
+# success.
+fm_backend_cmux_create_task() {  # <label> <cwd> [harness]
+  local label=$1 cwd=$2 harness=${3:-} title dup out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
+  fm_backend_cmux_env_args_for_harness "$harness" || return 1
+  # Guarded append, never a bare "${arr[@]}" expansion of a possibly-empty
+  # array: under `set -u`, bash 3.2 (the macOS system bash) treats expanding a
+  # zero-element array as an unbound-variable error, and most callers spawn
+  # with no harness secret needed (FM_BACKEND_CMUX_ENV_ARGS stays empty).
+  local -a new_workspace_args=(new-workspace --name "$title" --cwd "$cwd")
+  [ "${#FM_BACKEND_CMUX_ENV_ARGS[@]}" -eq 0 ] || new_workspace_args+=("${FM_BACKEND_CMUX_ENV_ARGS[@]}")
+  new_workspace_args+=(--focus false --id-format uuids)
+  out=$(fm_backend_cmux_cli "${new_workspace_args[@]}" 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }

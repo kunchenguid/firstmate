@@ -65,6 +65,31 @@ SH
   printf '%s\n' "$fb"
 }
 
+# add_fake_aws: drop an `aws` stub into an existing fakebin <dir> (typically
+# one already holding a fake `cmux` from make_cmux_fakebin), so opencode
+# create_task tests can fake both tools from one PATH entry. Logs every
+# invocation (one line, unit-separated args) to $FM_AWS_LOG and either exits
+# $FM_AWS_FAKE_EXIT (default 0) or prints $FM_AWS_FAKE_SECRET (default
+# 'fake-fireworks-key') on stdout, mirroring make_cmux_fakebin's
+# log-and-canned-response convention. Never a real network call.
+add_fake_aws() {  # <fakebin-dir>
+  local fb=$1
+  cat > "$fb/aws" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_AWS_LOG:?}"
+{
+  printf 'aws'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+exit_code=${FM_AWS_FAKE_EXIT:-0}
+[ "$exit_code" -eq 0 ] || exit "$exit_code"
+printf '%s' "${FM_AWS_FAKE_SECRET:-fake-fireworks-key}"
+SH
+  chmod +x "$fb/aws"
+}
+
 cmux_workspace_list_response() {  # <dir> <n> <id1> <title1> [<id2> <title2> ...]
   local dir=$1 n=$2 json first=1
   shift 2
@@ -494,6 +519,106 @@ test_create_task_creates_and_parses_ids() {
   assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
     "create_task did not pass --focus false"
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+}
+
+# --- create_task: opencode Fireworks env passthrough (--env) -----------------
+#
+# cmux workspaces get none of firstmate's own process environment (heavily
+# scrubbed at spawn time, docs/cmux-backend.md "Environment scrubbing"), so an
+# opencode spawn needs FIREWORKS_API_KEY injected explicitly via `new-workspace
+# --env KEY=VALUE`. These tests fake both `cmux` and `aws` (add_fake_aws) so no
+# real AWS call is ever made.
+
+test_secret_specs_for_harness_maps_opencode_only() {
+  ( . "$ROOT/bin/backends/cmux.sh"
+    out=$(fm_backend_cmux_secret_specs_for_harness opencode)
+    [ "$out" = "FIREWORKS_API_KEY opencode/fireworks-api-key" ] || { echo "opencode spec mismatch: '$out'" >&2; exit 1; }
+    out=$(fm_backend_cmux_secret_specs_for_harness claude)
+    [ -z "$out" ] || { echo "claude should need no injected secret, got '$out'" >&2; exit 1; }
+  ) || fail "fm_backend_cmux_secret_specs_for_harness did not map exactly opencode -> FIREWORKS_API_KEY/opencode/fireworks-api-key"
+  pass "fm_backend_cmux_secret_specs_for_harness: maps opencode to FIREWORKS_API_KEY/opencode/fireworks-api-key and other harnesses to nothing"
+}
+
+test_create_task_passes_fireworks_env_for_opencode() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-task-opencode-env"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-oc1)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace (silent on success)
+  # 3: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  # 4: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  add_fake_aws "$fb"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc1 /tmp/proj opencode' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should still echo '<workspace_id> <surface_id>' (never the secret) for an env-injected opencode spawn, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--env'$'\x1f''FIREWORKS_API_KEY=s3cr3t-fireworks-key' \
+    "create_task did not pass --env FIREWORKS_API_KEY=<value> to new-workspace for an opencode harness"
+  assert_contains "$(cat "$dir/aws-log")" \
+    $'\x1f''secretsmanager'$'\x1f''get-secret-value'$'\x1f''--secret-id'$'\x1f''opencode/fireworks-api-key'$'\x1f''--region'$'\x1f''us-east-1' \
+    "create_task did not fetch the Fireworks key from the documented Secrets Manager secret/region"
+  assert_not_contains "$(cat "$dir/aws-log")" "profile" \
+    "create_task's secret fetch should not hardcode an AWS profile"
+  pass "fm_backend_cmux_create_task: passes --env FIREWORKS_API_KEY=<value> to new-workspace for an opencode spawn"
+}
+
+test_create_task_omits_env_for_non_opencode_harness() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-task-claude-no-env"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-cl1)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  cat > "$fb/aws" <<'SH'
+#!/usr/bin/env bash
+echo "aws should not be invoked for a harness that needs no injected secret" >&2
+exit 1
+SH
+  chmod +x "$fb/aws"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-cl1 /tmp/proj claude' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should still succeed for a harness that needs no injected secret"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''--env' \
+    "create_task should not pass --env for a harness with no configured secret spec"
+  pass "fm_backend_cmux_create_task: passes no --env flags, and never calls aws, for a harness with no configured secret (e.g. claude)"
+}
+
+test_create_task_fails_when_secret_fetch_fails() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-secret-fail"; mkdir -p "$dir/responses"
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  add_fake_aws "$fb"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_EXIT=1 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc-fail /tmp/proj opencode' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the Fireworks secret cannot be fetched, rather than spawning without it"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''new-workspace' \
+    "create_task should never call new-workspace when the required secret fetch failed"
+  assert_contains "$out" "opencode/fireworks-api-key" "create_task's failure did not name the secret it could not fetch"
+  pass "fm_backend_cmux_create_task: fails before creating the workspace when the required secret cannot be fetched"
+}
+
+test_fetch_secret_fails_when_aws_missing() {
+  local dir out status
+  dir="$TMP_ROOT/fetch-secret-no-aws"; mkdir -p "$dir/empty-fakebin"
+  # Same empty-PATH convention as test_version_check_refuses_missing_cmux:
+  # excludes /opt/homebrew/bin and any other dir a real aws CLI might live in.
+  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_fetch_secret opencode/fireworks-api-key' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fetch_secret should fail when the aws CLI is not installed"
+  assert_contains "$out" "aws" "fetch_secret's missing-CLI error did not mention aws"
+  pass "fm_backend_cmux_fetch_secret: fails loudly when the aws CLI is not installed, rather than continuing without the key"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -1033,6 +1158,11 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_secret_specs_for_harness_maps_opencode_only
+test_create_task_passes_fireworks_env_for_opencode
+test_create_task_omits_env_for_non_opencode_harness
+test_create_task_fails_when_secret_fetch_fails
+test_fetch_secret_fails_when_aws_missing
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

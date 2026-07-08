@@ -327,6 +327,17 @@ Same as herdr's tabs and zellij's tabs, unlike tmux's own window-name uniqueness
 Verified live: two workspaces created with the identical title `fm-test-dup` both succeeded and listed simultaneously with distinct ids; two surfaces within one workspace both renamed to the identical tab title also succeeded.
 `fm_backend_cmux_create_task`'s own title-based duplicate check is therefore required, mirroring both prior adapters' posture exactly.
 
+## Provider credential passthrough (`--env`)
+
+A cmux workspace's terminal surface starts with none of firstmate's own process environment worth relying on for provider credentials - unlike tmux/herdr/zellij, which fork a task inside the same host shell and so inherit it, a cmux surface is a fresh GUI-app-spawned process (see the wrapper-stripping finding above for a related, but distinct, case: that one is about the RUNTIME firstmate's own launch environment when firstmate itself runs inside a cmux tab; this one is about the environment of a workspace firstmate just CREATED for a task).
+So an ambient `FIREWORKS_API_KEY` set in firstmate's own shell never reaches a spawned opencode surface, and opencode's Fireworks-backed models (e.g. GLM 5.2) fail outright.
+
+`fm_backend_cmux_create_task` takes an optional third `<harness>` argument and, when that harness needs a provider credential (`fm_backend_cmux_secret_specs_for_harness` - one pairing today, `opencode` -> `FIREWORKS_API_KEY`), fetches it from AWS Secrets Manager (`opencode/fireworks-api-key`, region `us-east-1`, using whatever AWS credentials/profile are already ambient - never a hardcoded profile) and passes it to `new-workspace` as `--env FIREWORKS_API_KEY=<value>`.
+`--env KEY=VALUE` is cmux-control's own verified mechanism for this (`bin/cmuxctl`'s `cmuxNewWorkspace`, which builds one `--env` pair per entry of an `env` object): a real, working `new-workspace` flag firstmate's own adapter simply never used before.
+A failed fetch (missing `aws` CLI, no credentials configured, an empty secret) fails the spawn loudly rather than silently launching opencode without the key it needs.
+The fetched value only ever lands in a shell variable used to build the `--env` argument - never printed, logged, or written to a file - the same convention `fm_backend_cmux_password`/`CMUX_SOCKET_PASSWORD` above already follows for the socket password.
+`bin/fm-spawn.sh` passes the resolved `$HARNESS` through on every cmux spawn; a harness with no configured secret spec (everything except opencode today) triggers no AWS call at all.
+
 ## Composer verification: structural border-row classification (adapted from herdr)
 
 cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and herdr's `--format ansi` path for ANSI-aware ghost/placeholder classification.
