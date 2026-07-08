@@ -78,6 +78,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  repos/<key>.md     per-repo ground truth (architecture facts, studied tool choices, hard constraints); resolved by fm-ground.sh and injected into every crewmate brief so workers never re-improvise a repo's architecture; <key> = repo basename; a `repo-path:` line makes an external repo (outside projects/) first-class
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
@@ -560,6 +561,7 @@ Map firstmate's real backlog operations to the approved commands:
 ## 11. Crewmate briefs
 
 Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
+The scaffold also injects the target repo's ground truth (`data/repos/<key>.md`, resolved via `bin/fm-ground.sh`) as a binding "do not re-derive or guess" section, so crewmates start knowing the repo's real architecture, studied tool choices, and hard constraints; when a repo has no ground-truth file the scaffold warns on stderr - write the file before dispatching anything nontrivial, and fold new hard-won facts (a wrong-guess a worker made, a studied choice, an install) back into it as they surface.
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the harness-appropriate no-mistakes validation pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.

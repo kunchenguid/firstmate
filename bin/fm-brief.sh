@@ -113,10 +113,29 @@ fi
 
 REPO=${POS[1]}
 
+# Ground truth: authoritative facts about the target repo (DB, providers, studied
+# techniques, hard constraints) so the crewmate never re-improvises architecture.
+# Resolved from data/repos/<key>.md via fm-ground.sh; empty + a stderr warning when
+# the repo has none, so the grounding gap is visible rather than silently guessed.
+GROUND_RAW="$("$SCRIPT_DIR/fm-ground.sh" "$REPO" 2>/dev/null || true)"
+if [ -n "$GROUND_RAW" ]; then
+  GROUND="
+# Repo ground truth — authoritative, do not re-derive or guess
+The facts below about this repo are established. Treat them as binding: never
+improvise architecture (DB, providers, models, how it runs) that contradicts them,
+and never \"reach for the cheapest available\" tool — every choice here is studied.
+
+$GROUND_RAW
+"
+else
+  GROUND=""
+  echo "fm-brief: WARNING - no ground truth for '$REPO' (data/repos/). The crewmate starts ungrounded and may guess the architecture; consider adding a data/repos/ file first." >&2
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+$GROUND
 # Task
 {TASK}
 
@@ -206,7 +225,7 @@ esac
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+$GROUND
 # Task
 {TASK}
 
