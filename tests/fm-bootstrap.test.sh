@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-bootstrap.sh tool detection.
+# Behavior tests for fm-bootstrap.sh reporting and session-start clone refresh bounds.
 #
 # Bootstrap prints one block or line per problem or capability fact and is silent when all
 # is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
@@ -9,6 +9,9 @@
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # quota-axi is on PATH, whether the local backend config opts out of tasks-axi
 # backlog mutations, and which no-mistakes version is on PATH.
+# Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
+# override, blank-env defaulting, partial-output relay, and pre-launch timeout
+# scan.
 set -u
 
 # shellcheck source=tests/lib.sh

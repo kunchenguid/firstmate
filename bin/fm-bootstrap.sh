@@ -55,8 +55,12 @@
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
-#          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT, or a fleet-size-aware
-#          default when that override is unset.
+#          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
+#          numeric override, while non-numeric values fall back to 20s.
+#          When the override is unset or blank, the timeout is
+#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
+#          refresh relays any completed fm-fleet-sync.sh output before the
+#          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
 #          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
