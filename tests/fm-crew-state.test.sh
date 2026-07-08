@@ -93,6 +93,9 @@ SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = "--session" ]; then
+  shift 2
+fi
 case "${1:-}" in
   status)
     [ "${2:-}" = --json ] && {

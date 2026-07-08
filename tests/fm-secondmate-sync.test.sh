@@ -371,6 +371,9 @@ make_nudge_herdr_fake() {
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
+if [ "\${1:-}" = "--session" ]; then
+  shift 2
+fi
 cmd=\${1:-}; sub=\${2:-}; arg=\${3:-}
 case "\$cmd \$sub" in
   "status --json")

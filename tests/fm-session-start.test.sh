@@ -175,6 +175,9 @@ make_fake_herdr() {
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
+if [ "\${1:-}" = "--session" ]; then
+  shift 2
+fi
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   [ "\${3:-}" = "$live" ] && exit 0
   exit 1
