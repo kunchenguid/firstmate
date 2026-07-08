@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
 # fm-fleet-board.sh - render the whole fleet as a dark, dense, clickable HTML board.
 #
-# READ-ONLY. Gathers live fleet state and writes one self-contained HTML file
-# (default $FM_HOME/.lavish/fleet-board.html), then prints the output path. It
-# never mutates fleet state: it only reads data/backlog.md, each
-# state/<id>.meta, and each in-flight task's current state via
-# bin/fm-crew-state.sh, and writes the single output HTML file.
+# READ-ONLY and fast. Gathers fleet state from existing files and writes one
+# self-contained HTML file (default $FM_HOME/.lavish/fleet-board.html), then
+# prints the output path. It never mutates fleet state: it reads data/backlog.md,
+# each state/<id>.meta, and each in-flight task's latest state/<id>.status line,
+# and writes the single output HTML file. The deeper, slower reconciled crew
+# state (bin/fm-crew-state.sh, which probes the no-mistakes run-step and pane) is
+# opt-in via --live, so the default invocation stays a sub-second read with no
+# per-task subprocess probe on the critical path.
 #
 # Usage:
-#   fm-fleet-board.sh [--out <path>]
+#   fm-fleet-board.sh [--out <path>] [--live]
+#
+# The thin `bin/fleet` wrapper forwards to this script unchanged, so the board
+# is also reachable by its natural name (e.g. `fleet --live`).
 #
 # Flags:
 #   --out <path>   write the HTML here instead of the default
 #                  ($FM_HOME/.lavish/fleet-board.html).
+#   --live         reconcile each in-flight task's state via bin/fm-crew-state.sh
+#                  (a slower per-task probe); default reads the cheap status tail.
 #   -h, --help     print this help and exit.
+#
+# Environment:
+#   FM_FLEET_BOARD_LIVE=1          default in-flight state to the reconciled
+#                                  --live read (same effect as passing --live).
+#   FM_FLEET_BOARD_USE_SNAPSHOT=0  ignore bin/fm-fleet-snapshot.sh and always
+#                                  gather directly.
 #
 # Data sources, in order of preference. The internal per-task record shape is
 # identical either way, so the snapshot path slots in without a render rewrite:
@@ -22,7 +36,9 @@
 #      used below; on any parse trouble it falls back to (2).
 #   2. Direct gather: data/backlog.md sections (In flight / Queued / Done), each
 #      state/<id>.meta (window=, harness=, model=, effort=, kind=, mode=, pr=),
-#      and bin/fm-crew-state.sh <id> for the current state of in-flight tasks.
+#      and each in-flight task's latest state/<id>.status line for its current
+#      state. With --live, that cheap status-tail read is replaced by the
+#      reconciled bin/fm-crew-state.sh <id> probe.
 #   Set FM_FLEET_BOARD_USE_SNAPSHOT=0 to skip (1) and force the direct gather.
 #
 # The HTML is self-contained (inline CSS, no external assets, dark monospace)
@@ -54,6 +70,7 @@ print_help() {
 }
 
 OUT=""
+LIVE="${FM_FLEET_BOARD_LIVE:-0}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)
@@ -62,6 +79,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --out=*) OUT=${1#--out=}; shift ;;
+    --live) LIVE=1; shift ;;
     -h|--help) print_help; exit 0 ;;
     *) echo "fm-fleet-board.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -191,7 +209,7 @@ parse_backlog_line() {  # <section> <raw-line>
   desc=${desc%%-}
   desc=$(trim "$desc")
 
-  local state="" detail="" window="" harness="" model="" effort="" mode="" branch="" meta wt cs after
+  local state="" detail="" window="" harness="" model="" effort="" mode="" branch="" meta wt cs after statusf lastline verb note
   if [ "$section" = inflight ]; then
     meta="$STATE/$id.meta"
     window=$(meta_val "$meta" window)
@@ -203,17 +221,43 @@ parse_backlog_line() {  # <section> <raw-line>
     if [ -n "$wt" ] && [ -d "$wt" ]; then
       branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
     fi
-    # Current state, read-only, degrading to unknown on any trouble.
-    cs=$("$CREW_STATE_CMD" "$id" 2>/dev/null || true)
-    if [ -n "$cs" ]; then
-      state=${cs#state: }
-      state=${state%% · *}
-      case "$cs" in
-        *' · source: '*)
-          after=${cs#* · source: }
-          case "$after" in *' · '*) detail=${after#* · } ;; esac
-          ;;
-      esac
+    if [ "$LIVE" = 1 ]; then
+      # Opt-in deep read: reconcile run-step, pane, and status log. This is the
+      # slow per-task probe, deliberately kept off the default critical path.
+      cs=$("$CREW_STATE_CMD" "$id" 2>/dev/null || true)
+      if [ -n "$cs" ]; then
+        state=${cs#state: }
+        state=${state%% · *}
+        case "$cs" in
+          *' · source: '*)
+            after=${cs#* · source: }
+            case "$after" in *' · '*) detail=${after#* · } ;; esac
+            ;;
+        esac
+      fi
+    else
+      # Fast default: derive an approximate state from the cheap status-log tail
+      # (its last wake-event line), with no subprocess probe. This can lag a
+      # resolved gate; --live reconciles it against the authoritative run-step.
+      statusf="$STATE/$id.status"
+      if [ -f "$statusf" ]; then
+        lastline=$(grep -v '^[[:space:]]*$' "$statusf" 2>/dev/null | tail -1 || true)
+        if [ -n "$lastline" ]; then
+          case "$lastline" in
+            *:*) verb=$(trim "${lastline%%:*}"); note=$(trim "${lastline#*:}") ;;
+            *)   verb=$(trim "$lastline"); note="" ;;
+          esac
+          case "$verb" in
+            working)        state=working ;;
+            needs-decision) state=parked ;;
+            blocked)        state=blocked ;;
+            "done")         state="done" ;;
+            failed)         state=failed ;;
+            *)              state=$verb ;;
+          esac
+          detail=$note
+        fi
+      fi
     fi
     [ -n "$state" ] || state=unknown
   fi
@@ -431,11 +475,16 @@ render_group() {  # <section> <label> <records>
 }
 
 render_html() {  # <records>
-  local records=$1 ts
+  local records=$1 ts src_note
   ts=$(date '+%Y-%m-%d %H:%M')
+  if [ "$LIVE" = 1 ]; then
+    src_note="in-flight state reconciled live"
+  else
+    src_note="in-flight state from latest status signal (--live to reconcile)"
+  fi
   html_head
   printf '<h1>FLEET BOARD</h1>\n'
-  printf '<div class="sub">Snapshot %s · generated by fm-fleet-board.sh · read-only, click any row for detail</div>\n' "$(html_escape "$ts")"
+  printf '<div class="sub">Snapshot %s · generated by fm-fleet-board.sh · read-only · %s</div>\n' "$(html_escape "$ts")" "$(html_escape "$src_note")"
   render_group inflight "In flight" "$records"
   render_group queued "Queued" "$records"
   render_group "done" "Done" "$records"

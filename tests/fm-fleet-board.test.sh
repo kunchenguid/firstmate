@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-fleet-board.sh - the read-only HTML fleet board.
 #
-# The board renders data/backlog.md + each state/<id>.meta + per-task live state
-# (from a crew-state command, faked here so the suite is hermetic) into one
-# self-contained dark HTML file. These cases pin the contract:
+# The board renders data/backlog.md + each state/<id>.meta + per-task state into
+# one self-contained dark HTML file. The default in-flight state is the cheap
+# state/<id>.status tail; --live opts into the reconciled crew-state probe (faked
+# here so the suite is hermetic). These cases pin the contract:
 #   (a) in-flight / queued / done rows render with the right id, chips, and detail
-#   (b) live crew-state feeds the in-flight state chip and "Now" activity line
+#   (b) with --live, crew-state feeds the in-flight state chip and "Now" line
 #   (c) full https PR urls and scout report paths surface in Done detail
 #   (d) HTML special characters in descriptions are escaped
 #   (e) the file is self-contained: inline <style>, no external asset references
@@ -15,6 +16,8 @@
 #   (i) the default output path is $FM_HOME/.lavish/fleet-board.html
 #   (j) shellcheck passes on the script when shellcheck is installed
 #   (k) the snapshot seam consumes a valid schema and falls back on a mismatch
+#   (l) the fast default derives in-flight state from the status tail, not the probe
+#   (m) the `fleet` wrapper forwards to fm-fleet-board.sh
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,7 +87,7 @@ make_home "$HOME1"
 OUT1="$TMP_ROOT/board1.html"
 
 before=$(tree_fingerprint "$HOME1/data" "$HOME1/state")
-printed=$(FM_HOME="$HOME1" FM_CREW_STATE_CMD="$FAKE_CS" "$BOARD" --out "$OUT1")
+printed=$(FM_HOME="$HOME1" FM_CREW_STATE_CMD="$FAKE_CS" "$BOARD" --live --out "$OUT1")
 after=$(tree_fingerprint "$HOME1/data" "$HOME1/state")
 
 [ "$printed" = "$OUT1" ] || fail "script must print the output path (got: $printed)"
@@ -100,7 +103,7 @@ assert_contains "$html" '<span class="id">tasktwo</span>'  "tasktwo row present"
 assert_contains "$html" '<span class="id">taskdone</span>' "taskdone row present"
 assert_contains "$html" '<span class="id">scoutdone</span>' "scoutdone row present"
 
-# (b) live crew-state drives the in-flight chip and activity line
+# (b) with --live, crew-state drives the in-flight chip and activity line
 assert_contains "$html" '<span class="chip st-work">working</span>' "in-flight working chip from crew-state"
 assert_contains "$html" 'validating (running)' "in-flight Now line from crew-state detail"
 assert_contains "$html" 'claude · claude-opus-4-8 · high effort · firstmate:fm-taskone' "agent line from meta"
@@ -232,10 +235,56 @@ else
   pass "jq not installed - skipping snapshot-seam assertion"
 fi
 
+# --- (l) fast default path vs opt-in --live ---------------------------------
+#
+# The default (no --live) must NOT invoke the slow per-task crew-state probe: it
+# derives the in-flight chip from the last state/<id>.status line. A "loud" stub
+# that emits a sentinel if called proves the probe is bypassed on the fast path
+# and only used under --live.
+LOUD_CS="$TMP_ROOT/loudcs"
+cat > "$LOUD_CS" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: run-step · LIVE PROBE RAN\n'
+SH
+chmod +x "$LOUD_CS"
+
+HOME7="$TMP_ROOT/home7"
+mkdir -p "$HOME7/data" "$HOME7/state"
+printf '## In flight\n- [ ] fasttask - quick glance task (repo: alpha) (kind: ship)\n' > "$HOME7/data/backlog.md"
+fm_write_meta "$HOME7/state/fasttask.meta" "window=firstmate:fm-fasttask" "harness=claude" "kind=ship" "mode=no-mistakes"
+printf 'working: started\nneeds-decision: waiting on the captain\n' > "$HOME7/state/fasttask.status"
+
+OUT8="$TMP_ROOT/board8.html"
+FM_HOME="$HOME7" FM_CREW_STATE_CMD="$LOUD_CS" "$BOARD" --out "$OUT8" >/dev/null || fail "fast-path render exited non-zero"
+fast_html=$(cat "$OUT8")
+assert_contains "$fast_html" '<span class="chip st-work">parked</span>' "fast path derives state from status tail (needs-decision -> parked)"
+assert_contains "$fast_html" 'waiting on the captain' "fast path Now line from status-tail note"
+assert_not_contains "$fast_html" 'LIVE PROBE RAN' "fast path must not invoke the crew-state probe"
+
+OUT9="$TMP_ROOT/board9.html"
+FM_HOME="$HOME7" FM_CREW_STATE_CMD="$LOUD_CS" "$BOARD" --live --out "$OUT9" >/dev/null || fail "--live render exited non-zero"
+live_html=$(cat "$OUT9")
+assert_contains "$live_html" '<span class="chip st-work">working</span>' "--live uses the crew-state probe"
+assert_contains "$live_html" 'LIVE PROBE RAN' "--live surfaces the crew-state probe detail"
+
+pass "fast default derives state from the status tail; --live opts into the crew-state probe"
+
+# --- (m) the `fleet` wrapper forwards to fm-fleet-board.sh -------------------
+
+WRAP="$ROOT/bin/fleet"
+[ -x "$WRAP" ] || fail "bin/fleet wrapper must be executable"
+OUT10="$TMP_ROOT/board10.html"
+wrap_printed=$(FM_HOME="$HOME1" FM_CREW_STATE_CMD="$FAKE_CS" "$WRAP" --out "$OUT10")
+[ "$wrap_printed" = "$OUT10" ] || fail "fleet wrapper must forward args and print the output path (got: $wrap_printed)"
+assert_contains "$(cat "$OUT10")" '<span class="id">taskone</span>' "fleet wrapper renders the same board"
+
+pass "the fleet wrapper forwards to fm-fleet-board.sh"
+
 # --- (j) shellcheck ---------------------------------------------------------
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$BOARD" || fail "shellcheck reported problems in fm-fleet-board.sh"
+  shellcheck "$WRAP" || fail "shellcheck reported problems in bin/fleet"
   pass "shellcheck clean"
 else
   pass "shellcheck not installed - skipping lint assertion"

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# fleet - thin wrapper so the fleet board is reachable by its natural name.
+# Forwards every argument to fm-fleet-board.sh, which owns all behavior, flags,
+# and help; run `fleet --help` for the full contract.
+set -u
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-fleet-board.sh" "$@"
