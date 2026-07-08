@@ -21,6 +21,9 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: healthy pid=<N> (beacon <age>s)             - a genuinely live+fresh watcher already held the lock
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+# On Codex surfaces whose background-completion wake channel is unverified, the
+# started/healthy lines include a DEGRADED diagnostic instead of claiming full
+# one-shot supervision reliability.
 # It NEVER reports started/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this

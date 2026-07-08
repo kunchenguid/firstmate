@@ -11,7 +11,7 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, or when Codex would end with degraded one-shot supervision outside away mode, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to restore reliable supervision.
 
 ## Codex Background Wake Caveat
 
@@ -44,6 +44,7 @@ If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+On Codex surfaces with an unverified background-completion wake channel, a healthy watcher still blocks as degraded supervision unless `state/.afk` exists and the away-mode daemon owns supervision.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
@@ -121,7 +122,7 @@ If Grok declines to load project hooks, this primary guard fails open and `fm-gu
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, the Codex unverified-background-wake turn-end block, and the Grok adapter's forced-resume loop guard and permission-mode regression.
-`tests/fm-watcher-lock.test.sh` covers the matching Codex degraded diagnostics in `fm-watch-arm.sh` and `fm-guard.sh`.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, the Codex unverified-background-wake turn-end block, the away-mode exemption, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-watcher-lock.test.sh` covers the matching Codex degraded diagnostics in `fm-watch-arm.sh` and `fm-guard.sh`, plus the away-mode guard exemption.
 These tests do not invoke live harnesses.
 Live harness validation is the empirical evidence recorded above.

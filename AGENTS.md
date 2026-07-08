@@ -740,15 +740,17 @@ This exception is narrow: ordinary crewmates still trip stale detection when the
 **Watcher liveness is guarded, not just disciplined.**
 Resuming the emitted supervision protocol is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
-The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, or that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
+The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, that beacon is missing or older than `FM_GUARD_GRACE` (default 300s), or Codex has only a fresh watcher on an unverified background wake channel.
 `bin/fm-wake-drain.sh` runs the same guard after it drains, so the liveness check also fires on a drain-and-handle turn that runs no other supervision script, narrowing the window in which a lapsed chain can hide; the grace beacon keeps it silent right after a normal fire and it warns only on a genuine stale-beyond-grace lapse.
 The no-watcher case leads with a prominent, bordered ●-marked banner (in-flight count, beacon age, and the exact one-line repair instruction) so it reads as an alarm rather than a buried stderr line you can skim past.
+The degraded-Codex case uses the same banner style with its own exact recovery guidance.
 The banner is only a supervision warning: the guarded operation still runs.
 When the guarded operation is `fm-send`, `fm-send` sets the banner's continuation line to say explicitly that the requested message WILL still be sent.
 So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling (watcher briefly down between a wake and the next supervision resume) silent.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
 If a guard warning says watcher liveness is stale, drain any queued wakes and then resume the emitted supervision protocol.
+If a guard warning says the Codex wake channel is unverified, run or repair `bin/fm-watch-loop.sh` as the persistent present-mode supervisor.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
@@ -758,7 +760,7 @@ The same assertion runs at session start as the bootstrap `TANGLE:` line inside 
 Two further guards prevent the tangle upstream: `fm-spawn` refuses to launch unless treehouse or Orca yields a genuine isolated worktree distinct from the primary checkout, and every ship brief's first instruction has the crewmate verify it is in its own worktree before branching (section 11).
 
 On every verified primary harness (`claude`, `codex`, `opencode`, `pi`, and `grok`), "no turn ends blind" has a structural backstop beyond the pull-based `fm-guard.sh` banner.
-The shared predicate is `bin/fm-turnend-guard.sh`: when tasks are in flight without a live identity-matched watcher lock and fresh beacon, direct-blocking harnesses block the turn end and passive harnesses force one bounded follow-up turn.
+The shared predicate is `bin/fm-turnend-guard.sh`: when tasks are in flight without a live identity-matched watcher lock and fresh beacon, or with Codex degraded supervision outside away mode, direct-blocking harnesses block the turn end and passive harnesses force one bounded follow-up turn.
 It shares status fields with `fm-guard.sh` via `bin/fm-supervision-lib.sh`, uses `bin/fm-wake-lib.sh` for live watcher lock health, and never blocks or follows up more than once per turn.
 It is scoped to fire only in the actual primary checkout - never in a crewmate/scout worktree or a secondmate home - and stays silent when supervision is healthy.
 See `docs/turnend-guard.md` for the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
