@@ -91,6 +91,21 @@ SH
   done
 }
 
+# fm_test_base_path: a "rest of the system" PATH for tests that restrict PATH
+# to simulate a missing tool. Defaults to the FHS locations, overridable via
+# FM_TEST_BASE_PATH, then prepends the real directories backing bash/coreutils
+# and jq: on a non-FHS host (e.g. NixOS/home-manager) those tools live outside
+# the FHS locations, and not necessarily in the same directory as each other,
+# which breaks every `bash -c`/script-shebang/jq invocation under the
+# restricted PATH regardless of the tool under test.
+fm_test_base_path() {
+  local base=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} tool real_bin
+  for tool in jq cat; do
+    real_bin=$(command -v "$tool" 2>/dev/null) && base="$(dirname "$real_bin"):$base"
+  done
+  printf '%s' "$base"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
