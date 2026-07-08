@@ -11,7 +11,7 @@
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: <window-targets...>",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
 #          worktree was fast-forwarded to firstmate's own current default-branch

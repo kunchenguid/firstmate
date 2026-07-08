@@ -94,6 +94,7 @@ tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-p
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
+tests/fm-secondmate-liveness.test.sh      # session-start secondmate agent-liveness probe and respawn sweep tests
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, optional secondmate model/effort pins, primary-to-secondmate config inheritance, and config-push tests
 tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
 tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, teardown boundary, and child-cleanup fail-closed tests

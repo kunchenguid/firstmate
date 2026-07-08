@@ -30,7 +30,7 @@
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
 #   - The sweep is skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1 (the
-#     read-only session path), matching the other three mutating sweeps.
+#     read-only session path), matching the other mutating sweeps.
 #   - The sweep is naturally scoped to the primary: with no kind=secondmate
 #     meta present (a secondmate's own state/ never holds one, since
 #     secondmates never spawn secondmates), it is a silent no-op.

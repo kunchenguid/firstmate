@@ -145,7 +145,8 @@ Tell the captain another active session is already managing the work and operate
 
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
-The mutating sweeps that run only when locked: fleet sync via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1 (set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning); and a sweep of every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
+The locked fleet-sync sweep runs via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1 (set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning).
+The locked local secondmate sync sweep fast-forwards every live secondmate home's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
 The live set comes from `state/<id>.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 This is a purely local fast-forward (every secondmate home is a worktree of this same repo, sharing one object store), never a fetch from origin and never a surprise pull: the version followed is simply whatever the primary is currently on, which only the captain changes deliberately via `git pull` or `/updatefirstmate`.
 A tracked-files fast-forward never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a dirty, diverged, or in-flight home is skipped untouched.
@@ -174,6 +175,8 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look. A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable; bootstrap continued, but inspect the reason because the secondmate may be stale after a primary update.
+- `SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>` - the session-start liveness sweep checked a live secondmate's recorded endpoint for a real agent process.
+  Treat `already-live` and `respawned` as handled; investigate `skipped` or `respawn failed` because that secondmate is not guaranteed live.
 - `TASKS_AXI: available` - a default-backend capability fact, not a problem; record it silently and use section 10 for backlog mutations.
   It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer.
   If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` but still falls back to hand-editing and never blocks work.

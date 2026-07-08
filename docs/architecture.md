@@ -47,7 +47,7 @@ Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.
-It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, and endpoint teardown.
+It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
 `bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
 New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
@@ -55,6 +55,7 @@ Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
 `fm-watch.sh` polls each window's backend for a busy state: tmux, zellij, orca, and cmux have no native primitive and always report unknown, preserving the original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first for stale detection, with unknown native states falling back to the same regex.
 That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
+The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and herdr have verified classifiers for secondmate recovery, while zellij, Orca, and cmux currently report `unknown` rather than guess.
 Herdr is experimental and can be selected explicitly or by runtime auto-detection: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, created-vs-adopted default-tab prune safety, restored-layout husk respawn idempotency, verified CLI facts, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
 Herdr's container shape is workspace-per-home plus tab-per-task: the primary home uses workspace label `firstmate`, secondmate homes use `2ndmate-<secondmate-id>`, and recovery/list-live scopes to the current `FM_HOME`'s workspace.
 Zellij is experimental and selected only explicitly: treehouse remains its worktree provider too, and its full verification - the resolved "gaps to verify" list from the original design report, the unconditional-exit-0 CLI quirk and its mitigation, the focus-steal-on-new-tab finding, the home-scoped tab-title collision fix, and known gaps - is recorded in `docs/zellij-backend.md`.
@@ -115,6 +116,7 @@ Secondmate homes stay on the same firstmate version as the primary checkout.
 On locked session start, `fm-bootstrap.sh` fast-forwards each live secondmate home recorded in `state/*.meta` to the primary default-branch commit with no origin fetch.
 The live signal is a `state/<id>.meta` record with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` directories untouched.
+The same locked session start probes each live secondmate endpoint for a real agent process and respawns only a confidently dead endpoint; inconclusive probes are reported and never acted on.
 The locked session-start bootstrap step separately propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates, dispatch profiles, and backlog backend use the primary settings.
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged by the tracked-file sync.
@@ -210,6 +212,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
+At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
 
 ## Development notes
