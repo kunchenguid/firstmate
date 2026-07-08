@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 
 let child = null;
-let skipNextIdle = false;
 
 function runProcess(command, args, options = {}) {
   return new Promise((resolve) => {
@@ -31,21 +30,30 @@ async function resolveRoot(anchor) {
   return anchor;
 }
 
-async function isPrimaryRoot(root) {
+function effectivePaths(root) {
+  const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
+  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || fmRoot;
+  const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+  const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
+  return { root: fmRoot, home: fmHome, state, config };
+}
+
+async function isPrimaryRoot(root, home) {
   if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`) || !existsSync(`${root}/state`)) return false;
+  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
   if (existsSync(`${root}/.fm-secondmate-home`)) return false;
+  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
   const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
   if (gitDir.code !== 0 || commonDir.code !== 0) return false;
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
-function shouldArm(root) {
-  if (existsSync(`${root}/state/.afk`)) return false;
-  if (existsSync(`${root}/config/x-mode.env`)) return true;
+function shouldArm(paths) {
+  if (existsSync(`${paths.state}/.afk`)) return false;
+  if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
-    return readdirSync(`${root}/state`).some((name) => name.endsWith(".meta"));
+    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
   } catch {
     return false;
   }
@@ -62,9 +70,15 @@ function firstWakeOrFailure(stdout, stderr, code) {
   return "";
 }
 
-function spawnArm(root, sessionID, client) {
-  child = spawn("bash", ["-lc", "[ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh"], {
-    cwd: root,
+function spawnArm(paths, sessionID, client) {
+  const env = {
+    ...process.env,
+    FM_HOME: paths.home,
+    FM_ROOT_OVERRIDE: paths.root,
+  };
+  child = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh"'], {
+    cwd: paths.root,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -91,30 +105,24 @@ function spawnArm(root, sessionID, client) {
           ],
         },
       });
-      skipNextIdle = true;
     } catch {
-      skipNextIdle = false;
     }
   });
 }
 
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = await resolveRoot(worktree ?? directory);
-  const primary = await isPrimaryRoot(root);
+  const paths = effectivePaths(root);
 
   return {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return;
-      if (!primary) return;
-      if (skipNextIdle) {
-        skipNextIdle = false;
-        return;
-      }
+      if (!(await isPrimaryRoot(paths.root, paths.home))) return;
       if (child) return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
-      if (!shouldArm(root)) return;
-      spawnArm(root, sessionID, client);
+      if (!shouldArm(paths)) return;
+      spawnArm(paths, sessionID, client);
     },
   };
 };

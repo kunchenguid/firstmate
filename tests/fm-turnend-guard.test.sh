@@ -566,6 +566,8 @@ test_pi_extension_forces_followup() {
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
   assert_contains "$content" 'skipNextTurnEnd' "pi extension must carry a loop guard"
+  assert_contains "$content" 'session-start operating block' "pi extension must use harness-neutral repair wording"
+  assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
   pass ".pi primary extension: turn_end forces one follow-up through the shared guard"
 }
 

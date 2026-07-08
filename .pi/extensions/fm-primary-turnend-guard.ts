@@ -36,7 +36,7 @@ export default function (pi: ExtensionAPI) {
     try {
       pi.sendUserMessage(
         "TURN WOULD END BLIND - supervision is off. " +
-          "Run bin/fm-watch-arm.sh as a background task before ending the turn.\n\n" +
+          "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
           result.stderr,
         { deliverAs: "followUp" },
       );
