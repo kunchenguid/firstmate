@@ -23,6 +23,7 @@
 #   2. Direct gather: data/backlog.md sections (In flight / Queued / Done), each
 #      state/<id>.meta (window=, harness=, model=, effort=, kind=, mode=, pr=),
 #      and bin/fm-crew-state.sh <id> for the current state of in-flight tasks.
+#   Set FM_FLEET_BOARD_USE_SNAPSHOT=0 to skip (1) and force the direct gather.
 #
 # The HTML is self-contained (inline CSS, no external assets, dark monospace)
 # and renders standalone in any browser; firstmate may open it via lavish-axi,
@@ -131,7 +132,7 @@ extract_paren() {  # <text> <key>
 }
 
 parse_backlog_line() {  # <section> <raw-line>
-  local section=$1 raw=$2 body id rest repo kind blocked_by pr report done_ref desc
+  local section=$1 raw=$2 body id rest repo kind blocked_by url pr report done_ref desc
   raw="${raw#"${raw%%[![:space:]]*}"}"
   case "$raw" in
     '- [ ] '*) body=${raw#- \[ \] } ;;
@@ -154,12 +155,16 @@ parse_backlog_line() {  # <section> <raw-line>
   kind=$(trim "$(extract_paren "$rest" kind)")
   [ -n "$kind" ] || kind=ship
   blocked_by=$(printf '%s\n' "$rest" | grep -oE 'blocked-by: [A-Za-z0-9_-]+' | head -1 | sed 's/blocked-by: //')
-  pr=$(printf '%s\n' "$rest" | grep -oE 'https://[^ )]+' | head -1)
+  url=$(printf '%s\n' "$rest" | grep -oE 'https://[^ )]+' | head -1)
   report=$(printf '%s\n' "$rest" | grep -oE 'data/[^ )]+report\.md' | head -1)
 
+  # The pr field (rendered under a "PR:" label) is populated only from a Done
+  # row's PR URL or an in-flight task's meta pr= value; a free-form https link
+  # in a queued or in-flight description must not be labeled as a PR.
+  pr=""
   done_ref=""
   if [ "$section" = "done" ]; then
-    if [ -n "$pr" ]; then done_ref=$pr
+    if [ -n "$url" ]; then done_ref=$url; pr=$url
     elif [ -n "$report" ]; then done_ref=$report
     elif printf '%s' "$rest" | grep -q 'local main'; then done_ref="local main"
     fi
@@ -168,7 +173,7 @@ parse_backlog_line() {  # <section> <raw-line>
   # Strip trailing backlog metadata so the description reads cleanly.
   desc=$(printf '%s\n' "$rest" | sed -E \
     's/\(repo:[^)]*\)//g; s/\(kind:[^)]*\)//g; s/\(since[^)]*\)//g; s/\(added[^)]*\)//g; s/\(merged[^)]*\)//g; s/\(reported[^)]*\)//g; s/blocked-by: [A-Za-z0-9_-]+//g')
-  [ -n "$pr" ] && desc=${desc//"$pr"/}
+  [ -n "$url" ] && desc=${desc//"$url"/}
   [ -n "$report" ] && desc=${desc//"$report"/}
   desc=$(printf '%s\n' "$desc" | sed -E 's/[[:space:]]+/ /g')
   desc=$(trim "$desc")
