@@ -759,6 +759,18 @@ run_config_push() {
     "$ROOT/bin/fm-config-push.sh"
 }
 
+seed_healthy_watcher_lock() {
+  local w=$1 state="$w/home/state" identity
+  identity=$(FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+    || fail "could not identify test pid for watcher lock"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  printf '%s\n' "$w/home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+}
+
 # The sweep pushes the primary's inheritable config into a live home, re-converges
 # it when the primary changes it, and mirrors absence when the primary clears it -
 # all while never inheriting secondmate-harness.
@@ -916,6 +928,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  seed_healthy_watcher_lock "$w"
   err="$w/config-push-basic.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
 
