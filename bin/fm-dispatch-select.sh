@@ -150,7 +150,7 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
   def general_ids($h):
     if $h == "claude" then ["five_hour", "seven_day"]
     elif $h == "codex" then ["five_hour", "weekly"]
-    elif $h == "gemini" then false
+    elif $h == "gemini" then ["daily", "rpm"]
     else []
     end;
   def candidate_metric($p; $i):

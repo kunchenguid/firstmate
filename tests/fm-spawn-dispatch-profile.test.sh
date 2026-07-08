@@ -327,6 +327,23 @@ test_pi_omits_invalid_max_effort() {
   pass "pi threads model and omits unsupported max effort"
 }
 
+test_gemini_threads_model_and_ignores_effort_axis() {
+  local rec id out status launch
+  id=profile-gemini-z77
+  rec=$(make_spawn_case profile-gemini gemini "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gemini-3.1-pro --effort high)
+  status=$?
+  expect_code 0 "$status" "gemini spawn with model and ignored effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" gemini gemini-3.1-pro high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "gemini --yolo --model 'gemini-3.1-pro'" \
+    "gemini launch did not thread model"
+  assert_not_contains "$launch" "--effort" "gemini launch must not pass unsupported --effort"
+  pass "gemini receives --model and omits the unsupported effort axis"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -377,6 +394,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
+test_gemini_threads_model_and_ignores_effort_axis
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

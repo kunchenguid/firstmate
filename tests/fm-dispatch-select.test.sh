@@ -38,6 +38,33 @@ write_quota() {
 JSON
 }
 
+write_gemini_quota() {
+  local file=$1 gemini_status=$2 gemini_daily=$3 gemini_rpm=$4 codex_status=$5 codex_five=$6 codex_week=$7
+  mkdir -p "$(dirname "$file")"
+  cat > "$file" <<JSON
+{
+  "providers": [
+    {
+      "provider": "gemini",
+      "state": { "status": "$gemini_status" },
+      "windows": [
+        { "id": "daily", "kind": "session", "percentRemaining": $gemini_daily },
+        { "id": "rpm", "kind": "weekly", "percentRemaining": $gemini_rpm }
+      ]
+    },
+    {
+      "provider": "codex",
+      "state": { "status": "$codex_status" },
+      "windows": [
+        { "id": "five_hour", "kind": "session", "percentRemaining": $codex_five },
+        { "id": "weekly", "kind": "weekly", "percentRemaining": $codex_week }
+      ]
+    }
+  ]
+}
+JSON
+}
+
 profiles='[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]'
 
 test_higher_min_vendor_wins() {
@@ -150,6 +177,23 @@ JSON
   pass "absent or unusable vendors resolve to an available candidate or the first fallback"
 }
 
+test_gemini_quota_evaluation() {
+  local quota out
+  quota="$TMP_ROOT/gemini.json"
+  local gemini_profiles='[{"harness":"gemini","model":"gemini-3.1-pro","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]'
+  
+  write_gemini_quota "$quota" fresh 80 75 fresh 70 60
+  out=$("$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced --quota-json "$quota" "$gemini_profiles")
+  [ "$out" = '{"harness":"gemini","model":"gemini-3.1-pro","effort":"high"}' ] \
+    || fail "gemini should win with higher quota windows, got: $out"
+
+  write_gemini_quota "$quota" fresh 30 80 fresh 90 90
+  out=$("$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced --quota-json "$quota" "$gemini_profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "codex should win when gemini daily window is depleted, got: $out"
+  pass "gemini quota evaluation correctly routes using daily and rpm windows"
+}
+
 test_backward_compatible_first_selection() {
   local fakebin marker out single array_rule
   fakebin=$(fm_fakebin "$TMP_ROOT/no-call")
@@ -181,6 +225,7 @@ test_quota_error_falls_back_to_first
 test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
+test_gemini_quota_evaluation
 test_backward_compatible_first_selection
 
 echo "# all fm-dispatch-select tests passed"
