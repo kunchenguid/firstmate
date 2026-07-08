@@ -32,6 +32,11 @@
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
 # Refuses to overwrite an existing brief.
+# The PR-producing ship modes (no-mistakes and direct-PR) also carry a
+# best-effort "Visual evidence" section - gh-image screenshots, and a recording
+# when one is producible, attached once the PR exists, skipping gracefully via a
+# one-line PR comment (see docs/gh-image-evidence.md); local-only and scout
+# briefs do not carry it because they produce no PR.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
