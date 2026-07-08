@@ -14,7 +14,7 @@
 # scan.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -138,6 +138,7 @@ run_bootstrap_timeout_case() {
   wait_for_marker=${7:-0}
   [ "$#" -lt 4 ] || override=$4
   (
+    # shellcheck disable=SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
@@ -146,6 +147,7 @@ run_bootstrap_timeout_case() {
         command sleep 0.01
       fi
     }
+    # shellcheck disable=SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {
       local tries
       if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
