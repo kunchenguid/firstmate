@@ -35,7 +35,7 @@ function runGuard(root) {
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
-  const root = await resolveRoot(worktree ?? directory);
+  const root = worktree ?? (await resolveRoot(directory));
 
   return {
     event: async ({ event }) => {

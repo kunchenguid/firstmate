@@ -30,6 +30,18 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_git_identity fmtest fmtest@example.invalid
 
+make_base_path_without() {
+  local dir=$1 skip=$2 src name
+  mkdir -p "$dir"
+  for src in /usr/bin/*; do
+    [ -x "$src" ] || continue
+    name=${src##*/}
+    [ "$name" = "$skip" ] && continue
+    [ -e "$dir/$name" ] || ln -s "$src" "$dir/$name"
+  done
+  printf '%s\n' "$dir"
+}
+
 # --- world builders ----------------------------------------------------------
 
 # new_world <name>: a real, throwaway git repo on `main` (so the worktree-tangle
@@ -249,7 +261,7 @@ EOF
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line context_line fleet_line next_line
+  local rec root home fakebin out lock_line boot_line wake_line context_line fleet_line next_line core_path
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -258,10 +270,11 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  core_path=$(make_base_path_without "$TMP_ROOT/no-node-bin" node)
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$core_path")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -393,7 +406,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out core_path
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -401,10 +414,11 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  core_path=$(make_base_path_without "$TMP_ROOT/no-node-composition-bin" node)
 
   append_wake "$home/state" signal task-z "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$core_path")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"

@@ -20,6 +20,18 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 
+make_base_path_without() {
+  local dir=$1 skip=$2 src name
+  mkdir -p "$dir"
+  for src in /usr/bin/*; do
+    [ -x "$src" ] || continue
+    name=${src##*/}
+    [ "$name" = "$skip" ] && continue
+    [ -e "$dir/$name" ] || ln -s "$src" "$dir/$name"
+  done
+  printf '%s\n' "$dir"
+}
+
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
@@ -269,16 +281,17 @@ ROWS
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca core_path
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
+  core_path=$(make_base_path_without "$TMP_ROOT/no-orca-bin" orca)
 
   case_dir="$TMP_ROOT/orca-backend-selected"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  out=$(PATH="$fakebin:$core_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 bash "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
   case_dir="$TMP_ROOT/orca-backend-not-selected"
