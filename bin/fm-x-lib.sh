@@ -83,8 +83,8 @@ fmx_load_config() {
     *) FMX_DRY=1 ;;
   esac
 
-  # Per-tweet character budget for thread-splitting (default 280, X non-premium),
-  # and the maximum number of tweets in one auto-split thread (anti-spam cap).
+  # Per-message character budgets for thread-splitting, and the maximum number
+  # of messages in one auto-split thread (anti-spam cap).
   local maxraw discordraw threadraw
   if [ -n "${FMX_X_REPLY_MAX_CHARS+x}" ]; then maxraw=${FMX_X_REPLY_MAX_CHARS-}; else maxraw=$(fmx_env_get FMX_X_REPLY_MAX_CHARS "$env_file"); fi
   case "$maxraw" in ''|*[!0-9]*) maxraw=280 ;; esac
@@ -467,7 +467,7 @@ fmx_meta_link_set() {
 }
 
 # fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
-# line, preserving every other meta line including x_request/x_request_ts.
+# line, preserving every other meta line including link and reply context.
 # Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_followups_set() {
   local meta=$1 n=$2 tmp
