@@ -1,13 +1,12 @@
 # shellcheck shell=bash
-# Shared "supervision missing" predicate.
+# Shared watcher beacon status helpers.
 # Usage: . bin/fm-supervision-lib.sh
 #
-# True exactly when a firstmate home has in-flight work (a state/<id>.meta
-# exists) but no watcher has a fresh liveness beacon (state/.last-watcher-beat,
-# touched every poll cycle, within the grace window). bin/fm-guard.sh uses this
-# grace-based warning predicate directly; bin/fm-turnend-guard.sh uses the status
-# fields here for its banner but performs its end-of-turn block decision with the
-# live watcher lock check in bin/fm-wake-lib.sh.
+# Reports whether a firstmate home has in-flight work (a state/<id>.meta exists)
+# and whether the watcher beacon (state/.last-watcher-beat, touched every poll
+# cycle) is fresh within the grace window. Guards use these fields for banner
+# context, but live supervision health also requires the identity-matched watcher
+# lock check in bin/fm-wake-lib.sh.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -57,8 +56,9 @@ fm_supervision_status() {
 }
 
 # fm_supervision_unhealthy <state-dir> [grace-seconds]
-# Exit 0 (true) exactly in the dangerous state: in-flight work exists and no
+# Legacy beacon-only predicate. Exit 0 (true) when in-flight work exists and no
 # watcher has a fresh beacon. Exit 1 (false) otherwise, including zero in-flight.
+# New guard decisions should prefer fm_watcher_healthy from bin/fm-wake-lib.sh.
 fm_supervision_unhealthy() {
   fm_supervision_status "$@"
   [ "$FM_SUP_IN_FLIGHT" -gt 0 ] && [ "$FM_SUP_WATCHER_FRESH" = false ]

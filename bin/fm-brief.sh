@@ -9,7 +9,8 @@
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout]
 #        fm-brief.sh <task-id> --secondmate <project>...
 #   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   the absolute firstmate-home path data/<task-id>/report.md (no branch, no
+#   push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
