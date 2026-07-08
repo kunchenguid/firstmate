@@ -649,11 +649,15 @@ test_arm_self_heals_wedged_incumbent() {
   printf '%s\n' "$WATCH"    > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=8 "$WATCH_ARM" > "$armout" &
+  # Give the fork+confirm the default confirm timeout (like test_arm_starts_and_self_heals)
+  # rather than a shortened one - a 'started'-expecting test must not race the confirm
+  # window under load. Only the FAILED-expecting cases pin a short FM_ARM_CONFIRM_TIMEOUT.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
-  while [ "$i" -lt 120 ]; do
+  while [ "$i" -lt 200 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done

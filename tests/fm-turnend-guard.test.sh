@@ -132,9 +132,16 @@ make_crewmate_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
+# Invoke the copied hook fully hermetically over the temp home. SCRIPT_DIR/FM_ROOT
+# already resolve to $dir/bin, but FM_HOME and STATE would otherwise inherit the
+# ambient FM_HOME the real fleet exports into this session, making the hook inspect
+# the real home's state - a leak that flakes these tests whenever the real fleet has
+# in-flight work. Pin both FM_HOME and FM_STATE_OVERRIDE (the highest-precedence
+# state selector) at $dir so every run_hook case reads only its own temp state.
 run_hook() {
   local dir=$1 stop_active=$2
-  printf '{"stop_hook_active":%s}' "$stop_active" | bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -372,7 +379,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy() {
 } >> "$log"
 EOF
   chmod +x "$fakebin/grok"
-  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
   [ -z "$out" ] || fail "grok adapter printed output: $out"
   assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"

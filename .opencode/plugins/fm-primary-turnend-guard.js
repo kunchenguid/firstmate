@@ -17,6 +17,12 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A guard that reads little and exits fast (the common blocked case: it prints
+    // its banner and exits 2 without draining stdin) can close its stdin pipe before
+    // we finish writing, which surfaces as an EPIPE 'error' event on child.stdin. That
+    // is not a failure - the guard already ran - so swallow it rather than let an
+    // unhandled socket error crash the host. The close handler above still resolves.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }
