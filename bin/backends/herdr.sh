@@ -618,6 +618,31 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_herdr_capture_ansi() {  # <target> <lines>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-200} fetch out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fetch=$lines
+  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
+fm_backend_herdr_strip_ansi() {  # <text>
+  local esc
+  esc=$'\033'
+  printf '%s' "$1" | sed "s/${esc}\\[[0-9;?]*[[:alpha:]]//g"
+}
+
+fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
+  local raw=$1 esc
+  esc=$'\033'
+  case "$raw" in
+    *"${esc}[1m❯ ${esc}[0m${esc}[2m"*|*"${esc}[1m› ${esc}[0m${esc}[2m"*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
@@ -651,9 +676,12 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
 #              through to `unknown` instead of being misread as delivered.
 #
-#   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
+#   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder). Safe to treat as submitted.
+#             placeholder), or bare-prompt tail text rendered faint in the ANSI
+#             capture (verified Codex idle suggestions such as "Run /review on
+#             my current changes" and "Find and fix a bug in @filename").
+#             Safe to treat as submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the
@@ -663,16 +691,11 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #   unknown - the pane could not be read, or no composer row (of either shape)
 #             was found in the captured window.
 #
-# KNOWN REMAINING GAP (docs/herdr-backend.md "Incident (2026-07-07)"): codex's
-# idle composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") rather than blank or a fixed placeholder string, so it cannot be
-# told apart from real pending input by pattern matching alone - a genuinely
-# idle codex composer under herdr classifies as "pending", not "empty". This
-# makes injection defer forever rather than redeliver, which is a narrower,
-# already-safe failure mode (the buffer is preserved, never silently lost, and
-# the max-defer wedge alarm still fires) - not fixed here; a real fix needs
-# either an upstream herdr cursor-row/style primitive or a codex-specific
-# signal, neither available today.
+# Codex ghost-suggestion note (2026-07-08): herdr's ANSI pane read preserves the
+# faint SGR style Codex uses for idle suggestions after the bare `›` prompt,
+# while real typed input after the same prompt is not faint. The classifier
+# therefore uses ANSI capture when available and treats a faint bare-prompt tail
+# as empty without weakening protection for real typed input.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -683,9 +706,12 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed stripped="" found=0 shape=""
-  cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
+  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
+    raw_line=$line
+    line=$(fm_backend_herdr_strip_ansi "$line")
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
@@ -693,12 +719,14 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
       '│'*'│'|'┃'*'┃'|'|'*'|')
         stripped=$trimmed
         shape=bordered
+        raw_match=$raw_line
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           stripped=$trimmed
           shape=bare
+          raw_match=$raw_line
           found=1
         fi
         ;;
@@ -728,6 +756,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
     printf 'empty'; return 0
   fi
+  if [ "$shape" = bare ] && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
+    faint_tail=1
+  fi
+  [ "$faint_tail" -eq 1 ] && { printf 'empty'; return 0; }
   printf 'pending'
 }
 

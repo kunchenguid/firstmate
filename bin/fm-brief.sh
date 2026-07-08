@@ -35,6 +35,15 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"

@@ -23,15 +23,18 @@ batched digest rather than per-wake injections.
    This file survives a firstmate restart: recovery re-enters afk if the
    flag is present.
 
-2. **Ensure the sub-supervisor daemon is running.** Check the pid file; start
-   the daemon only if it is dead or absent:
+2. **Ensure the sub-supervisor daemon is running.** Start the helper as its own
+   tracked background terminal/session:
    ```sh
-   if [ -f state/.supervise-daemon.pid ] && kill -0 "$(cat state/.supervise-daemon.pid)" 2>/dev/null; then
-     : # daemon already alive - it picks up the flag on its next cycle
-   else
-     nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &
-   fi
+   bin/fm-afk-start.sh
    ```
+   The helper sets or refreshes `state/.afk`, exits immediately if the daemon
+   pid file already names a live process, and otherwise execs
+   `bin/fm-supervise-daemon.sh` in the foreground.
+   Do not wrap this in `nohup ... &`.
+   Codex/herdr can reap fire-and-forget shell children after a tool call
+   returns; a tracked background terminal/session keeps the daemon attached to
+   the harness lifecycle and survived the real incident reproduction.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
@@ -90,8 +93,8 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   correctly read as empty, not pending. Without this, every idle claude pane
   looked like pending input and the daemon deferred 100% of escalations
   (incident afk-invx-i5). `FM_COMPOSER_IDLE_RE` still overrides empty-composer
-  matching after border stripping. On herdr, the equivalent structural
-  border-row classifier (`fm_backend_herdr_composer_state`,
+  matching after border stripping. On herdr, the equivalent ANSI-aware
+  structural classifier (`fm_backend_herdr_composer_state`,
   docs/herdr-backend.md) plays the same role.
 
 Either condition defers the injection; the buffered escalation survives in
@@ -190,8 +193,8 @@ the marker lets firstmate distinguish it from a real captain message.
   Enter is retried, Enter only and never a retype, until the composer is
   confirmed empty. That empty composer is the acknowledgement that the submit
   landed, using the same dim-ghost-aware and border-aware detector (tmux) or
-  structural border-row classifier (herdr) so a ghost-only or bordered-empty
-  claude composer counts as submitted rather than a false swallowed Enter.
+  ANSI-aware structural classifier (herdr) so a ghost-only or bordered-empty
+  composer counts as submitted rather than a false swallowed Enter.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
