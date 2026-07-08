@@ -168,12 +168,18 @@ parse_backlog_line() {  # <section> <raw-line>
     elif [ -n "$report" ]; then done_ref=$report
     elif printf '%s' "$rest" | grep -q 'local main'; then done_ref="local main"
     fi
+  elif [ "$section" = inflight ]; then
+    local meta_pr
+    meta_pr=$(meta_val "$STATE/$id.meta" pr)
+    [ -n "$meta_pr" ] && pr=$meta_pr
   fi
 
-  # Strip trailing backlog metadata so the description reads cleanly.
+  # Strip trailing backlog metadata so the description reads cleanly. A
+  # free-form https link stays in the description unless it is the URL
+  # promoted to the PR chip; queued/in-flight inline links remain visible.
   desc=$(printf '%s\n' "$rest" | sed -E \
     's/\(repo:[^)]*\)//g; s/\(kind:[^)]*\)//g; s/\(since[^)]*\)//g; s/\(added[^)]*\)//g; s/\(merged[^)]*\)//g; s/\(reported[^)]*\)//g; s/blocked-by: [A-Za-z0-9_-]+//g')
-  [ -n "$url" ] && desc=${desc//"$url"/}
+  if [ -n "$url" ] && [ "$url" = "$pr" ]; then desc=${desc//"$url"/}; fi
   [ -n "$report" ] && desc=${desc//"$report"/}
   desc=$(printf '%s\n' "$desc" | sed -E 's/[[:space:]]+/ /g')
   desc=$(trim "$desc")
@@ -188,9 +194,6 @@ parse_backlog_line() {  # <section> <raw-line>
     model=$(meta_val "$meta" model)
     effort=$(meta_val "$meta" effort)
     mode=$(meta_val "$meta" mode)
-    local meta_pr
-    meta_pr=$(meta_val "$meta" pr)
-    [ -n "$meta_pr" ] && pr=$meta_pr
     wt=$(meta_val "$meta" worktree)
     if [ -n "$wt" ] && [ -d "$wt" ]; then
       branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)

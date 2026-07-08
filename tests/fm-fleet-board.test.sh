@@ -48,6 +48,7 @@ make_home() {  # <home>
 
 ## Queued
 - [ ] tasktwo - A follow up that waits blocked-by: taskone (repo: alpha) (kind: ship) (since 2026-07-08)
+- [ ] taskthree - Investigate https://github.com/acme/alpha/issues/5 (repo: alpha) (kind: scout)
 
 ## Done
 - [x] taskdone - Landed change - https://github.com/acme/alpha/pull/42 (merged 2026-07-08) (repo: alpha) (kind: ship)
@@ -112,6 +113,11 @@ assert_contains "$html" '<span class="chip st-done">done</span>'   "done scout c
 # (c) full https PR url and scout report path
 assert_contains "$html" 'href="https://github.com/acme/alpha/pull/42"' "full PR url link in Done detail"
 assert_contains "$html" 'data/scoutdone/report.md' "scout report path in Done detail"
+
+# a free-form https link in a queued description stays visible and is never
+# promoted to (or stripped for) a PR chip
+assert_contains "$html" 'Investigate https://github.com/acme/alpha/issues/5' "queued inline url stays in description"
+assert_not_contains "$html" '<b>PR:</b> <a href="https://github.com/acme/alpha/issues/5"' "queued inline url must not render as a PR chip"
 
 # (d) HTML escaping of description special characters
 assert_contains "$html" '&quot;quotes&quot; &amp; &lt;angles&gt;' "description special chars escaped"
