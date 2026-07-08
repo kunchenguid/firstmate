@@ -33,7 +33,7 @@ Create an executable Node script with verbs `ensure-running`, `start-thread`, `s
 Use `codex app-server --listen stdio://`, send `initialize` first, then send bare newline JSON request objects with `id`, `method`, and `params`.
 For turns, send `input: [{type:"text", text, text_elements:[]}]`, `cwd`, optional `model`, optional `effort`, `approvalPolicy:"never"`, `approvalsReviewer:"user"`, and `sandboxPolicy:{type:"dangerFullAccess"}`.
 For `start-thread`, start an empty thread and set the name and goal when present.
-For `send-turn`, start the turn in a detached worker so the app-server process stays alive after the parent observes the ready result.
+For `send-turn`, resume the thread in the detached worker before `turn/start` so one-shot app-server processes can load the thread, then keep that app-server process alive after the parent observes the ready result.
 
 - [x] **Step 3: Verify the bridge test passes**
 
@@ -49,7 +49,7 @@ Expected: PASS for bridge request routing and response normalization.
 
 - [x] **Step 1: Write failing adapter tests**
 
-Assert `fm_backend_validate codex-app` succeeds, `fm_backend_validate_spawn codex-app` succeeds, `fm_backend_capture codex-app thread-1 5` calls bridge `turns-list`, `fm_backend_send_text_submit codex-app thread-1 "hello" ...` calls bridge `send-turn`, `fm_backend_busy_state codex-app thread-1` maps active statuses to `busy`, and `fm_backend_target_exists codex-app thread-1` succeeds when bridge `thread-status` returns a known status.
+Assert `fm_backend_validate codex-app` succeeds, `fm_backend_validate_spawn codex-app` succeeds, `fm_backend_capture codex-app thread-1 5` calls bridge `turns-list`, `fm_backend_send_text_submit codex-app thread-1 "hello" ...` calls bridge `send-turn`, bridge `send-turn` calls `thread/resume` before `turn/start`, `fm_backend_busy_state codex-app thread-1` maps active statuses to `busy`, and `fm_backend_target_exists codex-app thread-1` succeeds when bridge `thread-status` returns a known status.
 
 Run: `bash tests/fm-backend-codex-app.test.sh`
 Expected: FAIL because `codex-app` is unknown.
@@ -104,7 +104,7 @@ Record Codex metadata only after the return-channel status line is verified.
 - [x] **Step 4: Add return-channel verification**
 
 Append an instruction to the Codex prompt requiring the worker to write `working: Codex thread started` to the absolute status file before substantive work.
-Pass that status file, expected line, and timeout budget into bridge `send-turn` so the detached worker rejects stale pre-existing lines by reading only from the pre-turn byte offset.
+Pass that status file, expected line, and timeout budget into bridge `send-turn` so the detached worker rejects stale pre-existing lines by reading only from the byte offset recorded before `thread/resume` and `turn/start`.
 If the line is missing, fail with a diagnostic that names the thread id and status path.
 If startup fails, archive the thread and remove the startup worktree only when the worktree is still clean and at the verified base commit; otherwise preserve metadata and the worktree for recovery.
 
