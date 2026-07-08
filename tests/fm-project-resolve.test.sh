@@ -122,6 +122,37 @@ test_json_registry_refuses_subdirectory_canonical_path() {
   pass "projects.json refuses subdirectories as canonical project paths"
 }
 
+test_json_registry_rejects_relative_canonical_path() {
+  local home case_dir repo out status
+  home=$(new_home relative-canonical)
+  case_dir="$TMP_ROOT/relative-canonical"
+  repo="$case_dir/github/flow"
+  make_repo "$repo" dev
+  cat > "$home/data/projects.json" <<'EOF'
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "github/flow",
+      "gitCommonDir": "github/flow/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(cd "$case_dir" && FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$RESOLVE" --field canonical_path flow 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "projects.json entry with relative canonicalPath resolved"
+  assert_contains "$out" "canonicalPath must be absolute" "relative canonicalPath should fail before cwd normalization"
+  pass "projects.json rejects relative canonicalPath values"
+}
+
 test_json_registry_rejects_codex_owned_canonical_path() {
   local home repo codex_home out status
   home=$(new_home codex-root)
@@ -319,6 +350,80 @@ EOF
   pass "projects.json list rejects duplicate project ids and canonical paths"
 }
 
+test_json_registry_direct_resolution_rejects_duplicate_matches() {
+  local home first second first_real second_real out status
+  home=$(new_home duplicate-json-direct)
+  first="$TMP_ROOT/duplicate-json-direct/github/flow"
+  second="$TMP_ROOT/duplicate-json-direct/github/other-flow"
+  make_repo "$first" dev
+  make_repo "$second" dev
+  first_real=$(cd "$first" && pwd -P)
+  second_real=$(cd "$second" && pwd -P)
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    },
+    {
+      "projectId": "flow",
+      "canonicalPath": "$second_real",
+      "gitCommonDir": "$second_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --field canonical_path flow 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "direct projectId resolution accepted duplicate projectId entries"
+  assert_contains "$out" "duplicate projectId" "direct projectId lookup should reject duplicate ids"
+
+  cat > "$home/data/projects.json" <<EOF
+{
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "flow",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    },
+    {
+      "projectId": "flow-copy",
+      "canonicalPath": "$first_real",
+      "gitCommonDir": "$first_real/.git",
+      "defaultBranch": "dev",
+      "baseRef": "refs/remotes/origin/dev",
+      "mode": "direct-PR",
+      "yolo": false
+    }
+  ]
+}
+EOF
+
+  out=$(run_resolve "$home" --field project_id "$first_real" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "direct canonicalPath resolution accepted duplicate canonicalPath entries"
+  assert_contains "$out" "duplicate canonicalPath" "direct canonicalPath lookup should reject duplicate paths"
+  pass "projects.json direct resolution rejects duplicate project ids and canonical paths"
+}
+
 test_json_registry_rejects_invalid_policy_fields() {
   local home repo repo_real out status
   home=$(new_home invalid-policy)
@@ -445,12 +550,14 @@ test_json_registry_resolves_external_project_identity
 test_markdown_registry_fallback_still_works
 test_json_registry_refuses_linked_worktree_as_canonical
 test_json_registry_refuses_subdirectory_canonical_path
+test_json_registry_rejects_relative_canonical_path
 test_json_registry_rejects_codex_owned_canonical_path
 test_json_registry_malformed_file_fails_closed
 test_json_registry_list_malformed_file_fails_closed
 test_json_registry_requires_explicit_policy_fields
 test_json_registry_list_rejects_missing_project_id
 test_json_registry_list_rejects_duplicate_ids_and_paths
+test_json_registry_direct_resolution_rejects_duplicate_matches
 test_json_registry_rejects_invalid_policy_fields
 test_json_registry_matches_physical_canonical_path
 test_explicit_path_outside_managed_projects_does_not_borrow_legacy_policy

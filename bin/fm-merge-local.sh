@@ -24,9 +24,27 @@ META="$STATE/$ID.meta"
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+PROJECT_BASE_REF=$(grep '^project_base_ref=' "$META" | tail -1 | cut -d= -f2- || true)
 
 default_branch() {
-  local ref branch
+  local ref branch remote_ref
+  if [ -n "$PROJECT_BASE_REF" ]; then
+    case "$PROJECT_BASE_REF" in
+      refs/remotes/*)
+        remote_ref=${PROJECT_BASE_REF#refs/remotes/}
+        branch=${remote_ref#*/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+      refs/heads/*)
+        branch=${PROJECT_BASE_REF#refs/heads/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+      origin/*)
+        branch=${PROJECT_BASE_REF#origin/}
+        [ -n "$branch" ] && { echo "$branch"; return 0; }
+        ;;
+    esac
+  fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"

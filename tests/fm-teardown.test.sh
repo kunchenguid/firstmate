@@ -53,6 +53,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -140,12 +141,14 @@ SH
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
+  shift 3
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "$@"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -178,19 +181,37 @@ wt_commit_file() {
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
 }
 
+add_registered_dev_base() {
+  local case_dir=$1
+  git -C "$case_dir/project" checkout -q -b dev main
+  printf '%s\n' dev > "$case_dir/project/dev-base.txt"
+  git -C "$case_dir/project" add dev-base.txt
+  git -C "$case_dir/project" commit -q -m "dev baseline"
+  git -C "$case_dir/project" push -q origin dev
+  git -C "$case_dir/project" fetch -q origin dev
+  git -C "$case_dir/project" checkout -q main
+  git -C "$case_dir/wt" reset -q --hard refs/remotes/origin/dev
+}
+
 # Land <file>=<content> as a single commit on origin's default branch, simulating a
 # squash merge whose net change matches the task branch but whose commit differs.
 # After this, the branch's content is in origin/main even though the branch's own
 # commits are not reachable from it. Args: case_dir file content
-land_on_origin_main() {
-  local case_dir=$1 file=$2 content=$3 tmp
+land_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
   tmp="$case_dir/_land"
   git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -B "$branch" "origin/$branch"
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
-  git -C "$tmp" push -q origin HEAD:main
+  git -C "$tmp" push -q origin HEAD:"$branch"
   rm -rf "$tmp"
+}
+
+land_on_origin_main() {
+  local case_dir=$1 file=$2 content=$3
+  land_on_origin_branch "$case_dir" main "$file" "$content"
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
@@ -404,6 +425,14 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+run_merge_local() {
+  local case_dir=$1
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$MERGE_LOCAL" task-x1
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -493,6 +522,64 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_local_only_registered_base_ref_teardown_uses_local_branch() {
+  local case_dir rc wt_head
+  case_dir=$(make_case local-dev-teardown)
+  add_registered_dev_base "$case_dir"
+  write_meta "$case_dir" local-only ship "project_base_ref=refs/remotes/origin/dev"
+  wt_commit "$case_dir" "merged work on dev"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/dev "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-dev-teardown: teardown should accept work merged into registered dev branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-dev-teardown: teardown printed a REFUSED line"
+  pass "local-only teardown uses registered base ref branch"
+}
+
+test_no_mistakes_content_fallback_uses_registered_base_ref() {
+  local case_dir rc
+  case_dir=$(make_case content-dev)
+  add_registered_dev_base "$case_dir"
+  write_meta "$case_dir" no-mistakes ship "project_base_ref=refs/remotes/origin/dev"
+  wt_commit_file "$case_dir" feature.txt hello "dev feature"
+  land_on_origin_branch "$case_dir" dev feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-dev: teardown should find landed content on registered dev base"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-dev: teardown printed a REFUSED line"
+  pass "content fallback uses registered base ref branch"
+}
+
+test_merge_local_registered_base_ref_uses_local_branch() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merge-local-dev)
+  add_registered_dev_base "$case_dir"
+  git -C "$case_dir/project" checkout -q dev
+  write_meta "$case_dir" local-only ship "project_base_ref=refs/remotes/origin/dev"
+  wt_commit "$case_dir" "dev work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-local-dev: local merge should target registered dev branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merge-local-dev: merge printed a REFUSED line"
+  [ "$(git -C "$case_dir/project" rev-parse dev)" = "$wt_head" ] \
+    || fail "merge-local-dev: dev did not fast-forward to task head"
+  pass "fm-merge-local uses registered base ref branch"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1008,6 +1095,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_registered_base_ref_teardown_uses_local_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
@@ -1019,6 +1107,7 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_no_mistakes_content_fallback_uses_registered_base_ref
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
@@ -1028,3 +1117,4 @@ test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
 test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
+test_merge_local_registered_base_ref_uses_local_branch

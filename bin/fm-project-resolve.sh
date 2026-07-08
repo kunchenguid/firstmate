@@ -160,7 +160,7 @@ fallback_default_branch() {
 }
 
 json_registry_project() {
-  local arg=$1 arg_real raw entries entry candidate candidate_real
+  local arg=$1 arg_real matches count entries entry candidate candidate_real matched_count matched_entry
   arg_real=
   [ -f "$JSON_REG" ] || return 1
   command -v jq >/dev/null 2>&1 || {
@@ -170,27 +170,52 @@ json_registry_project() {
   if [ -d "$arg" ]; then
     arg_real=$(real_existing_dir "$arg")
   fi
-  raw=$(jq -c --arg arg "$arg" '
-    first(.projects[]? | select((.projectId // "") == $arg or (.canonicalPath // "") == $arg)) // empty
-  ' "$JSON_REG") || return 2
-  if [ -n "$raw" ]; then
-    printf '%s\n' "$raw"
+  matches=$(jq -c --arg arg "$arg" '[.projects[]? | select((.projectId // "") == $arg)]' "$JSON_REG") || return 2
+  count=$(printf '%s\n' "$matches" | jq -r 'length') || return 2
+  if [ "$count" -gt 1 ]; then
+    echo "error: duplicate projectId in $JSON_REG: $arg" >&2
+    return 2
+  fi
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' "$matches" | jq -c '.[0]'
     return 0
   fi
+
+  matches=$(jq -c --arg arg "$arg" '[.projects[]? | select((.canonicalPath // "") == $arg)]' "$JSON_REG") || return 2
+  count=$(printf '%s\n' "$matches" | jq -r 'length') || return 2
+  if [ "$count" -gt 1 ]; then
+    echo "error: duplicate canonicalPath in $JSON_REG: $arg" >&2
+    return 2
+  fi
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' "$matches" | jq -c '.[0]'
+    return 0
+  fi
+
   [ -n "$arg_real" ] || return 1
   entries=$(jq -c '.projects[]?' "$JSON_REG") || return 2
+  matched_count=0
+  matched_entry=
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     candidate=$(printf '%s\n' "$entry" | jq -r '.canonicalPath // empty') || return 2
     [ -n "$candidate" ] || continue
     candidate_real=$(real_existing_dir "$candidate" 2>/dev/null || true)
     if [ -n "$candidate_real" ] && [ "$candidate_real" = "$arg_real" ]; then
-      printf '%s\n' "$entry"
-      return 0
+      matched_count=$((matched_count + 1))
+      [ "$matched_count" -ne 1 ] || matched_entry=$entry
     fi
   done <<EOF
 $entries
 EOF
+  if [ "$matched_count" -gt 1 ]; then
+    echo "error: duplicate canonicalPath in $JSON_REG: $arg_real" >&2
+    return 2
+  fi
+  if [ "$matched_count" -eq 1 ]; then
+    printf '%s\n' "$matched_entry"
+    return 0
+  fi
   return 1
 }
 
@@ -315,6 +340,10 @@ normalize_json_project() {
   origin=$(printf '%s\n' "$project" | jq -r '.remotes.origin // empty')
   fork=$(printf '%s\n' "$project" | jq -r '.remotes.fork // empty')
 
+  case "$canonical" in
+    /*) ;;
+    *) echo "error: project $project_id canonicalPath must be absolute: $canonical" >&2; return 1 ;;
+  esac
   canonical=$(real_existing_dir "$canonical") || {
     echo "error: project $project_id canonicalPath is not a directory: $canonical" >&2
     return 1
