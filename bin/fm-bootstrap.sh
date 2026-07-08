@@ -10,14 +10,16 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
-#                 "NUDGE_SECONDMATES: <window-targets...>",
+#                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          A NUDGE_SECONDMATES line lists the RUNNING secondmate windows whose
-#          worktree was fast-forwarded to firstmate's own current default-branch
-#          commit (a purely LOCAL fast-forward, never an origin fetch) AND whose
-#          instruction surface (AGENTS.md, bin/, or .agents/skills/) actually
-#          changed; firstmate nudges each to re-read.
+#          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
+#          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
+#          current default-branch commit (a purely LOCAL fast-forward, never an
+#          origin fetch) AND whose instruction surface (AGENTS.md, bin/, or
+#          .agents/skills/) actually changed; firstmate nudges each via
+#          bin/fm-send.sh fm-<id> so meta resolves the current backend target
+#          even when the same bootstrap run also respawned the secondmate.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inheritable local config
 #          into each validated live secondmate home.
@@ -135,7 +137,7 @@ secondmate_sync() {
   # .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Mirrors
   # fm-update's nudge-secondmates: report so firstmate can live-converge the
-  # listed windows.
+  # listed fm-<id> selectors.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
