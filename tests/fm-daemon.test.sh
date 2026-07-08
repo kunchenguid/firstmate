@@ -804,7 +804,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
 # regardless of what runtime backend is running this test suite itself.
 
 make_herdr_agent_list_fakebin() {  # <dir> <agent-list-json-file>
-  local dir=$1 json=$2 fakebin="$dir/fakebin"
+  local dir=$1 json=$2
+  local fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
