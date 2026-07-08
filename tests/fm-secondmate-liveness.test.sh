@@ -255,8 +255,8 @@ add_sm_home() {
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
-    FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" "$@" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+    FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
+    env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
 test_sweep_respawns_confirmed_dead_secondmate() {
@@ -349,11 +349,15 @@ test_sweep_skipped_under_detect_only() {
   local w fb tmuxfb log out
   w=$(new_world sweep-detect-only)
   add_sm_home "$w" sm1 firstmate:fm-sm1
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_DETECT_ONLY=1)
 
+  assert_contains "$out" "CREW_HARNESS_OVERRIDE: codex" \
+    "detect-only should still execute fm-bootstrap.sh's read-only diagnostics"
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
     "the read-only detect-only path must never run the mutating liveness sweep"
   [ ! -s "$log" ] || fail "detect-only must never touch any endpoint: $(cat "$log")"
