@@ -264,8 +264,37 @@ test_loop_yields_when_afk_appears() {
   pass "watch loop yields promptly when AFK appears while watcher child is idle"
 }
 
+test_loop_preserves_queue_when_afk_appears() {
+  local dir state fakebin out err loop_pid
+  dir=$(make_case afk-preserves-queue)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/loop.out"
+  err="$dir/loop.err"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_LOOP_TICK=0.1 \
+    FM_POLL=10 FM_SIGNAL_GRACE=0.1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$LOOP" > "$out" 2> "$err" &
+  loop_pid=$!
+  wait_for_watch_lock_pid "$state" >/dev/null || {
+    stop_loop "$loop_pid"
+    fail "watch loop did not start a watcher before AFK queue preservation check"
+  }
+
+  append_wake "$state" signal task "$state/task.status"
+  : > "$state/.afk"
+  if ! wait_for_pattern "$out" "state/.afk appeared" 60; then
+    stop_loop "$loop_pid"
+    fail "watch loop did not report yielding after AFK appeared with queued wakes: $(cat "$out")"
+  fi
+  wait "$loop_pid" 2>/dev/null || true
+  [ -s "$state/.wake-queue" ] || fail "watch loop drained queued wakes after AFK appeared"
+  pass "watch loop preserves queued wakes when AFK appears"
+}
+
 test_loop_drains_signal_and_rearms
 test_loop_singleton_rejects_duplicate
 test_loop_adopts_existing_watcher
 test_loop_refuses_afk
 test_loop_yields_when_afk_appears
+test_loop_preserves_queue_when_afk_appears

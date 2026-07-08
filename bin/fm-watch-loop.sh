@@ -136,6 +136,10 @@ say "started pid=${BASHPID:-$$} (present-mode persistent re-arm; no AFK injectio
 drain_if_pending() {
   local rc
   [ -s "$FM_WAKE_QUEUE" ] || return 0
+  if [ -e "$STATE/.afk" ]; then
+    say "stopping because state/.afk appeared; away-mode daemon owns watcher supervision"
+    cleanup
+  fi
   say "draining queued wakes"
   record_drain_marker || true
   "$DRAIN"
