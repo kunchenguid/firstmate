@@ -209,9 +209,9 @@ test_drain_dedupes_obvious_duplicates() {
 
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
-# plain drain-and-handle turn that runs no other supervision script. It must warn
-# when work is in flight with no live watcher, and stay silent right after a
-# normal fire (a fresh beacon within grace), so it never false-alarms every wake.
+# plain drain-and-handle turn that runs no other supervision script. A fresh
+# beacon by itself is not healthy because the watcher may have exited after a
+# wake; the drain must still warn when no live watcher lock exists.
 test_drain_asserts_watcher_liveness() {
   local dir state err
   dir=$(make_case drain-liveness)
@@ -223,10 +223,9 @@ test_drain_asserts_watcher_liveness() {
   : > "$err"
   touch "$state/.last-watcher-beat"
   FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
-  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed right after a normal fire (fresh beacon within grace)"
-  fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent right after a fire"
+  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not warn when a fresh beacon had no live watcher lock"
+  grep -F 'No live watcher has a fresh home-scoped lock' "$err" >/dev/null || fail "drain did not explain fresh-beacon/no-process accurately"
+  pass "drain asserts watcher liveness: a fresh beacon without a live lock still warns"
 }
 
 test_concurrent_append_and_drain

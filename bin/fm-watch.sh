@@ -217,6 +217,23 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+stale_wake_reason() {  # <window> <task>
+  local win=$1 task=$2 line detail
+  [ -n "$task" ] || { printf 'stale: %s' "$win"; return 0; }
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
+  case "$line" in
+    'state: parked '*)
+      detail=${line#* · source: }
+      detail=${detail#* · }
+      [ -n "$detail" ] || detail="parked"
+      printf 'stale: %s (crew parked: %s)' "$win" "$detail"
+      ;;
+    *)
+      printf 'stale: %s' "$win"
+      ;;
+  esac
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -530,11 +547,13 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              task=$(window_to_task "$w" "$STATE")
+              reason=$(stale_wake_reason "$w" "$task")
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              mark_surfaced "$STATE/$task.status"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -564,10 +583,12 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed non-terminal stale (provably working): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              task=$(window_to_task "$w" "$STATE")
+              reason=$(stale_wake_reason "$w" "$task")
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              wake "stale: $w"
+              wake "$reason"
             fi
           else
             wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"

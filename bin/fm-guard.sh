@@ -5,13 +5,13 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
-# missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
-# banner so the agent cannot skim past it in the tool output of whatever it was
-# doing - the one channel every harness has. Normal wake handling (watcher
-# briefly down between a wake and its re-arm) stays inside the grace window and
-# stays silent. Always exits 0: the guard warns, it never blocks.
+# Then, if any task is in flight (a state/<id>.meta exists) and no live watcher
+# has this home's identity-matched lock plus a fresh liveness beacon
+# (state/.last-watcher-beat, touched every poll cycle), prints a loud, clearly
+# delimited banner so the agent cannot skim past it in the tool output of
+# whatever it was doing - the one channel every harness has. A queued wake with a
+# fresh beacon is reported as an actionable watcher exit, not a silent watcher
+# lapse. Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,9 +59,11 @@ if [ -n "$tangle_branch" ]; then
 fi
 
 # Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
+# grace-based status helper (bin/fm-supervision-lib.sh), then require the same
+# live identity-matched watcher lock that fm-watch-arm.sh and fm-turnend-guard.sh
+# trust. Only act with tasks in flight; count them so the banner can say how much
+# is riding on an absent watcher.
+WATCH="$SCRIPT_DIR/fm-watch.sh"
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
@@ -69,10 +71,17 @@ beacon_desc=$FM_SUP_BEACON_DESC
 [ "$in_flight" -eq 0 ] && exit 0
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
+watcher_healthy=false
+if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  watcher_healthy=true
+fi
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line.
-if [ "$watcher_fresh" = false ]; then
+# No live+fresh watcher with tasks in flight is the dangerous state: emit a
+# prominent, bordered banner FIRST so it reads as an alarm, not a buried stderr
+# line. A queued wake plus a fresh beacon usually means the watcher exited
+# correctly after surfacing an actionable wake; call that out instead of calling
+# it a silent watcher-down lapse.
+if [ "$watcher_healthy" = false ]; then
   if [ "$READ_ONLY" -eq 1 ]; then
     fix='Watcher repair belongs to the session holding the fleet lock; do not drain or re-arm from this read-only session.'
   elif "$queue_pending"; then
@@ -80,11 +89,18 @@ if [ "$watcher_fresh" = false ]; then
   else
     fix='Re-arm it NOW: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
   fi
+  if "$queue_pending" && [ "$watcher_fresh" = true ]; then
+    title='WATCHER EXITED AFTER ACTIONABLE WAKE'
+    state_line='A watcher recently beat, then exited after queueing work for firstmate.'
+  else
+    title='WATCHER DOWN - SUPERVISION IS OFF'
+    state_line='No live watcher has a fresh home-scoped lock.'
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
-    printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-    printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    printf '●  %s\n' "$title"
+    printf '●  %s task(s) in flight. %s (last beat: %s, grace %ss).\n' "$in_flight" "$state_line" "$beacon_desc" "$GRACE"
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else

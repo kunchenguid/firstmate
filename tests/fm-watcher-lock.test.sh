@@ -101,7 +101,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is re-arm-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line
+  local dir state err first banner_line queue_line live identity watch_path
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -136,12 +136,48 @@ test_guard_warnings() {
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
+  watch_path="$ROOT/bin/fm-watch.sh"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") || fail "could not identify fake watcher pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_path" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
+  # Non-git FM_ROOT keeps the worktree-tangle check inert so "healthy watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
   pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
+}
+
+test_guard_distinguishes_actionable_exit_from_silent_down() {
+  local dir state err first banner_line queue_line
+  dir=$(make_case guard-actionable-exit)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  append_wake "$state" stale "test:fm-task" "stale: test:fm-task" || fail "guard stale append failed"
+
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
+  case "$first" in
+    '●'*) ;;
+    *) fail "actionable-exit banner is not the first thing the guard prints (got '$first')" ;;
+  esac
+  grep -F 'WATCHER EXITED AFTER ACTIONABLE WAKE' "$err" >/dev/null || fail "guard did not distinguish an actionable watcher exit"
+  grep -F 'recently beat, then exited after queueing work' "$err" >/dev/null || fail "guard did not explain the fresh-beacon/no-process state"
+  grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about the pending wake"
+  ! grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard mislabeled an actionable exit as silent watcher down"
+  banner_line=$(grep -n 'WATCHER EXITED AFTER ACTIONABLE WAKE' "$err" | head -1 | cut -d: -f1)
+  queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
+  [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the actionable-exit banner"
+  pass "guard distinguishes a queued actionable watcher exit from a silent watcher-down lapse"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -649,6 +685,7 @@ test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_distinguishes_actionable_exit_from_silent_down
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency

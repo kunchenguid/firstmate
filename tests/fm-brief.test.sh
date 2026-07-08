@@ -93,7 +93,23 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_scout_brief_uses_absolute_report_path() {
+  local home id brief
+  home="$TMP_ROOT/scout-home"
+  mkdir -p "$home/data"
+  id="brief-scout-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "Write your findings to this exact absolute path: \`$home/data/$id/report.md\`." "$brief" \
+    "scout brief must give an absolute report path so scouts do not write under the scratch worktree"
+  assert_no_grep "Write your findings to \`data/$id/report.md\`" "$brief" \
+    "scout brief regressed to a relative report path"
+  pass "fm-brief.sh: scout briefs pin the report handoff to an absolute firstmate-home path"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_scout_brief_uses_absolute_report_path

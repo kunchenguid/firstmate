@@ -41,6 +41,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+case "$DATA" in /*) ;; *) DATA="$(cd "$(dirname "$DATA")" && pwd -P)/$(basename "$DATA")" ;; esac
+case "$STATE" in /*) ;; *) STATE="$(cd "$(dirname "$STATE")" && pwd -P)/$(basename "$STATE")" ;; esac
 KIND=ship
 POS=()
 for a in "$@"; do
@@ -159,7 +161,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to this exact absolute path: \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
