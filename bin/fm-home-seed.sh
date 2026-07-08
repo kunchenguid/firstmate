@@ -17,6 +17,9 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
+#       Project sources are resolved through fm-project-resolve.sh, so a parent
+#       data/projects.json can seed an external canonical checkout into the child
+#       home's projects/ directory and preserve its JSON-backed base ref and policy.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary

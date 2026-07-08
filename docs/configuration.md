@@ -40,7 +40,7 @@ A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herd
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-A codex-app task additionally records `thread_id=`, `codex_cwd=`, and `worktree_provider=git-worktree`, with `window=` set to the Codex thread id for shared selector compatibility.
+A codex-app task additionally records `thread_id=`, `codex_cwd=`, `project_id=`, optional `project_base_ref=`, and `worktree_provider=git-worktree`, with `window=` set to the Codex thread id for shared selector compatibility.
 Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 Spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
@@ -94,6 +94,7 @@ Use it when a project lives outside `$FM_HOME/projects`, when the safe base bran
 The file is local and gitignored because it records one captain's filesystem paths and workflow defaults.
 When it is present, `bin/fm-project-resolve.sh` is the only supported machine reader.
 Scripts should consume resolver fields instead of parsing either registry file directly.
+If the JSON sidecar is malformed, ambiguous, or violates the resolver contract, resolver consumers fail closed instead of silently falling back to legacy project paths.
 
 Schema version 1:
 
@@ -132,6 +133,7 @@ Required fields are `projectId`, `canonicalPath`, `defaultBranch`, `baseRef`, `m
 `canonicalPath` must be an absolute path to the full canonical checkout.
 It must not be a linked Git worktree, a path under `$CODEX_HOME/worktrees`, the filesystem root, an ancestor path, or another disposable task-worktree root.
 For new work, `baseRef` is authoritative and must point at the safe starting ref, such as `refs/remotes/origin/dev`.
+The resolver accepts `refs/remotes/origin/<defaultBranch>`, `origin/<defaultBranch>`, or `refs/heads/<defaultBranch>` and rejects a `baseRef` that names a different branch.
 The canonical checkout's current branch or dirty state is not a base-selection signal.
 
 First-use onboarding should confirm:
@@ -150,8 +152,10 @@ Explicit adoption of an existing Codex worktree needs task-level ownership metad
 
 `bin/fm-project-resolve.sh --field <field> <project>` prints a single normalized field.
 `bin/fm-project-resolve.sh --json <project>` prints the normalized resolver object.
+`bin/fm-project-resolve.sh --shell <project>` prints shell-quoted `fm_project_*` assignments for script consumers.
 `bin/fm-project-resolve.sh --list` prints registered project ids and canonical paths for fleet-wide consumers.
 When `data/projects.json` is absent, the resolver falls back to `data/projects.md` and `$FM_HOME/projects/<project-id>`.
+When the sidecar is present, `--list` still merges in legacy projects under `$FM_HOME/projects` that are not already represented by id or canonical path.
 
 ## Secondmate routes (data/secondmates.md)
 

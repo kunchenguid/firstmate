@@ -53,6 +53,9 @@ The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
+It resolves each requested project through `fm-project-resolve.sh`, so a parent registry entry can point at an external canonical checkout instead of `$FM_HOME/projects/<id>`.
+For JSON-backed projects, seeding materializes matching `data/projects.md` policy and writes a child `data/projects.json` entry whose canonical path points at the child clone.
+For legacy markdown-backed projects, seeding removes any stale child JSON entry for that project so the child resolves through its local `projects/<id>` clone.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.

@@ -266,7 +266,7 @@ FM_BACKEND=codex-app
 No runtime auto-detection in the first pass.
 Running inside Codex Desktop is common for the primary supervisor, but auto-selecting the backend would surprise users who still want tmux, herdr, zellij, or cmux from inside Codex.
 
-When `backend=codex-app` is selected, bootstrap requires `codex`, `codex app-server --help`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
+When `backend=codex-app` is selected, bootstrap requires `codex`, `codex app-server --help`, `node`, `gh`, `jq`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
 It intentionally skips `tmux` and `treehouse` for this backend because Codex Desktop owns the visible thread and Firstmate uses a plain git worktree.
 It also skips Treehouse compatibility probes when Treehouse is not in the selected required-tool set.
 
@@ -282,7 +282,8 @@ Implemented tests:
 
 - Backend selection accepts `codex-app` only after it is listed as known and spawn-capable.
 - `fm-spawn.sh --backend codex-app` refuses `--secondmate`.
-- Spawn records `backend=codex-app`, `thread_id=`, and `codex_cwd=`.
+- Spawn records `backend=codex-app`, `thread_id=`, `codex_cwd=`, `project_id=`, optional `project_base_ref=`, and `worktree_provider=git-worktree`.
+- Spawn uses a registered `baseRef` as the git-worktree base when `data/projects.json` supplies one.
 - Spawn refuses when the returned `codex_cwd` equals the primary checkout.
 - Spawn accepts a status-file return-channel write that arrives after the old five-second startup window.
 - Spawn refuses when the status-file return channel is not verified.
@@ -306,7 +307,7 @@ The higher-risk implementation areas are:
 
 - `bin/fm-backend.sh`: lists `codex-app` as known and spawn-capable, sources `bin/backends/codex-app.sh`, and dispatches capture, send, kill, busy state, and target existence.
 - `bin/backends/codex-app.sh`: implements bridge-backed adapter functions and keeps all JSON/protocol parsing out of generic scripts.
-- `bin/fm-spawn.sh`: owns the `codex-app` creation branch, skips terminal-send launch plumbing, acquires a shell-side worktree before thread creation, writes Codex-specific meta fields, and verifies the status return channel.
+- `bin/fm-spawn.sh`: owns the `codex-app` creation branch, skips terminal-send launch plumbing, resolves the project registry, acquires a shell-side worktree before thread creation, writes Codex-specific and project identity meta fields, and verifies the status return channel.
 - `bin/fm-watch.sh`: relies on semantic `busy` and `idle` from `fm_backend_busy_state`; deeper notification integration is deferred.
 - `bin/fm-crew-state.sh`: keeps using the backend dispatcher; richer Codex-specific state can be added later if needed.
 - `bin/fm-teardown.sh`: relies on existing landed-work checks, then maps endpoint removal to thread archive.
