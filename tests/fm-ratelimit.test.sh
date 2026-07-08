@@ -71,9 +71,14 @@ Claude usage limit reached. Your limit will reset at 4 PM (UTC).'
   pass "ratelimit matcher is anchored to the footer tail"
 }
 
-test_resume_success_is_silent_and_records_trail() {
+# An accepted `continue` submit whose limit footer still renders is NOT recovery:
+# the pane kept taking input while rate-limited (a mis-parsed or fallback reset, a
+# weekly cap, or a harness that accepts input during an active limit). The resume
+# must count it as one attempt and leave the marker so .attempts accumulates toward
+# the FM_RATELIMIT_MAX_RESUMES escalation instead of being wiped as a false success.
+test_accepted_submit_while_limited_counts_attempt_not_recovery() {
   local dir state marker out now
-  dir="$TMP_ROOT/resume-success"
+  dir="$TMP_ROOT/resume-accepted-still-limited"
   state="$dir/state"
   mkdir -p "$state"
   now=$(date +%s)
@@ -84,12 +89,77 @@ test_resume_success_is_silent_and_records_trail() {
   fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
   fm_backend_composer_state() { printf 'empty'; }
   fm_backend_send_text_submit() { printf 'empty'; }
-  out=$(FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 fm_ratelimit_resume_scan "$state")
-  [ -z "$out" ] || fail "successful resume printed an escalation: $out"
-  [ ! -e "$marker" ] || fail "successful resume did not clear marker"
+  out=$(FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state")
+  [ -z "$out" ] || fail "accepted-but-still-limited resume escalated early: $out"
+  [ -e "$marker" ] || fail "accepted-but-still-limited resume wiped the marker as a false success"
+  [ "$(cat "$marker.attempts" 2>/dev/null)" = 1 ] \
+    || fail "accepted-but-still-limited resume did not record a resume attempt: $(cat "$marker.attempts" 2>/dev/null)"
+  if [ -e "$state/.wake-queue" ] && grep "$(printf '\tratelimited-resumed\t')" "$state/.wake-queue" >/dev/null 2>&1; then
+    fail "accepted-but-still-limited resume falsely recorded a ratelimited-resumed success"
+  fi
+  pass "an accepted continue that stays rate-limited counts as an attempt, not a recovery"
+}
+
+# Repeated accepted-but-still-limited submits accumulate .attempts across scans and
+# eventually exhaust to .ratelimit.failed + escalation, so a crew that keeps
+# swallowing `continue` while rate-limited still surfaces to the captain rather than
+# being re-parked into silence forever.
+test_accepted_submit_still_limited_exhausts_across_scans() {
+  local dir state marker out now rc
+  dir="$TMP_ROOT/resume-accepted-exhaust"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf 'empty'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state" >/dev/null
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state" >/dev/null
+  [ "$(cat "$marker.attempts" 2>/dev/null)" = 2 ] \
+    || fail "attempts did not accumulate across scans on accepted-but-still-limited submits: $(cat "$marker.attempts" 2>/dev/null)"
+  [ ! -e "$marker.failed" ] || fail "resume exhausted before reaching FM_RATELIMIT_MAX_RESUMES"
+  out=$(FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state") && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "final scan did not return the exhaustion code: rc=$rc"
+  printf '%s' "$out" | grep -F 'ratelimit auto-resume exhausted' >/dev/null \
+    || fail "accepted-but-still-limited exhaustion did not escalate: $out"
+  [ -e "$marker.failed" ] || fail "accepted-but-still-limited exhaustion left no failed marker"
+  grep "$(printf '\tcheck\t')" "$state/.wake-queue" >/dev/null \
+    || fail "accepted-but-still-limited exhaustion did not append an escalation wake"
+  pass "repeated accepted-but-still-limited continues accumulate and exhaust to escalation"
+}
+
+# The happy path: a limited pane accepts `continue` (attempt recorded, marker kept),
+# then on the next scan its footer no longer renders a limit, so recovery clears the
+# whole marker set silently - a successfully-resumed pane never false-exhausts.
+test_resume_submit_then_recovery_clears_marker() {
+  local dir state marker now
+  dir="$TMP_ROOT/resume-then-recover"
+  state="$dir/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  marker="$state/task.ratelimit"
+  printf '%s\ttest:fm-task\tclaude\n' "$((now - 10))" > "$marker"
+  fm_backend_target_exists() { return 0; }
+  fm_backend_busy_state() { printf 'idle'; }
+  fm_backend_composer_state() { printf 'empty'; }
+  fm_backend_send_text_submit() { printf 'empty'; }
+  # Scan 1: still limited -> attempt recorded, marker preserved.
+  fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state" >/dev/null
+  [ -e "$marker" ] || fail "first resume attempt wiped the marker before recovery"
+  [ "$(cat "$marker.attempts" 2>/dev/null)" = 1 ] || fail "first resume attempt was not recorded"
+  # Scan 2: footer no longer shows a limit -> recovery clears the marker set.
+  fm_backend_capture() { printf 'a healthy idle prompt with no limit in sight\n'; }
+  FM_STATE_OVERRIDE="$state" FM_RATELIMIT_MARGIN=0 FM_RATELIMIT_MAX_RESUMES=3 fm_ratelimit_resume_scan "$state" >/dev/null
+  [ ! -e "$marker" ] || fail "recovered pane did not clear its marker after resume"
+  [ ! -e "$marker.attempts" ] || fail "recovered pane did not clear its attempts counter"
   grep "$(printf '\tratelimited-resumed\t')" "$state/.wake-queue" >/dev/null \
-    || fail "successful resume did not append ratelimited-resumed trail wake"
-  pass "successful ratelimit auto-resume is silent and leaves an audit wake"
+    || fail "recovery after resume did not append a ratelimited-resumed trail wake"
+  pass "a limited pane that accepts continue then recovers clears its marker without false exhaustion"
 }
 
 test_resume_exhaustion_escalates_and_leaves_marker() {
@@ -326,7 +396,9 @@ test_crew_resume_submits_plain_unmarked_continue() {
 test_reset_parser_handles_iana_timezone_and_dst
 test_reset_parser_handles_utc_24h_and_fallback
 test_footer_match_is_tail_anchored
-test_resume_success_is_silent_and_records_trail
+test_accepted_submit_while_limited_counts_attempt_not_recovery
+test_accepted_submit_still_limited_exhausts_across_scans
+test_resume_submit_then_recovery_clears_marker
 test_resume_exhaustion_escalates_and_leaves_marker
 test_marker_write_preserves_active_episode_reset
 test_resume_self_recovered_clears_without_submit

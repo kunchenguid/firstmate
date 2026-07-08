@@ -414,14 +414,6 @@ EOF
     resume_text='continue'
     [ "$id" = firstmate ] && resume_text="${FM_INJECT_MARK}continue"
     verdict=$(fm_backend_send_text_submit "$backend" "$window" "$resume_text" "${FM_SEND_RETRIES:-3}" "${FM_SEND_SLEEP:-0.4}" 0.3 "$label" 2>/dev/null) || verdict=send-failed
-    if [ "$verdict" = empty ]; then
-      rm -f "$marker" "$attempts_file" "$marker.failed" 2>/dev/null || true
-      if command -v fm_wake_append >/dev/null 2>&1; then
-        STATE="$state" FM_WAKE_QUEUE="$state/.wake-queue" FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock" \
-          fm_wake_append ratelimited-resumed "$id" "ratelimited-resumed: $id $window" >/dev/null 2>&1 || true
-      fi
-      continue
-    fi
     if [ "$attempts" -ge "$max" ]; then
       reason="check: $marker: ratelimit auto-resume exhausted after $attempts attempts for $id ($window; verdict=$verdict)"
       {

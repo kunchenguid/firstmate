@@ -1053,13 +1053,17 @@ housekeeping() {  # <state>
 }
 
 detect_supervisor_ratelimit() {  # <state>
-  local state=$1 target backend tail match reset kind
+  local state=$1 target backend tail match reset kind reuse_reset
   target="${FM_SUPERVISOR_TARGET:-}"
   backend="${FM_SUPERVISOR_BACKEND:-}"
   [ -n "$target" ] && [ -n "$backend" ] || return 0
   fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1 || return 0
   tail=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 0
-  match=$(fm_ratelimit_render_match "$tail" || true)
+  reuse_reset=""
+  if [ ! -e "$state/firstmate.ratelimit.failed" ]; then
+    reuse_reset=$(fm_ratelimit_marker_reset "$state" firstmate "$target" firstmate 2>/dev/null || true)
+  fi
+  match=$(fm_ratelimit_render_match "$tail" "" "$reuse_reset" || true)
   [ -n "$match" ] || return 0
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match

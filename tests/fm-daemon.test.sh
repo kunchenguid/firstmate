@@ -136,6 +136,40 @@ test_ratelimited_wake_self_handles() {
   pass "ratelimited watcher wake self-handles in the away-mode daemon"
 }
 
+# detect_supervisor_ratelimit must reuse an already-parked firstmate marker's reset
+# epoch instead of re-parsing the footer (re-spawning python) every housekeeping
+# cycle, mirroring the watcher's crew path. A .failed marker suppresses reuse so an
+# exhausted pane re-derives fresh and can return to normal escalation.
+test_supervisor_ratelimit_reuses_marker_reset() {
+  local dir state target
+  dir=$(make_supercase super-rl-reuse)
+  state="$dir/state"
+  target="sess:0"
+  printf '%s\t%s\tfirstmate\n' 4242 "$target" > "$state/firstmate.ratelimit"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+    fm_ratelimit_render_match() { printf '%s' "${3:-}" > "$state/reuse-arg"; printf '%s\tratelimit\n' "${3:-9999}"; }
+    fm_ratelimit_marker_write() { return 1; }
+    fm_wake_append() { :; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" detect_supervisor_ratelimit "$state"
+  )
+  [ "$(cat "$state/reuse-arg" 2>/dev/null)" = 4242 ] \
+    || fail "detect_supervisor_ratelimit did not reuse the recorded reset: $(cat "$state/reuse-arg" 2>/dev/null)"
+  : > "$state/firstmate.ratelimit.failed"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_capture() { printf 'Claude usage limit reached. Your limit will reset at 1 PM (UTC).\n'; }
+    fm_ratelimit_render_match() { printf '%s' "${3:-}" > "$state/reuse-arg-failed"; printf '%s\tratelimit\n' "${3:-9999}"; }
+    fm_ratelimit_marker_write() { return 1; }
+    fm_wake_append() { :; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" detect_supervisor_ratelimit "$state"
+  )
+  [ -z "$(cat "$state/reuse-arg-failed" 2>/dev/null)" ] \
+    || fail "detect_supervisor_ratelimit reused a reset while .failed present: $(cat "$state/reuse-arg-failed" 2>/dev/null)"
+  pass "supervisor ratelimit detection reuses an active marker reset and re-parses fresh when exhausted"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1672,6 +1706,7 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_ratelimited_wake_self_handles
+test_supervisor_ratelimit_reuses_marker_reset
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
