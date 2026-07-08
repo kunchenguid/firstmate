@@ -556,7 +556,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc alt_dir
+  local out lock attempt=0 max_retries lock_desc alt_dir alt_lock_retry=0
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -578,10 +578,14 @@ teardown_treehouse_return() {
             return 0
           fi
           [ -n "$out" ] && printf '%s\n' "$out" >&2
+          if treehouse_return_is_index_lock_error "$out"; then
+            dir=$alt_dir
+            alt_lock_retry=1
+          fi
         fi
         ;;
     esac
-    return 1
+    [ "$alt_lock_retry" -eq 1 ] || return 1
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
