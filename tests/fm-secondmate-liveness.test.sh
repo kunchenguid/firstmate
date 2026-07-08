@@ -238,7 +238,7 @@ new_world() {
 # worktree; a non-git home just makes the unrelated fast-forward sweep log a
 # harmless "not a git repo" skip.
 add_sm_home() {
-  local w=$1 id=$2 window=$3
+  local w=$1 id=$2 window=$3 harness=${4:-claude}
   local home="$w/$id"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -247,6 +247,7 @@ add_sm_home() {
   {
     printf 'window=%s\n' "$window"
     printf 'kind=secondmate\n'
+    printf 'harness=%s\n' "$harness"
     printf 'home=%s\n' "$home"
   } > "$w/home/state/$id.meta"
 }
@@ -308,6 +309,21 @@ test_sweep_never_acts_on_inconclusive_reading() {
   pass "sweep: a transient/unknown probe reading is reported but never acted on"
 }
 
+test_sweep_never_acts_on_unverified_harness_dead_reading() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unverified-harness)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 custom-agent
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: liveness probe inconclusive" \
+    "an unverified harness should not let a dead-looking endpoint become actionable"
+  [ ! -s "$log" ] || fail "an unverified harness must NEVER trigger a kill or respawn: $(cat "$log")"
+  pass "sweep: an unverified harness makes a dead-looking probe inconclusive"
+}
+
 test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
@@ -367,6 +383,7 @@ test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
+test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
