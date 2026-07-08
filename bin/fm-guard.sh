@@ -20,6 +20,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
+actionable_exit_recent=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
@@ -71,6 +72,9 @@ beacon_desc=$FM_SUP_BEACON_DESC
 [ "$in_flight" -eq 0 ] && exit 0
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
+if [ -e "$STATE/.watch-actionable-exit" ] && [ "$(fm_path_age "$STATE/.watch-actionable-exit")" -lt "$GRACE" ]; then
+  actionable_exit_recent=true
+fi
 watcher_healthy=false
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   watcher_healthy=true
@@ -89,7 +93,7 @@ if [ "$watcher_healthy" = false ]; then
   else
     fix='Re-arm it NOW: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
   fi
-  if "$queue_pending" && [ "$watcher_fresh" = true ]; then
+  if { "$queue_pending" || "$actionable_exit_recent"; } && [ "$watcher_fresh" = true ]; then
     title='WATCHER EXITED AFTER ACTIONABLE WAKE'
     state_line='A watcher recently beat, then exited after queueing work for firstmate.'
   else

@@ -60,6 +60,7 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+ACTIONABLE_EXIT="$STATE/.watch-actionable-exit"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
@@ -81,6 +82,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+rm -f "$ACTIONABLE_EXIT" 2>/dev/null || true
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -256,6 +258,7 @@ wake() {
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  touch "$ACTIONABLE_EXIT"
   echo "$1"
   exit 0
 }

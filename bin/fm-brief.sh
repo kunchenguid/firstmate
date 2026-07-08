@@ -41,8 +41,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-case "$DATA" in /*) ;; *) DATA="$(cd "$(dirname "$DATA")" && pwd -P)/$(basename "$DATA")" ;; esac
-case "$STATE" in /*) ;; *) STATE="$(cd "$(dirname "$STATE")" && pwd -P)/$(basename "$STATE")" ;; esac
+case "$DATA" in /*) ;; *) mkdir -p "$(dirname "$DATA")"; DATA="$(cd "$(dirname "$DATA")" && pwd -P)/$(basename "$DATA")" ;; esac
+case "$STATE" in /*) ;; *) mkdir -p "$(dirname "$STATE")"; STATE="$(cd "$(dirname "$STATE")" && pwd -P)/$(basename "$STATE")" ;; esac
 KIND=ship
 POS=()
 for a in "$@"; do

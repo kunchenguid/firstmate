@@ -108,8 +108,27 @@ test_scout_brief_uses_absolute_report_path() {
   pass "fm-brief.sh: scout briefs pin the report handoff to an absolute firstmate-home path"
 }
 
+test_relative_home_can_create_new_parent() {
+  local run_dir id brief status
+  run_dir="$TMP_ROOT/relative-run"
+  mkdir -p "$run_dir"
+  id="brief-relative-e1"
+  (
+    cd "$run_dir" || exit 1
+    FM_HOME="new-home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "fm-brief.sh should scaffold into a new relative FM_HOME"
+  brief="$run_dir/new-home/data/$id/brief.md"
+  assert_present "$brief" "relative FM_HOME brief was not scaffolded"
+  assert_grep "Write your findings to this exact absolute path: \`$run_dir/new-home/data/$id/report.md\`." "$brief" \
+    "relative FM_HOME scout report path was not canonicalized after creating the parent"
+  pass "fm-brief.sh: relative FM_HOME may create a new parent"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_scout_brief_uses_absolute_report_path
+test_relative_home_can_create_new_parent

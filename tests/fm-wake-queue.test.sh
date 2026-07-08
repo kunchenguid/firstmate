@@ -63,6 +63,7 @@ test_signal_catchup_without_running_watcher() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
+  [ -e "$state/.watch-actionable-exit" ] || fail "watcher did not mark its actionable exit"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
 
@@ -228,6 +229,25 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: a fresh beacon without a live lock still warns"
 }
 
+test_drain_preserves_actionable_exit_classification() {
+  local dir state err out
+  dir=$(make_case drain-actionable-exit)
+  state="$dir/state"
+  err="$dir/drain.err"
+  out="$dir/drain.out"
+  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  touch "$state/.last-watcher-beat"
+  touch "$state/.watch-actionable-exit"
+  append_wake "$state" stale "test:fm-x" "stale: test:fm-x" || fail "seed stale wake failed"
+
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" > "$out" 2> "$err" || fail "drain failed with actionable-exit marker"
+  grep -F 'stale: test:fm-x' "$out" >/dev/null || fail "drain did not print the queued stale wake"
+  [ ! -s "$state/.wake-queue" ] || fail "drain did not empty the wake queue"
+  grep -F 'WATCHER EXITED AFTER ACTIONABLE WAKE' "$err" >/dev/null || fail "post-drain guard lost the actionable-exit classification"
+  ! grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "post-drain guard mislabeled an actionable exit as watcher down"
+  pass "drain preserves actionable-exit classification after emptying the queue"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -236,3 +256,4 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_drain_preserves_actionable_exit_classification
