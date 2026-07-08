@@ -342,6 +342,45 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+add_not_managed_then_logical_lock_aware_treehouse() {
+  local case_dir=$1 physical=$2 logical=$3
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "\$@"; do
+    case "\$a" in
+      --force) ;;
+      *) wt=\$a ;;
+    esac
+  done
+  printf '%s\n' "\$wt" >> "$case_dir/treehouse-calls"
+  case "\$wt" in
+    "$physical") echo "worktree \$wt is not managed by treehouse" >&2; exit 1 ;;
+    "$logical")
+      lock=\$(git -C "\$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+      case "\$lock" in
+        /*|'') ;;
+        *) lock="\$wt/\$lock" ;;
+      esac
+      if [ -n "\$lock" ] && [ -e "\$lock" ]; then
+        echo "fatal: Unable to create '\$lock': File exists." >&2
+        echo "Another git process seems to be running in this repository." >&2
+        exit 128
+      fi
+      exit 0
+      ;;
+  esac
+  echo "unexpected treehouse return path: \$wt" >&2
+  exit 2
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 add_transient_git_process_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -1120,6 +1159,50 @@ test_treehouse_return_retries_alternate_home_spelling() {
   pass "treehouse return retries the alternate HOME spelling after a not-managed failure"
 }
 
+test_alternate_home_spelling_uses_stale_lock_cleanup() {
+  local case_dir rc real_home logical_home physical_wt logical_wt lock calls
+  case_dir=$(make_case alternate-home-stale-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  real_home="$case_dir/real-home"
+  logical_home="$case_dir/logical-home"
+  mkdir -p "$real_home"
+  mv "$case_dir/wt" "$real_home/wt"
+  ln -s "$real_home" "$logical_home"
+  physical_wt="$real_home/wt"
+  logical_wt="$logical_home/wt"
+  write_meta "$case_dir" no-mistakes ship
+  sed -i "s|^worktree=.*|worktree=$physical_wt|" "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree repair "$real_home" >/dev/null 2>&1 || true
+
+  add_not_managed_then_logical_lock_aware_treehouse "$case_dir" "$physical_wt" "$logical_wt"
+  add_lsof_no_holder "$case_dir"
+  lock=$(git_index_lock_path "$logical_wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  HOME="$logical_home" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "alternate-home-stale-lock: teardown should clear a stale lock on the alternate path"
+  calls=$(cat "$case_dir/treehouse-calls")
+  [ "$calls" = "$physical_wt"$'\n'"$logical_wt"$'\n'"$logical_wt"$'\n'"$logical_wt" ] \
+    || fail "alternate-home-stale-lock: wrong treehouse retry sequence"$'\n'"$calls"
+  assert_grep "retrying alternate home spelling $logical_wt" "$case_dir/stderr" \
+    "alternate-home-stale-lock: teardown did not try the alternate spelling"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "alternate-home-stale-lock: teardown did not run stale-lock cleanup for the alternate spelling"
+  assert_absent "$lock" "alternate-home-stale-lock: stale lock file should have been removed"
+  pass "alternate HOME spelling return uses stale-lock cleanup before giving up"
+}
+
 test_treehouse_return_retries_git_process_lock_once_without_removing_lock() {
   local case_dir rc lock calls
   case_dir=$(make_case transient-git-process-lock)
@@ -1222,5 +1305,6 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree
 test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_treehouse_return_retries_alternate_home_spelling
+test_alternate_home_spelling_uses_stale_lock_cleanup
 test_treehouse_return_retries_git_process_lock_once_without_removing_lock
 test_git_process_lock_message_still_reaches_stale_cleanup

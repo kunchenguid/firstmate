@@ -577,32 +577,10 @@ finish_treehouse_return_after_retry_failed() {
   return 1
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a stale git
-# lock left by a killed crew process. On failure: wait briefly and retry once
-# (the owning process may be exiting), then - only if the lock is provably
-# stale - remove it and retry once more. A lock that is not provably stale is
-# left untouched and the original failure is surfaced to the caller.
-teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock out alt_dir
+recover_treehouse_return_failure() {
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} failed_output=$5 lock
 
-  if out=$(treehouse_return_once "$dir" "$cd_dir" 2>&1); then
-    [ -z "$out" ] || printf '%s\n' "$out"
-    return 0
-  fi
-  [ -z "$out" ] || printf '%s\n' "$out" >&2
-
-  if treehouse_return_output_not_managed "$out"; then
-    alt_dir=$(alternate_home_spelling_for_dir "$dir" || true)
-    if [ -n "$alt_dir" ]; then
-      echo "teardown: $label return was not managed as $dir; retrying alternate home spelling $alt_dir" >&2
-      if treehouse_return_once "$alt_dir" "$cd_dir"; then
-        echo "teardown: $label return succeeded with alternate home spelling" >&2
-        return 0
-      fi
-    fi
-  fi
-
-  if treehouse_return_output_git_process_lock "$out"; then
+  if treehouse_return_output_git_process_lock "$failed_output"; then
     echo "teardown: $label return failed with transient git process lock; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying once" >&2
     sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
     if treehouse_return_once "$dir" "$cd_dir"; then
@@ -631,6 +609,40 @@ teardown_treehouse_return() {
   fi
 
   finish_treehouse_return_after_retry_failed "$dir" "$cd_dir" "$label" "$post_cleanup_check" "$lock"
+}
+
+# Return a worktree/home via `treehouse return --force`, tolerating a stale git
+# lock left by a killed crew process. On failure: wait briefly and retry once
+# (the owning process may be exiting), then - only if the lock is provably
+# stale - remove it and retry once more. A lock that is not provably stale is
+# left untouched and the original failure is surfaced to the caller.
+teardown_treehouse_return() {
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} out alt_dir alt_out status
+
+  if out=$(treehouse_return_once "$dir" "$cd_dir" 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out"
+    return 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+
+  if treehouse_return_output_not_managed "$out"; then
+    alt_dir=$(alternate_home_spelling_for_dir "$dir" || true)
+    if [ -n "$alt_dir" ]; then
+      echo "teardown: $label return was not managed as $dir; retrying alternate home spelling $alt_dir" >&2
+      if alt_out=$(treehouse_return_once "$alt_dir" "$cd_dir" 2>&1); then
+        [ -z "$alt_out" ] || printf '%s\n' "$alt_out"
+        echo "teardown: $label return succeeded with alternate home spelling" >&2
+        return 0
+      fi
+      [ -z "$alt_out" ] || printf '%s\n' "$alt_out" >&2
+      recover_treehouse_return_failure "$alt_dir" "$cd_dir" "$label" "$post_cleanup_check" "$alt_out"
+      status=$?
+      [ "$status" -eq 0 ] && return 0
+      [ "$status" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] && return "$status"
+    fi
+  fi
+
+  recover_treehouse_return_failure "$dir" "$cd_dir" "$label" "$post_cleanup_check" "$out"
 }
 
 validate_worktree_teardown_safety() {
