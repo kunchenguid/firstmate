@@ -69,8 +69,9 @@ SH
 # one already holding a fake `cmux` from make_cmux_fakebin), so opencode
 # create_task tests can fake both tools from one PATH entry. Logs every
 # invocation (one line, unit-separated args) to $FM_AWS_LOG and either exits
-# $FM_AWS_FAKE_EXIT (default 0) or prints $FM_AWS_FAKE_SECRET (default
-# 'fake-fireworks-key') on stdout, mirroring make_cmux_fakebin's
+# $FM_AWS_FAKE_EXIT (default 0) after printing $FM_AWS_FAKE_STDERR (default
+# an AccessDenied-shaped diagnostic) to stderr, or prints $FM_AWS_FAKE_SECRET
+# (default 'fake-fireworks-key') on stdout, mirroring make_cmux_fakebin's
 # log-and-canned-response convention. Never a real network call.
 add_fake_aws() {  # <fakebin-dir>
   local fb=$1
@@ -84,10 +85,29 @@ LOG="${FM_AWS_LOG:?}"
   printf '\n'
 } >> "$LOG"
 exit_code=${FM_AWS_FAKE_EXIT:-0}
-[ "$exit_code" -eq 0 ] || exit "$exit_code"
+if [ "$exit_code" -ne 0 ]; then
+  printf '%s\n' "${FM_AWS_FAKE_STDERR:-An error occurred (AccessDeniedException) when calling the GetSecretValue operation}" >&2
+  exit "$exit_code"
+fi
 printf '%s' "${FM_AWS_FAKE_SECRET:-fake-fireworks-key}"
 SH
   chmod +x "$fb/aws"
+}
+
+# write_cmux_env_secrets: write a config/cmux-env-secrets under <dir>/config
+# pairing opencode with the Fireworks secret (the motivating pairing,
+# docs/cmux-backend.md "Provider credential passthrough (--env)"), plus a
+# comment and blank line to exercise the parser, and echo the config dir for
+# use as FM_CONFIG_OVERRIDE. The adapter itself ships no hardcoded pairing.
+write_cmux_env_secrets() {  # <dir> -> echoes config dir
+  local cfg="$1/config"
+  mkdir -p "$cfg"
+  {
+    printf '# provider credentials injected into cmux workspaces at spawn\n'
+    printf '\n'
+    printf 'opencode FIREWORKS_API_KEY opencode/fireworks-api-key us-east-1\n'
+  } > "$cfg/cmux-env-secrets"
+  printf '%s\n' "$cfg"
 }
 
 cmux_workspace_list_response() {  # <dir> <n> <id1> <title1> [<id2> <title2> ...]
@@ -521,27 +541,38 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
-# --- create_task: opencode Fireworks env passthrough (--env) -----------------
+# --- create_task: provider-credential env passthrough (--env) ----------------
 #
 # cmux workspaces get none of firstmate's own process environment (heavily
-# scrubbed at spawn time, docs/cmux-backend.md "Environment scrubbing"), so an
-# opencode spawn needs FIREWORKS_API_KEY injected explicitly via `new-workspace
-# --env KEY=VALUE`. These tests fake both `cmux` and `aws` (add_fake_aws) so no
-# real AWS call is ever made.
+# scrubbed at spawn time, docs/cmux-backend.md "Environment scrubbing"), so a
+# harness paired with a provider credential in the local, gitignored
+# config/cmux-env-secrets (e.g. opencode -> FIREWORKS_API_KEY) needs it
+# injected explicitly via `new-workspace --env KEY=VALUE`. These tests
+# configure the pairing via write_cmux_env_secrets/FM_CONFIG_OVERRIDE and fake
+# both `cmux` and `aws` (add_fake_aws) so no real AWS call is ever made.
 
-test_secret_specs_for_harness_maps_opencode_only() {
+test_secret_specs_read_from_local_config() {
+  local dir cfg
+  dir="$TMP_ROOT/secret-specs-config"; mkdir -p "$dir"
+  cfg=$(write_cmux_env_secrets "$dir")
+  printf 'codex OPENAI_API_KEY codex/openai-api-key\n' >> "$cfg/cmux-env-secrets"
   ( . "$ROOT/bin/backends/cmux.sh"
-    out=$(fm_backend_cmux_secret_specs_for_harness opencode)
-    [ "$out" = "FIREWORKS_API_KEY opencode/fireworks-api-key" ] || { echo "opencode spec mismatch: '$out'" >&2; exit 1; }
-    out=$(fm_backend_cmux_secret_specs_for_harness claude)
-    [ -z "$out" ] || { echo "claude should need no injected secret, got '$out'" >&2; exit 1; }
-  ) || fail "fm_backend_cmux_secret_specs_for_harness did not map exactly opencode -> FIREWORKS_API_KEY/opencode/fireworks-api-key"
-  pass "fm_backend_cmux_secret_specs_for_harness: maps opencode to FIREWORKS_API_KEY/opencode/fireworks-api-key and other harnesses to nothing"
+    out=$(FM_CONFIG_OVERRIDE="$dir/nonexistent-config" fm_backend_cmux_secret_specs_for_harness opencode)
+    [ -z "$out" ] || { echo "an absent config file should configure no injection, got '$out'" >&2; exit 1; }
+    out=$(FM_CONFIG_OVERRIDE="$cfg" fm_backend_cmux_secret_specs_for_harness opencode)
+    [ "$out" = "FIREWORKS_API_KEY opencode/fireworks-api-key us-east-1" ] || { echo "opencode spec mismatch: '$out'" >&2; exit 1; }
+    out=$(FM_CONFIG_OVERRIDE="$cfg" fm_backend_cmux_secret_specs_for_harness codex)
+    [ "$out" = "OPENAI_API_KEY codex/openai-api-key" ] || { echo "region-less spec mismatch: '$out'" >&2; exit 1; }
+    out=$(FM_CONFIG_OVERRIDE="$cfg" fm_backend_cmux_secret_specs_for_harness claude)
+    [ -z "$out" ] || { echo "an unpaired harness should need no injected secret, got '$out'" >&2; exit 1; }
+  ) || fail "fm_backend_cmux_secret_specs_for_harness did not read pairings from config/cmux-env-secrets"
+  pass "fm_backend_cmux_secret_specs_for_harness: reads pairings (with optional region) from local config/cmux-env-secrets, skipping comments, blanks, unpaired harnesses, and an absent file"
 }
 
 test_create_task_passes_fireworks_env_for_opencode() {
-  local dir fb out title
+  local dir fb cfg out title
   dir="$TMP_ROOT/create-task-opencode-env"; mkdir -p "$dir/responses"
+  cfg=$(write_cmux_env_secrets "$dir")
   title=$(cmux_expected_scoped_title fm-oc1)
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
@@ -553,7 +584,7 @@ test_create_task_passes_fireworks_env_for_opencode() {
   fb=$(make_cmux_fakebin "$dir")
   add_fake_aws "$fb"
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
+    FM_CONFIG_OVERRIDE="$cfg" FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc1 /tmp/proj opencode' "$ROOT" )
   [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
     || fail "create_task should still echo '<workspace_id> <surface_id>' (never the secret) for an env-injected opencode spawn, got '$out'"
@@ -564,12 +595,13 @@ test_create_task_passes_fireworks_env_for_opencode() {
     "create_task did not fetch the Fireworks key from the documented Secrets Manager secret/region"
   assert_not_contains "$(cat "$dir/aws-log")" "profile" \
     "create_task's secret fetch should not hardcode an AWS profile"
-  pass "fm_backend_cmux_create_task: passes --env FIREWORKS_API_KEY=<value> to new-workspace for an opencode spawn"
+  pass "fm_backend_cmux_create_task: passes --env FIREWORKS_API_KEY=<value> to new-workspace for a config-paired opencode spawn"
 }
 
-test_create_task_omits_env_for_non_opencode_harness() {
-  local dir fb out title
+test_create_task_omits_env_for_unpaired_harness() {
+  local dir fb cfg out title
   dir="$TMP_ROOT/create-task-claude-no-env"; mkdir -p "$dir/responses"
+  cfg=$(write_cmux_env_secrets "$dir")
   title=$(cmux_expected_scoped_title fm-cl1)
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
   cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
@@ -577,40 +609,70 @@ test_create_task_omits_env_for_non_opencode_harness() {
   fb=$(make_cmux_fakebin "$dir")
   cat > "$fb/aws" <<'SH'
 #!/usr/bin/env bash
-echo "aws should not be invoked for a harness that needs no injected secret" >&2
+echo "aws should not be invoked for a harness with no configured pairing" >&2
 exit 1
 SH
   chmod +x "$fb/aws"
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_CONFIG_OVERRIDE="$cfg" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-cl1 /tmp/proj claude' "$ROOT" )
   [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
-    || fail "create_task should still succeed for a harness that needs no injected secret"
+    || fail "create_task should still succeed for a harness with no configured pairing"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''--env' \
     "create_task should not pass --env for a harness with no configured secret spec"
-  pass "fm_backend_cmux_create_task: passes no --env flags, and never calls aws, for a harness with no configured secret (e.g. claude)"
+  pass "fm_backend_cmux_create_task: passes no --env flags, and never calls aws, for a harness config/cmux-env-secrets does not pair (e.g. claude)"
+}
+
+test_create_task_skips_env_when_unconfigured() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-task-no-config"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-oc-nocfg)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  cat > "$fb/aws" <<'SH'
+#!/usr/bin/env bash
+echo "aws should not be invoked when config/cmux-env-secrets is absent" >&2
+exit 1
+SH
+  chmod +x "$fb/aws"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_CONFIG_OVERRIDE="$dir/no-such-config" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc-nocfg /tmp/proj opencode' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should spawn exactly as before when no config/cmux-env-secrets exists, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''--env' \
+    "create_task should not pass --env when no pairing is configured at all"
+  pass "fm_backend_cmux_create_task: with no config/cmux-env-secrets, injects nothing and never calls aws - the spawn proceeds as before the knob existed"
 }
 
 test_create_task_fails_when_secret_fetch_fails() {
-  local dir fb out status
+  local dir fb cfg out status
   dir="$TMP_ROOT/create-task-secret-fail"; mkdir -p "$dir/responses"
+  cfg=$(write_cmux_env_secrets "$dir")
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
   fb=$(make_cmux_fakebin "$dir")
   add_fake_aws "$fb"
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_EXIT=1 \
+    FM_CONFIG_OVERRIDE="$cfg" FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_EXIT=1 \
+    FM_AWS_FAKE_STDERR="An error occurred (AccessDeniedException) when calling the GetSecretValue operation: not authorized" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc-fail /tmp/proj opencode' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should fail when the Fireworks secret cannot be fetched, rather than spawning without it"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''new-workspace' \
     "create_task should never call new-workspace when the required secret fetch failed"
   assert_contains "$out" "opencode/fireworks-api-key" "create_task's failure did not name the secret it could not fetch"
-  pass "fm_backend_cmux_create_task: fails before creating the workspace when the required secret cannot be fetched"
+  assert_contains "$out" "AccessDeniedException" \
+    "create_task's fetch-failure error should include the AWS CLI's own stderr diagnostics"
+  pass "fm_backend_cmux_create_task: fails before creating the workspace when the required secret cannot be fetched, surfacing the AWS CLI's stderr"
 }
 
 test_create_task_failure_output_redacts_fetched_secret() {
-  local dir fb out status
+  local dir fb cfg out status
   dir="$TMP_ROOT/create-task-secret-redact"; mkdir -p "$dir/responses"
+  cfg=$(write_cmux_env_secrets "$dir")
   fb=$(make_cmux_fakebin "$dir")
   add_fake_aws "$fb"
   # A `cmux` stub whose new-workspace fails with a usage-style error that
@@ -634,7 +696,7 @@ exit 0
 SH
   chmod +x "$fb/cmux"
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
+    FM_CONFIG_OVERRIDE="$cfg" FM_AWS_LOG="$dir/aws-log" FM_AWS_FAKE_SECRET="s3cr3t-fireworks-key" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-oc-redact /tmp/proj opencode' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should fail when new-workspace fails"
@@ -1196,9 +1258,10 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
-test_secret_specs_for_harness_maps_opencode_only
+test_secret_specs_read_from_local_config
 test_create_task_passes_fireworks_env_for_opencode
-test_create_task_omits_env_for_non_opencode_harness
+test_create_task_omits_env_for_unpaired_harness
+test_create_task_skips_env_when_unconfigured
 test_create_task_fails_when_secret_fetch_fails
 test_create_task_failure_output_redacts_fetched_secret
 test_fetch_secret_fails_when_aws_missing

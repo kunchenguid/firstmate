@@ -341,34 +341,62 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
-# fm_backend_cmux_secret_specs_for_harness: zero or more "ENV_VAR
-# secret-name" lines naming the provider credentials that must be explicitly
-# injected into a cmux workspace for <harness>. Needed only for cmux: unlike
-# tmux/herdr/zellij (which fork a task inside the same host shell and so
-# inherit firstmate's own process environment), a cmux terminal surface's
-# environment is heavily scrubbed at spawn time (docs/cmux-backend.md
-# "Provider credential passthrough (--env)") - ambient provider API keys
-# never reach it. One pairing exists today: opencode's Fireworks-backed
-# models (e.g. GLM 5.2) need FIREWORKS_API_KEY. Expressed as a lookup table
-# so a second pairing is a one-line addition rather than a new framework.
+# fm_backend_cmux_secret_specs_for_harness: zero or more "ENV_VAR secret-name
+# [region]" lines naming the provider credentials that must be explicitly
+# injected into a cmux workspace for <harness>, read fresh from the local,
+# gitignored config/cmux-env-secrets under the effective config dir (the same
+# read-fresh convention as fm_backend_cmux_password above). Each config line
+# is "<harness> <ENV_VAR> <secret-name> [<aws-region>]"; blank lines and
+# '#'-prefixed lines are ignored (docs/cmux-backend.md "Provider credential
+# passthrough (--env)"). Needed only for cmux: unlike tmux/herdr/zellij
+# (which fork a task inside the same host shell and so inherit firstmate's
+# own process environment), a cmux terminal surface's environment is heavily
+# scrubbed at spawn time - ambient provider API keys never reach it. An
+# absent file, or a harness with no matching line, means no injection at all.
 fm_backend_cmux_secret_specs_for_harness() {  # <harness>
-  case "$1" in
-    opencode) printf 'FIREWORKS_API_KEY opencode/fireworks-api-key\n' ;;
-  esac
+  local harness=$1 config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" f h env_var secret_name region _rest
+  f="$config_dir/cmux-env-secrets"
+  [ -f "$f" ] || return 0
+  while read -r h env_var secret_name region _rest || [ -n "$h" ]; do
+    case "$h" in ''|'#'*) continue ;; esac
+    [ "$h" = "$harness" ] || continue
+    [ -n "$secret_name" ] || continue
+    if [ -n "$region" ]; then
+      printf '%s %s %s\n' "$env_var" "$secret_name" "$region"
+    else
+      printf '%s %s\n' "$env_var" "$secret_name"
+    fi
+  done < "$f"
 }
 
 # fm_backend_cmux_fetch_secret: print <secret-name>'s current value from AWS
-# Secrets Manager (region us-east-1) on stdout, using whatever AWS
-# credentials/profile are already ambient in this process's environment -
-# never a hardcoded profile. Fails loudly rather than continuing without the
-# key: a missing 'aws' CLI, a failed call (including no credentials
-# configured), or an empty secret are all refused.
-fm_backend_cmux_fetch_secret() {  # <secret-name>
-  local secret_name=$1 value
+# Secrets Manager on stdout (in [region] when given, otherwise whatever
+# region is ambient in AWS config), using whatever AWS credentials/profile
+# are already ambient in this process's environment - never a hardcoded
+# profile. Fails loudly rather than continuing without the key: a missing
+# 'aws' CLI, a failed call (whose AWS stderr is included in the error - AWS
+# error text never contains the secret value), or an empty secret are all
+# refused.
+fm_backend_cmux_fetch_secret() {  # <secret-name> [region]
+  local secret_name=$1 region=${2:-} where value err_file aws_err status=0
+  where="AWS Secrets Manager${region:+ (region $region)}"
   command -v aws >/dev/null 2>&1 || { echo "error: cmux env passthrough needs secret '$secret_name' but the 'aws' CLI is not installed" >&2; return 1; }
-  value=$(aws secretsmanager get-secret-value --secret-id "$secret_name" --region us-east-1 --query SecretString --output text 2>/dev/null) \
-    || { echo "error: failed to fetch secret '$secret_name' from AWS Secrets Manager (region us-east-1) - check that AWS credentials/profile are configured" >&2; return 1; }
-  [ -n "$value" ] && [ "$value" != None ] || { echo "error: secret '$secret_name' from AWS Secrets Manager returned an empty value" >&2; return 1; }
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-cmux-aws-err.XXXXXX") || err_file=/dev/null
+  if [ -n "$region" ]; then
+    value=$(aws secretsmanager get-secret-value --secret-id "$secret_name" --region "$region" --query SecretString --output text 2>"$err_file") || status=$?
+  else
+    value=$(aws secretsmanager get-secret-value --secret-id "$secret_name" --query SecretString --output text 2>"$err_file") || status=$?
+  fi
+  aws_err=
+  if [ "$err_file" != /dev/null ]; then
+    aws_err=$(cat "$err_file" 2>/dev/null)
+    rm -f "$err_file"
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "error: failed to fetch secret '$secret_name' from $where - ${aws_err:-check that AWS credentials/profile are configured}" >&2
+    return 1
+  fi
+  [ -n "$value" ] && [ "$value" != None ] || { echo "error: secret '$secret_name' from $where returned an empty value" >&2; return 1; }
   printf '%s' "$value"
 }
 
@@ -381,12 +409,11 @@ fm_backend_cmux_fetch_secret() {  # <secret-name>
 # password. Empty array (success) when the harness needs no injected secret.
 fm_backend_cmux_env_args_for_harness() {  # <harness>
   FM_BACKEND_CMUX_ENV_ARGS=()
-  local harness=$1 spec env_var secret_name value
-  while IFS= read -r spec; do
-    [ -n "$spec" ] || continue
-    env_var=${spec%% *}
-    secret_name=${spec#* }
-    value=$(fm_backend_cmux_fetch_secret "$secret_name") || return 1
+  local harness=$1 env_var secret_name region value
+  [ -n "$harness" ] || return 0
+  while read -r env_var secret_name region; do
+    [ -n "$secret_name" ] || continue
+    value=$(fm_backend_cmux_fetch_secret "$secret_name" "$region") || return 1
     FM_BACKEND_CMUX_ENV_ARGS+=(--env "$env_var=$value")
   done < <(fm_backend_cmux_secret_specs_for_harness "$harness")
   return 0
@@ -400,10 +427,11 @@ fm_backend_cmux_env_args_for_harness() {  # <harness>
 # defense in depth though verified to already be the default (finding:
 # workspace/surface/pane create all default focus to false) - no
 # focus-restore dance is needed, unlike zellij. When <harness> is given and
-# needs provider credentials (fm_backend_cmux_secret_specs_for_harness), they
-# are fetched and passed as `--env KEY=VALUE` (verified flag: cmux-control's
-# own bin/cmuxctl, cmuxNewWorkspace). Echoes "<workspace_id> <surface_id>" on
-# success.
+# config/cmux-env-secrets pairs it with provider credentials
+# (fm_backend_cmux_secret_specs_for_harness), they are fetched and passed as
+# `--env KEY=VALUE` (verified flag: cmux-control's own bin/cmuxctl,
+# cmuxNewWorkspace); with no pairing configured, nothing is fetched or
+# injected. Echoes "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd> [harness]
   local label=$1 cwd=$2 harness=${3:-} title dup out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")

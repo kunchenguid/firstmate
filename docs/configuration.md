@@ -55,7 +55,7 @@ Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `d
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
-A cmux spawn whose harness needs an injected provider credential (today only `opencode` -> `FIREWORKS_API_KEY`) also fetches that secret from AWS Secrets Manager and refuses loudly when the fetch fails; see [`docs/cmux-backend.md`](cmux-backend.md) "Provider credential passthrough (`--env`)".
+A cmux spawn whose harness has a provider-credential pairing configured in local, gitignored `config/cmux-env-secrets` also fetches that secret from AWS Secrets Manager and refuses loudly when the fetch fails; with no pairing configured, nothing is fetched or injected and the spawn proceeds as before - see [`docs/cmux-backend.md`](cmux-backend.md) "Provider credential passthrough (`--env`)".
 A backend spawn refusal from a missing dependency, version gate, unauthenticated socket, or failed credential fetch is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
@@ -77,6 +77,7 @@ For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and 
 Zellij has no per-home workspace split: primary and secondmate tasks share that one session, and visible tab titles are scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Use the guarded cleanup path described in [`docs/zellij-backend.md`](zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
 cmux has no session layer at all - one workspace per task, in whatever cmux window is open - and its socket password (when configured) is read from local, gitignored `config/cmux-socket-password` under the effective config directory, never committed.
+Per-harness provider-credential injection for cmux workspaces is configured the same way in local, gitignored `config/cmux-env-secrets`: one `<harness> <ENV_VAR> <secret-name> [<aws-region>]` pairing per line (blank lines and `#`-prefixed lines ignored; an omitted region defers to ambient AWS region config), e.g. `opencode FIREWORKS_API_KEY opencode/fireworks-api-key us-east-1`.
 The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
@@ -152,7 +153,7 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 For the herdr backend, `FM_HOME` also determines the workspace label used by the adapter.
 For the zellij backend, `FM_HOME` does not split containers, but it determines the readable home prefix embedded in visible tab titles; use `FM_ZELLIJ_SESSION` when a separate zellij session is needed.
 The full zellij home label also includes a short hash of the resolved `FM_ROOT` path.
-For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
+For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` and `config/cmux-env-secrets` are read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
 ## Harness support
