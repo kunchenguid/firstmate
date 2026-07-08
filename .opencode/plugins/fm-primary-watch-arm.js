@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
@@ -61,7 +62,15 @@ async function resolveRoot(anchor) {
   const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
   const root = result.stdout.trim();
   if (result.code === 0 && root) return root;
-  return anchor;
+  return resolvePath(anchor);
+}
+
+function resolvePath(anchor) {
+  try {
+    return realpathSync(anchor);
+  } catch {
+    return resolve(anchor);
+  }
 }
 
 function effectivePaths(root) {
@@ -214,7 +223,7 @@ async function ensureArm(paths, sessionID, client) {
 }
 
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
-  const root = await resolveRoot(worktree ?? directory);
+  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {
     ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),

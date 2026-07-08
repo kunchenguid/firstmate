@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
@@ -28,7 +30,15 @@ async function resolveRoot(anchor) {
   const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
   const root = result.stdout.trim();
   if (result.code === 0 && root) return root;
-  return anchor;
+  return resolvePath(anchor);
+}
+
+function resolvePath(anchor) {
+  try {
+    return realpathSync(anchor);
+  } catch {
+    return resolve(anchor);
+  }
 }
 
 function runGuard(root) {
@@ -44,7 +54,7 @@ async function letWatchArmRun(sessionID, client) {
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
-  const root = await resolveRoot(worktree ?? directory);
+  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
 
   return {
     event: async ({ event }) => {

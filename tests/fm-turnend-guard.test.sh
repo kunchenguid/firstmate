@@ -526,10 +526,12 @@ test_opencode_plugin_forces_followup() {
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
-  local plugin worktree_dir wrong_dir out status
+  local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
-  worktree_dir="$TMP_ROOT/opencode-plugin-worktree"
+  parent="$TMP_ROOT/opencode-plugin-parent"
+  git init -q "$parent"
+  worktree_dir="$parent/nested/opencode-plugin-worktree"
   wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
   mkdir -p "$worktree_dir/bin" "$wrong_dir"
   cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
