@@ -740,15 +740,14 @@ This exception is narrow: ordinary crewmates still trip stale detection when the
 **Watcher liveness is guarded, not just disciplined.**
 Arming the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 While running, `fm-watch.sh` touches `state/.last-watcher-beat` every poll cycle.
-The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, or that beacon is missing or older than `FM_GUARD_GRACE` (default 300s).
-`bin/fm-wake-drain.sh` runs the same guard after it drains, so the liveness check also fires on a drain-and-handle turn that runs no other supervision script, narrowing the window in which a lapsed chain can hide; the grace beacon keeps it silent right after a normal fire and it warns only on a genuine stale-beyond-grace lapse.
-The no-watcher case leads with a prominent, bordered ●-marked banner (in-flight count, beacon age, and the exact one-line re-arm command) so it reads as an alarm rather than a buried stderr line you can skim past.
+The supervision scripts (`fm-peek`, `fm-send`, `fm-spawn`, `fm-teardown`, `fm-pr-check`, `fm-promote`, `fm-review-diff`, `fm-fleet-sync`, `fm-update`) call `bin/fm-guard.sh` first, which warns to stderr when any task is in flight (`state/*.meta` exists) but queued wakes are pending, the watcher exited after queueing an actionable wake, or no live identity-matched watcher holds this home's lock with a fresh beacon within `FM_GUARD_GRACE` (default 300s).
+`bin/fm-wake-drain.sh` runs the same guard after it drains, so the liveness check also fires on a drain-and-handle turn that runs no other supervision script, narrowing the window in which a lapsed chain can hide; a fresh beacon without a live lock is still unhealthy, and a recent actionable watcher exit is named separately from a silent watcher-down lapse.
+The actionable-exit and no-watcher cases lead with a prominent, bordered alarm banner (in-flight count, beacon age, and the exact next command) so they read as alarms rather than buried stderr lines you can skim past.
 The banner is only a supervision warning: the guarded operation still runs.
 When the guarded operation is `fm-send`, `fm-send` sets the banner's continuation line to say explicitly that the requested message WILL still be sent.
-So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
-The grace window keeps normal handling (watcher briefly down between a wake and its re-arm) silent.
+So the next time you touch the fleet with queued wakes, an actionable watcher exit, or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
-If a guard warning says watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
+If a guard warning says the watcher exited after an actionable wake or watcher liveness is stale, arm `bin/fm-watch-arm.sh` after draining any queued wakes.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
@@ -873,7 +872,7 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
-For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
+For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to the absolute firstmate-home path `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
