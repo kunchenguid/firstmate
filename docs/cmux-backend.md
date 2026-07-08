@@ -55,8 +55,8 @@ A cmux spawn refuses loudly, with an actionable message pointing back to this do
 No first-run provisioning beyond the socket-access setup above and having `jq` installed; firstmate creates the workspace it needs on first spawn, launching the app itself (`open -a cmux`) if it is not already running.
 
 Watching and attaching: firstmate uses one workspace per task in whatever cmux window is currently open.
-Callers still use firstmate's universal `fm-<id>` selector vocabulary, while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
-You do not need to bring the window forward for routine supervision: `bin/fm-peek.sh fm-<id>` reads a task's surface without focusing it, and `bin/fm-send.sh fm-<id> "<text>"` steers it - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
+Callers can use exact task ids or stable `fm-<id>` labels, while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
+You do not need to bring the window forward for routine supervision: `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and `bin/fm-send.sh <id> "<text>"` steers it - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
 
 Verify it works by spawning a trivial task with `--backend cmux` and confirming the task's meta records `backend=cmux` plus `cmux_workspace_id=` and `cmux_surface_id=`.
 The cmux sidebar should show a new `fm-firstmate-<8hex>-<id>` workspace in the primary home.

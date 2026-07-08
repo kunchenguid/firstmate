@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
 # Usage: fm-send.sh <target> <text...>
-#   <target> may be a bare firstmate task name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or an explicit backend target.
+#   <target> may be an exact task id, a legacy fm-<id> task label resolved
+#   through this home's state/<id>.meta, or an explicit backend target.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.

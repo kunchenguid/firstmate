@@ -22,7 +22,7 @@
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
-# selector that is neither "session:window" nor a bare "fm-<id>" routed
+# selector that is neither an explicit target nor a task selector routed
 # through meta - an ad hoc window name with no recorded task. Mirrors the
 # `tmux list-windows -a ... | grep` pipeline that used to live inline in
 # fm-send.sh's and fm-peek.sh's own (until now duplicated) resolve().

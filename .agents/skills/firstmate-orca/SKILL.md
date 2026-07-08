@@ -51,7 +51,7 @@ Do not manually patch metadata to make an externally-created Orca terminal look 
 ## Supervision
 
 Use `bin/fm-peek.sh`, `bin/fm-send.sh`, `bin/fm-crew-state.sh`, and `bin/fm-teardown.sh` for routine operation.
-For steer messages, send short lines through `bin/fm-send.sh fm-<id> '...'`.
+For steer messages, send short lines through `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works.
 Put long instructions in the task brief or a temporary file and point the crewmate at that file.
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.

@@ -467,10 +467,10 @@ Read `data/secondmates.md` before dispatching and compare the work request to ea
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
-If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
-The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass an explicit backend target only when intentionally targeting an endpoint outside this firstmate home.
+If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh <id> '<work request>'` and let it run the normal lifecycle inside its own home.
+The stable `fm-<id>` label printed by lifecycle commands still works, but exact task ids resolve first through this home's `state/<id>.meta`; pass an explicit backend target containing `:` only when intentionally targeting an endpoint outside this firstmate home.
 A secondmate is itself a firstmate, so a request reaches it in its own chat, which you never read - the return channel that wakes you is its status file.
-So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
+So `fm-send` to a task selector whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
 Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
 A captain typing directly into the secondmate's window is unmarked and stays a conversational captain intervention, so do not relay captain-destined chat through this path; the marker is applied only by `fm-send` to a `kind=secondmate` target.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
