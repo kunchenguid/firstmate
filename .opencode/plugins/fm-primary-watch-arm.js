@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
@@ -93,6 +93,25 @@ function shouldArm(paths) {
   }
 }
 
+async function sessionOwnsLock(paths) {
+  let lockPid = "";
+  try {
+    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    if (pid === lockPid) return true;
+    const result = await runProcess("ps", ["-o", "ppid=", "-p", pid]);
+    if (result.code !== 0) return false;
+    pid = result.stdout.trim();
+    if (!pid || pid === "1") return false;
+  }
+  return false;
+}
+
 function firstWakeOrFailure(stdout, stderr, code) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
@@ -182,6 +201,8 @@ function spawnArm(paths, sessionID, client) {
 
 async function ensureArm(paths, sessionID, client) {
   if (!sessionID) return "skipped";
+  if (!(await isPrimaryRoot(paths.root, paths.home))) return "not-primary";
+  if (!(await sessionOwnsLock(paths))) return "read-only";
   if (child) return waitForArmReady();
   if (!shouldArm(paths)) return "not-needed";
   spawnArm(paths, sessionID, client);
@@ -198,8 +219,6 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   return {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return;
-      if (!(await isPrimaryRoot(paths.root, paths.home))) return;
-      if (child) return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
       void ensureArm(paths, sessionID, client);

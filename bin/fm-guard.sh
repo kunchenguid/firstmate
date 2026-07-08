@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
@@ -77,9 +78,12 @@ if [ "$watcher_fresh" = false ]; then
   [ -e "$STATE/.afk" ] && afk=1
   queue_arg=0
   "$queue_pending" && queue_arg=1
+  x_mode=0
+  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
     --read-only "$READ_ONLY" \
     --afk "$afk" \
+    --x-mode "$x_mode" \
     --queue-pending "$queue_arg" \
     --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'

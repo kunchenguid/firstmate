@@ -264,6 +264,19 @@ test_hook_blocks_from_fm_home_state() {
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
 }
 
+test_hook_x_mode_reason_sources_cadence() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode")
+  home=$(cd "$dir" && pwd)
+  mkdir -p "$dir/config"
+  : > "$dir/config/x-mode.env"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
+  assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
+  pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
+}
+
 test_hook_ignores_repo_state_when_fm_home_set() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home-ignore-root")
@@ -594,6 +607,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
+test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry

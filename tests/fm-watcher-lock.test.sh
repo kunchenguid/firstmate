@@ -132,6 +132,15 @@ test_guard_warnings() {
   queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
   [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
 
+  dir=$(make_case guard-xmode)
+  state="$dir/state"
+  err="$dir/guard.err"
+  mkdir -p "$dir/config"
+  printf 'project=x\n' > "$state/task.meta"
+  : > "$dir/config/x-mode.env"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+
   # (2) fresh watcher, empty queue -> silence.
   dir=$(make_case guard-fresh)
   state="$dir/state"
