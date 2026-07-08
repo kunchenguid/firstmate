@@ -150,6 +150,19 @@ test_json_registry_malformed_file_fails_closed() {
   pass "malformed projects.json fails closed instead of falling back"
 }
 
+test_json_registry_list_malformed_file_fails_closed() {
+  local home out status
+  home=$(new_home malformed-list-json)
+  mkdir -p "$home/projects/flow"
+  printf '{ not json\n' > "$home/data/projects.json"
+
+  out=$(run_resolve "$home" --list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed projects.json list fell back to legacy project listing"
+  assert_not_contains "$out" $'flow\t' "malformed projects.json list should not emit legacy projects"
+  pass "malformed projects.json list fails closed"
+}
+
 test_json_registry_requires_explicit_policy_fields() {
   local home repo repo_real out status
   home=$(new_home missing-policy)
@@ -360,6 +373,7 @@ test_json_registry_refuses_linked_worktree_as_canonical
 test_json_registry_refuses_subdirectory_canonical_path
 test_json_registry_rejects_codex_owned_canonical_path
 test_json_registry_malformed_file_fails_closed
+test_json_registry_list_malformed_file_fails_closed
 test_json_registry_requires_explicit_policy_fields
 test_json_registry_list_rejects_missing_project_id
 test_json_registry_rejects_invalid_policy_fields

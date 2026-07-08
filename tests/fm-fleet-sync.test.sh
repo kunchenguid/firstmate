@@ -122,6 +122,18 @@ run_sync() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
+make_failing_jq() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf 'jq unavailable\n' >&2
+exit 127
+SH
+  chmod +x "$fakebin/jq"
+  printf '%s\n' "$fakebin"
+}
+
 # --- tests ------------------------------------------------------------------
 
 test_detached_clean_ancestor_recovers() {
@@ -298,6 +310,37 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_mode_resolution_failure_skips_without_syncing() {
+  local home clone out before fakebin
+  home=$(new_home)
+  clone=$(build_pair "$home" mode-fail)
+  advance_origin "$home" mode-fail C1
+  before=$(head_sha "$clone")
+  fakebin=$(make_failing_jq "$home/fake-jq")
+
+  out=$(PATH="$fakebin:$PATH" run_sync "$home")
+
+  assert_contains "$out" "mode-fail: skipped: project mode resolution failed" "mode resolver failure should skip the project"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "mode resolver failure still allowed fleet sync to move the clone"
+  pass "project mode resolution failures fail closed in fleet sync"
+}
+
+test_whole_fleet_list_failure_skips_without_syncing() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" list-fail)
+  advance_origin "$home" list-fail C1
+  before=$(head_sha "$clone")
+  mkdir -p "$home/data"
+  printf '{ not json\n' > "$home/data/projects.json"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "fleet: skipped: project registry list failed" "list resolver failure should abort whole-fleet sync"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "list resolver failure still allowed fleet sync to move a clone"
+  pass "whole-fleet registry list failures fail closed"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -383,6 +426,7 @@ test_single_project_by_explicit_path_does_not_borrow_registry_basename() {
   clone="$home/other/flow"
   mkdir -p "$home/other"
   mv "$other" "$clone"
+  clone=$(cd "$clone" && pwd -P)
   advance_origin "$home" other-flow C1
 
   out=$(run_sync "$home" "$clone")
@@ -468,6 +512,8 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_mode_resolution_failure_skips_without_syncing
+test_whole_fleet_list_failure_skips_without_syncing
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

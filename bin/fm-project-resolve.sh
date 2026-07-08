@@ -412,28 +412,34 @@ emit_shell() {
 }
 
 list_projects() {
-  local id path proj seen_ids seen_paths entry
+  local id path proj seen_ids seen_paths entry entries json_lines
   seen_ids=
   seen_paths=
+  json_lines=
   if [ -f "$JSON_REG" ]; then
     command -v jq >/dev/null 2>&1 || {
       echo "error: $JSON_REG exists but jq is not installed" >&2
       return 1
     }
+    entries=$(jq -c '.projects[]?' "$JSON_REG") || return 1
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      json_required_string "$entry" "" projectId projectId >/dev/null || return 1
-    done < <(jq -c '.projects[]?' "$JSON_REG")
-    while IFS= read -r id; do
+      id=$(json_required_string "$entry" "" projectId projectId) || return 1
       [ -n "$id" ] || continue
-      proj=$(resolve_project "$id") || return 1
+      proj=$(resolve_json "$id") || return 1
       path=$(printf '%s\n' "$proj" | jq -r '.canonical_path')
-      printf '%s\t%s\n' "$id" "$path"
+      json_lines="${json_lines}${json_lines:+
+}$id	$path"
       seen_ids="${seen_ids}${seen_ids:+
 }$id"
       seen_paths="${seen_paths}${seen_paths:+
 }$path"
-    done < <(jq -r '.projects[]?.projectId // empty' "$JSON_REG")
+    done <<EOF
+$entries
+EOF
+    if [ -n "$json_lines" ]; then
+      printf '%s\n' "$json_lines"
+    fi
   fi
   [ -d "$PROJECTS" ] || return 0
   for path in "$PROJECTS"/*; do

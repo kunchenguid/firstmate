@@ -156,7 +156,7 @@ EOF
 }
 
 test_home_seed_materializes_json_only_project_mode() {
-  local home subhome work remote repo remote_abs repo_abs out status mode
+  local home subhome work remote repo remote_abs repo_abs out status mode source base
   home="$TMP_ROOT/json-only-parent"
   subhome="$TMP_ROOT/json-only-sub"
   work="$TMP_ROOT/json-only-work-flow"
@@ -201,13 +201,18 @@ EOF
   status=$?
   expect_code 0 "$status" "seed should clone JSON-only registered external project: $out"
   assert_grep '- flow [direct-PR +yolo] - cloned project' "$subhome/data/projects.md" "seed should materialize JSON mode/yolo into child registry"
+  assert_present "$subhome/data/projects.json" "seed should write child JSON registry for JSON-backed projects"
+  source=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-resolve.sh" --field source flow)
+  [ "$source" = "json" ] || fail "seeded JSON-only project did not resolve from child projects.json"
+  base=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-resolve.sh" --field base_ref flow)
+  [ "$base" = "refs/remotes/origin/dev" ] || fail "seeded JSON-only project lost baseRef: $base"
   mode=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" flow)
   [ "$mode" = "direct-PR on" ] || fail "seeded JSON-only project resolved as $mode in child home"
   pass "secondmate seed preserves mode/yolo for JSON-only projects"
 }
 
 test_home_seed_materializes_json_policy_over_stale_markdown() {
-  local home subhome work remote repo remote_abs repo_abs out status mode
+  local home subhome work remote repo remote_abs repo_abs out status mode source base
   home="$TMP_ROOT/json-stale-md-parent"
   subhome="$TMP_ROOT/json-stale-md-sub"
   work="$TMP_ROOT/json-stale-md-work-flow"
@@ -253,6 +258,11 @@ EOF
   status=$?
   expect_code 0 "$status" "seed should clone JSON project despite stale markdown policy: $out"
   assert_grep '- flow [direct-PR +yolo] - Flow project' "$subhome/data/projects.md" "seed should materialize JSON mode/yolo over stale projects.md policy"
+  assert_present "$subhome/data/projects.json" "seed should write child JSON registry over stale markdown policy"
+  source=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-resolve.sh" --field source flow)
+  [ "$source" = "json" ] || fail "stale markdown seed did not resolve from child projects.json"
+  base=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-resolve.sh" --field base_ref flow)
+  [ "$base" = "refs/remotes/origin/dev" ] || fail "stale markdown seed lost baseRef: $base"
   mode=$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" flow)
   [ "$mode" = "direct-PR on" ] || fail "stale markdown seed resolved as $mode in child home"
   pass "secondmate seed materializes JSON policy over stale markdown"

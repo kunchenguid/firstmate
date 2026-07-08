@@ -58,15 +58,20 @@ project_label() {
 }
 
 # resolve_project_arg <arg>: accept a path or project id, resolved through the
-# shared project resolver. Falls back to the original argument unresolved so a
-# genuinely bad path still hits sync_project's existing "not a directory" skip.
+# shared project resolver. Genuinely bad names still resolve to a not-a-directory
+# fallback path; resolver errors are returned so callers can fail closed.
 resolve_project_arg() {
-  local arg=$1 resolved
-  if resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$arg" 2>/dev/null); then
+  local arg=$1 resolved err status
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-project-resolve.XXXXXX")
+  if resolved=$("$SCRIPT_DIR/fm-project-resolve.sh" --field canonical_path "$arg" 2>"$err"); then
+    rm -f "$err"
     printf '%s\n' "$resolved"
     return 0
   fi
-  printf '%s\n' "$arg"
+  status=$?
+  cat "$err"
+  rm -f "$err"
+  return "$status"
 }
 
 default_branch() {
@@ -87,6 +92,20 @@ default_branch() {
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+}
+
+resolve_project_field() {
+  local field=$1 arg=$2 value err status
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-project-resolve.XXXXXX")
+  if value=$("$SCRIPT_DIR/fm-project-resolve.sh" --field "$field" "$arg" 2>"$err"); then
+    rm -f "$err"
+    printf '%s\n' "$value"
+    return 0
+  fi
+  status=$?
+  cat "$err"
+  rm -f "$err"
+  return "$status"
 }
 
 prune_gone_branches() {
@@ -169,6 +188,7 @@ report_stuck() {
 }
 
 sync_project() {
+  local mode_err reason
   PROJ=$1
   label=$(project_label)
 
@@ -180,7 +200,18 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ" 2>/dev/null || echo "no-mistakes off")
+  mode_err=$(mktemp "${TMPDIR:-/tmp}/fm-project-mode.XXXXXX")
+  if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ" 2>"$mode_err"); then
+    reason=$(first_line "$(cat "$mode_err")")
+    rm -f "$mode_err"
+    if [ -n "$reason" ]; then
+      echo "$label: skipped: project mode resolution failed: $reason"
+    else
+      echo "$label: skipped: project mode resolution failed"
+    fi
+    return 0
+  fi
+  rm -f "$mode_err"
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
@@ -202,10 +233,34 @@ sync_project() {
 
   prune_gone_branches || true
 
-  registry_source=$("$SCRIPT_DIR/fm-project-resolve.sh" --field source "$PROJ" 2>/dev/null || true)
+  if ! registry_source=$(resolve_project_field source "$PROJ"); then
+    reason=$(first_line "$registry_source")
+    if [ -n "$reason" ]; then
+      echo "$label: skipped: project registry resolution failed: $reason"
+    else
+      echo "$label: skipped: project registry resolution failed"
+    fi
+    return 0
+  fi
   if [ "$registry_source" = json ]; then
-    DEFAULT=$("$SCRIPT_DIR/fm-project-resolve.sh" --field default_branch "$PROJ" 2>/dev/null || true)
-    BASE=$("$SCRIPT_DIR/fm-project-resolve.sh" --field base_ref "$PROJ" 2>/dev/null || true)
+    if ! DEFAULT=$(resolve_project_field default_branch "$PROJ"); then
+      reason=$(first_line "$DEFAULT")
+      if [ -n "$reason" ]; then
+        echo "$label: skipped: project registry resolution failed: $reason"
+      else
+        echo "$label: skipped: project registry resolution failed"
+      fi
+      return 0
+    fi
+    if ! BASE=$(resolve_project_field base_ref "$PROJ"); then
+      reason=$(first_line "$BASE")
+      if [ -n "$reason" ]; then
+        echo "$label: skipped: project registry resolution failed: $reason"
+      else
+        echo "$label: skipped: project registry resolution failed"
+      fi
+      return 0
+    fi
     if [ -z "$DEFAULT" ] && [ -n "$BASE" ]; then
       DEFAULT=${BASE##*/}
     fi
@@ -317,12 +372,36 @@ sync_project() {
 }
 
 if [ $# -eq 1 ]; then
-  sync_project "$(resolve_project_arg "$1")"
+  if ! resolved_project_arg=$(resolve_project_arg "$1"); then
+    reason=$(first_line "$resolved_project_arg")
+    if [ -n "$reason" ]; then
+      echo "$1: skipped: project resolution failed: $reason"
+    else
+      echo "$1: skipped: project resolution failed"
+    fi
+    exit 0
+  fi
+  sync_project "$resolved_project_arg"
   exit 0
 fi
+
+list_err=$(mktemp "${TMPDIR:-/tmp}/fm-project-list.XXXXXX")
+if ! project_list=$("$SCRIPT_DIR/fm-project-resolve.sh" --list 2>"$list_err"); then
+  reason=$(first_line "$(cat "$list_err")")
+  rm -f "$list_err"
+  if [ -n "$reason" ]; then
+    echo "fleet: skipped: project registry list failed: $reason"
+  else
+    echo "fleet: skipped: project registry list failed"
+  fi
+  exit 0
+fi
+rm -f "$list_err"
 
 while IFS=$'\t' read -r project_id proj; do
   [ -n "$project_id" ] || continue
   [ -n "$proj" ] || continue
   sync_project "$proj"
-done < <("$SCRIPT_DIR/fm-project-resolve.sh" --list)
+done <<EOF
+$project_list
+EOF
