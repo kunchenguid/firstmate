@@ -3,9 +3,9 @@
 # teardown.
 # Usage: . bin/fm-tasks-axi-lib.sh
 # Compatible means tasks-axi --version reports 0.1.1 or newer.
-# `config/backlog-backend=manual` opts out; absent or any other value keeps the
-# default tasks-axi backend path, falling back to manual when the tool is not
-# compatible.
+# `config/backlog-backend=manual` opts out of tasks-axi backlog mutations;
+# absent or any other value keeps the default tasks-axi backend path, falling
+# back to manual mutation when the tool is not compatible.
 
 fm_tasks_axi_version_parts() {
   local output

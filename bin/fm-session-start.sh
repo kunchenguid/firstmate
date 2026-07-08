@@ -52,9 +52,11 @@
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
 # mode) for its read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
-# tasks-axi availability - none of which mutate shared state and all of which
-# are safe to compute from a second session. Only the four mutating sweeps
-# and the wake-queue drain are skipped. The context and fleet-state digests
+# tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
+# which mutate shared state and all of which are safe to compute from a second
+# session.
+# Only the four mutating sweeps and the wake-queue drain are skipped.
+# The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
 # Usage: fm-session-start.sh
