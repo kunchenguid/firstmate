@@ -76,6 +76,7 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab se
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
+herdr_real_shell_io_ready || exit 0
 
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
