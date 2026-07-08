@@ -99,6 +99,19 @@ SH
   chmod +x "$fakebin/tasks-axi"
 }
 
+make_system_path_without() {
+  local dir=$1 excluded=$2 sysbin tool real
+  sysbin="$dir/sysbin"
+  mkdir -p "$sysbin"
+  for tool in awk basename bash cat chmod cut date dirname env find flock git grep head jq mkdir perl ps readlink realpath rm sed sleep sort stat timeout tr uname wc; do
+    [ "$tool" = "$excluded" ] && continue
+    real=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$real" ] || continue
+    ln -s "$real" "$sysbin/$tool"
+  done
+  printf '%s\n' "$sysbin"
+}
+
 add_real_jq() {
   local fakebin=$1 real_jq
   real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
@@ -302,7 +315,7 @@ ROWS
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin sysbin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -310,7 +323,8 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  sysbin=$(make_system_path_without "$case_dir" orca)
+  out=$(PATH="$fakebin:$sysbin" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
