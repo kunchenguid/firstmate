@@ -1319,12 +1319,46 @@ test_link_carry_count_and_ts_preserve_followup_binding() {
   meta="$home/state/successor-task.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
-    "$ROOT/bin/fm-x-link.sh" successor-task req-carry --carry-count 2 --carry-ts 1700000000 >/dev/null; rc=$?
+    "$ROOT/bin/fm-x-link.sh" successor-task req-carry \
+      --carry-count 2 --carry-ts 1700000000 --carry-platform x --carry-max 280 >/dev/null; rc=$?
   expect_code 0 "$rc" "link paired carry flags exit"
   assert_grep "x_request=req-carry" "$meta" "carried link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "--carry-ts must preserve the original timestamp, not the current time"
   assert_grep "x_followups=2" "$meta" "--carry-count must seed the follow-up counter, not reset it"
+  assert_grep "x_platform=x" "$meta" "--carry-platform must preserve the prior reply platform"
+  assert_grep "x_reply_max_chars=280" "$meta" "--carry-max must preserve the prior split budget"
   pass "fm-x-link paired carry flags preserve a prior task's follow-up binding onto a successor"
+}
+
+test_link_recovery_relink_carries_discord_context_after_inbox_drain() {
+  local home meta out rc reply
+  home="$TMP_ROOT/link-carry-discord"; mkdir -p "$home/state"
+  meta="$home/state/successor-discord.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
+    "$ROOT/bin/fm-x-link.sh" successor-discord req-discord-recovery \
+      --carry-count 1 --carry-ts 1700000000 --carry-platform discord --carry-max 1900 >/dev/null; rc=$?
+  expect_code 0 "$rc" "Discord recovery relink exit"
+  assert_grep "x_platform=discord" "$meta" "Discord recovery relink must preserve the platform after inbox drain"
+  assert_grep "x_reply_max_chars=1900" "$meta" "Discord recovery relink must preserve the split budget after inbox drain"
+  reply=$(cat <<'TXT'
+The recovered task is reporting back with enough text to exceed an X tweet, but it is still comfortably within the Discord budget carried over from the prior task.
+
+```bash
+printf '%s\n' "the code fence should not force an unnecessary Discord split"
+```
+
+The successor task must post this as one Discord follow-up even though the original inbox payload has already been drained.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" successor-discord - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord recovery follow-up dry-run exit"
+  [ "$out" = "req-discord-recovery" ] || fail "Discord recovery follow-up must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord-recovery.json" >/dev/null \
+    || fail "Discord recovery follow-up below its message budget must not fall back to X splitting"
+  assert_grep "x_followups=2" "$meta" "Discord recovery follow-up must increment the carried count"
+  pass "fm-x-link recovery relink preserves Discord platform context after inbox drain"
 }
 
 test_link_carry_count_validation() {
@@ -1351,6 +1385,19 @@ test_link_carry_count_validation() {
     "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "link --carry-ts without --carry-count exit"
   assert_grep "--carry-ts requires --carry-count" "$err" "link must require --carry-count when carrying timestamp"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link carry without reply context exit"
+  assert_grep "relink requires carried reply context" "$err" "link must not silently drop reply context on relink"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-platform discord >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-platform without paired carry flags exit"
+  assert_grep "--carry-platform and --carry-max require --carry-count and --carry-ts" "$err" \
+    "link must require the paired carry binding when carrying reply context"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 --carry-max 49 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-max below floor exit"
+  assert_grep "--carry-max needs an integer of at least 50" "$err" "link must reject an unusable carried split budget"
   pass "fm-x-link rejects malformed or unpaired carry flags"
 }
 
@@ -1403,7 +1450,8 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
   if [ -n "$count" ]; then
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" --carry-count "$count" --carry-ts "$ts" >/dev/null
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
+      --carry-count "$count" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
   else
     FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
   fi
@@ -1759,6 +1807,7 @@ test_dismiss_usage_error
 test_link_records_request_and_timestamp
 test_link_records_discord_platform_for_followups
 test_link_carry_count_and_ts_preserve_followup_binding
+test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
