@@ -220,16 +220,21 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# new_world <name>: a scratch firstmate HOME (state/, watcher beacon) with no
-# kind=secondmate meta yet. FM_ROOT is left to resolve naturally to the real
-# checkout under test ($ROOT), exactly as production always has it - this
-# sweep's own fm-spawn.sh invocation resolves the secondmate harness through
-# $FM_ROOT/bin/fm-harness.sh, which only exists in the real tree.
+# new_world <name>: a scratch firstmate HOME (state/, watcher beacon, pinned
+# harness) with no kind=secondmate meta yet. FM_ROOT is left to resolve
+# naturally to the real checkout under test ($ROOT), exactly as production
+# always has it - this sweep's own fm-spawn.sh invocation resolves the
+# secondmate harness through $FM_ROOT/bin/fm-harness.sh, which only exists in
+# the real tree. The harness is pinned because ambient own-harness detection is
+# environment-dependent: interactive harness sessions expose markers or parent
+# process names, while a plain pipeline shell can fall through to "unknown",
+# which has no fm-spawn.sh launch template.
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state"
+  mkdir -p "$w/home/state" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
+  printf 'codex\n' > "$w/home/config/crew-harness"
   printf '%s\n' "$w"
 }
 
