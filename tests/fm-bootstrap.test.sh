@@ -95,6 +95,7 @@ make_fake_fleet_sync_root() {
   mkdir -p "$fake_root/bin"
   cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
 exec perl -e 'sleep 300'
@@ -127,19 +128,49 @@ add_no_origin_projects() {
 }
 
 run_bootstrap_timeout_case() {
-  local home=$1 fake_root=$2 fakebin=$3 override=${4:-__unset__}
+  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
+  override=__unset__
+  started_marker=${5:-}
+  git_record=${6:-}
+  wait_for_marker=${7:-0}
+  [ "$#" -lt 4 ] || override=$4
   (
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
+      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
+        FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
+        command sleep 0.01
+      fi
+    }
+    git() {
+      local tries
+      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
+        tries=0
+        while [ "$tries" -lt 5 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do
+          command sleep 0.01
+          tries=$((tries + 1))
+        done
+      fi
+      if [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
+        printf '%s\n' "$*" >> "$FM_FAKE_GIT_SYNC_STARTED_RECORD"
+      fi
+      command git "$@"
     }
     export -f sleep
+    export -f git
     if [ "$override" = __unset__ ]; then
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+        FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
+        FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
     else
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$override" \
+        FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
+        FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
     fi
   )
@@ -306,6 +337,42 @@ test_fleet_sync_timeout_explicit_override_wins() {
   pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
 }
 
+test_fleet_sync_timeout_empty_override_uses_default() {
+  local case_dir home fakebin fake_root out
+  case_dir="$TMP_ROOT/fleet-timeout-empty-override"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 18
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root=$(make_fake_fleet_sync_root "$case_dir")
+
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" "")
+
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)" "blank timeout env should behave like an unset override"
+  assert_not_contains "$out" "timeout=20s" "blank timeout env should not force the legacy floor on a large fleet"
+  pass "bootstrap treats a blank timeout override as unset"
+}
+
+test_fleet_sync_timeout_is_computed_before_launch() {
+  local case_dir home fakebin fake_root out started_marker git_record
+  case_dir="$TMP_ROOT/fleet-timeout-launch-order"
+  home="$case_dir/home"
+  started_marker="$case_dir/fleet-started"
+  git_record="$case_dir/git-after-start"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 3
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root=$(make_fake_fleet_sync_root "$case_dir")
+
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
+
+  [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "launch-order case should still enforce the computed timeout"
+  pass "bootstrap computes the timeout before launching fleet sync"
+}
+
 test_crew_dispatch_active_rules_are_surfaced() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -367,5 +434,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
+test_fleet_sync_timeout_empty_override_uses_default
+test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

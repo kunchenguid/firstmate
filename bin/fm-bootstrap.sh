@@ -106,9 +106,9 @@ fleet_sync_origin_backed_project_count() {
 
 fleet_sync_bootstrap_timeout() {
   local count timeout
-  if [ "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT+x}" = x ]; then
-    case "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" in
-      ''|*[!0-9]*) echo 20 ;;
+  if [ -n "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" ]; then
+    case "$FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT" in
+      *[!0-9]*) echo 20 ;;
       *) echo "$FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT" ;;
     esac
     return 0
@@ -146,13 +146,13 @@ fleet_sync() {
   [ -d "$PROJECTS" ] || return 0
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  timeout=$(fleet_sync_bootstrap_timeout)
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
   "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
   pid=$!
 
-  timeout=$(fleet_sync_bootstrap_timeout)
   start=$SECONDS
   while jobs -r -p | grep -qx "$pid"; do
     if [ $((SECONDS - start)) -ge "$timeout" ]; then
