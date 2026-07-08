@@ -21,14 +21,20 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 
 make_base_path_without() {
-  local dir=$1 skip=$2 src name
+  local dir=$1 skip=$2 old_ifs path_dir src name
   mkdir -p "$dir"
-  for src in /usr/bin/*; do
-    [ -x "$src" ] || continue
-    name=${src##*/}
-    [ "$name" = "$skip" ] && continue
-    [ -e "$dir/$name" ] || ln -s "$src" "$dir/$name"
+  old_ifs=$IFS
+  IFS=:
+  for path_dir in $BASE_PATH; do
+    [ -d "$path_dir" ] || continue
+    for src in "$path_dir"/*; do
+      [ -x "$src" ] || continue
+      name=${src##*/}
+      [ "$name" = "$skip" ] && continue
+      [ -e "$dir/$name" ] || ln -s "$src" "$dir/$name"
+    done
   done
+  IFS=$old_ifs
   printf '%s\n' "$dir"
 }
 
