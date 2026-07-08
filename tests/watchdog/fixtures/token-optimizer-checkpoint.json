@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "generated": "2026-07-08T02:09:24-0500",
+  "trigger": "quality-80",
+  "fill_pct": 52.0,
+  "quality": {
+    "score": 74.2,
+    "tool_calls": 412,
+    "breakdown": {
+      "context_fill_degradation": {
+        "score": 50.0,
+        "fill_pct": 52.0,
+        "quality_estimate": 87,
+        "quality_curve": "anthropic-default",
+        "model": "claude-opus-4-8",
+        "model_context_window": 1000000,
+        "band": "DEGRADATION STARTING",
+        "detail": "52% fill, degradation starting (anthropic-default)"
+      }
+    }
+  },
+  "session_id": "2b09e308-e6e7-4c74-b648-1495d36a9fc8"
+}
