@@ -1,6 +1,6 @@
 ---
 name: parking
-description: Capture, resurface, refine, and promote the captain's half-formed ideas. Use when the captain invokes /parking or asks to review, refine, or clean up their parking lot ("review my parking lot", "parked ideas", "refine ideas", "what's in parking"), when a parking-ritual cron prompt fires, or when handling a parking capture trigger ("Parking:", "park this", "put this in parking"). The always-on capture reflex is contracted in AGENTS.md section 6; this skill owns the store schema, capture mechanics, daily/weekly rituals, decay, clustering, cron scheduling with self-re-arm, and promotion via jira-connect.
+description: Capture, resurface, refine, and promote the captain's half-formed ideas. Use when the captain invokes /parking or asks to review, refine, or clean up their parking lot ("review my parking lot", "parked ideas", "refine ideas", "what's in parking"), when a parking-ritual cron prompt fires, or when handling a parking capture trigger ("Parking:", "park this", "put this in parking"). The always-on capture reflex is contracted in AGENTS.md section 6; this skill owns the store schema, capture mechanics, daily/weekly rituals, decay, clustering, cron scheduling with self-re-arm, and promotion into tracked work.
 user-invocable: true
 metadata:
   internal: true
@@ -20,7 +20,7 @@ It is created lazily on the first capture and is never committed.
 One entry per idea in `data/parking.md`:
 
 ```markdown
-## <id> — <distilled one-liner>
+## <id> - <distilled one-liner>
 - status: raw | refining | ready | promoted | dropped
 - parked: <YYYY-MM-DD>
 - last-touched: <YYYY-MM-DD>
@@ -33,7 +33,7 @@ One entry per idea in `data/parking.md`:
 
 Field contract:
 
-- `id`: short kebab slug with a random suffix, the same convention as task ids, e.g. `redshift-cache-idea-k4`.
+- `id`: short kebab slug with a random suffix, the same convention as task ids, e.g. `cache-rollup-idea-k4`.
 - `status`: lifecycle field, `raw` on capture, `refining` while notes are being added, `ready` when the captain deems it actionable, then `promoted` (moved into tracked work) or `dropped` (killed but retained for record).
 - `parked`: capture date, immutable.
 - `last-touched`: updated on every note append or status change; drives the decay nudge.
@@ -68,7 +68,7 @@ Three durable crons fire the rituals. Create them with `CronCreate`, each `durab
 - Afternoon: `30 15 * * *` (3:30pm exact; the scheduler's small jitter still applies).
 - Weekly digest: `7 17 * * 5` (~Friday 5:07pm).
 
-The off-minute morning (8:57) and Friday (5:07) times avoid the fleet-wide :00/:30 pileup; the 3:30pm afternoon time is the captain's deliberate exact choice (documented in `README.md`) and lands on :30 by design.
+The off-minute morning (8:57) and Friday (5:07) times avoid the fleet-wide :00/:30 pileup; the 3:30pm afternoon time is a sensible mid-afternoon default (adjust to taste) and lands on :30 by design.
 These crons auto-expire after 7 days, so they are self-re-armed (see below).
 
 **Morning and afternoon.**
@@ -88,7 +88,7 @@ Acting on it (a note append, a status change, or a drop) resets `last-touched`.
 
 ### Theme clustering
 
-During a ritual, group related parked ideas and suggest combining them: "3 ideas here all touch Redshift access - combine into one effort?"
+During a ritual, group related parked ideas and suggest combining them: "3 ideas here all touch the same subsystem - combine into one effort?"
 This turns scattered sparks into a single deliberate effort.
 Clustering is a suggestion, not an automatic merge; the captain decides.
 
@@ -113,19 +113,18 @@ This lapse-then-self-heal behavior is the accepted tradeoff documented in `READM
 Refine in place until an idea is `ready`: during a ritual or on demand, append dated notes, add sub-ideas, and bump `raw -> refining -> ready`. `last-touched` updates on every change.
 
 **Promote (`ready` -> `promoted`).**
-When the captain wants a `ready` idea promoted:
+When the captain wants a `ready` idea promoted, the default target is firstmate's own intake:
 
-1. Load the `jira-connect` skill and create a Jira issue: title is the distilled one-liner, body is the refinement notes, and add the deadline when the idea is time-sensitive. Record the returned Jira issue key.
-2. Flip the parking entry to `status: promoted` with a pointer to the Jira key, and update `last-touched`.
-3. When the idea is also fleet software work firstmate should execute, ALSO run firstmate's normal intake (AGENTS.md section 7): resolve the project, classify ship versus scout, and spawn the crewmate. Record both the Jira key and the resulting backlog id / PR / report on the parking entry.
+1. Run firstmate's normal intake (AGENTS.md section 7): resolve the project, classify ship versus scout, and either spawn the crewmate or file a `data/backlog.md` entry. Add the deadline when the idea is time-sensitive.
+2. Flip the parking entry to `status: promoted` with a pointer to the resulting backlog id / PR / report, and update `last-touched`.
+
+**Optional external tracker.**
+If a tracker skill is available in this fleet (for example Jira via `jira-connect`, or any equivalent), the captain may also want the idea filed there: load that skill and create an issue with the distilled one-liner as title, the refinement notes as body, and the deadline when time-sensitive, then record the returned issue key on the parking entry alongside the backlog id.
+When no such skill is present, the local intake above is the whole promote path.
 
 **Promote-to-scout.**
 An idea that is really a question ("would X work?") promotes straight to a firstmate scout task: firstmate investigates and reports, no commitment.
-Still file the Jira issue when the captain wants it tracked there.
-
-**Fallback when `jira-connect` is unavailable.**
-Create a local `data/backlog.md` entry instead, and warn the captain that the idea was queued locally rather than filed in Jira.
-Still flip the parking entry to `promoted` with a pointer to the backlog id.
+File an external tracker issue too only when the captain wants it tracked there and a tracker skill is available.
 
 **Drop (`dropped`).**
 A killed idea is retained for record, not deleted immediately.
