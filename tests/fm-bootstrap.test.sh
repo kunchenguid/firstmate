@@ -18,7 +18,7 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-$(fm_isolated_base_path tmux node gh treehouse no-mistakes orca gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi)}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 
 # A fake toolchain where every required tool is present and gh is authenticated.

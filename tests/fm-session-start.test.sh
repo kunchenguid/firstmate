@@ -26,7 +26,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-$(fm_isolated_base_path tmux node gh treehouse no-mistakes orca gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi)}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -186,7 +186,14 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  # Scrub ambient harness markers so primary-harness detection is driven only by
+  # the per-test fake `ps` ancestry, not by the real harness this suite runs
+  # under (fm-harness.sh's detect_own checks CLAUDECODE/PI_CODING_AGENT/GROK_AGENT
+  # before the ps walk, so a live Claude Code session would force 'claude').
+  (
+    unset CLAUDECODE PI_CODING_AGENT GROK_AGENT
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  )
 }
 
 hash_file_for_test() {

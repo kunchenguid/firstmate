@@ -91,6 +91,36 @@ SH
   done
 }
 
+# fm_isolated_base_path <exclude-tool>... echoes a temp dir that mirrors the
+# real system bin dirs (as symlinks) but with the named tools removed. Use it
+# as BASE_PATH so a test that omits a fake shim sees that tool as genuinely
+# absent, even on hosts where an unrelated real binary of the same name lives
+# in /usr/bin (e.g. the GNOME 'orca' screen reader, or a system 'node'). Without
+# it, `command -v <tool>` falls through to the real binary and the intended
+# "MISSING: <tool>" absence cases never fire.
+#
+# ponytail: no EXIT-trap cleanup here on purpose. This runs under command
+# substitution ($(...)), whose subshell fires EXIT traps in this bash, which
+# would delete the mirror the instant it is built. It is a small symlink-only
+# mktemp dir under TMPDIR; leave it to normal temp cleanup, same as the rest of
+# the suite's best-effort temp handling.
+fm_isolated_base_path() {  # <exclude-tool>...
+  local mirror src f name
+  mirror=$(mktemp -d "${TMPDIR:-/tmp}/fm-sysbin.XXXXXX")
+  for src in /usr/bin /bin /usr/sbin /sbin; do
+    [ -d "$src" ] || continue
+    for f in "$src"/*; do
+      name=${f##*/}
+      [ -e "$mirror/$name" ] && continue
+      ln -s "$f" "$mirror/$name" 2>/dev/null || true
+    done
+  done
+  for name in "$@"; do
+    rm -f "$mirror/$name"
+  done
+  printf '%s' "$mirror"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
