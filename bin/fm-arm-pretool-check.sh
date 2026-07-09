@@ -180,7 +180,9 @@ has_bare_background_operator() {
       if [ "$in_double" -eq 0 ]; then in_double=1; else in_double=0; fi
       continue
     fi
-    [ "$in_single" -eq 0 ] && [ "$in_double" -eq 0 ] || continue
+    if [ "$in_single" -ne 0 ] || [ "$in_double" -ne 0 ]; then
+      continue
+    fi
     [ "$ch" = "&" ] || continue
 
     prev=""
@@ -275,7 +277,9 @@ has_shell_redirection() {
       if [ "$in_double" -eq 0 ]; then in_double=1; else in_double=0; fi
       continue
     fi
-    [ "$in_single" -eq 0 ] && [ "$in_double" -eq 0 ] || continue
+    if [ "$in_single" -ne 0 ] || [ "$in_double" -ne 0 ]; then
+      continue
+    fi
     { [ "$ch" = "<" ] || [ "$ch" = ">" ]; } && return 0
   done
   return 1
