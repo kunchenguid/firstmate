@@ -106,7 +106,8 @@ make_base_path_without() {
   for dir in $BASE_PATH; do
     [ -d "$dir" ] || continue
     for f in "$dir"/*; do
-      [ -x "$f" ] && [ ! -d "$f" ] || continue
+      [ -x "$f" ] || continue
+      [ -d "$f" ] && continue
       name=$(basename "$f")
       [ "$name" = "$exclude" ] && continue
       [ -e "$base_dir/$name" ] && continue
