@@ -451,6 +451,54 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# An Azure DevOps-origin project pulls `az` (with the azure-devops extension) into
+# the dependency set and prompts az login when unauthenticated. GitHub-only fleets
+# never emit these lines (covered by the empty/exact cases above, which have no
+# ADO project). Uses FM_BOOTSTRAP_DETECT_ONLY=1 so the read-only detection runs
+# without the mutating fleet-sync sweep touching the fake ADO origin.
+test_ado_project_requires_az() {
+  local case_dir fakebin repo out
+  case_dir="$TMP_ROOT/ado-az"
+  mkdir -p "$case_dir/home/projects"
+  repo="$case_dir/home/projects/ado-repo"
+  git init -q "$repo"
+  git -C "$repo" remote add origin https://dev.azure.com/contoso/Platform/_git/api
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  run_ado() {
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  # az absent -> MISSING: az
+  rm -f "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -Fx 'MISSING: az (install: brew install azure-cli  # or the platform'"'"'s package manager)' >/dev/null \
+    || fail "ado-az: missing az should be reported (got: $out)"
+
+  # az present but azure-devops extension missing -> MISSING extension
+  printf '#!/usr/bin/env bash\ncase "$1 $2" in "extension show") exit 1;; "account show") exit 0;; esac\nexit 0\n' > "$fakebin/az"
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -Fx 'MISSING: az azure-devops extension (install: az extension add --name azure-devops)' >/dev/null \
+    || fail "ado-az: missing azure-devops extension should be reported (got: $out)"
+
+  # az + extension present but not authenticated -> NEEDS_AZ_AUTH
+  printf '#!/usr/bin/env bash\ncase "$1 $2" in "extension show") exit 0;; "account show") exit 1;; esac\nexit 0\n' > "$fakebin/az"
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -Fx 'NEEDS_AZ_AUTH' >/dev/null \
+    || fail "ado-az: unauthenticated az should emit NEEDS_AZ_AUTH (got: $out)"
+
+  # fully set up -> no az lines at all
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/az"
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -E 'MISSING: az|NEEDS_AZ_AUTH' >/dev/null \
+    && fail "ado-az: a ready az must emit no az lines (got: $out)"
+  pass "bootstrap requires az (and az login) for an Azure DevOps-origin project"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
@@ -461,3 +509,4 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_ado_project_requires_az
