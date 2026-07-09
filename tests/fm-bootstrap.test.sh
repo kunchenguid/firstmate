@@ -7,8 +7,9 @@
 # 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# quota-axi is on PATH, whether the local backend config opts out of tasks-axi
-# backlog mutations, and which no-mistakes version is on PATH.
+# tasks-axi update advertises --archive-body, whether quota-axi is on PATH,
+# whether the local backend config opts out of tasks-axi backlog mutations, and
+# which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -71,11 +72,20 @@ SH
 }
 
 add_tasks_axi() {
-  local fakebin=$1 version=$2
+  local fakebin=$1 version=$2 archive_body=${3:-yes} archive_line
+  archive_line=""
+  [ "$archive_body" = yes ] && archive_line='  --archive-body'
   cat > "$fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
   printf '%s\n' '$version'
+  exit 0
+fi
+if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  [ -z '$archive_line' ] || printf '%s\n' '$archive_line'
+  exit 0
 fi
 exit 0
 SH
@@ -187,7 +197,7 @@ run_bootstrap_timeout_case() {
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
+  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -202,7 +212,14 @@ test_bootstrap_reporting() {
     if [ "$tasks" = "-" ]; then
       rm -f "$fakebin/tasks-axi"
     else
-      add_tasks_axi "$fakebin" "$tasks"
+      archive_body=yes
+      case "$tasks" in
+        *:noarchive)
+          archive_body=no
+          tasks=${tasks%:noarchive}
+          ;;
+      esac
+      add_tasks_axi "$fakebin" "$tasks" "$archive_body"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -230,6 +247,7 @@ treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^M
 compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^

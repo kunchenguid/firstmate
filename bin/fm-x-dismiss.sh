@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dismiss a pending X mention at the relay WITHOUT replying to it.
+# Dismiss a pending X-mode mention at the relay WITHOUT replying to it.
 #
 # Usage: fm-x-dismiss.sh <request_id>
 #

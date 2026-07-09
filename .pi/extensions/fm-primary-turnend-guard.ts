@@ -1,12 +1,60 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 let skipNextTurnEnd = false;
 
-const extensionDir = dirname(fileURLToPath(import.meta.url));
+type LockOwnership = "owned" | "missing" | "other";
+
+const extensionFile = fileURLToPath(import.meta.url);
+const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
+const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const marker = `${state}/.pi-turnend-extension-loaded`;
+const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+
+function parentPid(pid: string): string {
+  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
+function pidAlive(pid: string): boolean {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function lockOwnership(): LockOwnership {
+  let lockPid = "";
+  try {
+    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+  } catch {
+    return "missing";
+  }
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    if (pid === lockPid) return "owned";
+    pid = parentPid(pid);
+    if (!pid || pid === "1") break;
+  }
+  return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function markLoaded() {
+  if (lockOwnership() === "other") return false;
+  mkdirSync(state, { recursive: true });
+  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  return true;
+}
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
@@ -24,6 +72,8 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on?.("session_start", markLoaded);
+
   pi.on("turn_end", async () => {
     if (skipNextTurnEnd) {
       skipNextTurnEnd = false;
@@ -36,7 +86,7 @@ export default function (pi: ExtensionAPI) {
     try {
       pi.sendUserMessage(
         "TURN WOULD END BLIND - supervision is off. " +
-          "Run bin/fm-watch-arm.sh as a background task before ending the turn.\n\n" +
+          "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
           result.stderr,
         { deliverAs: "followUp" },
       );
@@ -45,4 +95,6 @@ export default function (pi: ExtensionAPI) {
       skipNextTurnEnd = false;
     }
   });
+
+  markLoaded();
 }

@@ -2,7 +2,8 @@
 # Shared tasks-axi backend selection and compatibility probe for bootstrap and
 # teardown.
 # Usage: . bin/fm-tasks-axi-lib.sh
-# Compatible means tasks-axi --version reports 0.1.1 or newer.
+# Compatible means tasks-axi --version reports 0.1.1 or newer and
+# `tasks-axi update --help` exposes --archive-body for recoverable note rewrites.
 # `config/backlog-backend=manual` opts out of tasks-axi backlog mutations;
 # absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
@@ -25,10 +26,20 @@ fm_tasks_axi_compatible() {
   minor=${rest%% *}
   patch=${rest##* }
 
-  [ "$major" -gt 0 ] && return 0
-  [ "$major" -eq 0 ] && [ "$minor" -gt 1 ] && return 0
-  [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ] && return 0
+  if [ "$major" -gt 0 ] ||
+    { [ "$major" -eq 0 ] && [ "$minor" -gt 1 ]; } ||
+    { [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ]; }; then
+    fm_tasks_axi_update_has_archive_body
+    return $?
+  fi
   return 1
+}
+
+fm_tasks_axi_update_has_archive_body() {
+  local output
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  output=$(tasks-axi update --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
 }
 
 fm_backlog_backend_value() {

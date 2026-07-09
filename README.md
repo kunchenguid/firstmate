@@ -54,16 +54,55 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+### Requirements
+
+- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- Git with GitHub auth (`gh auth login`).
+- tmux, for the reference session backend.
+
 The first mate detects and offers to install everything else.
+
+### Recommended harnesses
+
+**Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session.
+Claude Code and Grok use background-notify wake cycles; Pi uses its tracked primary watcher extension.
+All three have verified turn-end guard paths when launched with their documented setup.
+Pick whichever one matches your subscription and workflow.
+
+Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+### Install and launch
 
 ```sh
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
-cd firstmate && claude   # launch your harness here; AGENTS.md takes over
+cd firstmate
 ```
 
-Then just talk:
+Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+**Claude Code**
+
+```sh
+claude
+```
+
+**Grok**
+
+```sh
+grok --trust
+```
+
+**Pi**
+
+```sh
+pi
+```
+
+For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
+For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+
+### Talk to it
 
 ```sh
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
@@ -78,6 +117,8 @@ Then just talk:
 
 > alright merge it
 ```
+
+### More backends
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
@@ -148,6 +189,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
+- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
