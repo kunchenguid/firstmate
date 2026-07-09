@@ -40,6 +40,10 @@ assert_deny "mid-command shell background before follow-up work" 'bin/fm-watch-a
 assert_deny "checkpoint && follow-up work is bundling" 'bin/fm-watch-checkpoint.sh --seconds 180 && echo done'
 assert_deny "checkpoint bare background before follow-up work" 'bin/fm-watch-checkpoint.sh --seconds 180 & echo done'
 assert_deny "export leading statement cannot hide bundled work" 'export FM_HOME=/tmp && tasks-axi done x; exec bin/fm-watch-arm.sh'
+assert_deny "arm output redirection hides status lines" 'exec bin/fm-watch-arm.sh >/dev/null'
+assert_deny "checkpoint output redirection hides status lines" 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'
+assert_deny "export command substitution cannot hide bundled work" "export X=\$(tasks-axi done x); exec bin/fm-watch-arm.sh"
+assert_deny "checkpoint command substitution cannot hide bundled work" "bin/fm-watch-checkpoint.sh --seconds \$(tasks-axi done x)"
 
 # ALLOW acceptance cases (task spec)
 assert_allow "bare blessed exec of the arm" 'exec bin/fm-watch-arm.sh'
@@ -55,6 +59,11 @@ assert_deny "piped into tail" 'bin/fm-watch-arm.sh | tail -f'
 assert_deny "arm && another command bundled" 'exec bin/fm-watch-arm.sh && echo done'
 assert_deny "checkpoint backgrounded" 'bin/fm-watch-checkpoint.sh --seconds 60 &'
 assert_deny "broad pkill without -f" 'pkill fm-watch.sh'
+assert_deny "arm stderr redirection is still redirection" 'exec bin/fm-watch-arm.sh 2>/tmp/err'
+assert_deny "checkpoint stderr/stdout merge is still redirection" 'bin/fm-watch-checkpoint.sh --seconds 180 2>&1'
+assert_deny "export backtick substitution cannot hide bundled work" "export X=\`tasks-axi done x\`; exec bin/fm-watch-arm.sh"
+assert_deny "export process substitution cannot hide bundled work" 'export X=<(tasks-axi done x); exec bin/fm-watch-arm.sh'
+assert_deny "checkpoint process substitution cannot hide bundled work" 'bin/fm-watch-checkpoint.sh --file <(echo x)'
 assert_allow "arm with --restart, blessed" 'exec bin/fm-watch-arm.sh --restart'
 # The blessed leading-statement separator is ';' (matching the documented
 # x-mode-guard recipe), not '&&' - a bare 'cd X && exec arm' is bundling by

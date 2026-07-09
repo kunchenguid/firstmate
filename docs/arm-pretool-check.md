@@ -27,10 +27,12 @@ For a relevant command it denies when:
 
 1. The command backgrounds the arm/checkpoint with a shell `&` (trailing, not `&&`), or applies `nohup`/`disown`.
 2. The arm/checkpoint is piped into `head`, `tail`, `timeout`, or `sed -n`, which can tear down attach-and-wait before the watcher confirms it started.
-3. The arm/checkpoint is bundled with other work in a multi-statement command (separated by `;`, `&&`, `||`, or a newline) that is not the blessed shape below.
-4. The command is a broad `pkill` against `fm-watch` - forbidden regardless of shape, because it matches every firstmate home's watcher and can kill a sibling's supervision (`AGENTS.md` section 8).
+3. The command redirects watcher arm/checkpoint stdio with shell redirection, which can hide the status and wake lines the primary relies on.
+4. The command uses command or process substitution inside a watcher arm/checkpoint command.
+5. The arm/checkpoint is bundled with other work in a multi-statement command (separated by `;`, `&&`, `||`, or a newline) that is not the blessed shape below.
+6. The command is a broad `pkill` against `fm-watch` - forbidden regardless of shape, because it matches every firstmate home's watcher and can kill a sibling's supervision (`AGENTS.md` section 8).
 
-The **blessed shape** - always allowed - is: no pipe, no background operator anywhere, and a final statement that is exactly `[exec] bin/fm-watch-arm.sh [--restart]` or `bin/fm-watch-checkpoint.sh [args...]`, optionally preceded by leading statements that are each `cd <path>`, `export VAR=...`, `. config/x-mode.env` / `source config/x-mode.env`, or the guarded form `[ -f config/x-mode.env ] && . config/x-mode.env`.
+The **blessed shape** - always allowed - is: no pipe, no background operator, no redirection, no command/process substitution, and a final statement that is exactly `[exec] bin/fm-watch-arm.sh [--restart]` or `bin/fm-watch-checkpoint.sh [args...]`, optionally preceded by leading statements that are each `cd <path>`, `export VAR=...`, `. config/x-mode.env` / `source config/x-mode.env`, or the guarded form `[ -f config/x-mode.env ] && . config/x-mode.env`.
 Leading statements are separated from the final statement by `;` or a newline, matching the documented arm recipe (`AGENTS.md` section 8, `docs/supervision-protocols/grok.md`) - a leading statement joined to the final one with `&&` (e.g. `cd X && exec bin/fm-watch-arm.sh`) is bundling, not the blessed shape, and is denied like any other multi-statement command.
 
 `.toolInput.background` / `.tool_input.background` is read for context only.
@@ -130,5 +132,5 @@ Payload shape confirmed from the `@earendil-works/pi-coding-agent` type definiti
 
 ## Tests
 
-`tests/fm-arm-pretool-check.test.sh` covers the shared checker's CLI mode (all required DENY/ALLOW acceptance cases plus additional coverage for `nohup`/`disown`, `tail`, `&&`-bundling, non-`-f` `pkill`, and the blessed `--restart`/`cd`/`export` leading-statement forms), stdin JSON mode for both the Grok (`toolInput.command`) and Claude/Codex (`tool_input.command`) schemas, fail-open behavior (empty stdin, unparseable JSON, missing `jq`), the `--claude` output-shaping contract, and tracked hook-file wiring for all five harnesses including a regression test for the grok `${VAR}` bug.
+`tests/fm-arm-pretool-check.test.sh` covers the shared checker's CLI mode (all required DENY/ALLOW acceptance cases plus additional coverage for `nohup`/`disown`, `tail`, redirection, command/process substitution, `&&`-bundling, non-`-f` `pkill`, and the blessed `--restart`/`cd`/`export` leading-statement forms), stdin JSON mode for both the Grok (`toolInput.command`) and Claude/Codex (`tool_input.command`) schemas, fail-open behavior (empty stdin, unparseable JSON, missing `jq`), the `--claude` output-shaping contract, and tracked hook-file wiring for all five harnesses including a regression test for the grok `${VAR}` bug.
 These tests do not invoke live harnesses; live harness validation is the empirical evidence recorded above.

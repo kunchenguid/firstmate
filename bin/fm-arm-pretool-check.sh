@@ -17,12 +17,13 @@
 # THIS IS A SEATBELT FOR KNOWN-BAD COMMAND SHAPES, NOT A POST-ARM LIVENESS
 # GUARANTEE. It only inspects the text of a shell command about to run and
 # denies a handful of specific anti-patterns (background operator, truncating
-# pipe, bundling with other work, broad pkill). It cannot prove the watcher
-# actually started and stayed healthy afterward - that is bin/fm-guard.sh and
-# bin/fm-turnend-guard.sh's job, which run after the fact from the beacon and
-# lock. A command this script allows can still fail to arm the watcher for
-# unrelated reasons. See docs/arm-pretool-check.md for the full contract and
-# the per-harness wiring audit.
+# pipe, stdio redirection, command substitution, bundling with other work,
+# broad pkill). It cannot prove the watcher actually started and stayed
+# healthy afterward - that is bin/fm-guard.sh and bin/fm-turnend-guard.sh's
+# job, which run after the fact from the beacon and lock. A command this script
+# allows can still fail to arm the watcher for unrelated reasons. See
+# docs/arm-pretool-check.md for the full contract and the per-harness wiring
+# audit.
 #
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
@@ -201,6 +202,67 @@ has_shell_list_operator() {
   return 1
 }
 
+has_command_or_process_substitution() {
+  local cmd=$1
+  local i len ch next in_single=0 in_double=0 escaped=0
+  len=${#cmd}
+  for ((i = 0; i < len; i++)); do
+    ch=${cmd:i:1}
+    if [ "$escaped" -eq 1 ]; then
+      escaped=0
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = "\\" ]; then
+      escaped=1
+      continue
+    fi
+    if [ "$in_double" -eq 0 ] && [ "$ch" = "'" ]; then
+      if [ "$in_single" -eq 0 ]; then in_single=1; else in_single=0; fi
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = '"' ]; then
+      if [ "$in_double" -eq 0 ]; then in_double=1; else in_double=0; fi
+      continue
+    fi
+    [ "$in_single" -eq 0 ] || continue
+
+    next=""
+    [ "$((i + 1))" -lt "$len" ] && next=${cmd:i+1:1}
+    [ "$ch" = "$" ] && [ "$next" = "(" ] && return 0
+    [ "$ch" = '`' ] && return 0
+    { [ "$ch" = "<" ] || [ "$ch" = ">" ]; } && [ "$next" = "(" ] && return 0
+  done
+  return 1
+}
+
+has_shell_redirection() {
+  local cmd=$1
+  local i len ch in_single=0 in_double=0 escaped=0
+  len=${#cmd}
+  for ((i = 0; i < len; i++)); do
+    ch=${cmd:i:1}
+    if [ "$escaped" -eq 1 ]; then
+      escaped=0
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = "\\" ]; then
+      escaped=1
+      continue
+    fi
+    if [ "$in_double" -eq 0 ] && [ "$ch" = "'" ]; then
+      if [ "$in_single" -eq 0 ]; then in_single=1; else in_single=0; fi
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = '"' ]; then
+      if [ "$in_double" -eq 0 ]; then in_double=1; else in_double=0; fi
+      continue
+    fi
+    [ "$in_single" -eq 0 ] && [ "$in_double" -eq 0 ] || continue
+    { [ "$ch" = "<" ] || [ "$ch" = ">" ]; } && return 0
+  done
+  return 1
+}
+
 is_backgrounded() {
   local cmd=$1
   has_bare_background_operator "$cmd" && return 0
@@ -225,12 +287,14 @@ statement_count() {
 
 # The blessed shape: optional cd/export/guarded-x-mode-source leading
 # statements, then a sole final exec of fm-watch-arm.sh (optional --restart)
-# or a sole fm-watch-checkpoint.sh invocation. No pipes, no background
-# operator anywhere.
+# or a sole fm-watch-checkpoint.sh invocation. No pipes, background operator,
+# redirection, or command/process substitution anywhere.
 is_blessed_shape() {
   local cmd=$1
   printf '%s' "$cmd" | grep -Eq '\|' && return 1
   is_backgrounded "$cmd" && return 1
+  has_shell_redirection "$cmd" && return 1
+  has_command_or_process_substitution "$cmd" && return 1
 
   local normalized line trimmed
   normalized=$(printf '%s' "$cmd" | tr ';' '\n')
@@ -289,6 +353,12 @@ elif is_relevant "$CMD"; then
   elif is_piped_truncated "$CMD"; then
     DENY=1
     REASON="pipes the watcher arm/checkpoint through head/tail/timeout/sed -n, which can tear down attach-and-wait before the watcher confirms it started."
+  elif has_shell_redirection "$CMD"; then
+    DENY=1
+    REASON="redirects the watcher arm/checkpoint stdio with shell redirection, which can hide the status and wake lines the primary relies on."
+  elif has_command_or_process_substitution "$CMD"; then
+    DENY=1
+    REASON="runs command or process substitution inside a watcher arm/checkpoint command. Run the watcher arm/checkpoint as its own literal standalone command."
   elif [ "$(statement_count "$CMD")" -gt 1 ]; then
     DENY=1
     REASON="bundles the watcher arm/checkpoint with other work in a multi-statement command. Run it as its own standalone command, optionally preceded only by cd/export/source config/x-mode.env."
