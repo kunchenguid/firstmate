@@ -8,6 +8,7 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) ado pr= -> resolve the PR head via az + a source-branch fetch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,7 +142,42 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_ado_pr_meta_fetches_head_via_az() {
+  local case_dir out fakebin
+  case_dir=$(make_case ado-pr-fetch)
+  stale_and_pr_commits "$case_dir"
+  # Publish the PR head under a source branch ref the ADO PR reports, so the
+  # library can fetch the commit object by that ref.
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/heads/feature-pr"
+
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/az" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *"repos pr show"*)
+    printf '%s\n' '{"status":"active","lastMergeSourceCommit":{"commitId":"$PR_SHA"},"sourceRefName":"refs/heads/feature-pr"}'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/az"
+
+  # Point origin at an ADO PR URL so provider detection routes to az.
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/contoso/Platform/_git/api/pullrequest/9"
+
+  out=$(PATH="$fakebin:$PATH" run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "ado-pr-fetch: diff should use the ADO PR head content"
+  assert_not_contains "$out" 'stale-local' "ado-pr-fetch: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "ado-pr-fetch: should not warn when the ADO PR head resolves via az + fetch"
+  pass "fm-review-diff resolves an Azure DevOps PR head via az and a source-branch fetch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_ado_pr_meta_fetches_head_via_az
