@@ -32,6 +32,7 @@ A herdr spawn additionally version-gates against the installed `herdr` binary's 
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A codex-app spawn requires the `codex` CLI, `node`, and `harness=codex`; it starts a Codex Desktop thread through `bin/fm-codex-bridge`, validates the returned thread cwd, resumes the thread before every turn in one-shot stdio mode, and refuses to supervise the task unless the thread writes the expected status-file return-channel line from the current startup turn.
+The detached bridge worker keeps the app-server alive by polling the started turn's status, because the thread shell itself can report `notLoaded` while that turn is still running.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
 When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it checks for `codex` with `app-server` support, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Codex Desktop owns the visible endpoint and Firstmate creates a git worktree itself.
@@ -315,7 +316,7 @@ CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-s
 FM_CODEX_BRIDGE=        # codex-app only: optional path to an alternate fm-codex-bridge, mainly for tests
 FM_CODEX_BRIDGE_TIMEOUT_MS=30000 # codex-app only: app-server request timeout inside one bridge process
 FM_CODEX_APP_CAPTURE_TURN_LIMIT=20 # codex-app only: recent turns fetched before line-tail capture is applied
-FM_CODEX_APP_RETURN_CHANNEL_POLLS=240  # codex-app only: status-file handshake poll count after thread creation
+FM_CODEX_APP_RETURN_CHANNEL_POLLS=720  # codex-app only: status-file handshake poll count after thread creation
 FM_CODEX_APP_RETURN_CHANNEL_SLEEP=0.25 # codex-app only: seconds between status-file handshake polls
 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=4320 # codex-app only: detached send-turn worker polls before giving up its app-server hold
 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=5    # codex-app only: seconds between detached send-turn worker lifecycle polls

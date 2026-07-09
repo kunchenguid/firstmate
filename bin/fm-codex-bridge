@@ -115,7 +115,7 @@ function statusWaitBudgetMs(opts) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["wait-status-polls"],
     "--wait-status-polls",
-    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "720",
   )));
   const sleepMs = Math.round(numericOption(
     opts["wait-status-sleep"],
@@ -132,7 +132,7 @@ async function waitForStatusFile(threadId, opts, startOffset = 0) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["wait-status-polls"],
     "--wait-status-polls",
-    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "720",
   )));
   const sleepMs = Math.round(numericOption(
     opts["wait-status-sleep"],
@@ -147,10 +147,30 @@ async function waitForStatusFile(threadId, opts, startOffset = 0) {
 }
 
 function isActiveStatus(status) {
-  return status === "active" || status === "inProgress" || status === "running" || status === "unknown";
+  return status === "active" || status === "inProgress" || status === "running" || status === "unknown" || status === "notLoaded";
 }
 
-async function holdTurnLifecycle(server, threadId, opts) {
+function turnIdFromStartResult(turn) {
+  if (!turn || typeof turn !== "object") return "";
+  if (typeof turn.id === "string") return turn.id;
+  if (turn.turn && typeof turn.turn.id === "string") return turn.turn.id;
+  return "";
+}
+
+async function readTurnStatus(server, threadId, turnId) {
+  const result = await server.request("thread/turns/list", {
+    threadId,
+    limit: 20,
+    itemsView: "summary",
+    sortDirection: "desc",
+  });
+  const turns = result.data || [];
+  const turn = turns.find(item => item && item.id === turnId);
+  if (!turn) return "unknown";
+  return statusType(turn.status);
+}
+
+async function holdTurnLifecycle(server, threadId, opts, turnId = "") {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["turn-lifecycle-polls"],
     "--turn-lifecycle-polls",
@@ -164,9 +184,14 @@ async function holdTurnLifecycle(server, threadId, opts) {
   for (let i = 0; i < polls; i += 1) {
     if (sleepMs > 0) await delay(sleepMs);
     try {
-      const result = await server.request("thread/read", { threadId, includeTurns: false });
-      const normalized = normalizeThread(result, "");
-      if (!isActiveStatus(normalized.status)) return;
+      let status;
+      if (turnId) {
+        status = await readTurnStatus(server, threadId, turnId);
+      } else {
+        const result = await server.request("thread/read", { threadId, includeTurns: false });
+        status = normalizeThread(result, "").status;
+      }
+      if (!isActiveStatus(status)) return;
     } catch (_) {
       // Keep the app-server alive through transient status-read failures.
     }
@@ -517,7 +542,7 @@ async function sendTurnWorker(opts, readyFile) {
       const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };
       writeJsonFile(readyFile, ready);
       reportedReady = true;
-      await holdTurnLifecycle(server, threadId, opts);
+      await holdTurnLifecycle(server, threadId, opts, turnIdFromStartResult(turn));
       return ready;
     } catch (err) {
       if (!reportedReady) writeJsonFile(readyFile, { ok: false, error: err.message });

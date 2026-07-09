@@ -846,7 +846,7 @@ codex_app_prompt_file() {
   local prompt="$TASK_TMP/codex-prompt.txt" status_file="$STATE_REAL/$ID.status"
   {
     echo "You are a Firstmate crewmate running in a Codex Desktop thread."
-    echo "Before doing substantive work, append exactly this line to the absolute Firstmate status file below:"
+    echo "Your first action must be to append exactly this line to the absolute Firstmate status file below, before reading project files or doing substantive work:"
     echo "working: Codex thread started"
     echo
     echo "Firstmate status file:"
@@ -894,7 +894,7 @@ codex_app_start_thread() {
 codex_app_start_initial_turn() {
   local bridge polls sleep_s status_file
   bridge=$(fm_backend_codex_app_bridge)
-  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
+  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-720}
   sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
   status_file="$STATE_REAL/$ID.status"
   CODEX_TURN_ARGS=(send-turn --thread-id "$CODEX_THREAD_ID" --prompt-file "$CODEX_PROMPT_FILE" --cwd "$WT")
@@ -906,7 +906,7 @@ codex_app_start_initial_turn() {
 
 codex_app_wait_return_channel() {
   local status_file="$STATE_REAL/$ID.status" polls sleep_s
-  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-240}
+  polls=${FM_CODEX_APP_RETURN_CHANNEL_POLLS:-720}
   sleep_s=${FM_CODEX_APP_RETURN_CHANNEL_SLEEP:-0.25}
   for _ in $(seq 1 "$polls"); do
     if grep -Fx 'working: Codex thread started' "$status_file" >/dev/null 2>&1; then

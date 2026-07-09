@@ -65,6 +65,10 @@ function hasSchemaNativeTextInput(params) {
     item && item.type === "text" && typeof item.text === "string" && Array.isArray(item.text_elements)
   );
 }
+function currentTurnStatus() {
+  if (holdActiveUntilSubstantive && !substantiveDone) return "inProgress";
+  return process.env.FM_FAKE_CODEX_TURN_STATUS || "completed";
+}
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", line => {
   if (!line.trim()) return;
@@ -116,7 +120,7 @@ rl.on("line", line => {
         { id: "turn-old", status: "completed", items: [{ type: "agentMessage", text: "older line" }] }
       ], nextCursor: null, backwardsCursor: null } });
     } else {
-      write({ id, result: { data: [{ id: turnId, status: "completed", items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] }], nextCursor: null, backwardsCursor: null } });
+      write({ id, result: { data: [{ id: turnId, status: currentTurnStatus(), items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] }], nextCursor: null, backwardsCursor: null } });
     }
   } else if (msg.method === "thread/list") {
     write({ id, result: { data: [thread(cwd, process.env.FM_FAKE_CODEX_STATUS || "idle")], nextCursor: null } });
@@ -285,6 +289,29 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
+}
+
+test_bridge_send_turn_tracks_turn_status_when_thread_is_not_loaded() {
+  local dir fb log prompt substantive_file out status i
+  dir="$TMP_ROOT/bridge-turn-not-loaded"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  substantive_file="$dir/substantive.log"
+  printf 'Keep the turn alive even when the shell thread status is notLoaded, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS=notLoaded FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=350 FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE=1 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=40 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.02 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should accept a turn whose thread shell status is notLoaded: $out"
+  for ((i = 0; i < 40; i += 1)); do
+    [ -f "$substantive_file" ] && break
+    sleep 0.02
+  done
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep the app-server alive until the turn reports completed"
+  assert_contains "$(cat "$log")" $'request\tthread/turns/list\t' "bridge should poll the turn lifecycle instead of treating thread notLoaded as completion"
+  pass "fm-codex-bridge: send-turn tracks turn status when the thread shell status is notLoaded"
 }
 
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
@@ -471,6 +498,7 @@ test_backend_capture_returns_empty_parsed_text() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_send_turn_tracks_turn_status_when_thread_is_not_loaded
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
 test_bridge_send_turn_rejects_stale_status_line
 test_bridge_start_thread_requires_reported_cwd
