@@ -36,8 +36,10 @@
 # cycle already present means re-arm attaches - do not start a second watcher.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
-# state/.watch.lock) and start a fresh one. It resolves and signals exactly that
-# pid, so it can never touch another home's watcher. NEVER `pkill -f
+# state/.watch.lock) and own a fresh cycle, or report restart-only healthy if a
+# live peer still holds the lock after the duplicate child stands down. It
+# resolves and signals exactly that pid, so it can never touch another home's
+# watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings. Restart never
 # takes the attach path.
