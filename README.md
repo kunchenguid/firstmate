@@ -57,17 +57,48 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 **Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with host auth (GitHub via `gh`, or Azure DevOps via `az` for ADO-origin projects), and tmux for the reference session backend.
 The first mate detects and offers to install everything else.
-For the best firstmate experience, run the primary firstmate session in Claude Code if you have an Anthropic subscription: its background task and Stop-hook behavior match firstmate's lowest-friction supervision model.
-If Claude Code is not available, use Pi next; it has the best non-Anthropic primary-session ergonomics verified so far.
-Codex, OpenCode, and Grok remain supported verified harnesses, but their supervision paths involve more harness-specific tradeoffs.
+
+### Recommended harnesses
+
+**Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session.
+Claude Code and Grok use background-notify wake cycles; Pi uses its tracked primary watcher extension.
+All three have verified turn-end guard paths when launched with their documented setup.
+Pick whichever one matches your subscription and workflow.
+
+Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+### Install and launch
 
 ```sh
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
-cd firstmate && claude   # launch your harness here; AGENTS.md takes over
+cd firstmate
 ```
 
-Then just talk:
+Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+**Claude Code**
+
+```sh
+claude
+```
+
+**Grok**
+
+```sh
+grok --trust
+```
+
+**Pi**
+
+```sh
+pi
+```
+
+For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
+For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+
+### Talk to it
 
 ```sh
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
@@ -82,6 +113,8 @@ Then just talk:
 
 > alright merge it
 ```
+
+### More backends
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 

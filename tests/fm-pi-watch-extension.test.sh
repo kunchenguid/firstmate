@@ -1,83 +1,51 @@
 #!/usr/bin/env bash
-# Tests for the generated Pi primary watcher extension and Pi secondmate wiring.
+# Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
-GEN="$ROOT/bin/fm-pi-watch-extension.sh"
+EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
-test_generator_writes_extension() {
-  local home out file text expected_config_source version version_text marker_write
-  home="$TMP_ROOT/home"
-  mkdir -p "$home/state"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN")
-  file="$home/state/fm-primary-pi-watch.ts"
-  version="$home/state/.pi-watch-extension-version"
+test_tracked_extension_present_and_self_hashing() {
+  local text expected_config_source
   expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
-  [ "$out" = "$file" ] || fail "generator printed '$out', expected '$file'"
-  assert_present "$file" "generator did not write the Pi watch extension"
-  assert_present "$version" "generator did not write the Pi watch extension version"
-  version_text=$(cat "$version")
-  text=$(cat "$file")
-  assert_contains "$text" "fm_watch_arm_pi" "generated extension missing tool name"
-  assert_contains "$text" "fm-watch-arm-pi" "generated extension missing command name"
-  assert_contains "$text" "fm-watch-arm.sh" "generated extension missing watcher arm"
-  assert_contains "$text" "sendUserMessage" "generated extension missing Pi wake API"
-  assert_contains "$text" "deliverAs: \"followUp\"" "generated extension missing followUp delivery"
-  assert_contains "$text" ".pi-watch-extension-loaded" "generated extension missing loaded marker"
-  assert_contains "$text" "const extensionVersion = \"$version_text\"" "generated extension missing content version"
-  assert_contains "$text" "sessionOwnsLock" "generated extension missing session lock ownership check"
-  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "generated extension does not distinguish missing lock from another owner"
-  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "generated extension does not read the effective session lock"
-  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "generated extension does not allow a pre-lock load marker"
-  assert_contains "$text" 'if (lockOwnership() === "other") return false' "generated extension overwrites another live session marker"
-  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "generated extension arms without the session lock"
-  marker_write="writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)"
-  assert_contains "$text" "$marker_write" "generated extension does not write the content version and process marker"
-  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "generated extension missing effective config resolution"
-  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "generated extension does not pass the effective config to the watcher arm"
-  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "generated extension does not pass the effective watcher arm script"
-  assert_contains "$text" "$expected_config_source" "generated extension does not source the effective x-mode config"
-  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "generated extension does not restart into a Pi-owned watcher child"
-  assert_not_contains "$text" "[ -f config/x-mode.env ]" "generated extension kept a repo-relative x-mode config path"
-  pass "Pi extension generator writes the firstmate-owned watcher bridge"
-}
-
-test_generator_preserves_loaded_marker_when_unchanged() {
-  local home file marker
-  home="$TMP_ROOT/home-stable"
-  mkdir -p "$home/state"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN" >/dev/null
-  file="$home/state/fm-primary-pi-watch.ts"
-  marker="$home/state/.pi-watch-extension-loaded"
-  touch -t 202001010000 "$file"
-  touch -t 202001010001 "$marker"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN" >/dev/null
-  if [ "$file" -nt "$marker" ]; then
-    fail "generator rewrote identical content and made the extension newer than the loaded marker"
-  fi
-  pass "Pi extension generator preserves mtime when content is unchanged"
-}
-
-test_generator_uses_portable_mktemp_template() {
-  local text
-  text=$(cat "$GEN")
-  assert_contains "$text" "fm-primary-pi-watch.ts.XXXXXX" "generator mktemp template should keep Xs at the end"
-  assert_not_contains "$text" "fm-primary-pi-watch.XXXXXX.ts" "generator mktemp template must not put a suffix after the Xs"
-  pass "Pi extension generator uses a portable mktemp template"
+  assert_present "$EXT" "tracked Pi primary watcher extension is missing"
+  text=$(cat "$EXT")
+  assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
+  assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
+  assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
+  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
+  assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
+  assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
+  assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
+  assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
+  assert_contains "$text" "sessionOwnsLock" "tracked extension missing session lock ownership check"
+  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
+  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
+  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
+  assert_contains "$text" 'if (lockOwnership() === "other") return false' "tracked extension overwrites another live session marker"
+  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "tracked extension arms without the session lock"
+  assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
+  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
+  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
+  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
+  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
+  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
+  assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
+  pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
 }
 
 test_spawn_template_mentions_pi_watch_placeholder() {
   local text
   text=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$text" "-e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include both primary extensions"
-  assert_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn does not generate the Pi watch extension before launch"
-  assert_contains "$text" "env FM_HOME=\"\$PROJ_ABS\" FM_ROOT_OVERRIDE=\"\$PROJ_ABS\" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \"\$SCRIPT_DIR/fm-pi-watch-extension.sh\"" "fm-spawn lets primary operational overrides leak into Pi secondmate watch generation"
+  assert_contains "$text" "\$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts" "fm-spawn does not point the Pi secondmate watch placeholder at the tracked extension"
+  assert_not_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn should no longer generate the Pi watch extension before launch"
   assert_contains "$text" "__PITURNEND__" "fm-spawn does not replace the Pi turn-end guard extension placeholder"
   assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
-  pass "Pi secondmate launch wiring includes both primary extensions"
+  pass "Pi secondmate launch wiring includes both tracked primary extensions"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -90,8 +58,7 @@ test_pi_extension_reports_external_healthy_watcher() {
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" "$GEN" >/dev/null
-  out=$(PLUGIN="$home/state/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$EXT" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -562,9 +529,7 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
-test_generator_writes_extension
-test_generator_preserves_loaded_marker_when_unchanged
-test_generator_uses_portable_mktemp_template
+test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_opencode_primary_watch_plugin_static_wiring

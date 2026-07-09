@@ -125,12 +125,6 @@ hash_file() {
   fi
 }
 
-first_line_if_file() {
-  local file=$1
-  [ -f "$file" ] || return 1
-  sed -n '1p' "$file"
-}
-
 pi_extension_loaded() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
@@ -209,23 +203,16 @@ X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ]; then
-  PI_EXT="$STATE/fm-primary-pi-watch.ts"
+  PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   PI_WATCH_MARKER="$STATE/.pi-watch-extension-loaded"
-  PI_WATCH_VERSION_FILE="$STATE/.pi-watch-extension-version"
   PI_TURNEND_MARKER="$STATE/.pi-turnend-extension-loaded"
   PI_LOCK="$STATE/.lock"
-  PI_WATCH_VERSION=$(first_line_if_file "$PI_WATCH_VERSION_FILE" || printf '')
+  PI_WATCH_VERSION=$(hash_file "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(hash_file "$PI_TURNEND_EXT" || printf '')
-  if [ "$READ_ONLY" -eq 0 ]; then
-    if ! "$SCRIPT_DIR/fm-pi-watch-extension.sh" >/dev/null 2>&1; then
-      printf 'PI_WATCH_EXTENSION: generation failed - run %s/fm-pi-watch-extension.sh before relying on Pi background wake supervision\n' "$SCRIPT_DIR"
-    fi
-    PI_WATCH_VERSION=$(first_line_if_file "$PI_WATCH_VERSION_FILE" || printf '')
-  fi
   if ! pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
     || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
-    printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s -e %s for background wake supervision and turn-end guard coverage\n' "$PI_TURNEND_EXT" "$PI_EXT"
+    printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart plain pi so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

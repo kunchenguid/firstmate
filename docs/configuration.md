@@ -134,7 +134,7 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Pi secondmate launches, `fm-spawn.sh` generates the secondmate home's `state/fm-primary-pi-watch.ts` bridge and starts Pi with both that bridge and `.pi/extensions/fm-primary-turnend-guard.ts`.
+For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
