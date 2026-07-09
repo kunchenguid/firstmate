@@ -663,6 +663,41 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Resolve a directory's git common-dir to a physical absolute path, or fail
+# (non-zero, no output) when <dir> is not inside a git working tree. All
+# treehouse worktrees of a project share ONE common-dir (object store) with the
+# primary checkout, so this is the identity that says "belongs to the same
+# repository". `rev-parse --git-common-dir` can return a path relative to <dir>
+# (e.g. ".git"), so resolve it against <dir> before canonicalizing.
+git_common_dir_real() {  # <dir>
+  local dir=$1 cdir
+  cdir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$cdir" ] || return 1
+  case "$cdir" in
+    /*) : ;;
+    *) cdir="$dir/$cdir" ;;
+  esac
+  (cd "$cdir" 2>/dev/null && pwd -P) || return 1
+}
+
+# The project repository's common-dir, resolved once. A polled candidate cwd is
+# accepted as the worktree only when it shares this common-dir, which rejects a
+# transient unrelated git repo (e.g. ~/.oh-my-zsh that a shell rc briefly cd's
+# into while treehouse's fresh subshell sources ~/.zshrc). Empty when it can't
+# be resolved (e.g. a non-git PROJ_ABS), in which case the checks below fall
+# back to the prior differs-from-primary behavior alone.
+PROJ_COMMON_DIR=$(git_common_dir_real "$PROJ_ABS" 2>/dev/null || true)
+
+# A polled candidate cwd belongs to the project's repository when its git
+# common-dir matches the project's. When the project common-dir is unknown, the
+# guard can't be applied, so accept (prior behavior).
+candidate_is_project_worktree() {  # <candidate-path>
+  local cand=$1 cand_common
+  [ -n "$PROJ_COMMON_DIR" ] || return 0
+  cand_common=$(git_common_dir_real "$cand" 2>/dev/null) || return 1
+  [ "$cand_common" = "$PROJ_COMMON_DIR" ]
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -672,7 +707,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_common
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -686,6 +721,18 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
+  fi
+  # Defense-in-depth: the worktree must belong to the project's repository
+  # (shared git common-dir), so even a capture that was fooled into recording
+  # an unrelated git repo is rejected here rather than launched. Scoped to the
+  # treehouse path; the orca path owns its own worktree handling. Skipped when
+  # the project common-dir can't be resolved.
+  if [ "$BACKEND" != orca ] && [ -n "$PROJ_COMMON_DIR" ]; then
+    wt_common=$(git_common_dir_real "$WT" 2>/dev/null || true)
+    if [ "$wt_common" != "$PROJ_COMMON_DIR" ]; then
+      echo "error: $source resolved a worktree outside the project's repository (worktree common-dir '${wt_common:-none}'; project common-dir '$PROJ_COMMON_DIR'); refusing to launch. Inspect target $inspect_target" >&2
+      exit 1
+    fi
   fi
 }
 
@@ -825,16 +872,27 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Accept only a candidate that is a worktree OF THE PROJECT'S repository:
+  # treehouse's fresh subshell sources ~/.zshrc, and an rc that momentarily
+  # cd's elsewhere (oh-my-zsh's update check runs `cd "$ZSH"` = ~/.oh-my-zsh)
+  # can be sampled by this poll. Such a cwd differs from the project yet is an
+  # unrelated git repo, so it would pass the differs-from-primary test alone and
+  # be recorded as WT, breaking teardown and isolation. Requiring the shared
+  # project common-dir skips it and keeps polling for the real worktree.
+  # Poll budget defaults to 60 tries at 1s (unchanged); the knobs exist only so
+  # tests can exercise the timeout path fast.
+  WT_POLL_TRIES=${FM_SPAWN_WT_POLL_TRIES:-60}
+  WT_POLL_SLEEP=${FM_SPAWN_WT_POLL_SLEEP:-1}
+  for _ in $(seq 1 "$WT_POLL_TRIES"); do
     p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ] && candidate_is_project_worktree "$p"; then
       WT="$p"
       break
     fi
-    sleep 1
+    [ "$WT_POLL_SLEEP" = 0 ] || sleep "$WT_POLL_SLEEP"
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WT_POLL_TRIES}x${WT_POLL_SLEEP}s; inspect window $T" >&2
     exit 1
   fi
 
