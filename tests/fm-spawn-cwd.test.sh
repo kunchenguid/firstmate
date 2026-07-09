@@ -274,6 +274,69 @@ test_cwd_places_claude_turnend_hook_in_subdir() {
   pass "--cwd places the claude turn-end hook under the session's start subdir"
 }
 
+test_cwd_places_grok_turnend_pointer_in_both_locations() {
+  # grok's global hook reads $GROK_WORKSPACE_ROOT/.fm-grok-turnend; with --cwd
+  # grok may scope that root to the start subdir rather than the worktree root,
+  # so the pointer must land in BOTH places or the turn-end signal is orphaned.
+  local rec id status
+  id=cwd-grok-z13
+  rec=$(make_cwd_case cwd-grok "$id")
+  read_cwd_case_record "$rec"
+  mkdir -p "$WT_DIR/argus"
+
+  GROK_HOME="$CASE_DIR/grok" run_cwd_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_DIR/launch-root.log" "$WT_DIR/argus" \
+    "$id" "$PROJ_DIR" grok >/dev/null
+  status=$?
+  expect_code 0 "$status" "baseline grok spawn without --cwd should succeed"
+  [ -f "$WT_DIR/.fm-grok-turnend" ] || \
+    fail "without --cwd the grok pointer should live at the worktree root"
+  [ ! -f "$WT_DIR/argus/.fm-grok-turnend" ] || \
+    fail "without --cwd the grok pointer must NOT be written into a subdir"
+
+  rm -f "$WT_DIR/.fm-grok-turnend"
+  GROK_HOME="$CASE_DIR/grok" run_cwd_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_DIR/launch-cwd.log" "$WT_DIR/argus" \
+    "$id" "$PROJ_DIR" grok --cwd argus >/dev/null
+  status=$?
+  expect_code 0 "$status" "grok spawn with --cwd should succeed"
+  [ -f "$WT_DIR/.fm-grok-turnend" ] || \
+    fail "with --cwd the grok pointer must still exist at the worktree root"
+  [ -f "$WT_DIR/argus/.fm-grok-turnend" ] || \
+    fail "with --cwd the grok pointer must also live under the session's start subdir"
+  pass "--cwd writes the grok turn-end pointer to both the worktree root and the subdir"
+}
+
+test_cwd_teardown_removes_subdir_hooks() {
+  # Teardown returns the worktree to a reused pool, so it removes our hook files
+  # first. With --cwd those files live under the subdir, not the worktree root.
+  local rec id status meta teardown
+  teardown="$(cd "$(dirname "$SPAWN")" && pwd)/fm-teardown.sh"
+  id=cwd-teardown-z14
+  rec=$(make_cwd_case cwd-teardown "$id")
+  read_cwd_case_record "$rec"
+  mkdir -p "$WT_DIR/argus"
+  meta="$HOME_DIR/state/$id.meta"
+
+  GROK_HOME="$CASE_DIR/grok" run_cwd_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_DIR/launch-cwd.log" "$WT_DIR/argus" \
+    "$id" "$PROJ_DIR" claude --cwd argus >/dev/null
+  status=$?
+  expect_code 0 "$status" "claude spawn with --cwd should succeed"
+  [ -f "$WT_DIR/argus/.claude/settings.local.json" ] || fail "precondition: subdir claude hook should exist"
+  # Drop a grok pointer in the subdir too, standing in for a grok+--cwd spawn.
+  printf 'token=fm.aaaaaaaaaaaa\n' > "$WT_DIR/argus/.fm-grok-turnend"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$PATH" \
+    "$teardown" "$id" --force >/dev/null 2>&1 || true
+
+  [ ! -f "$WT_DIR/argus/.claude/settings.local.json" ] || \
+    fail "teardown must remove the subdir claude hook so a reused pool worktree cannot fire stale signals"
+  [ ! -f "$WT_DIR/argus/.fm-grok-turnend" ] || \
+    fail "teardown must remove the subdir grok pointer"
+  pass "teardown removes --cwd subdir hooks before returning the worktree to the pool"
+}
+
 test_cwd_rejects_invalid_paths
 test_cwd_allows_non_dotdot_dotted_names
 test_cwd_rejects_with_secondmate
@@ -281,3 +344,5 @@ test_cwd_missing_subdirectory_fails
 test_cwd_recorded_in_meta_only_when_used
 test_harness_resolution_unaffected_by_cwd
 test_cwd_places_claude_turnend_hook_in_subdir
+test_cwd_places_grok_turnend_pointer_in_both_locations
+test_cwd_teardown_removes_subdir_hooks

@@ -1017,6 +1017,12 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      # With --cwd, grok may scope GROK_WORKSPACE_ROOT to the session start dir
+      # instead of the git worktree root, so drop a second pointer in the subdir
+      # too. The exclude pattern above has no slash, so it already covers both.
+      if [ -n "$CWD_ARG" ]; then
+        printf 'token=%s\n' "${auth_file##*/}" > "$WT/$CWD_ARG/.fm-grok-turnend"
+      fi
       ;;
   esac
 fi

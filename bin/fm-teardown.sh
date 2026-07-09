@@ -101,6 +101,9 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+# --cwd relocated the claude/opencode hooks and the grok pointer under this subdir
+# of the worktree; absent for non-cwd spawns.
+CWD_SUBDIR=$(fm_meta_get "$META" cwd_subdir)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -1016,6 +1019,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  # With --cwd the hooks and grok pointer live under the recorded subdir instead.
+  if [ -n "$CWD_SUBDIR" ]; then
+    rm -f "$WT/$CWD_SUBDIR/.claude/settings.local.json" \
+      "$WT/$CWD_SUBDIR/.opencode/plugins/fm-turn-end.js" \
+      "$WT/$CWD_SUBDIR/.fm-grok-turnend"
+  fi
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates a stale git lock left by a
