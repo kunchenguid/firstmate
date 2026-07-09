@@ -3,11 +3,13 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # True exactly when a firstmate home has in-flight work (a state/<id>.meta
-# exists) but no watcher has a fresh liveness beacon (state/.last-watcher-beat,
-# touched every poll cycle, within the grace window). bin/fm-guard.sh uses this
-# grace-based warning predicate directly; bin/fm-turnend-guard.sh uses the status
-# fields here for its banner but performs its end-of-turn block decision with the
-# live watcher lock check in bin/fm-wake-lib.sh.
+# exists, excluding a persistent secondmate's own meta marked
+# supervision=resting - see fm_sup_resting_secondmate below) but no watcher has
+# a fresh liveness beacon (state/.last-watcher-beat, touched every poll cycle,
+# within the grace window). bin/fm-guard.sh uses this grace-based warning
+# predicate directly; bin/fm-turnend-guard.sh uses the status fields here for
+# its banner but performs its end-of-turn block decision with the live watcher
+# lock check in bin/fm-wake-lib.sh.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -16,6 +18,20 @@ fm_sup_stat_mtime() {
   else
     stat -c %Y "$1" 2>/dev/null
   fi
+}
+
+# fm_sup_resting_secondmate <meta-file>: true when <meta-file> is a persistent
+# secondmate (kind=secondmate) explicitly marked supervision=resting. A resting
+# secondmate stays alive (AGENTS.md sections 2 and 8) - this only excludes it
+# from in-flight supervision counting below. Any other value, including the
+# field being absent (the legacy/pre-existing case), reads as active and still
+# counts, so existing secondmates are never silently dropped from supervision.
+fm_sup_resting_secondmate() {
+  local meta=$1 kind supervision
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+  [ "$kind" = secondmate ] || return 1
+  supervision=$(grep '^supervision=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+  [ "$supervision" = resting ]
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
@@ -35,6 +51,7 @@ fm_supervision_status() {
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
+    fm_sup_resting_secondmate "$meta" && continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
 
