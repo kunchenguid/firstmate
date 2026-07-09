@@ -19,10 +19,14 @@
 # Four properties this library must never violate:
 #   1. It cannot fail or hang bootstrap. Every network probe is a background child
 #      whose stdout is redirected to a result FILE, never to bootstrap's stdout, so
-#      a straggler can never hold open a caller's $(...) capture; probes are bounded
-#      by FM_UPDATE_CHECK_TIMEOUT (default 5s) on top of curl's own --max-time and
-#      git's http low-speed bound. Offline, rate-limited, unauthenticated, or missing
-#      curl/jq all degrade to silence. uc_report always returns 0.
+#      a straggler can never hold open a caller's $(...) capture. Bootstrap's own wait
+#      is bounded by FM_UPDATE_CHECK_TIMEOUT (default 5s); a probe still running at
+#      that deadline is signalled as a process group, so its curl or git/ssh
+#      grandchild dies with it. The per-transport bounds (curl --max-time,
+#      http.lowSpeed* for an HTTPS origin, ssh ConnectTimeout/ServerAlive for an SSH
+#      one) narrow that window rather than being the only guard. Offline,
+#      rate-limited, unauthenticated, or missing curl/jq all degrade to silence.
+#      uc_report always returns 0.
 #   2. It never nags onto a prerelease. GitHub releases carrying draft:true or
 #      prerelease:true are filtered out, and any tag that is not a bare vX.Y.Z is
 #      refused. This is not hypothetical: no-mistakes v1.33.0 was a PRERELEASE while
@@ -140,9 +144,12 @@ uc_latest_npm_version() {
 
 # Commit sha of origin's <branch>, read WITHOUT fetching so nothing in the repo is
 # mutated. Credential and host-key prompts are disabled so this can never block.
+# Both transports are bounded: http.lowSpeed* covers an HTTPS origin, and the ssh
+# connect/keepalive options cover an SSH one (http.lowSpeed* does not apply there).
 uc_remote_default_head() {
   local root=$1 branch=$2 timeout=$3 sha
-  sha=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes' \
+  sha=$(GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=$timeout -oServerAliveInterval=$timeout -oServerAliveCountMax=1" \
     git -C "$root" -c http.lowSpeedLimit=1 -c "http.lowSpeedTime=$timeout" \
     ls-remote --heads origin "$branch" 2>/dev/null | awk 'NR==1 {print $1}')
   [ -n "$sha" ] || return 1
@@ -154,12 +161,22 @@ uc_remote_default_head() {
 # Run <func> <args...> as a background child. Its stdout goes to <wd>/<key>, NEVER to
 # our own stdout: bootstrap's output is read through $(...), and a child inheriting
 # that pipe would keep the capture open past bootstrap's own exit.
+# The caller enables monitor mode first, so each probe leads its own process group
+# and uc_wait_probes can signal the whole tree rather than only the subshell.
 uc_spawn_probe() {
   local wd=$1 key=$2
   shift 2
   ( "$@" > "$wd/$key" 2>/dev/null; : > "$wd/$key.done" ) >/dev/null 2>&1 &
   UC_PIDS+=("$!")
   UC_KEYS+=("$key")
+}
+
+# Signal the probe's whole process group, falling back to the bare pid. Killing only
+# the subshell would leave its curl or git/ssh grandchild running past the bound
+# (git's http.lowSpeed* and ssh's ConnectTimeout narrow that window but do not close
+# it on a black-holed connection). Mirrors fleet_sync's set -m / kill -TERM -$pid.
+uc_kill_probe() {
+  kill -TERM "-$1" 2>/dev/null || kill -TERM "$1" 2>/dev/null || true
 }
 
 uc_wait_probes() {
@@ -174,7 +191,7 @@ uc_wait_probes() {
     [ "$pending" -eq 0 ] && return 0
     if [ $((SECONDS - start)) -ge "$timeout" ]; then
       for pid in "${UC_PIDS[@]}"; do
-        kill -TERM "$pid" 2>/dev/null || true
+        uc_kill_probe "$pid"
       done
       return 1
     fi
@@ -185,9 +202,14 @@ uc_wait_probes() {
 # Probe every checkable tool in parallel into <wd>. A tool that is not installed is
 # not probed: its absence is already the MISSING: flow's business, not ours.
 uc_refresh() {
-  local root=$1 wd=$2 timeout=$3 branch
+  local root=$1 wd=$2 timeout=$3 branch monitor_was_on
   UC_PIDS=()
   UC_KEYS=()
+  # Monitor mode puts each background probe in its own process group so a timed-out
+  # probe can be signalled as a group. Restore the caller's setting afterwards.
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
   if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     if command -v no-mistakes >/dev/null 2>&1; then
       uc_spawn_probe "$wd" no-mistakes uc_latest_stable_release kunchenguid/no-mistakes "$timeout"
@@ -204,6 +226,7 @@ uc_refresh() {
     uc_spawn_probe "$wd" firstmate uc_remote_default_head "$root" "$branch" "$timeout"
   fi
   uc_wait_probes "$wd" "$timeout" || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
   return 0
 }
 
