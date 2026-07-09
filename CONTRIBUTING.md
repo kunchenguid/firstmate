@@ -73,7 +73,7 @@ shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behav
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, PID identity stability, watch-arm liveness, and guard-warning tests
-tests/fm-turnend-guard.test.sh            # shared supervision predicate plus Claude Stop-hook scoping, loop guard, fail-open, and live watcher health tests
+tests/fm-turnend-guard.test.sh            # shared supervision predicate, resting-vs-active secondmate in-flight counting, plus Claude Stop-hook scoping, loop guard, fail-open, and live watcher health tests
 tests/fm-pi-primary-types.test.sh         # strict no-emit TypeScript check for both tracked Pi primary extensions against an installed Pi package
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh # opt-in real Pi TUI regression in an isolated home and private tmux socket
 tests/fm-arm-pretool-check.test.sh        # command-position watcher-arm policy: adversarial allow/deny matrix across all five adapter entry forms, reason codes, fail-closed malformed-protected syntax, fail-open transport, and --claude output shaping
@@ -102,7 +102,7 @@ tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-p
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, ignored seed-marker migration and real-dirt protection, bootstrap nudge gating, stable nudge selectors after respawn, and spawn hook tests
-tests/fm-secondmate-liveness.test.sh      # session-start secondmate agent-liveness probe and respawn sweep tests
+tests/fm-secondmate-liveness.test.sh      # session-start secondmate agent-liveness probe and respawn sweep tests, including that supervision=resting never affects liveness/respawn
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, optional secondmate model/effort pins, primary-to-secondmate config inheritance, and config-push tests
 tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
 tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, teardown boundary, and child-cleanup fail-closed tests
