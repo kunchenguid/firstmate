@@ -205,10 +205,23 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Use literal
+  # prefix removal (not byte-count ${content#??}/${content#?}) so multibyte
+  # glyphs like ❯ and › (3 bytes each) survive a C/byte locale where # strips
+  # bytes, not characters.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯ '*) content=${content#'❯ '} ;;
+    '› '*) content=${content#'› '} ;;
+    '> '*) content=${content#'> '} ;;
+    '$ '*) content=${content#'$ '} ;;
+    '% '*) content=${content#'% '} ;;
+    '# '*) content=${content#'# '} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
