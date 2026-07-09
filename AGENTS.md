@@ -145,6 +145,12 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited-config convergence.
 
+If the digest's lock step could not acquire the lock, it prints a loud, bordered read-only banner instead of silently continuing: every mutating step was skipped, and the rest of the digest is the read-only-safe subset described above.
+The banner distinguishes two causes, because they need different responses.
+When another live session genuinely holds the lock (`FM_LOCK_REASON=lock-held`), the banner says another session holds the fleet lock; tell the captain another active session is already managing the work and operate read-only until it resolves.
+When this session cannot inspect processes to identify its own harness (`FM_LOCK_REASON=ps-unavailable`, as a Codex sandbox that denies `ps` produces, or `harness-detect-failed`), the banner instead reports that firstmate is unable to verify this session's identity and explicitly does NOT claim another session holds the lock; firstmate still refuses to mutate fleet state, and the banner points at `bin/fm-lock.sh status` plus session/process discovery commands to determine the true state.
+In both cases, operate read-only - do not spawn, steer, merge, or otherwise mutate fleet state from this session until it resolves.
+
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
