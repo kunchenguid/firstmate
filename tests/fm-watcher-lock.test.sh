@@ -703,8 +703,104 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_stable_across_consecutive_reads() {
+  # A watcher lock is written once and re-read many times over its life
+  # (arm, guard, turn-end). The identity must not drift between reads of the
+  # same still-running process - this is the property the clock-step bug
+  # broke on WSL2, where lstart drifted seconds apart across reads of one
+  # unchanged pid because the guest clock kept stepping. We cannot step the
+  # system clock in this test, so this checks the honest, testable half of
+  # that regression: plain read-to-read stability with the clock left alone.
+  local live id1 id2 id3
+  sleep 300 &
+  live=$!
+  id1=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  id2=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  id3=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$id1" ] || fail "fm_pid_identity produced no identity for a live process"
+  [ "$id2" = "$id1" ] || fail "fm_pid_identity varied across consecutive reads (got '$id2', want '$id1')"
+  [ "$id3" = "$id1" ] || fail "fm_pid_identity varied across consecutive reads (got '$id3', want '$id1')"
+  pass "fm_pid_identity is stable across consecutive reads of a live process"
+}
+
+test_pid_identity_differs_across_processes() {
+  # Distinct command lines guarantee distinct identities regardless of
+  # whether the two processes happen to start within the same clock tick, so
+  # this stays deterministic instead of racing tick resolution.
+  local live1 live2 id1 id2
+  sleep 300 &
+  live1=$!
+  sleep 301 &
+  live2=$!
+  id1=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live1" 2>/dev/null)
+  id2=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live2" 2>/dev/null)
+  kill "$live1" "$live2" 2>/dev/null || true
+  wait "$live1" "$live2" 2>/dev/null || true
+  [ -n "$id1" ] || fail "fm_pid_identity produced no identity for the first process"
+  [ -n "$id2" ] || fail "fm_pid_identity produced no identity for the second process"
+  [ "$id1" != "$id2" ] || fail "fm_pid_identity produced the same identity for two distinct processes ('$id1')"
+  pass "fm_pid_identity produces distinct identities for distinct live processes"
+}
+
+test_watcher_lock_matches_pid_accepts_match_rejects_mismatch() {
+  local dir state live other identity home="fmhome-matches-pid" watch_path="fake-watch-path"
+  dir=$(make_case lock-matches-pid)
+  state="$dir/state"
+  sleep 300 &
+  live=$!
+  sleep 301 &
+  other=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  [ -n "$identity" ] || fail "could not compute identity for the live pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_path" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$watch_path" "$live" "$home" \
+    || fail "fm_watcher_lock_matches_pid rejected a genuinely matching live pid"
+  ! bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$watch_path" "$other" "$home" \
+    || fail "fm_watcher_lock_matches_pid accepted a pid whose live identity does not match the recorded one"
+  kill "$live" "$other" 2>/dev/null || true
+  wait "$live" "$other" 2>/dev/null || true
+  pass "fm_watcher_lock_matches_pid accepts a matching live pid and rejects a mismatched one"
+}
+
+test_pid_identity_linux_is_ticks_not_wall_clock() {
+  # On Linux, fm_pid_identity must derive its time component from
+  # /proc/<pid>/stat starttime ticks, never from ps's wall-clock lstart -
+  # that is the actual fix for the clock-step bug. This host's own identity
+  # format is asserted directly (it starts with "ticks:"), which is a
+  # stronger and more direct check than pattern-matching for the absence of
+  # a rendered date. Skips with a pass note on a non-Linux host or a
+  # /proc-less environment, where fm_pid_identity legitimately falls back to
+  # the ps-based path instead.
+  local live identity
+  if [ "$(uname)" != Linux ] || [ ! -r "/proc/$$/stat" ]; then
+    pass "fm_pid_identity Linux ticks-derivation check skipped (not on Linux with /proc)"
+    return
+  fi
+  sleep 300 &
+  live=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$identity" ] || fail "fm_pid_identity produced no identity on Linux"
+  case "$identity" in
+    ticks:[0-9]*) : ;;
+    *) fail "fm_pid_identity on Linux is not ticks-derived (got '$identity')" ;;
+  esac
+  pass "fm_pid_identity on Linux is derived from /proc starttime ticks, not a rendered wall-clock date"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_stable_across_consecutive_reads
+test_pid_identity_differs_across_processes
+test_watcher_lock_matches_pid_accepts_match_rejects_mismatch
+test_pid_identity_linux_is_ticks_not_wall_clock
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

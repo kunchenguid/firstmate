@@ -23,14 +23,64 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# fm_pid_identity <pid> prints an opaque string identifying the live process
+# named by <pid>, so a recorded identity can later be compared against a
+# fresh read to confirm the same process (not a PID-reuse collision) is still
+# running. The two component functions below own the actual derivation; this
+# wrapper only picks which one applies. The identity format is internal and
+# may change freely: writers and readers both go through this function, and a
+# lock written under an old format simply reads as unhealthy once and
+# self-heals on the next arm/restart.
 fm_pid_identity() {
-  local pid=$1 out
+  local pid=$1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
-  # written under one locale but re-read under the machine's ambient locale, which
-  # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  if [ "$(uname)" = Linux ] && [ -r "/proc/$pid/stat" ]; then
+    fm_pid_identity_linux "$pid"
+    return
+  fi
+  fm_pid_identity_ps "$pid"
+}
+
+# Linux identity: /proc/<pid>/stat field 22 (starttime, in clock ticks since
+# boot) combined with the command line. Both are immune to wall-clock steps.
+# ps's lstart is NOT immune: procps renders it from /proc/stat's btime plus
+# starttime ticks, and btime shifts whenever the kernel clock is stepped
+# (settimeofday). Live evidence on WSL2 (2026-07-09): the guest clock stepped
+# forward repeatedly after boot (+2s within 45s, +11s within nine minutes)
+# with no process restart, so a watcher's lock, written once at arm time,
+# drifted out of sync with a freshly-read lstart for the very same
+# still-running pid and was wrongly rejected as dead.
+# comm (stat field 2) is parenthesized and may itself contain spaces or
+# parentheses, so split on the LAST ')' in the line rather than counting
+# fields naively; starttime is then field 20 of the remainder (field 22 minus
+# the two fields, pid and comm, already consumed by that split).
+fm_pid_identity_linux() {
+  local pid=$1 stat rest starttime cmd
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  [ -n "$stat" ] || return 1
+  rest=${stat##*) }
+  [ "$rest" != "$stat" ] || return 1
+  # shellcheck disable=SC2086 # deliberate word-splitting to pull positional fields
+  set -- $rest
+  starttime=${20:-}
+  case "$starttime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  [ -n "$cmd" ] || cmd=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null)
+  [ -n "$cmd" ] || return 1
+  printf 'ticks:%s %s\n' "$starttime" "$cmd"
+}
+
+# Non-Linux fallback (e.g. Darwin, which has no /proc): the original
+# lstart-based ps identity, unchanged.
+# Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
+# written under one locale but re-read under the machine's ambient locale, which
+# would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+fm_pid_identity_ps() {
+  local pid=$1 out
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
