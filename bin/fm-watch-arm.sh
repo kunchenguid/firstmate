@@ -74,6 +74,15 @@ clear_stale_recorded_watcher_lock() {
   fm_lock_remove_path "$WATCH_LOCK" || true
 }
 
+lock_holder_is_fm_watch() {
+  local pid=$1 cmd
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$cmd" in
+    *"$WATCH"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
 # home's watcher (the identity match guards against a recycled/reused pid) AND the
 # liveness beacon is fresh within GRACE. Sets HEALTHY_PID on success. This is the
@@ -140,15 +149,17 @@ if [ "$mode" = restart ]; then
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
+      if lock_holder_is_fm_watch "$lock_pid"; then
+        kill -TERM "$lock_pid" 2>/dev/null || true
+        # Wait for it to actually exit before relaunching, so the fresh watcher
+        # either takes a released lock or reclaims a now-dead-pid stale lock instead
+        # of seeing the dying one as a live holder and no-opping.
+        i=0
+        while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+          sleep 0.1
+          i=$((i + 1))
+        done
+      fi
     else
       clear_stale_recorded_watcher_lock
     fi
