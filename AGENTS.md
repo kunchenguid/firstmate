@@ -413,7 +413,7 @@ Load `harness-adapters` before spawning or recovering any direct report so trust
 
 ```sh
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness only when no crew-dispatch.json is active
-bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
+bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.6-sol --effort ultra   # explicit profile axes
 bin/fm-spawn.sh <id> projects/<repo> --backend <tmux|herdr|zellij|orca|cmux>   # explicit runtime backend (docs/configuration.md "Runtime backend")
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> [<firstmate-home>] --secondmate   # launch or recover a persistent secondmate in its home

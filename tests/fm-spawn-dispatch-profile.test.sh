@@ -105,6 +105,16 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_help_includes_ultra_effort() {
+  local out status
+  out=$("$SPAWN" --help)
+  status=$?
+  expect_code 0 "$status" "fm-spawn --help should succeed"
+  assert_contains "$out" "--effort <low|medium|high|xhigh|max|ultra>" \
+    "fm-spawn help did not publish the extended shared effort vocabulary"
+  pass "fm-spawn usage and help include ultra effort"
+}
+
 test_no_profile_keeps_claude_launch_unchanged() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -224,6 +234,54 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+test_existing_effort_values_remain_accepted() {
+  local rec effort id out status launch
+  local -a ids=(
+    profile-existing-low-z17
+    profile-existing-medium-z18
+    profile-existing-high-z19
+    profile-existing-xhigh-z20
+    profile-existing-max-z21
+  )
+  rec=$(make_spawn_case profile-existing-efforts claude "${ids[@]}")
+  read_case_record "$rec"
+
+  for effort in low medium high xhigh max; do
+    id="profile-existing-$effort-z17"
+    case "$effort" in
+      medium) id=profile-existing-medium-z18 ;;
+      high) id=profile-existing-high-z19 ;;
+      xhigh) id=profile-existing-xhigh-z20 ;;
+      max) id=profile-existing-max-z21 ;;
+    esac
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model sonnet --effort "$effort")
+    status=$?
+    expect_code 0 "$status" "existing effort '$effort' should remain accepted"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet "$effort"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--effort '$effort'" \
+      "existing effort '$effort' no longer reached the Claude launch"
+  done
+  pass "all existing shared effort values remain accepted and preserve Claude launch behavior"
+}
+
+test_unknown_effort_is_rejected() {
+  local rec id out status
+  id=profile-unknown-effort-z22
+  rec=$(make_spawn_case profile-unknown-effort codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort impossible)
+  status=$?
+  expect_code 1 "$status" "an unknown effort should still fail parser validation"
+  assert_contains "$out" "--effort must be one of low, medium, high, xhigh, max, ultra" \
+    "unknown effort rejection did not print the updated shared vocabulary"
+  assert_absent "$HOME_DIR/state/$id.meta" "unknown effort rejection should happen before meta is written"
+  pass "the shared effort parser still rejects values outside its vocabulary"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -238,6 +296,23 @@ test_codex_threads_model_and_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
+}
+
+test_codex_threads_gpt_5_6_sol_ultra() {
+  local rec id out status launch
+  id=profile-codex-ultra-z23
+  rec=$(make_spawn_case profile-codex-ultra codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort ultra)
+  status=$?
+  expect_code 0 "$status" "codex gpt-5.6-sol spawn with ultra effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol ultra
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"ultra\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread gpt-5.6-sol and ultra reasoning effort"
+  pass "codex receives gpt-5.6-sol and model_reasoning_effort=ultra profile axes"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -255,6 +330,33 @@ test_codex_omits_invalid_max_effort() {
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
+}
+
+test_non_codex_harnesses_omit_ultra_effort() {
+  local harness rec id out status launch
+  for harness in claude grok pi opencode; do
+    id="profile-$harness-ultra-z24"
+    rec=$(make_spawn_case "profile-$harness-ultra" "$harness" "$id")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model fixture-model --effort ultra)
+    status=$?
+    expect_code 0 "$status" "$harness should omit unsupported ultra effort and still launch"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" fixture-model ultra
+    launch=$(cat "$LAUNCH_LOG")
+    case "$harness" in
+      claude) assert_not_contains "$launch" "--effort 'ultra'" "claude launch must omit unsupported ultra effort" ;;
+      grok) assert_not_contains "$launch" "--reasoning-effort 'ultra'" "grok launch must omit unsupported ultra effort" ;;
+      pi) assert_not_contains "$launch" "--thinking 'ultra'" "pi launch must omit unsupported ultra effort" ;;
+      opencode)
+        assert_not_contains "$launch" "--effort" "opencode launch must omit unsupported effort flags"
+        assert_not_contains "$launch" "--thinking" "opencode launch must not gain Pi's effort flag"
+        assert_not_contains "$launch" "--reasoning-effort" "opencode launch must not gain Grok's effort flag"
+        ;;
+    esac
+  done
+  pass "non-Codex harnesses record ultra in meta but omit it from their launch commands"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -364,6 +466,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_help_includes_ultra_effort
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -371,8 +474,12 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_existing_effort_values_remain_accepted
+test_unknown_effort_is_rejected
 test_codex_threads_model_and_effort
+test_codex_threads_gpt_5_6_sol_ultra
 test_codex_omits_invalid_max_effort
+test_non_codex_harnesses_omit_ultra_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis

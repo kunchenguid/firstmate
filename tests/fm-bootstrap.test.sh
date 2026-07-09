@@ -479,7 +479,13 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+codex ultra rule effort is accepted^{"rules":[{"when":"deep implementation","use":{"harness":"codex","model":"gpt-5.6-sol","effort":"ultra"}}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
+codex ultra default effort is accepted^{"default":{"harness":"codex","model":"gpt-5.6-sol","effort":"ultra"}}^grep^CREW_DISPATCH: active config/crew-dispatch.json
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+unsupported claude ultra effort is flagged^{"rules":[{"when":"deep implementation","use":{"harness":"claude","model":"opus","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: claude:ultra
+unsupported grok ultra effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:ultra
+unsupported pi ultra effort is flagged^{"rules":[{"when":"deep implementation","use":{"harness":"pi","model":"sonnet","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+unsupported opencode ultra effort is flagged^{"rules":[{"when":"deep implementation","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:ultra
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json

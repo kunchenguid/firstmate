@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
+#   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
@@ -118,6 +118,15 @@ EFFORT_SET=0
 BACKEND_SET=0
 POS=()
 want_value=
+EFFORT_HELP='low, medium, high, xhigh, max, ultra'
+
+effort_is_valid() {
+  case "$1" in
+    low|medium|high|xhigh|max|ultra) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -152,10 +161,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
-case "$EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
-esac
+[ -z "$EFFORT" ] || effort_is_valid "$EFFORT" || { echo "error: --effort must be one of $EFFORT_HELP" >&2; exit 1; }
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -394,10 +400,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   if [ "$EFFORT_SET" -eq 0 ]; then
     SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
     if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
-      esac
+      if effort_is_valid "$SM_EFFORT"; then
+        EFFORT=$SM_EFFORT
+      else
+        echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of $EFFORT_HELP; ignoring" >&2
+      fi
     fi
   fi
 fi
@@ -444,10 +451,10 @@ effort_flag_for_harness() {
       ;;
     codex)
       # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # gpt-5.6-sol model catalog advertises ultra. Keep omitting max under the
+      # established cross-model fallback rather than broadening that rule.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)

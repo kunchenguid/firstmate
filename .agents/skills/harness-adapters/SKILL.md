@@ -77,18 +77,51 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
-The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path.
+The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path, with the Codex `ultra` addition re-verified on 2026-07-09.
 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|ultra>"'` | Verified on codex-cli 0.144.0 with `gpt-5.6-sol`. `max` remains omitted under the existing cross-model fallback rule. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
+
+**Codex `ultra` verification (2026-07-09, codex-cli 0.144.0).**
+The local model catalog and one ephemeral read-only launch verified both config-parser acceptance and a real `gpt-5.6-sol` response at `ultra`.
+
+Commands:
+
+```sh
+codex --version
+jq -c '.models[] | select(.slug == "gpt-5.6-sol") | {slug,display_name,supported_reasoning_levels}' ~/.codex/models_cache.json
+tmp_dir=$(mktemp -d /tmp/fm-codex-ultra-launch.XXXXXX)
+codex --strict-config -a never -s read-only -m gpt-5.6-sol -c 'model_reasoning_effort="ultra"' exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check -C "$tmp_dir" 'Reply with exactly ULTRA_OK. Do not call tools.'
+rc=$?
+rm -rf "$tmp_dir"
+printf 'exit_status=%s\n' "$rc"
+```
+
+Relevant non-sensitive output:
+
+```text
+codex-cli 0.144.0
+{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"},{"effort":"max","description":"Maximum reasoning depth for the hardest problems"},{"effort":"ultra","description":"Maximum reasoning with automatic task delegation"}]}
+OpenAI Codex v0.144.0
+workdir: /tmp/fm-codex-ultra-launch.dAV12v
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: ultra
+reasoning summaries: none
+codex
+ULTRA_OK
+exit_status=0
+```
 
 ## no-mistakes skill invocation
 

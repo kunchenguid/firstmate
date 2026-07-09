@@ -107,6 +107,7 @@ absent file -> own harness, empty model/effort^ABSENT^claude^^
 bare harness only -> empty model/effort (backward-compat)^claude^claude^^
 harness + model -> model only^claude opus^claude^opus^
 harness + model + effort -> both^claude opus high^claude^opus^high
+codex ultra effort token is exposed^codex gpt-5.6-sol ultra^codex^gpt-5.6-sol^ultra
 default harness token -> falls back to crew, empty model/effort^default^claude^^
 extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^xhigh
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
@@ -528,6 +529,27 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
+}
+
+test_spawn_secondmate_codex_ultra_tokens() {
+  local w sm meta launchlog launch
+  w="$TMP_ROOT/spawn-codex-ultra-tokens"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex gpt-5.6-sol ultra\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "codex-ultra-tokens: meta harness not codex"
+  [ "$(meta_field "$meta" model)" = gpt-5.6-sol ] || fail "codex-ultra-tokens: meta model not gpt-5.6-sol"
+  [ "$(meta_field "$meta" effort)" = ultra ] || fail "codex-ultra-tokens: meta effort not ultra"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"ultra\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex-ultra-tokens: launch did not carry gpt-5.6-sol with ultra reasoning effort"
+  pass "C4a spawn: config/secondmate-harness threads Codex gpt-5.6-sol with ultra effort"
 }
 
 # Precedence: an explicit per-spawn --model overrides the file's model token.
@@ -1026,6 +1048,7 @@ test_spawn_unverified_secondmate_harness_refused
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
+test_spawn_secondmate_codex_ultra_tokens
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
