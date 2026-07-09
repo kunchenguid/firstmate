@@ -94,6 +94,7 @@ tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression
 tests/fm-dispatch-select.test.sh          # deterministic crew-dispatch profile selection, quota-balanced tie/stale/fallback behavior, and backward-compatible first-profile selection tests
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
+tests/fm-hooks.test.sh                    # post-worktree-create spawn hook seam: absent no-op, args/env contract, primary-checkout refusal, non-fatal hook error, and FM_HOOK_TIMEOUT bound with kill-after grace
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, stable nudge selectors after respawn, and spawn hook tests
 tests/fm-secondmate-liveness.test.sh      # session-start secondmate agent-liveness probe and respawn sweep tests

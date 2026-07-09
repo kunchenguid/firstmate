@@ -72,6 +72,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Right after that isolation assertion, `fm-spawn.sh` runs the optional local, gitignored `config/hooks/post-worktree-create` hook for every task kind; the hook is non-fatal and time-bounded, so fleet-local worktree provisioning never gates a launch (see [configuration.md](configuration.md)).
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -120,7 +121,7 @@ On locked session start, `fm-bootstrap.sh` fast-forwards each live secondmate ho
 The live signal is a `state/<id>.meta` record with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` directories untouched.
 The same locked session start probes each live secondmate endpoint for a real agent process and respawns only a confidently dead endpoint; inconclusive probes are reported and never acted on.
-The locked session-start bootstrap step separately propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates, dispatch profiles, and backlog backend use the primary settings.
+The locked session-start bootstrap step separately propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/hooks/post-worktree-create`, into each validated live secondmate home so that secondmate's own crewmates, dispatch profiles, backlog backend, and spawn hook use the primary settings.
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged by the tracked-file sync.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
@@ -138,6 +139,7 @@ An explicit per-spawn harness or raw launch command does not inherit model or ef
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces hand-editing across the fleet.
+`config/hooks/post-worktree-create` is inherited too, with its executable mode preserved, so crewmates spawned by a secondmate get the same fleet-local worktree provisioning.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).
 

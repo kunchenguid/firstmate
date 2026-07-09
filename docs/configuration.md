@@ -306,6 +306,7 @@ FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh t
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=2 # seconds fm-teardown.sh waits before retrying a worktree return that failed on a git lock
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
+FM_HOOK_TIMEOUT=120     # seconds allowed for the optional config/hooks/post-worktree-create spawn hook; 0 disables the bound
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
