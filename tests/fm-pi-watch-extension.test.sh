@@ -81,7 +81,16 @@ test_spawn_template_mentions_pi_watch_placeholder() {
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
-  local repo home out status
+  local repo home out status probe_ts
+  # Some Node builds (e.g. distro packages) omit the bundled TypeScript
+  # stripper (amaro), so they cannot import the generated .ts extension at
+  # all - skip cleanly rather than failing on an environment limitation.
+  probe_ts="$TMP_ROOT/ts-support-probe.ts"
+  printf 'export const probe: number = 1;\n' > "$probe_ts"
+  if ! node --input-type=module -e "import('file://$probe_ts')" >/dev/null 2>&1; then
+    echo "skip: node lacks built-in TypeScript support (cannot import .ts modules)"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
