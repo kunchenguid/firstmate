@@ -242,9 +242,42 @@ test_harness_resolution_unaffected_by_cwd() {
   pass "harness resolution and LAUNCH construction are unaffected by --cwd"
 }
 
+test_cwd_places_claude_turnend_hook_in_subdir() {
+  # The claude Stop hook fires only when it lives in the session's start
+  # directory, so with --cwd the hook must land under the subdir, not the
+  # worktree root, or the turn-end signal is silently orphaned.
+  local rec id status excl
+  id=cwd-hook-z12
+  rec=$(make_cwd_case cwd-hook "$id")
+  read_cwd_case_record "$rec"
+  mkdir -p "$WT_DIR/argus"
+
+  run_cwd_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_DIR/launch-root.log" "$WT_DIR/argus" \
+    "$id" "$PROJ_DIR" claude >/dev/null
+  status=$?
+  expect_code 0 "$status" "baseline claude spawn without --cwd should succeed"
+  [ -f "$WT_DIR/.claude/settings.local.json" ] || \
+    fail "without --cwd the claude hook should live at the worktree root"
+
+  rm -rf "$WT_DIR/.claude"
+  run_cwd_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_DIR/launch-cwd.log" "$WT_DIR/argus" \
+    "$id" "$PROJ_DIR" claude --cwd argus >/dev/null
+  status=$?
+  expect_code 0 "$status" "claude spawn with --cwd should succeed"
+  [ -f "$WT_DIR/argus/.claude/settings.local.json" ] || \
+    fail "with --cwd the claude hook must live under the subdir the session starts in"
+  [ ! -f "$WT_DIR/.claude/settings.local.json" ] || \
+    fail "with --cwd the claude hook must NOT be orphaned at the worktree root"
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  assert_grep "argus/.claude/settings.local.json" "$excl" \
+    "the git-exclude entry must anchor to the moved hook location"
+  pass "--cwd places the claude turn-end hook under the session's start subdir"
+}
+
 test_cwd_rejects_invalid_paths
 test_cwd_allows_non_dotdot_dotted_names
 test_cwd_rejects_with_secondmate
 test_cwd_missing_subdirectory_fails
 test_cwd_recorded_in_meta_only_when_used
 test_harness_resolution_unaffected_by_cwd
+test_cwd_places_claude_turnend_hook_in_subdir

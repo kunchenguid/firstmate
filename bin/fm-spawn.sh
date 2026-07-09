@@ -923,24 +923,33 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  # claude and opencode discover their hook config from the session's start
+  # directory and do not walk up to a parent, so with --cwd the hook must live
+  # under that subdir. codex, pi, and grok turn-end signals are cwd-independent.
+  HOOK_BASE=$WT
+  HOOK_REL_PREFIX=
+  if [ -n "$CWD_ARG" ]; then
+    HOOK_BASE=$WT/$CWD_ARG
+    HOOK_REL_PREFIX=$CWD_ARG/
+  fi
   case "$HARNESS" in
     claude*)
-      mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      mkdir -p "$HOOK_BASE/.claude"
+      cat > "$HOOK_BASE/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
+      exclude_path "${HOOK_REL_PREFIX}.claude/settings.local.json"
       ;;
     opencode*)
-      mkdir -p "$WT/.opencode/plugins"
-      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
+      mkdir -p "$HOOK_BASE/.opencode/plugins"
+      cat > "$HOOK_BASE/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
   },
 })
 EOF
-      exclude_path '.opencode/plugins/fm-turn-end.js'
+      exclude_path "${HOOK_REL_PREFIX}.opencode/plugins/fm-turn-end.js"
       ;;
     pi*)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
