@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--cwd <subdir>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -27,6 +27,16 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --cwd <subdir> starts the ship/scout harness session inside <subdir> of the
+#   task worktree instead of the worktree root (e.g. a project with per-subdirectory
+#   .claude/skills/ trees that only register when the session starts there).
+#   <subdir> must be a relative path with no '..' path segment; an absolute path,
+#   an empty value, or a '..' segment is rejected. Ship/scout only: it does not
+#   interact with harness/dispatch resolution or the LAUNCH string at all. A
+#   --secondmate spawn and a backend=orca spawn both refuse --cwd because neither
+#   uses the treehouse-get-in-pane flow this relies on to cd the live pane and
+#   confirm the change landed. Recorded as cwd_subdir=<subdir> in the task's meta
+#   only when used.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -84,7 +94,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -112,10 +122,12 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+CWD_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+CWD_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -128,6 +140,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      cwd) CWD_ARG=$a; CWD_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +157,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --cwd) want_value=cwd ;;
+    --cwd=*) CWD_ARG=${a#--cwd=}; CWD_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -152,10 +167,23 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$CWD_SET" -eq 0 ] || [ -n "$CWD_ARG" ] || { echo "error: --cwd requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+if [ -n "$CWD_ARG" ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --cwd is not supported for --secondmate spawns (no treehouse-get-in-pane flow)" >&2
+    exit 1
+  fi
+  case "$CWD_ARG" in
+    /*) echo "error: --cwd must be a relative path, got '$CWD_ARG'" >&2; exit 1 ;;
+  esac
+  case "/$CWD_ARG/" in
+    */../*) echo "error: --cwd must not contain a '..' path segment, got '$CWD_ARG'" >&2; exit 1 ;;
+  esac
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -177,6 +205,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
 fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+  exit 1
+fi
+if [ "$BACKEND" = orca ] && [ -n "$CWD_ARG" ]; then
+  echo "error: backend=orca does not support --cwd (no treehouse-get-in-pane flow)" >&2
   exit 1
 fi
 if [ "$BACKEND" = orca ]; then
@@ -255,6 +287,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ -z "$CWD_ARG" ] || shared_args+=(--cwd "$CWD_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -839,6 +872,33 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # --cwd: cd the live pane into a named subdirectory of the worktree before the
+  # harness LAUNCH is sent, so a harness whose session-start scoping depends on
+  # cwd (e.g. Claude Code's per-subdirectory .claude/skills/ registration) picks
+  # it up. Independent of harness/dispatch resolution above: LAUNCH is already
+  # fixed by this point and is untouched here.
+  if [ -n "$CWD_ARG" ]; then
+    if [ ! -d "$WT/$CWD_ARG" ]; then
+      echo "error: --cwd subdirectory '$CWD_ARG' does not exist in worktree $WT" >&2
+      exit 1
+    fi
+    CWD_TARGET_REAL=$(cd "$WT/$CWD_ARG" && pwd -P)
+    spawn_send_text_line "$T" "cd $(shell_quote "$CWD_ARG")"
+    CWD_LANDED=
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$T" || true)
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$CWD_TARGET_REAL" ]; then
+        CWD_LANDED=1
+        break
+      fi
+      sleep 1
+    done
+    if [ -z "$CWD_LANDED" ]; then
+      echo "error: cd into --cwd subdirectory '$CWD_ARG' did not land within 60s; inspect window $T" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -973,6 +1033,7 @@ META_WINDOW=$T
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
+  [ -z "$CWD_ARG" ] || echo "cwd_subdir=$CWD_ARG"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
