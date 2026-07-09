@@ -384,6 +384,29 @@ test_sweep_skipped_under_detect_only() {
   pass "sweep: skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1, exactly like the other mutating sweeps"
 }
 
+test_sweep_unaffected_by_supervision_resting() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-supervision-resting)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'supervision=resting\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # Liveness probing and respawn are keyed on kind=secondmate and the pane
+  # probe alone; supervision= only affects in-flight supervision COUNTING
+  # (bin/fm-supervision-lib.sh), never this liveness sweep, so a dead resting
+  # secondmate must still be respawned exactly like an active one.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a resting secondmate's dead endpoint must still be respawned, unaffected by supervision=resting"
+  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
+    "the stale endpoint must still be killed before respawn regardless of supervision="
+  assert_contains "$(cat "$log")" "new-window" \
+    "a confirmed-dead resting secondmate must still be relaunched"
+  pass "sweep: liveness probe and respawn behavior are unaffected by supervision=resting"
+}
+
 test_sweep_noop_with_no_secondmate_meta() {
   local w fb tmuxfb log out
   w=$(new_world sweep-no-secondmates)
@@ -410,6 +433,7 @@ test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
+test_sweep_unaffected_by_supervision_resting
 test_sweep_noop_with_no_secondmate_meta
 
 echo "# all fm-secondmate-liveness tests passed"

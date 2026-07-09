@@ -77,6 +77,62 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# --- PREDICATE: resting vs active secondmate supervision state --------------
+# A persistent secondmate (kind=secondmate) stays alive regardless of this
+# field - this is purely a supervision-counting change. `supervision=resting`
+# excludes it from FM_SUP_IN_FLIGHT; `supervision=active` and legacy meta with
+# no supervision= field (the pre-existing, safe default) still count, exactly
+# as every other meta kind always has.
+
+test_predicate_resting_secondmate_excluded() {
+  local state="$TMP_ROOT/pred-sm-resting/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/sm1.meta" "kind=secondmate" "supervision=resting"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a resting secondmate must not count as in-flight, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: kind=secondmate supervision=resting is excluded from in-flight count"
+}
+
+test_predicate_active_secondmate_counts() {
+  local state="$TMP_ROOT/pred-sm-active/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/sm1.meta" "kind=secondmate" "supervision=active"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "an active secondmate must count as in-flight, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: kind=secondmate supervision=active still counts as in-flight"
+}
+
+test_predicate_legacy_secondmate_counts() {
+  local state="$TMP_ROOT/pred-sm-legacy/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/sm1.meta" "kind=secondmate"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "legacy secondmate meta with no supervision= field must still count (safe default), got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: legacy kind=secondmate meta with no supervision= field still counts as in-flight"
+}
+
+test_predicate_ordinary_crewmate_unaffected() {
+  local state="$TMP_ROOT/pred-crew-unaffected/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/task1.meta" "kind=ship"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "an ordinary ship task must count as in-flight, got $FM_SUP_IN_FLIGHT"
+  fm_write_meta "$state/task2.meta" "kind=scout"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 2 ] || fail "an ordinary scout task must also count as in-flight, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: ordinary crewmate/scout meta counts unchanged (no regression)"
+}
+
+test_predicate_resting_secondmate_plus_real_child_work() {
+  local state="$TMP_ROOT/pred-sm-plus-child/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/sm1.meta" "kind=secondmate" "supervision=resting"
+  fm_write_meta "$state/child1.meta" "kind=ship"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "genuine in-flight work alongside a resting secondmate's own meta must still count, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: real in-flight work still counts regardless of a co-located resting secondmate's own supervision= value"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -280,6 +336,26 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+test_hook_silent_when_only_resting_secondmate_in_flight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-sm-resting")
+  fm_write_meta "$dir/state/sm1.meta" "kind=secondmate" "supervision=resting"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must not block turn-end when the only in-flight meta is a resting secondmate"
+  [ -z "$out" ] || fail "hook produced output with only a resting secondmate in flight: $out"
+  pass "fm-turnend-guard: does not block turn-end when only resting secondmates are in flight"
+}
+
+test_hook_blocks_when_active_secondmate_in_flight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-sm-active")
+  fm_write_meta "$dir/state/sm1.meta" "kind=secondmate" "supervision=active"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block turn-end for an active secondmate with no live watcher"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: still blocks turn-end for an active secondmate exactly as before"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -906,12 +982,19 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_resting_secondmate_excluded
+test_predicate_active_secondmate_counts
+test_predicate_legacy_secondmate_counts
+test_predicate_ordinary_crewmate_unaffected
+test_predicate_resting_secondmate_plus_real_child_work
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_silent_when_only_resting_secondmate_in_flight
+test_hook_blocks_when_active_secondmate_in_flight
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
