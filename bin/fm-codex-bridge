@@ -157,7 +157,7 @@ function turnIdFromStartResult(turn) {
   return "";
 }
 
-async function readTurnStatus(server, threadId, turnId) {
+async function readTurnStatus(server, threadId, turnId, previousTurnIds) {
   const result = await server.request("thread/turns/list", {
     threadId,
     limit: 20,
@@ -165,12 +165,13 @@ async function readTurnStatus(server, threadId, turnId) {
     sortDirection: "desc",
   });
   const turns = result.data || [];
-  const turn = turns.find(item => item && item.id === turnId);
+  const turn = turns.find(item => item && item.id === turnId) ||
+    (previousTurnIds && turns.find(item => item && !previousTurnIds.has(item.id)));
   if (!turn) return "unknown";
   return statusType(turn.status);
 }
 
-async function holdTurnLifecycle(server, threadId, opts, turnId = "") {
+async function holdTurnLifecycle(server, threadId, opts, turnId = "", previousTurnIds = null) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["turn-lifecycle-polls"],
     "--turn-lifecycle-polls",
@@ -187,7 +188,7 @@ async function holdTurnLifecycle(server, threadId, opts, turnId = "") {
     try {
       let status;
       if (turnId) {
-        status = await readTurnStatus(server, threadId, turnId);
+        status = await readTurnStatus(server, threadId, turnId, previousTurnIds);
       } else {
         const result = await server.request("thread/read", { threadId, includeTurns: false });
         status = normalizeThread(result, "").status;
@@ -482,7 +483,7 @@ async function sendTurnDetached(opts) {
     detached: true,
     stdio: "ignore",
   });
-  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 3) + statusWaitBudgetMs(opts) + 5000;
+  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 4) + statusWaitBudgetMs(opts) + 5000;
   let ready;
   try {
     ready = await waitForReadyFile(readyFile, child, readyTimeoutMs);
@@ -578,12 +579,24 @@ async function sendTurnWorker(opts, readyFile) {
     try {
       const statusStartOffset = statusFileOffset(opts["wait-status-file"]);
       await server.request("thread/resume", threadResumeParams(threadId, opts));
+      let previousTurnIds = null;
+      try {
+        const previous = await server.request("thread/turns/list", {
+          threadId,
+          limit: 20,
+          itemsView: "summary",
+          sortDirection: "desc",
+        });
+        previousTurnIds = new Set((previous.data || []).map(item => item && item.id).filter(Boolean));
+      } catch (_) {
+        // Exact turn-id tracking still works when history is temporarily unavailable.
+      }
       const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
       await waitForStatusFile(threadId, opts, statusStartOffset);
       const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };
       writeJsonFile(readyFile, ready);
       reportedReady = true;
-      await holdTurnLifecycle(server, threadId, opts, turnIdFromStartResult(turn));
+      await holdTurnLifecycle(server, threadId, opts, turnIdFromStartResult(turn), previousTurnIds);
       return ready;
     } catch (err) {
       if (!reportedReady) writeJsonFile(readyFile, { ok: false, error: err.message });
