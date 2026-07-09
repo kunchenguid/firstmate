@@ -315,7 +315,7 @@ install_cmd() {
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
     az) echo "brew install azure-cli  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/davidkydd/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;

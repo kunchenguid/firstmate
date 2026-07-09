@@ -282,7 +282,7 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/davidkydd/no-mistakes/main/docs/install.sh | sh)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
