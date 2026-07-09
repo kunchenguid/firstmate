@@ -14,6 +14,7 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) an Azure DevOps PR URL is refused before recording or calling gh-axi
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -295,6 +296,33 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# firstmate never merges an Azure DevOps PR: refuse before any recording or
+# host call, and point the captain at the ADO UI.
+test_ado_url_refuses_before_any_action() {
+  local case_dir rc
+  case_dir=$(make_case ado-refuse)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" abc123
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://dev.azure.com/contoso/Platform/_git/api/pullrequest/42 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" != 0 ] || fail "ado-refuse: fm-pr-merge should refuse an Azure DevOps PR URL"
+  assert_grep 'does not merge Azure DevOps' "$case_dir/stderr" \
+    "ado-refuse: refusal message should name Azure DevOps"
+  assert_grep 'https://dev.azure.com/contoso/Platform/_git/api/pullrequest/42' "$case_dir/stderr" \
+    "ado-refuse: refusal should echo the PR URL for the captain"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "ado-refuse: no pr= should be recorded for a refused ADO merge"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "ado-refuse: gh-axi must not be called for an ADO PR URL"
+  pass "fm-pr-merge refuses an Azure DevOps PR URL before recording or calling gh-axi"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -305,3 +333,4 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_ado_url_refuses_before_any_action
