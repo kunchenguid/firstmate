@@ -863,8 +863,22 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
+      # Worktree-scoped rm -rf allow: lets routine scratch cleanup (deleting
+      # node_modules, .terraform, a scratch trace dir) inside this crewmate's own
+      # worktree skip the interactive confirmation that global settings.json's
+      # "ask" safety net would otherwise trigger even under
+      # --dangerously-skip-permissions - a prompt an unattended crewmate cannot
+      # itself answer, previously stranding crewmates mid-turn with no commits.
+      # Verified end to end with a real spawn (harness-adapters skill,
+      # "Permission precedence"): a command matching this allow entry runs with
+      # no prompt, while a command outside the worktree still correctly prompts.
+      # Absolute, canonicalized path: Bash permission patterns match literal
+      # command text, not a resolved cwd, so this only helps a crewmate command
+      # that spells out the worktree's own absolute path rather than a bare
+      # relative one (see the brief guidance in bin/fm-brief.sh).
+      WT_REAL=$(cd "$WT" && pwd -P)
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"permissions":{"allow":["Bash(rm -rf $WT_REAL/*)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
