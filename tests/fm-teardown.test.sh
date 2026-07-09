@@ -48,7 +48,7 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
