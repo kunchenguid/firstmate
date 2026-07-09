@@ -249,6 +249,11 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
+# Code discipline
+Before editing, trace the touched flow, then reuse the highest existing rung that works: project helper, stdlib, platform feature, installed dependency, or the smallest new code that satisfies this brief.
+For bug fixes or contract changes, run rg over every caller of the function/API/schema you touch and fix the shared cause once instead of patching the reported path only.
+Keep the diff boring and local: no speculative features, new dependencies, or abstractions unless the brief or existing codebase makes them necessary.
+
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.

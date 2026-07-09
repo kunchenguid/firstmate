@@ -93,7 +93,44 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Ship briefs carry a compact Code discipline block between Setup and Rules.
+# Scout briefs must not include it by default (report-focused contract).
+test_ship_code_discipline_block() {
+  local home id brief setup_ln disc_ln rules_ln
+  home="$TMP_ROOT/code-discipline-home"
+  mkdir -p "$home/data"
+
+  id="brief-discipline-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "# Code discipline" "$brief" "ship brief missing Code discipline heading"
+  assert_grep "reuse the highest existing rung that works" "$brief" \
+    "ship brief missing reuse-existing-rung line"
+  assert_grep "run rg over every caller of the function/API/schema you touch" "$brief" \
+    "ship brief missing caller/root-cause line"
+  assert_grep "Keep the diff boring and local" "$brief" \
+    "ship brief missing keep-diff-local line"
+  setup_ln=$(grep -n '^# Setup$' "$brief" | head -1 | cut -d: -f1)
+  disc_ln=$(grep -n '^# Code discipline$' "$brief" | head -1 | cut -d: -f1)
+  rules_ln=$(grep -n '^# Rules$' "$brief" | head -1 | cut -d: -f1)
+  if [ -z "$setup_ln" ] || [ -z "$disc_ln" ] || [ -z "$rules_ln" ]; then
+    fail "ship brief missing Setup ($setup_ln), Code discipline ($disc_ln), or Rules ($rules_ln)"
+  fi
+  [ "$setup_ln" -lt "$disc_ln" ] || fail "Code discipline (line $disc_ln) must follow Setup (line $setup_ln)"
+  [ "$disc_ln" -lt "$rules_ln" ] || fail "Code discipline (line $disc_ln) must precede Rules (line $rules_ln)"
+
+  id="brief-discipline-scout-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "# Code discipline" "$brief" \
+    "scout brief must not include Code discipline by default"
+  pass "fm-brief.sh: ship briefs carry Code discipline; scouts do not"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_code_discipline_block

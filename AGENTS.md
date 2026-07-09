@@ -606,6 +606,9 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 - Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
   Steer it back to no-mistakes' respond flow; the pipeline, not the crewmate, applies validation fixes.
 
+When reviewing a crewmate diff (local-only summary, pre-merge review, or PR-ready summary), treat over-engineering as a finding: unnecessary dependencies, hand-rolled stdlib or platform behavior, speculative abstractions, dead code, unused flexibility, and wrapper-only layers - unless the task justifies them.
+This lens never weakens required validation, security, data-loss, accessibility, trust-boundary checks, or the project-mode pipeline.
+
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
@@ -764,6 +767,7 @@ For example, Claude uses a background-notify cycle, while Codex intentionally us
 A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+Use the cheapest authoritative read first, stop once you have enough to steer or report, and batch the captain-facing answer instead of streaming incidental pane detail.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 
 ### Away-mode stub
@@ -869,6 +873,7 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Ship briefs carry a compact Code discipline block (reuse existing rungs, fix shared callers, keep the diff local); the scaffold remains the crewmate contract, not a license to expand scope.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
