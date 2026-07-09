@@ -28,6 +28,20 @@ export const Type = {
 JS
 }
 
+# Importing the generated .ts extension directly needs a Node build with native
+# TypeScript-stripping support (Amaro); a Node built without it (node_use_amaro
+# false) throws ERR_NO_TYPESCRIPT on the very first `import`. Probe once so the
+# one test that imports the .ts file can skip on such a build instead of
+# false-failing, without gating every other test in this file on it.
+node_supports_ts_import() {
+  local probe="$TMP_ROOT/.ts-support-check.ts"
+  printf 'export default 1;\n' > "$probe"
+  node --input-type=module >/dev/null 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+await import(pathToFileURL("$probe").href);
+EOF
+}
+
 test_tracked_extension_present_and_self_hashing() {
   local text expected_config_source
   expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
@@ -80,6 +94,10 @@ test_spawn_template_mentions_pi_watch_placeholder() {
 
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
+  if ! node_supports_ts_import; then
+    echo "skip: node lacks native TypeScript-stripping support (ERR_NO_TYPESCRIPT); cannot import the generated .ts extension"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
