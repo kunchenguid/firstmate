@@ -945,6 +945,27 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    gemini*)
+      mkdir -p "$WT/.gemini"
+      cat > "$WT/.gemini/settings.json" <<EOF
+{
+  "hooks": {
+    "AfterAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "touch '$TURNEND'"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+      exclude_path '.gemini/settings.json'
+      ;;
   esac
 fi
 

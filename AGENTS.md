@@ -64,7 +64,7 @@ Existing overrides remain compatible: `FM_STATE_OVERRIDE` can still point at a c
 Each secondmate gets its own persistent `FM_HOME`, so its local state, backlog, projects, and session lock are isolated from the main firstmate.
 
 ```
-AGENTS.md            this file (CLAUDE.md is a symlink to it)
+AGENTS.md            this file (CLAUDE.md and GEMINI.md are symlinks to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
@@ -384,7 +384,7 @@ Firstmate keeps project knowledge split by ownership.
 **Project-intrinsic knowledge** belongs to the project.
 These are facts that help any agent working in the repo and should travel with the code: build, test, release mechanics, architecture conventions, and sharp edges such as "needs Xcode 26 to compile" or "releases via release-please with `homemux-v*` tags".
 This knowledge lives in the project's committed `AGENTS.md`.
-A project's `AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it.
+A project's `AGENTS.md` is the real file; both `CLAUDE.md` and `GEMINI.md` are symlinks to it.
 A project's `AGENTS.md` is only for knowledge useful to almost every future session in that repo.
 Prefer a pointer to the authoritative file, command, or doc over repeating what the codebase already shows, and rewrite or prune stale entries instead of appending by default.
 The canonical self-governance wording for project `AGENTS.md` files lives in `bin/fm-ensure-agents-md.sh`; this section states the principle and points there.

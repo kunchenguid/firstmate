@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Ensure a project worktree follows the agent-memory file convention.
-# AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md is a
-# relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
-# when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present, and refuses to clobber distinct real files or wrong symlinks.
+# AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md and GEMINI.md
+# are relative symlinks to it for compatibility. Creates a minimal AGENTS.md
+# skeleton when neither file exists, promotes a real CLAUDE.md or GEMINI.md file
+# when it is the only file present, and refuses to clobber distinct real files
+# or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, appending it to created skeletons and promoted
-# CLAUDE.md files that lack it.
+# compatibility files that lack it.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -30,7 +31,6 @@ DIR=$(cd "$DIR" && pwd -P)
 cd "$DIR"
 
 AGENTS=AGENTS.md
-CLAUDE=CLAUDE.md
 
 write_maintenance_section() {
   cat <<'EOF'
@@ -72,15 +72,17 @@ EOF
   ensure_maintenance_section
 }
 
-is_correct_claude_symlink() {
-  [ -L "$CLAUDE" ] || return 1
-  target=$(readlink "$CLAUDE")
+is_correct_symlink() {
+  local link_file=$1
+  [ -L "$link_file" ] || return 1
+  local target
+  target=$(readlink "$link_file")
   case "$target" in
     "$AGENTS"|"./$AGENTS") return 0 ;;
   esac
   [ -e "$AGENTS" ] || return 1
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$CLAUDE" "$AGENTS" <<'PY'
+    python3 - "$link_file" "$AGENTS" <<'PY'
 import os
 import sys
 sys.exit(0 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 1)
@@ -100,49 +102,84 @@ if [ -e "$AGENTS" ] && [ ! -f "$AGENTS" ]; then
 fi
 
 if [ -e "$AGENTS" ]; then
-  if [ -L "$CLAUDE" ]; then
-    if is_correct_claude_symlink; then
-      echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md in $DIR"
-      exit 0
+  changed=false
+  for file in CLAUDE.md GEMINI.md; do
+    if [ -L "$file" ]; then
+      if ! is_correct_symlink "$file"; then
+        echo "conflict: $file is a symlink in $DIR but does not point to AGENTS.md" >&2
+        exit 1
+      fi
+    elif [ ! -e "$file" ]; then
+      ln -s "$AGENTS" "$file"
+      echo "symlinked: $file -> AGENTS.md in $DIR"
+      changed=true
+    elif [ -f "$file" ]; then
+      echo "conflict: both AGENTS.md and $file are real files in $DIR; reconcile them manually" >&2
+      exit 1
+    else
+      echo "conflict: $file exists in $DIR but is not a regular file or symlink" >&2
+      exit 1
     fi
-    echo "conflict: CLAUDE.md is a symlink in $DIR but does not point to AGENTS.md" >&2
+  done
+  if [ "$changed" = false ]; then
+    echo "unchanged: AGENTS.md with compatibility symlinks -> AGENTS.md in $DIR"
+  fi
+  exit 0
+fi
+
+# AGENTS.md does not exist.
+# Let's check for any real regular files to promote.
+real_files=()
+for file in CLAUDE.md GEMINI.md; do
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    real_files+=("$file")
+  elif [ -e "$file" ] && [ ! -L "$file" ]; then
+    echo "conflict: $file exists in $DIR but is not a regular file or symlink" >&2
     exit 1
   fi
-  if [ ! -e "$CLAUDE" ]; then
-    ln -s "$AGENTS" "$CLAUDE"
-    echo "symlinked: CLAUDE.md -> AGENTS.md in $DIR"
-    exit 0
-  fi
-  if [ -f "$CLAUDE" ]; then
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
-    exit 1
-  fi
-  echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
+done
+
+if [ "${#real_files[@]}" -gt 1 ]; then
+  echo "conflict: multiple real compatibility files (${real_files[*]}) exist in $DIR without AGENTS.md; reconcile them manually" >&2
   exit 1
 fi
 
-if [ -L "$CLAUDE" ]; then
-  if is_correct_claude_symlink; then
-    write_skeleton
-    echo "created: AGENTS.md and kept CLAUDE.md -> AGENTS.md in $DIR"
-    exit 0
-  fi
-  echo "conflict: CLAUDE.md is a symlink in $DIR but AGENTS.md is missing and the link does not point to AGENTS.md" >&2
-  exit 1
+if [ "${#real_files[@]}" -eq 1 ]; then
+  promote_src="${real_files[0]}"
+  mv "$promote_src" "$AGENTS"
+  ensure_maintenance_section
+  for file in CLAUDE.md GEMINI.md; do
+    if [ -e "$file" ] && [ ! -L "$file" ]; then
+      echo "conflict: $file is a real file in $DIR; cannot overwrite" >&2
+      exit 1
+    fi
+    if [ -L "$file" ]; then
+      if ! is_correct_symlink "$file"; then
+        echo "conflict: $file is a symlink in $DIR but does not point to AGENTS.md" >&2
+        exit 1
+      fi
+    else
+      ln -s "$AGENTS" "$file"
+    fi
+  done
+  echo "promoted: moved $promote_src to AGENTS.md and symlinked compatibility files -> AGENTS.md in $DIR"
+  exit 0
 fi
 
-if [ -e "$CLAUDE" ]; then
-  if [ -f "$CLAUDE" ]; then
-    mv "$CLAUDE" "$AGENTS"
-    ensure_maintenance_section
-    ln -s "$AGENTS" "$CLAUDE"
-    echo "promoted: moved CLAUDE.md to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
-    exit 0
+# No real files to promote.
+# Let's check for correct symlinks first, to see if we can keep them.
+for file in CLAUDE.md GEMINI.md; do
+  if [ -L "$file" ] && ! is_correct_symlink "$file"; then
+    echo "conflict: $file is a symlink in $DIR but AGENTS.md is missing and the link does not point to AGENTS.md" >&2
+    exit 1
   fi
-  echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
-  exit 1
-fi
+done
 
 write_skeleton
-ln -s "$AGENTS" "$CLAUDE"
-echo "created: AGENTS.md and CLAUDE.md -> AGENTS.md in $DIR"
+for file in CLAUDE.md GEMINI.md; do
+  if [ ! -e "$file" ]; then
+    ln -s "$AGENTS" "$file"
+  fi
+done
+echo "created: AGENTS.md and compatibility symlinks -> AGENTS.md in $DIR"
+exit 0
