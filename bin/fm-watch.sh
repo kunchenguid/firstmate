@@ -79,7 +79,12 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+# EXIT alone is not enough: a bounded checkpoint kills this watcher with SIGTERM
+# (bin/fm-watch-checkpoint.sh via timeout/perl), and bash does not run an EXIT
+# trap when terminated by an untrapped signal, so the singleton lock would leak.
+# Trap the terminating signals to release the lock and exit through the EXIT trap.
 trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+trap 'exit 143' TERM INT HUP
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
