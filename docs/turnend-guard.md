@@ -3,6 +3,7 @@
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
 The shared predicate lives in `bin/fm-turnend-guard.sh`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
+A related but separate guard, the pre-arm PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`), denies a bad watcher-arm command shape before it runs rather than detecting a blind turn end afterward.
 
 ## Gap Closed
 
@@ -100,6 +101,10 @@ That validation command used `--permission-mode bypassPermissions` only to keep 
 Project-local Grok hooks did not fire in scratch single mode without a trust grant.
 The primary integration therefore requires the primary firstmate checkout to be trusted for Grok hooks, which can be done with `/hooks-trust` or launch-time `--trust`.
 If Grok declines to load project hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
+
+**2026-07-09 update:** grok 0.2.93 broke the `.grok/hooks/fm-primary-turnend-guard.json` Stop hook with `hook not executed: required env var(s) not set: ${root}`, because grok's own `${VAR}` expansion over the raw `command` string does not tolerate a bare local variable assigned earlier in the same `bash -lc` script.
+The hook command was fixed to reference `${GROK_WORKSPACE_ROOT:-}` directly everywhere instead of assigning it to `$root` first, and re-validated against grok 0.2.93 to fire and complete cleanly.
+See `docs/arm-pretool-check.md`'s "Grok `${VAR}` regression" section for the full root cause, the fix, and the re-validation evidence; that document's Grok hook shares the same fix.
 
 ## Tests
 

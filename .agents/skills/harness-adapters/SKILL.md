@@ -55,6 +55,14 @@ Every verified primary harness has an empirically validated hook path for the "n
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
+## Primary pre-arm (PreToolUse) seatbelt
+
+Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+`claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
+`opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
+When changing any primary PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
+
 ## Primary watcher supervision
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.

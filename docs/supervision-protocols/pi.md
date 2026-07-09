@@ -8,6 +8,7 @@ When this session owns supervision and away mode is not active:
 5. If the extension says the watcher is already healthy, do not start another cycle.
 6. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
 7. Never use shell `&` for watcher supervision.
+   The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The generated watcher extension lives at `__FM_PI_EXT__`.

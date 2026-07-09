@@ -74,6 +74,7 @@ for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior te
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, PID identity stability, watch-arm liveness, and guard-warning tests
 tests/fm-turnend-guard.test.sh            # shared supervision predicate plus Claude Stop-hook scoping, loop guard, fail-open, and live watcher health tests
+tests/fm-arm-pretool-check.test.sh        # PreToolUse watcher-arm seatbelt: CLI/stdin allow-deny table, fail-open, --claude output shaping, and all five harness wiring files
 tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale status-log override, wedge threshold, repeated wedge demand marker, heartbeat backstop, and afk one-shot coherence
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, fm-afk-start daemon-lock lifecycle, max-defer, composer, and fm-send submit tests
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests

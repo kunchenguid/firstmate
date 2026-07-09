@@ -17,6 +17,7 @@ When this session owns supervision and away mode is not active:
 8. Waiting is silent.
 9. Never use shell `&` for firstmate supervision.
 10. Never bundle the arm onto another command.
+    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) whenever this project's Grok hooks are trusted.
 
 Grok injects a synthetic user message with `synthetic_reason: task_completed` when the background arm completes.
 When you see a background-task-completed system reminder for the arm:
