@@ -19,17 +19,20 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh watcher already held
-#                                                          the lock; this arm attaches and
+#   watcher: attached pid=<N> (beacon <age>s)            - arm mode found a live+fresh watcher
+#                                                          holding the lock; this arm attaches and
 #                                                          waits until that cycle ends
+#   watcher: healthy pid=<N> (beacon <age>s)             - restart mode found a live+fresh
+#                                                          watcher it did not own
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
-# It NEVER reports started/attached off a stale beacon or a dead/reused pid: a
+# It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live until the identity-matched holder is no longer
 # healthy, then exits zero so the harness background-notify fires then (not as a
-# false empty wake). On FAILED it exits non-zero so the failure is loud. A live
+# false empty wake). On restart-only healthy it exits zero after the duplicate
+# child stands down. On FAILED it exits non-zero so the failure is loud. A live
 # cycle already present means re-arm attaches - do not start a second watcher.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
@@ -81,6 +84,12 @@ report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
+report_healthy() {
+  local age
+  age=$(fm_path_age "$BEAT")
+  echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
 # Stay alive until the attached identity-matched healthy holder is gone.
@@ -188,15 +197,20 @@ while :; do
       rm -f "$child_out" 2>/dev/null || true
       exit "$rc"
     fi
-    # Another watcher won the singleton; our child stood down. Attach to the live
-    # peer and wait until that cycle ends - same contract as the pre-fork path.
-    report_attached
+    # Another watcher won the singleton; our child stood down.
+    if [ "$mode" = arm ]; then
+      report_attached
+      wait "$child" 2>/dev/null || true
+      rm -f "$child_out" 2>/dev/null || true
+      child=
+      child_out=
+      trap - HUP TERM INT
+      attach_and_wait "$HEALTHY_PID"
+    fi
+    report_healthy
     wait "$child" 2>/dev/null || true
     rm -f "$child_out" 2>/dev/null || true
-    child=
-    child_out=
-    trap - HUP TERM INT
-    attach_and_wait "$HEALTHY_PID"
+    exit 0
   fi
   if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
     wait "$child"
