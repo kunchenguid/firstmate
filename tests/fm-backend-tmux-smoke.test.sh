@@ -137,5 +137,29 @@ fi
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
 
+# --- numeric session name (bug hit live 2026-07-09) ---------------------------
+# A session literally named "0" (tmux's own session-name default) makes a bare
+# `-t "$ses"` ambiguous: tmux's target-window resolution prefers a window
+# INDEX match in the current session over a session-NAME match, and every
+# session's initial window already occupies index 0, so `new-window -t "0"`
+# used to fail with "create window failed: index 0 in use" even though the
+# session name "0" itself was free. Killing the "smoke" session first leaves
+# "0" as the only live session, so its bare-target resolution is unambiguous.
+tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
+NSESSION="0"
+NWINDOW="fm-numeric-test"
+tmux new-session -d -s "$NSESSION" -x 200 -y 50 \
+  || fail "real tmux: numeric-session new-session failed"
+[ "$(tmux list-sessions -F '#{session_name}')" = "$NSESSION" ] \
+  || fail "real tmux: numeric session must be the only live session for this check to be unambiguous"
+
+fm_backend_tmux_create_task "$NSESSION" "$NWINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed against a numeric session name (the -t 0 window-index collision regression)"
+tmux list-windows -t "$NSESSION:" -F '#{window_name}' | grep -qx "$NWINDOW" \
+  || fail "created window is not visible in the numeric-named session"
+pass "real tmux: fm_backend_tmux_create_task works against a numeric session name whose window index 0 is already in use"
+
+tmux kill-session -t "$NSESSION" >/dev/null 2>&1 || true
+
 cleanup_all
 trap - EXIT
