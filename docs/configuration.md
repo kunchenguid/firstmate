@@ -257,6 +257,31 @@ It uses the same live secondmate discovery and propagation helper as bootstrap, 
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Session lock and read-only sessions
+
+Each firstmate home takes a per-home session lock at session start (`bin/fm-lock.sh`), keyed to the harness process it finds by walking its own process ancestry with `ps`.
+A session that cannot take the lock stays read-only and skips every mutating step, and `bin/fm-session-start.sh` prints a loud banner explaining why.
+The banner distinguishes two very different failures, because they need different responses.
+
+When another live firstmate session genuinely holds the lock, the banner says another session holds the fleet lock; operate read-only and let that session own mutable follow-up.
+
+When this session cannot inspect processes to identify its own harness, the banner instead says it is unable to verify this session's identity, and explicitly does not claim another session holds the lock.
+This is the case a Codex macOS sandbox produces: `workspace-write` with `on-request` approvals can deny `ps`, so `bin/fm-lock.sh` cannot walk the ancestry and cannot confirm the harness.
+A detached background job whose ancestry is not walkable hits the same path.
+Firstmate stays read-only here on purpose, because it must not mutate fleet state when it cannot verify its own identity.
+To determine the true state, run the diagnostics the banner prints:
+
+```sh
+bin/fm-lock.sh status
+tmux list-sessions
+tmux list-panes -a
+ps -axo pid,ppid,stat,lstart,command
+```
+
+If `bin/fm-lock.sh status` reports `lock: free` and no other firstmate session is running, the read-only state was caused by denied process inspection, not a real lock holder.
+Under a Codex sandbox, granting the approval that lets `ps` run (or launching the harness where its ancestry is inspectable) lets the next session start acquire the lock normally.
+`bin/fm-lock.sh` emits a stable `FM_LOCK_REASON=<lock-held|ps-unavailable|harness-detect-failed>` line to stderr on any acquire failure so this classification is scriptable; every acquire failure still exits 1.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.

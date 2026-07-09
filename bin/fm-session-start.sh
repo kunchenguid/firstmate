@@ -242,20 +242,50 @@ section "SESSION START - $FM_HOME"
 subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
-printf '%s\n' "$LOCK_OUT"
+# fm-lock.sh emits a stable machine-readable FM_LOCK_REASON=<reason> line to
+# stderr on failure. Parse it out for banner branching, and strip it from the
+# human-facing echo so only the readable message is shown.
+LOCK_REASON=$(printf '%s\n' "$LOCK_OUT" | sed -n 's/^FM_LOCK_REASON=//p' | head -1)
+LOCK_MSG=$(printf '%s\n' "$LOCK_OUT" | grep -v '^FM_LOCK_REASON=')
+printf '%s\n' "$LOCK_MSG"
 READ_ONLY=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
-    printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
-    printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
-    printf '●  otherwise mutate fleet state from this session.\n'
+    # Only an explicit lock-held reason produces the "another session" banner.
+    # ps-unavailable, harness-detect-failed, and any unrecognized/absent reason
+    # all default to the honest identity-unverifiable banner: firstmate still
+    # refuses to mutate fleet state (it cannot verify its own session identity),
+    # but it must NOT falsely claim another session holds the lock.
+    if [ "$LOCK_REASON" = lock-held ]; then
+      printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+      printf '●  %s\n' "$LOCK_MSG"
+      printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
+      printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap diagnostics and\n'
+      printf '●  the rest of this read-only-safe digest still ran below.\n'
+      printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
+      printf '●  otherwise mutate fleet state from this session.\n'
+    else
+      printf "●  READ-ONLY SESSION - UNABLE TO VERIFY THIS SESSION'S IDENTITY\n"
+      printf '●  Process inspection failed or was denied, so this session cannot confirm\n'
+      printf '●  which harness it is running under. This is NOT a claim that another\n'
+      printf '●  session holds the fleet lock - run the discovery commands below to find\n'
+      printf '●  the true state.\n'
+      printf '●  %s\n' "$LOCK_MSG"
+      printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
+      printf '●  X-mode artifacts, fleet sync, and wake-queue drain, because firstmate must not mutate\n'
+      printf '●  fleet state when it cannot verify its own session identity. Detect-only\n'
+      printf '●  bootstrap diagnostics and the rest of this read-only-safe digest still\n'
+      printf '●  ran below.\n'
+      printf '●  Determine the true state before acting:\n'
+      printf '●    bin/fm-lock.sh status\n'
+      printf '●    tmux list-sessions\n'
+      printf '●    tmux list-panes -a\n'
+      printf '●    ps -axo pid,ppid,stat,lstart,command\n'
+      printf '●  A Codex sandbox may require approval for process inspection.\n'
+    fi
     printf '%s\n' "$BAR"
   }
 fi
@@ -386,12 +416,23 @@ fi
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  cat <<'EOF'
+  if [ "$LOCK_REASON" = lock-held ]; then
+    cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. The session
 holding the lock owns mutable follow-up.
 
 EOF
+  else
+    cat <<'EOF'
+This session could not verify its own identity, so it did not take the fleet
+lock. Stay read-only: do not arm, drain, spawn, steer, merge, or repair fleet
+state from here. Run bin/fm-lock.sh status and the session/process discovery
+commands in the banner above to determine the true state before acting; a
+Codex sandbox may require approval for process inspection.
+
+EOF
+  fi
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:

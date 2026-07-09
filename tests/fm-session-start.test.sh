@@ -156,6 +156,19 @@ SH
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
+# make_fake_ps_denied <fakebin>: every `ps` invocation fails, mimicking a Codex
+# sandbox that blocks process inspection. fm-lock.sh cannot then identify its
+# harness and classifies the failure ps-unavailable (issue #306) - distinct from
+# another live session holding the lock.
+make_fake_ps_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
 make_fake_ps_pi_holder() {
   local fakebin=$1 holder_pid=$2
   cat > "$fakebin/ps" <<SH
@@ -387,6 +400,49 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+# --- identity-unverifiable path: process inspection denied (issue #306) -------
+
+test_identity_unverifiable_read_only_path() {
+  local rec root home fakebin out status
+  rec=$(new_world identity-unverifiable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # ps denied -> fm-lock.sh cannot identify its harness -> ps-unavailable, NOT a
+  # held lock. No .lock file exists, so a false "another session" banner would be
+  # doubly wrong. A queued wake proves the read-only path still skips the drain.
+  make_fake_ps_denied "$fakebin"
+  append_wake "$home/state" signal task-z "needs-decision: pick a library" || fail "seed wake failed"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 even when it cannot verify identity"
+  # The honest banner: identity unverifiable, and explicitly NOT a lock claim.
+  assert_contains "$out" "UNABLE TO VERIFY THIS SESSION'S IDENTITY" "identity-unverifiable banner missing"
+  assert_contains "$out" "NOT a claim that another" "banner did not disclaim the false lock-held reading"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "identity-unverifiable path falsely claimed another session holds the lock"
+  assert_contains "$out" "ps failed or was denied" "banner did not surface fm-lock.sh's ps-unavailable message"
+  # The recommended diagnostics.
+  assert_contains "$out" "bin/fm-lock.sh status" "banner did not recommend fm-lock.sh status"
+  assert_contains "$out" "tmux list-sessions" "banner did not recommend tmux session discovery"
+  assert_contains "$out" "ps -axo pid,ppid,stat,lstart,command" "banner did not recommend process discovery"
+  assert_contains "$out" "Codex sandbox may require approval" "banner did not note the Codex sandbox caveat"
+  # The raw machine-readable token must not leak into the human-facing digest.
+  assert_not_contains "$out" "FM_LOCK_REASON=" "machine-readable reason token leaked into the digest"
+
+  # Still read-only: every mutating step skipped, exactly like a held lock.
+  assert_contains "$out" "skipped (read-only session)" "identity-unverifiable path did not skip the wake-queue drain"
+  assert_not_contains "$out" "$(printf 'signal\ttask-z\tneeds-decision: pick a library')" "identity-unverifiable path drained the wake queue instead of leaving it"
+
+  # Honest next-step guidance, not the "session holding the lock owns follow-up".
+  assert_contains "$out" "could not verify its own identity" "next step did not explain the identity-unverifiable cause"
+  assert_contains "$out" "Stay read-only: do not arm" "next step did not block direct watcher repair"
+
+  pass "a denied ps yields an honest identity-unverifiable banner that stays read-only without claiming another session"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -901,6 +957,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_identity_unverifiable_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
