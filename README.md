@@ -44,6 +44,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
+- **GitHub and Azure DevOps** - the PR host is auto-detected per project from its `origin` remote, so ADO-origin projects move through the same lifecycle as GitHub ones; firstmate reads ADO PR state but never completes an ADO PR ([docs/ado-backend.md](docs/ado-backend.md)).
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is in flight and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
@@ -54,7 +55,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with host auth (GitHub via `gh`, or Azure DevOps via `az` for ADO-origin projects), and tmux for the reference session backend.
 The first mate detects and offers to install everything else.
 For the best firstmate experience, run the primary firstmate session in Claude Code if you have an Anthropic subscription: its background task and Stop-hook behavior match firstmate's lowest-friction supervision model.
 If Claude Code is not available, use Pi next; it has the best non-Anthropic primary-session ergonomics verified so far.
@@ -144,6 +145,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
+- [docs/ado-backend.md](docs/ado-backend.md) - Azure DevOps project support: provider auto-detection, which gates firstmate waits on, `az` prerequisites, and the never-complete-an-ADO-PR boundary.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.
 - [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.

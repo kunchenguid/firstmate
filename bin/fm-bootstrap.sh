@@ -3,7 +3,7 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per problem or capability fact and exits 0.
 #          Silent = all good.
-#          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
+#          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH", "NEEDS_AZ_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
@@ -95,6 +95,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-scm-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -311,6 +313,7 @@ secondmate_liveness_sweep() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    az) echo "brew install azure-cli  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -567,6 +570,28 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+# Azure DevOps origin projects need the `az` CLI (with the azure-devops extension)
+# for firstmate's PR reads; report missing tooling and prompt `az login` when a
+# project ships to ADO. GitHub-only fleets never emit any of these lines.
+ado_origin_present() {
+  local proj url
+  [ -d "$PROJECTS" ] || return 1
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
+    [ "$(fm_scm_provider_of_url "$url")" = ado ] && return 0
+  done
+  return 1
+}
+if ado_origin_present; then
+  if ! command -v az >/dev/null 2>&1; then
+    echo "MISSING: az (install: $(install_cmd az))"
+  elif ! az extension show --name azure-devops >/dev/null 2>&1; then
+    echo "MISSING: az azure-devops extension (install: az extension add --name azure-devops)"
+  elif ! az account show >/dev/null 2>&1; then
+    echo "NEEDS_AZ_AUTH"
+  fi
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

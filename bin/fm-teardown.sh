@@ -8,17 +8,20 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# the PR host reports a PR head that contains the current local work, or its content
+# is already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
+# when the branch itself was deleted. So a missing pr= never by itself causes a
+# false refusal of landed work.
+# Provider (GitHub or Azure DevOps) is auto-detected via bin/fm-scm-lib.sh; the
+# provider-agnostic content_in_default fallback below still gates ADO teardown even
+# when every host call fails. See docs/ado-backend.md.
+# A PR host lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
@@ -80,6 +83,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -162,42 +167,32 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
+# Resolve the PR number for a worktree branch via the project's PR host. Echoes
+# the number on a single match and returns 0; returns non-zero on no match or any
+# lookup failure, so the caller treats it as "no PR found" (fail-safe). Provider
+# is detected from the worktree's origin remote (github/unknown -> gh-axi; ado ->
+# az repos pr list).
 pr_number_from_branch() {
-  local branch=$1 out n
+  local branch=$1 provider
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
+  provider=$(fm_scm_provider_of_remote "$WT")
+  fm_scm_pr_number_for_branch "$provider" "$WT" "$branch"
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  local target=$1 commit=$2 provider
+  provider=$(provider_for_target "$target")
+  fm_scm_ensure_commit_object "$provider" "$WT" "$target" "$commit"
+}
+
+# Provider for a PR target that may be a full URL (provider read from the URL) or
+# a bare number (provider read from the worktree's origin remote).
+provider_for_target() {
+  local target=$1
+  case "$target" in
+    http*://*) fm_scm_provider_of_url "$target" ;;
+    *) fm_scm_provider_of_remote "$WT" ;;
+  esac
 }
 
 patch_id_for_commit() {
@@ -233,26 +228,25 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks the
+# project's PR host (GitHub or Azure DevOps, via bin/fm-scm-lib.sh) for both the
+# PR state and head. Returns non-zero when the PR is not merged, the current work
+# is not contained in the PR head, no PR is found, or any host error occurs - the
+# caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target provider view state head current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  provider=$(provider_for_target "$target")
+  view=$(fm_scm_pr_state_head "$provider" "$WT" "$target") || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
+  [ "$state" = MERGED ] || return 1
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1

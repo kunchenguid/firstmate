@@ -404,8 +404,42 @@ test_view_renders_dead_secondmate_agent_status() {
   pass "fleet view renders secondmate agent liveness"
 }
 
+test_ado_pr_url_extracted() {
+  local home out
+  home=$(make_home ado-pr)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ado-task - ADO Task (repo: alpha) (kind: ship) (since 2026-07-08)
+
+## Done
+- [x] ado-done - ADO Done https://dev.azure.com/contoso/Platform/_git/api/pullrequest/12 (repo: alpha) (kind: ship) (merged 2026-07-07)
+EOF
+  fm_write_meta "$home/state/ado-task.meta" \
+    "window=firstmate:fm-ado-task" \
+    "worktree=$home/projects/ado-worktree" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://dev.azure.com/contoso/Platform/_git/api/pullrequest/12"
+  mkdir -p "$home/projects/ado-worktree"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "ado-task")
+    | .pr.url == "https://dev.azure.com/contoso/Platform/_git/api/pullrequest/12"
+  ' >/dev/null || fail "ADO PR URL from meta pr= not surfaced: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.state == "done")
+    | .pr_url == "https://dev.azure.com/contoso/Platform/_git/api/pullrequest/12"
+  ' >/dev/null || fail "ADO PR URL from a Done backlog line not extracted: $out"
+  pass "fleet snapshot extracts Azure DevOps PR URLs from meta and Done backlog lines"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_ado_pr_url_extracted
 test_event_hints_follow_reconciled_current_state
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides

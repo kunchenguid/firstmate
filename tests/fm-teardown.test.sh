@@ -37,6 +37,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) ado completed PR containing the local work              -> ALLOW  (az path parity)
+#   (s) ado active PR with unlanded work                        -> REFUSE (az path safety)
 #
 # Also covers backlog teardown-lock-race-l2: a stale git index.lock left in the
 # worktree by a killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -240,6 +242,32 @@ append_pr_meta_for_current_head() {
 append_pr_meta_url() {
   local case_dir=$1
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+}
+
+# Record an ADO PR URL (and the current HEAD as pr_head) in the task meta.
+append_ado_pr_meta_for_current_head() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://dev.azure.com/contoso/Platform/_git/api/pullrequest/7' \
+    "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
+# Override the az mock to report the task's ADO PR with the given status and head.
+# Args: case_dir status head
+add_az_pr_for_status() {
+  local case_dir=$1 status=$2 head=$3
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *"repos pr show"*)
+    printf '%s\n' '{"status":"$status","lastMergeSourceCommit":{"commitId":"$head"},"sourceRefName":"refs/heads/fm/task-x1"}'
+    ;;
+  *"repos pr list"*) printf '%s\n' '[]' ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
 }
 
 commit_tree_from_wt_head() {
@@ -562,6 +590,48 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+# ADO parity for the squash-merged-then-deleted flow: an Azure DevOps origin whose
+# completed PR head contains the local work tears down cleanly via the az path.
+test_ado_completed_pr_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case ado-completed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_ado_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_az_pr_for_status "$case_dir" completed "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ado-completed: teardown should succeed when the ADO PR is completed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "ado-completed: teardown printed a REFUSED line"
+  pass "ADO completed PR containing the local work is torn down via the az path"
+}
+
+# ADO safety: an unmerged (active) ADO PR whose work is nowhere in the default
+# branch must still refuse, exactly like the GitHub genuinely-unlanded case.
+test_ado_active_pr_unlanded_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case ado-active-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_ado_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_az_pr_for_status "$case_dir" active "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" != 0 ] || fail "ado-active-unlanded: teardown should refuse an unmerged ADO PR with unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "ado-active-unlanded: expected a REFUSED line"
+  pass "ADO active PR with unlanded work is refused by teardown"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -1019,6 +1089,8 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
+test_ado_completed_pr_allows
+test_ado_active_pr_unlanded_refuses
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

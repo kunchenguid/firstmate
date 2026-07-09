@@ -92,6 +92,31 @@ SH
   chmod +x "$fakebin/tasks-axi"
 }
 
+# make_base_path_without <tool> <case_dir> echoes a single-directory PATH holding
+# symlinks to every executable currently on BASE_PATH except <tool>. This lets a
+# sub-case assert `command -v <tool>` genuinely fails even on hosts that ship it
+# in BASE_PATH (GitHub's ubuntu runners pre-install azure-cli), since a fakebin
+# prepended to PATH can add a stub but cannot hide a real tool further down.
+make_base_path_without() {
+  local exclude=$1 case_dir=$2 base_dir name
+  base_dir="$case_dir/base-no-$exclude"
+  mkdir -p "$base_dir"
+  local IFS=:
+  local dir
+  for dir in $BASE_PATH; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*; do
+      [ -x "$f" ] || continue
+      [ -d "$f" ] && continue
+      name=$(basename "$f")
+      [ "$name" = "$exclude" ] && continue
+      [ -e "$base_dir/$name" ] && continue
+      ln -s "$f" "$base_dir/$name" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$base_dir"
+}
+
 add_real_jq() {
   local fakebin=$1 real_jq
   real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
@@ -451,6 +476,74 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# An Azure DevOps-origin project pulls `az` (with the azure-devops extension) into
+# the dependency set and prompts az login when unauthenticated. GitHub-only fleets
+# never emit these lines (covered by the empty/exact cases above, which have no
+# ADO project). Uses FM_BOOTSTRAP_DETECT_ONLY=1 so the read-only detection runs
+# without the mutating fleet-sync sweep touching the fake ADO origin.
+test_ado_project_requires_az() {
+  local case_dir fakebin repo out
+  case_dir="$TMP_ROOT/ado-az"
+  mkdir -p "$case_dir/home/projects"
+  repo="$case_dir/home/projects/ado-repo"
+  git init -q "$repo"
+  git -C "$repo" remote add origin https://dev.azure.com/contoso/Platform/_git/api
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  # A base PATH scrubbed of any real `az`, so the "absent" sub-case is hermetic
+  # even on hosts (e.g. GitHub's ubuntu runners) that ship azure-cli in BASE_PATH.
+  # PATH-prepending the fakebin can add tools but cannot hide one further down.
+  local no_az_base
+  no_az_base=$(make_base_path_without az "$case_dir")
+
+  run_ado() {
+    PATH="$fakebin:${1:-$BASE_PATH}" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  # az absent -> MISSING: az (run against the az-scrubbed base PATH)
+  rm -f "$fakebin/az"
+  out=$(run_ado "$no_az_base")
+  printf '%s\n' "$out" | grep -Fx 'MISSING: az (install: brew install azure-cli  # or the platform'"'"'s package manager)' >/dev/null \
+    || fail "ado-az: missing az should be reported (got: $out)"
+
+  # az present but azure-devops extension missing -> MISSING extension
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "extension show") exit 1 ;;
+  "account show") exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -Fx 'MISSING: az azure-devops extension (install: az extension add --name azure-devops)' >/dev/null \
+    || fail "ado-az: missing azure-devops extension should be reported (got: $out)"
+
+  # az + extension present but not authenticated -> NEEDS_AZ_AUTH
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "extension show") exit 0 ;;
+  "account show") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -Fx 'NEEDS_AZ_AUTH' >/dev/null \
+    || fail "ado-az: unauthenticated az should emit NEEDS_AZ_AUTH (got: $out)"
+
+  # fully set up -> no az lines at all
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/az"
+  chmod +x "$fakebin/az"
+  out=$(run_ado)
+  printf '%s\n' "$out" | grep -E 'MISSING: az|NEEDS_AZ_AUTH' >/dev/null \
+    && fail "ado-az: a ready az must emit no az lines (got: $out)"
+  pass "bootstrap requires az (and az login) for an Azure DevOps-origin project"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
@@ -461,3 +554,4 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_ado_project_requires_az

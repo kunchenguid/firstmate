@@ -147,7 +147,7 @@ status_event_json() {  # <status-log>
 
 first_pr_url_in_file() {  # <file>
   [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
+  grep -Eo 'https?://[^[:space:])"]+/(pull|pullrequest)/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
 backlog_json() {
@@ -239,7 +239,7 @@ backlog_json() {
              done:metadata_word($rest; "done"),
              completion:completion($rest),
              links:links($rest),
-             pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
+             pr_url:((links($rest) | map(select(test("/(pull|pullrequest)/[0-9]+"))) | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
              local_note:local_note($rest),
              raw:$line,
