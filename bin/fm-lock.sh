@@ -20,7 +20,7 @@ HARNESS_ARGS_RE='(^|[[:space:]/])(claude|codex|opencode|grok|copilot|pi)([[:spac
 # Runtimes that may host a harness under a generic comm name (e.g. MainThread).
 # The args-based scan is restricted to these so unrelated 'gh copilot ...' calls
 # in the parent chain are never mistaken for a harness process.
-INTERP_RE='^(node|python[0-9.]*)$'
+INTERP_RE='^(node|python[0-9.]*|MainThread)$'
 
 harness_pid() {
   local pid=$$ comm args

@@ -99,6 +99,54 @@ test_fm_harness_detects_copilot_env_marker() {
   pass "fm-harness.sh detects the copilot env marker"
 }
 
+test_fm_lock_recognizes_copilot_mainthread_holder() {
+  local home fakebin out
+  home="$TMP_ROOT/lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/lock-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  # copilot's --server --stdio child reports comm=MainThread, not "copilot";
+  # only the args carry the harness name. Regression coverage for the generic-
+  # comm fallback in harness_pid()/holder_alive() (bin/fm-lock.sh).
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' '/home/user/.cache/github-copilot-sdk/cli/1.0.0/copilot --server --stdio --no-auto-update'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" "fm-lock did not recognize copilot's generic-comm (MainThread) server process as a live holder"
+  pass "fm-lock recognizes copilot's generic-comm (MainThread) server process"
+}
+
+test_fm_lock_ignores_unrelated_gh_copilot_process() {
+  local home fakebin out
+  home="$TMP_ROOT/lock-ignore-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/lock-ignore-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  # An unrelated `gh copilot suggest` process has comm=gh (not a known
+  # interpreter), so its args must never be scanned for "copilot" -
+  # regression coverage for review finding F1 (args-scan false positive).
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'gh'; exit 0 ;;
+  *"args="*) printf '%s\n' 'gh copilot suggest "list files"'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" "fm-lock incorrectly recognized an unrelated 'gh copilot suggest' process as a harness holder"
+  pass "fm-lock ignores an unrelated 'gh copilot suggest' process"
+}
+
 test_copilot_spawn_installs_worktree_hook
 test_copilot_spawn_threads_model_and_effort
 test_fm_harness_detects_copilot_env_marker
+test_fm_lock_recognizes_copilot_mainthread_holder
+test_fm_lock_ignores_unrelated_gh_copilot_process
