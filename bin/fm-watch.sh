@@ -83,7 +83,11 @@ fi
 # (bin/fm-watch-checkpoint.sh via timeout/perl), and bash does not run an EXIT
 # trap when terminated by an untrapped signal, so the singleton lock would leak.
 # Trap the terminating signals to release the lock and exit through the EXIT trap.
-trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+# The EXIT trap first disarms the terminating-signal traps: GNU timeout follows
+# SIGTERM with a second signal, which would otherwise re-enter the TERM handler
+# mid-release (exit inside an EXIT trap does not re-run it), aborting the release
+# and leaking the singleton lock.
+trap 'trap "" TERM INT HUP; fm_lock_release "$WATCH_LOCK"' EXIT
 trap 'exit 143' TERM INT HUP
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
