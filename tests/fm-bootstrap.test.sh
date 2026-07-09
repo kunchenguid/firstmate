@@ -477,14 +477,28 @@ test_ado_project_requires_az() {
     || fail "ado-az: missing az should be reported (got: $out)"
 
   # az present but azure-devops extension missing -> MISSING extension
-  printf '#!/usr/bin/env bash\ncase "$1 $2" in "extension show") exit 1;; "account show") exit 0;; esac\nexit 0\n' > "$fakebin/az"
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "extension show") exit 1 ;;
+  "account show") exit 0 ;;
+esac
+exit 0
+SH
   chmod +x "$fakebin/az"
   out=$(run_ado)
   printf '%s\n' "$out" | grep -Fx 'MISSING: az azure-devops extension (install: az extension add --name azure-devops)' >/dev/null \
     || fail "ado-az: missing azure-devops extension should be reported (got: $out)"
 
   # az + extension present but not authenticated -> NEEDS_AZ_AUTH
-  printf '#!/usr/bin/env bash\ncase "$1 $2" in "extension show") exit 0;; "account show") exit 1;; esac\nexit 0\n' > "$fakebin/az"
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "extension show") exit 0 ;;
+  "account show") exit 1 ;;
+esac
+exit 0
+SH
   chmod +x "$fakebin/az"
   out=$(run_ado)
   printf '%s\n' "$out" | grep -Fx 'NEEDS_AZ_AUTH' >/dev/null \
