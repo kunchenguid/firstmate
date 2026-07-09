@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation.
-Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
+Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer and `tasks-axi update --help` exposes `--archive-body`.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and `TASKS_AXI: available` behavior.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress `TASKS_AXI: available`, not missing-tool reporting.
 Absent or `tasks-axi` selects the default tasks-axi backend.
@@ -153,7 +153,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Toolchain
 
-On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi), lists it with the exact install commands, and installs only after you say go.
+On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body`, and quota-axi), lists it with the exact install commands, and installs only after you say go.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.

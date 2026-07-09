@@ -131,6 +131,13 @@ add_compatible_tasks_axi() {
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' '0.1.1'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  printf '%s\n' '  --archive-body'
+  exit 0
 fi
 exit 0
 SH

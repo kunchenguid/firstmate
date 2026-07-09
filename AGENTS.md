@@ -165,7 +165,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
-  For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
+  For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1 or whose `tasks-axi update --help` lacks `--archive-body`; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
   For `quota-axi`, bootstrap requires it because crew-dispatch `quota-balanced` may call it; `bin/fm-dispatch-select.sh` still degrades at runtime when quota data is unavailable.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; section 8 explains why this guard exists and what it protects.
@@ -182,7 +182,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>` - the session-start liveness sweep checked a live secondmate's recorded endpoint for a real agent process.
   Treat `already-live` and `respawned` as handled; investigate `skipped` or `respawn failed` because that secondmate is not guaranteed live.
 - `TASKS_AXI: available` - a default-backend capability fact, not a problem; record it silently and use section 10 for backlog mutations.
-  It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer.
+  It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer plus `tasks-axi update --help` exposing `--archive-body`.
   If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` but still falls back to hand-editing and never blocks work.
   If `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
 - `NUDGE_SECONDMATES: fm-<id>...` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) actually changed; send a one-line re-read nudge with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` unless `FM_HOME` is already set to the active firstmate home.
@@ -416,7 +416,7 @@ Route each piece of durable knowledge to its most specific home:
 | Project-intrinsic knowledge | that project's own `AGENTS.md`, via normal crewmate delivery, never hand-written by firstmate |
 | Fleet-local operational facts and gotchas | `data/learnings.md` |
 | Knowledge generalizable to every firstmate user | the shared `AGENTS.md`, shipped via PR through the pipeline |
-| Task-scoped notes | backlog item notes, inspect first with `tasks-axi show <id> --full`, then replace the body with `tasks-axi update <id> --body-file <path>` or hand-edit per the active backend |
+| Task-scoped notes | backlog item notes, inspect first with `tasks-axi show <id> --full`, then replace the body with `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when superseded prior state should remain recoverable, or hand-edit per the active backend |
 | Investigation findings | scout reports at `data/<id>/report.md` |
 
 When the captain invokes `/stow`, load the `stow` skill.
@@ -831,7 +831,7 @@ Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker
 A tracked `.tasks.toml` at this repo root pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 The local, gitignored `config/backlog-backend` file is the explicit opt-out knob.
 Absent or `tasks-axi` means use the default tasks-axi backend; `manual` means force hand-editing even when `tasks-axi` is installed.
-Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
+Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer and `tasks-axi update --help` exposes `--archive-body`.
 When the default backend is selected and compatible `tasks-axi` is on PATH, firstmate mutates the backlog through its verbs instead of hand-editing, with secondmate handoffs still going through the validated helper described in section 6.
 When the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap reports it through the normal `MISSING:` consent flow in `docs/configuration.md` "Toolchain", and every firstmate home falls back to hand-editing `data/backlog.md` exactly as this section describes until it is installed.
 When `config/backlog-backend=manual`, every firstmate home hand-edits; bootstrap still requires compatible `tasks-axi` on `PATH` but does not print `TASKS_AXI: available`.
@@ -848,7 +848,7 @@ Map firstmate's real backlog operations to the approved commands:
 - Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Update task notes: inspect first with `tasks-axi show <id> --full`, then replace the considered body with `tasks-axi update <id> --body-file <path>`.
-  When superseding prior state should remain recoverable, carry that context into the replacement body before updating.
+  Add `--archive-body` to that update command when superseding prior state should remain recoverable.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
 - Read an item's full notes: `tasks-axi show <id> --full`.
