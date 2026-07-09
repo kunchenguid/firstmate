@@ -155,10 +155,55 @@ is_pkill_watch() {
   printf '%s' "$1" | grep -Eq '\bpkill\b[^|;&]*fm-watch'
 }
 
-# Trailing bare `&` (not `&&`), or nohup/disown anywhere in an already-relevant command.
+# Bare shell `&` (not `&&` or redirection), or nohup/disown anywhere in an
+# already-relevant command.
+has_bare_background_operator() {
+  local cmd=$1
+  local i len ch prev next in_single=0 in_double=0 escaped=0
+  len=${#cmd}
+  for ((i = 0; i < len; i++)); do
+    ch=${cmd:i:1}
+    if [ "$escaped" -eq 1 ]; then
+      escaped=0
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = "\\" ]; then
+      escaped=1
+      continue
+    fi
+    if [ "$in_double" -eq 0 ] && [ "$ch" = "'" ]; then
+      if [ "$in_single" -eq 0 ]; then in_single=1; else in_single=0; fi
+      continue
+    fi
+    if [ "$in_single" -eq 0 ] && [ "$ch" = '"' ]; then
+      if [ "$in_double" -eq 0 ]; then in_double=1; else in_double=0; fi
+      continue
+    fi
+    [ "$in_single" -eq 0 ] && [ "$in_double" -eq 0 ] || continue
+    [ "$ch" = "&" ] || continue
+
+    prev=""
+    next=""
+    [ "$i" -gt 0 ] && prev=${cmd:i-1:1}
+    [ "$((i + 1))" -lt "$len" ] && next=${cmd:i+1:1}
+    [ "$next" = "&" ] && { i=$((i + 1)); continue; }
+    [ "$prev" = ">" ] && continue
+    [ "$next" = ">" ] && continue
+    return 0
+  done
+  return 1
+}
+
+has_shell_list_operator() {
+  local cmd=$1
+  printf '%s' "$cmd" | grep -Eq '&&|\|\|' && return 0
+  has_bare_background_operator "$cmd" && return 0
+  return 1
+}
+
 is_backgrounded() {
   local cmd=$1
-  printf '%s' "$cmd" | grep -Eq '(^|[^&])&[[:space:]]*$' && return 0
+  has_bare_background_operator "$cmd" && return 0
   printf '%s' "$cmd" | grep -Eq '\b(nohup|disown)\b' && return 0
   return 1
 }
@@ -201,6 +246,7 @@ EOF
   [ "$n" -ge 1 ] || return 1
 
   local last=${stmts[$((n - 1))]}
+  has_shell_list_operator "$last" && return 1
   local last_ok=1
   printf '%s' "$last" | grep -Eq '^(exec[[:space:]]+)?(\./)?bin/fm-watch-arm\.sh([[:space:]]+--restart)?[[:space:]]*$' && last_ok=0
   if [ "$last_ok" -ne 0 ]; then
@@ -211,10 +257,11 @@ EOF
   local i stmt
   for ((i = 0; i < n - 1; i++)); do
     stmt=${stmts[$i]}
-    printf '%s' "$stmt" | grep -Eq '^cd[[:space:]]+[^[:space:]]+$' && continue
-    printf '%s' "$stmt" | grep -Eq '^export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=' && continue
-    printf '%s' "$stmt" | grep -Eq '^(\.|source)[[:space:]]+config/x-mode\.env$' && continue
     printf '%s' "$stmt" | grep -Eq '^\[[[:space:]]+-f[[:space:]]+config/x-mode\.env[[:space:]]+\][[:space:]]+&&[[:space:]]+(\.|source)[[:space:]]+config/x-mode\.env$' && continue
+    has_shell_list_operator "$stmt" && return 1
+    printf '%s' "$stmt" | grep -Eq '^cd[[:space:]]+[^[:space:]]+$' && continue
+    printf '%s' "$stmt" | grep -Eq '^export[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=.*$' && continue
+    printf '%s' "$stmt" | grep -Eq '^(\.|source)[[:space:]]+config/x-mode\.env$' && continue
     return 1
   done
   return 0

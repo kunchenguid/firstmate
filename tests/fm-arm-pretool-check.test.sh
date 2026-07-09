@@ -35,6 +35,11 @@ assert_deny "trailing shell background operator" 'bin/fm-watch-arm.sh &'
 assert_deny "piped into head, then backgrounded" 'bin/fm-watch-arm.sh 2>&1 | head -2 &'
 assert_deny "bundled after another command, then backgrounded" 'tasks-axi done x --pr y; bin/fm-watch-arm.sh &'
 assert_deny "broad pkill against the watcher" 'pkill -f bin/fm-watch.sh'
+assert_deny "mid-command shell background before wait" 'bin/fm-watch-arm.sh & wait'
+assert_deny "mid-command shell background before follow-up work" 'bin/fm-watch-arm.sh & echo done'
+assert_deny "checkpoint && follow-up work is bundling" 'bin/fm-watch-checkpoint.sh --seconds 180 && echo done'
+assert_deny "checkpoint bare background before follow-up work" 'bin/fm-watch-checkpoint.sh --seconds 180 & echo done'
+assert_deny "export leading statement cannot hide bundled work" 'export FM_HOME=/tmp && tasks-axi done x; exec bin/fm-watch-arm.sh'
 
 # ALLOW acceptance cases (task spec)
 assert_allow "bare blessed exec of the arm" 'exec bin/fm-watch-arm.sh'
