@@ -25,10 +25,29 @@ If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
-A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+
+### Just-fired grace
+
+When `fm_watcher_healthy` fails, the turn-end guard does not block immediately.
+It first applies a just-fired grace: if `state/.last-watcher-beat` exists and its age is under `FM_TURNEND_FIRE_GRACE` (default 120 seconds), it exits 0 silently instead of blocking.
+This exists because `bin/fm-watch.sh` EXITS every time it fires an actionable wake - one cycle per wake is its designed lifecycle - and the supervisor re-arms after handling it.
+On harnesses where the arm runs as a harness-tracked background task, the fire itself re-invokes the supervisor, so the brief window between a fire and the re-arm is not blind: a wake notification is already in flight.
+The watcher touches `state/.last-watcher-beat` every poll including the final one before it fires, so a fresh beacon with no live watcher means "fired seconds ago" rather than a lapsed supervision chain.
+During chatty fleet stretches, where many crews write status and turn-end markers, the supervisor's turns constantly end inside that window, and without this grace the captain sees a stream of false "TURN WOULD END BLIND" banners for healthy operation.
+Once the beacon ages past `FM_TURNEND_FIRE_GRACE` with still no live watcher, the next turn end blocks exactly as before, so a genuinely lapsed chain is still caught.
+
+The just-fired grace is scoped to the turn-end guard alone.
+It does not change `fm_watcher_healthy` or `fm_supervision_status`, so `bin/fm-guard.sh`'s pull-based banner on fleet commands and every other caller of the shared predicate are unaffected.
+
+Documented tradeoff: a watcher that CRASHES rather than fires also leaves a fresh beacon briefly, because the beacon is touched every poll.
+In that case the turn-end alarm is delayed by up to one `FM_TURNEND_FIRE_GRACE` window; it resumes on the next turn end once the beacon ages out.
+`fm-guard.sh`'s pull-based banner on the next fleet command still fires regardless, so a crashed watcher is not left entirely silent even during that window.
+
+### Configuration
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
-`FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
+`FM_GUARD_GRACE` controls the beacon freshness window for `fm_watcher_healthy` and defaults to 300 seconds.
+`FM_TURNEND_FIRE_GRACE` controls the turn-end guard's just-fired grace window and defaults to 120 seconds; set it to 0 to disable the grace and restore the strict block on any beacon with no live watcher.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
 
 ## Harness Integrations
@@ -103,6 +122,6 @@ If Grok declines to load project hooks, this primary guard fails open and `fm-gu
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the just-fired grace (a fresh beacon with no live watcher allows, a beacon older than `FM_TURNEND_FIRE_GRACE` blocks, a missing beacon blocks, `FM_TURNEND_FIRE_GRACE=0` restores the strict block, and the crashed-watcher tradeoff allows within the window), loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 These tests do not invoke live harnesses.
 Live harness validation is the empirical evidence recorded above.

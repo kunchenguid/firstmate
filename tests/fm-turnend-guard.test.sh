@@ -6,7 +6,10 @@
 #                used by fm-guard.sh and by the hook's banner details.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
 #                scopes in-flight work to the PRIMARY checkout only and requires
-#                a live, identity-matched watcher lock plus a fresh beacon.
+#                a live, identity-matched watcher lock plus a fresh beacon, EXCEPT
+#                for the just-fired grace: a fresh beacon with no live watcher is
+#                allowed for FM_TURNEND_FIRE_GRACE seconds, because the watcher
+#                exits every time it fires a wake and the supervisor re-arms.
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
@@ -175,18 +178,41 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
+test_hook_allows_fresh_beacon_within_fire_grace() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fresh-no-lock")
   : > "$dir/state/task1.meta"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+  expect_code 0 "$status" "hook must allow a fresh beacon within the just-fired grace even with no live watcher"
+  [ -z "$out" ] || fail "hook produced output during the just-fired grace window: $out"
+  pass "fm-turnend-guard: allows a fresh beacon with no live watcher (watcher just fired, re-arm in flight)"
 }
 
-test_hook_blocks_when_dead_lock_has_fresh_beacon() {
+test_hook_fire_grace_knob_gates_fresh_beacon() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-fire-grace-zero")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_FIRE_GRACE=0 bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "FM_TURNEND_FIRE_GRACE=0 must gate the just-fired grace off so a fresh beacon blocks"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: FM_TURNEND_FIRE_GRACE gates the just-fired grace (0 restores the strict block)"
+}
+
+test_hook_blocks_stale_beacon_no_live_lock() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-no-lock")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the beacon is older than the just-fired grace and no watcher is live"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks a beacon older than FM_TURNEND_FIRE_GRACE with no live watcher"
+}
+
+test_hook_allows_dead_lock_with_fresh_beacon_crash_tradeoff() {
   local dir dead out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-fresh")
   dead=$(nonexistent_pid)
@@ -194,9 +220,9 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   record_watcher_lock "$dir" "$dead" "dead watcher identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when the watcher lock pid is dead despite a fresh beacon"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
+  expect_code 0 "$status" "documented tradeoff: a fresh beacon within the just-fired grace allows even with a dead lock"
+  [ -z "$out" ] || fail "hook produced output during the crash-tradeoff grace window: $out"
+  pass "fm-turnend-guard: fresh-beacon just-fired grace also covers a crashed watcher's leftover beacon (documented tradeoff)"
 }
 
 test_hook_silent_with_live_lock_and_fresh_beacon() {
@@ -605,8 +631,10 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
-test_hook_blocks_when_fresh_beacon_has_no_live_lock
-test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_allows_fresh_beacon_within_fire_grace
+test_hook_fire_grace_knob_gates_fresh_beacon
+test_hook_blocks_stale_beacon_no_live_lock
+test_hook_allows_dead_lock_with_fresh_beacon_crash_tradeoff
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary

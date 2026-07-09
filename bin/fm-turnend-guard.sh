@@ -37,6 +37,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
+FIRE_GRACE=${FM_TURNEND_FIRE_GRACE:-120}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
 # shellcheck source=bin/fm-supervision-lib.sh
@@ -79,6 +80,27 @@ GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || ex
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+
+# Just-fired grace: fm-watch.sh EXITS every time it fires an actionable wake -
+# one cycle per wake is its designed lifecycle - and the supervisor re-arms
+# after handling it. On harnesses where the arm runs as a harness-tracked
+# background task (claude here), the fire itself re-invokes the supervisor, so
+# the brief window between a fire and the re-arm is NOT blind: a notification is
+# already in flight. The watcher touches state/.last-watcher-beat every poll
+# INCLUDING the final one before it fires, so a fresh beacon with no live watcher
+# means "fired seconds ago, wake in flight" - exactly the state that would
+# otherwise produce a false "TURN WOULD END BLIND" alarm during chatty fleet
+# stretches. Allow it; the next turn end still alarms once the beacon ages past
+# FM_TURNEND_FIRE_GRACE and supervision truly has not resumed.
+# Documented tradeoff (docs/turnend-guard.md): a watcher that CRASHES rather than
+# fires also leaves a fresh beacon briefly, so a real alarm is delayed by up to
+# one FM_TURNEND_FIRE_GRACE window in that case. fm-guard.sh's pull-based banner
+# on the next fleet command is unaffected. This grace is scoped to the turn-end
+# guard alone and never touches fm_watcher_healthy or fm_supervision_status.
+BEAT="$STATE/.last-watcher-beat"
+if [ -e "$BEAT" ] && [ "$(fm_path_age "$BEAT")" -lt "$FIRE_GRACE" ]; then
+  exit 0
+fi
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
