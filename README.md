@@ -56,7 +56,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified agent harness: Claude Code, Grok, Codex, OpenCode, or Pi.
+- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
 - Git with GitHub auth (`gh auth login`).
 - tmux, for the reference session backend.
 
@@ -64,10 +64,12 @@ The first mate detects and offers to install everything else.
 
 ### Recommended harnesses
 
-**Claude Code and Grok are the two co-primary recommendations** for running the primary firstmate session: both drive firstmate's lowest-friction supervision model through a background-notify wake cycle plus a working turn-end guard.
-Pick whichever one matches your subscription.
+**Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session.
+Claude Code and Grok use background-notify wake cycles; Pi uses its generated primary watcher extension.
+All three have verified turn-end guard paths when launched with their documented setup.
+Pick whichever one matches your subscription and workflow.
 
-Codex, OpenCode, and Pi are also verified and supported as primary harnesses; each has its own supervision shape (bounded foreground checkpoints for Codex, a TUI plugin for OpenCode, a generated watcher extension for Pi) with more harness-specific tradeoffs than the two above.
+Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 
 ### Install and launch
 
@@ -77,11 +79,15 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
-Then launch your harness - AGENTS.md takes over from there:
+Then launch one of the co-primary harnesses - AGENTS.md takes over from there:
 
 ```sh
-claude   # or: grok
+claude
+grok --trust
+pi
 ```
+
+For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 
 ### Talk to it
 
