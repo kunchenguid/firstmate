@@ -195,6 +195,24 @@ has_bare_background_operator() {
   return 1
 }
 
+has_nested_shell_evaluator() {
+  local cmd=$1
+  printf '%s' "$cmd" | grep -Eq \
+    -e '(^|[[:space:];|&])([^[:space:];|&]*/)?(bash|sh|zsh)([[:space:]][^;|&]*)?[[:space:]]-[^[:space:]]*c([[:space:]]|$)' \
+    -e '(^|[[:space:];|&])eval([[:space:]]|$)'
+}
+
+nested_shell_projection() {
+  printf '%s' "$1" | tr -d "'\""
+}
+
+has_nested_shell_background_operator() {
+  local cmd=$1 projected
+  has_nested_shell_evaluator "$cmd" || return 1
+  projected=$(nested_shell_projection "$cmd")
+  has_bare_background_operator "$projected"
+}
+
 has_shell_list_operator() {
   local cmd=$1
   printf '%s' "$cmd" | grep -Eq '&&|\|\|' && return 0
@@ -266,8 +284,23 @@ has_shell_redirection() {
 is_backgrounded() {
   local cmd=$1
   has_bare_background_operator "$cmd" && return 0
+  has_nested_shell_background_operator "$cmd" && return 0
   printf '%s' "$cmd" | grep -Eq '\b(nohup|disown)\b' && return 0
   return 1
+}
+
+has_nested_shell_redirection() {
+  local cmd=$1 projected
+  has_nested_shell_evaluator "$cmd" || return 1
+  projected=$(nested_shell_projection "$cmd")
+  has_shell_redirection "$projected"
+}
+
+has_nested_command_or_process_substitution() {
+  local cmd=$1 projected
+  has_nested_shell_evaluator "$cmd" || return 1
+  projected=$(nested_shell_projection "$cmd")
+  has_command_or_process_substitution "$projected"
 }
 
 # Piped into a tool that can tear down attach-and-wait early.
@@ -356,9 +389,15 @@ elif is_relevant "$CMD"; then
   elif has_shell_redirection "$CMD"; then
     DENY=1
     REASON="redirects the watcher arm/checkpoint stdio with shell redirection, which can hide the status and wake lines the primary relies on."
+  elif has_nested_shell_redirection "$CMD"; then
+    DENY=1
+    REASON="redirects the watcher arm/checkpoint stdio inside a nested shell payload, which can hide the status and wake lines the primary relies on."
   elif has_command_or_process_substitution "$CMD"; then
     DENY=1
     REASON="runs command or process substitution inside a watcher arm/checkpoint command. Run the watcher arm/checkpoint as its own literal standalone command."
+  elif has_nested_command_or_process_substitution "$CMD"; then
+    DENY=1
+    REASON="runs command or process substitution inside a nested shell watcher arm/checkpoint payload. Run the watcher arm/checkpoint as its own literal standalone command."
   elif [ "$(statement_count "$CMD")" -gt 1 ]; then
     DENY=1
     REASON="bundles the watcher arm/checkpoint with other work in a multi-statement command. Run it as its own standalone command, optionally preceded only by cd/export/source config/x-mode.env."

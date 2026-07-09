@@ -44,6 +44,11 @@ assert_deny "arm output redirection hides status lines" 'exec bin/fm-watch-arm.s
 assert_deny "checkpoint output redirection hides status lines" 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'
 assert_deny "export command substitution cannot hide bundled work" "export X=\$(tasks-axi done x); exec bin/fm-watch-arm.sh"
 assert_deny "checkpoint command substitution cannot hide bundled work" "bin/fm-watch-checkpoint.sh --seconds \$(tasks-axi done x)"
+assert_deny "nested bash payload cannot background the arm" "bash -lc 'bin/fm-watch-arm.sh &'"
+assert_deny "absolute nested shell payload cannot background the arm" "/bin/sh -c 'bin/fm-watch-arm.sh &'"
+assert_deny "nested sh payload cannot redirect checkpoint output" "sh -c 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'"
+assert_deny "nested zsh payload cannot run checkpoint substitution" "zsh -c 'bin/fm-watch-checkpoint.sh --seconds \$(tasks-axi done x)'"
+assert_deny "eval payload cannot background the arm" "eval 'bin/fm-watch-arm.sh &'"
 
 # ALLOW acceptance cases (task spec)
 assert_allow "bare blessed exec of the arm" 'exec bin/fm-watch-arm.sh'
