@@ -866,9 +866,21 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      # --dangerously-skip-permissions is confirmed broken on some machines (still
+      # prompts per-command; data/learnings.md 2026-07-09), so crewmates instead get
+      # a curated allowlist for routine, worktree-contained operations. Anything not
+      # allowlisted - network egress, git push/merge, sudo, rm -rf, PR merges - still
+      # prompts, which is the point: no bypass, just fewer prompts for safe work.
+      if command -v jq >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/fm-crew-permissions.json" ]; then
+        jq -s '.[0] * .[1]' \
+          "$SCRIPT_DIR/fm-crew-permissions.json" \
+          <(printf '%s' "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"touch '$TURNEND'\"}]}]}}") \
+          > "$WT/.claude/settings.local.json"
+      else
+        cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
+      fi
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
