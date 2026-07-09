@@ -54,19 +54,36 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+### Requirements
+
+- A verified agent harness: Claude Code, Grok, Codex, OpenCode, or Pi.
+- Git with GitHub auth (`gh auth login`).
+- tmux, for the reference session backend.
+
 The first mate detects and offers to install everything else.
-For the best firstmate experience, run the primary firstmate session in Claude Code if you have an Anthropic subscription: its background task and Stop-hook behavior match firstmate's lowest-friction supervision model.
-If Claude Code is not available, use Pi next; it has the best non-Anthropic primary-session ergonomics verified so far.
-Codex, OpenCode, and Grok remain supported verified harnesses, but their supervision paths involve more harness-specific tradeoffs.
+
+### Recommended harnesses
+
+**Claude Code and Grok are the two co-primary recommendations** for running the primary firstmate session: both drive firstmate's lowest-friction supervision model through a background-notify wake cycle plus a working turn-end guard.
+Pick whichever one matches your subscription.
+
+Codex, OpenCode, and Pi are also verified and supported as primary harnesses; each has its own supervision shape (bounded foreground checkpoints for Codex, a TUI plugin for OpenCode, a generated watcher extension for Pi) with more harness-specific tradeoffs than the two above.
+
+### Install and launch
 
 ```sh
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
-cd firstmate && claude   # launch your harness here; AGENTS.md takes over
+cd firstmate
 ```
 
-Then just talk:
+Then launch your harness - AGENTS.md takes over from there:
+
+```sh
+claude   # or: grok
+```
+
+### Talk to it
 
 ```sh
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
@@ -81,6 +98,8 @@ Then just talk:
 
 > alright merge it
 ```
+
+### More backends
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
