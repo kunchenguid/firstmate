@@ -84,10 +84,13 @@ Then launch one of the co-primary harnesses - AGENTS.md takes over from there:
 ```sh
 claude
 grok --trust
-pi
+pi \
+  -e .pi/extensions/fm-primary-turnend-guard.ts \
+  -e state/fm-primary-pi-watch.ts
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
+For Pi, the two extensions provide the turn-end guard and background wake supervision; `bin/fm-pi-watch-extension.sh` and session start create or refresh the `state/` bridge when needed.
 
 ### Talk to it
 
