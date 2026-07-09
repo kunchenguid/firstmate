@@ -29,6 +29,7 @@ batched digest rather than per-wake injections.
    bin/fm-afk-start.sh
    ```
    The helper sets or refreshes `state/.afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
+   That daemon lock uses `bin/fm-wake-lib.sh`'s shared PID identity helper, including Linux `/proc` starttime ticks so wall-clock steps do not invalidate a live daemon.
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
