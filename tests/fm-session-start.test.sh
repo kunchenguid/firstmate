@@ -190,7 +190,7 @@ run_session_start() {  # <home> <root> <path>
   # ancestry layer instead of leaking the outer test-runner's own harness
   # (e.g. CLAUDECODE=1 when this suite runs inside a live Claude Code session).
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-    CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= \
+    CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' \
     "$SESSION_START"
 }
 
