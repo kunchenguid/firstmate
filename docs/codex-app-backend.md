@@ -204,7 +204,7 @@ fm-codex-bridge send-turn --thread-id <thread_id> --prompt-file <tmp-prompt> [--
 ```
 
 The first implementation starts a new turn by calling `thread/resume` and then `turn/start` in a detached bridge worker.
-The CLI returns after the turn is accepted, while the worker keeps the app-server alive until the thread leaves an active state.
+The CLI returns after the turn is accepted, while the worker keeps the app-server alive until that specific turn leaves an active state.
 Follow-up sends pass the recorded `codex_cwd` as `cwd`, propagate the recorded model and effort when they are not `default`, and run with the task's `GOTMPDIR` when `tasktmp=` is present in meta.
 A later enhancement can offer same-turn steering, `turn/interrupt`, or interrupt-plus-new-turn behavior, but that should require an explicit design decision rather than surprising interruption.
 
