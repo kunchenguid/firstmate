@@ -79,18 +79,31 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
-Then launch one of the co-primary harnesses - AGENTS.md takes over from there:
+Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+**Claude Code**
 
 ```sh
 claude
+```
+
+**Grok**
+
+```sh
 grok --trust
+```
+
+**Pi**
+
+```sh
+bin/fm-pi-watch-extension.sh
 pi \
   -e .pi/extensions/fm-primary-turnend-guard.ts \
   -e state/fm-primary-pi-watch.ts
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, the two extensions provide the turn-end guard and background wake supervision; `bin/fm-pi-watch-extension.sh` and session start create or refresh the `state/` bridge when needed.
+For Pi, run `bin/fm-pi-watch-extension.sh` before the first supervised launch so `state/fm-primary-pi-watch.ts` exists; session start refreshes that bridge after launch.
 
 ### Talk to it
 
