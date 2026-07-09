@@ -298,6 +298,8 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+FM_SPAWN_WT_POLL_TRIES=60   # fm-spawn polls for the treehouse worktree cwd this many times, accepting only a cwd that shares the project's git common-dir; exists so tests can exercise the timeout path fast
+FM_SPAWN_WT_POLL_SLEEP=1    # seconds fm-spawn waits between worktree-cwd polls; 0 disables the sleep
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
