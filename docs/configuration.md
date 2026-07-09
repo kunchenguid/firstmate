@@ -28,6 +28,8 @@ Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
+A ship/scout spawn may pass `--cwd <subdir>` to start the harness session inside a named subdirectory of the task worktree instead of its root, so a harness whose session-start scoping depends on cwd (for example Claude Code's per-subdirectory `.claude/skills/` registration) picks it up; `<subdir>` must be a relative path with no `..` segment, and `--secondmate` and `backend=orca` spawns both refuse `--cwd` because neither uses the treehouse-get-in-pane flow it relies on to `cd` the live pane and confirm the change landed.
+With `--cwd`, the claude/opencode turn-end hooks and the grok pointer are written under that subdirectory as well as (for grok) the worktree root.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
 Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
@@ -37,6 +39,7 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+A ship/scout spawn records `cwd_subdir=<subdir>` only when `--cwd` is used, so teardown can relocate the hooks and grok pointer cleanup under that subdirectory.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
