@@ -9,6 +9,7 @@
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "UPDATE_AVAILABLE: <tool> <current> -> <latest> (update: <command>)",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
@@ -36,6 +37,14 @@
 #          reading would spin up a duplicate agent). Session-start scope only;
 #          see AGENTS.md "Session start" and docs/tmux-backend.md /
 #          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
+#          An UPDATE_AVAILABLE line means a newer STABLE version of a fleet tool
+#          (no-mistakes, treehouse, tasks-axi) or of firstmate itself exists. It is
+#          report-only: bootstrap never updates anything as a side effect, and the
+#          captain consents exactly as in the MISSING: flow. Prereleases are filtered
+#          out, results are cached in state/.update-check for FM_UPDATE_CHECK_TTL,
+#          each probe round is bounded by FM_UPDATE_CHECK_TIMEOUT, a read-only
+#          session writes no cache, and any failure degrades to silence.
+#          Set FM_UPDATE_CHECK=0 to skip it. See bin/fm-update-check-lib.sh.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -93,6 +102,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-update-check-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-update-check-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -586,6 +597,10 @@ crew_dispatch_validate
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
+# Report-only staleness check (fm-update-check-lib.sh). Runs in BOTH modes because it
+# is a detect line, not a sweep; the lib itself declines to write its cache when this
+# session is read-only, and can never fail or hang bootstrap.
+uc_report "$FM_ROOT" "$STATE" "${FM_BOOTSTRAP_DETECT_ONLY:-0}"
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep

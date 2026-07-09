@@ -169,6 +169,12 @@ When X mode is opted in, bootstrap also requires `curl` and `jq` before arming t
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap also prints `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
+Separately from that version floor, bootstrap runs a best-effort update-availability check (`bin/fm-update-check-lib.sh`) and prints `UPDATE_AVAILABLE: <tool> <current> -> <latest> (update: <command>)` for each of `no-mistakes`, `treehouse`, `tasks-axi`, and firstmate itself that has fallen behind.
+It compares against the latest *stable* release only, so a newer prerelease never produces a suggestion; firstmate's own line counts commits behind `origin/<default-branch>` and points at `/updatefirstmate`.
+Remote answers are cached in `state/.update-check` for `FM_UPDATE_CHECK_TTL` seconds, a cache hit makes no network call, and a read-only session that did not get the fleet lock never writes that cache.
+Each probe round is bounded by `FM_UPDATE_CHECK_TIMEOUT`; being offline, rate-limited, or missing `curl` or `jq` degrades to silence rather than failing or stalling bootstrap.
+Nothing is ever installed automatically: the captain consents exactly as in the `MISSING:` flow, and `no-mistakes update` restarts its daemon and aborts any in-flight validation run.
+Set `FM_UPDATE_CHECK=0` to skip the check entirely.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
@@ -266,6 +272,9 @@ FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer pl
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
+FM_UPDATE_CHECK=1        # set to 0 to skip bootstrap's report-only update-availability check
+FM_UPDATE_CHECK_TIMEOUT=5    # seconds bounding each update-check probe round; non-numeric or non-positive falls back to the default
+FM_UPDATE_CHECK_TTL=86400    # seconds a cached state/.update-check answer stays fresh; 0 forces a refresh every run
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
