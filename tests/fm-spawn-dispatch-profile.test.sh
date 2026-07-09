@@ -315,6 +315,47 @@ test_codex_threads_gpt_5_6_sol_ultra() {
   pass "codex receives gpt-5.6-sol and model_reasoning_effort=ultra profile axes"
 }
 
+test_codex_omits_ultra_when_model_missing() {
+  local rec id out status launch
+  id=profile-codex-ultra-missing-model-z34
+  rec=$(make_spawn_case profile-codex-ultra-missing-model codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort ultra)
+  status=$?
+  expect_code 0 "$status" "codex ultra with missing model should still launch"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default ultra
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$out" "warning: codex ultra is verified only for model gpt-5.6-sol" \
+    "codex missing-model ultra case did not warn"
+  assert_not_contains "$launch" "model_reasoning_effort=\"ultra\"" \
+    "missing-model ultra case must omit model_reasoning_effort"
+  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+    "missing-model ultra case should still launch codex"
+  pass "codex omits ultra launch flag but warns when model is missing"
+}
+
+test_codex_omits_ultra_when_model_not_supported() {
+  local rec id out status launch
+  id=profile-codex-ultra-nonsupported-model-z35
+  rec=$(make_spawn_case profile-codex-ultra-nonsupported-model codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5 --effort ultra)
+  status=$?
+  expect_code 0 "$status" "codex ultra with non-sol model should still launch"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 ultra
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$out" "warning: codex ultra is verified only for model gpt-5.6-sol" \
+    "codex non-sol ultra case did not warn"
+  assert_not_contains "$launch" "model_reasoning_effort=\"ultra\"" \
+    "non-sol ultra case must omit model_reasoning_effort"
+  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+    "non-sol ultra case should still launch codex with model"
+  pass "codex omits ultra launch flag but warns when model is not gpt-5.6-sol"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -479,7 +520,9 @@ test_unknown_effort_is_rejected
 test_codex_threads_model_and_effort
 test_codex_threads_gpt_5_6_sol_ultra
 test_codex_omits_invalid_max_effort
-test_non_codex_harnesses_omit_ultra_effort
+  test_codex_omits_ultra_when_model_missing
+  test_codex_omits_ultra_when_model_not_supported
+  test_non_codex_harnesses_omit_ultra_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis

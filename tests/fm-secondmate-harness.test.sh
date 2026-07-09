@@ -552,6 +552,30 @@ test_spawn_secondmate_codex_ultra_tokens() {
   pass "C4a spawn: config/secondmate-harness threads Codex gpt-5.6-sol with ultra effort"
 }
 
+test_spawn_secondmate_codex_ultra_tokens_with_non_sol_model() {
+  local w sm meta launchlog launch out
+  w="$TMP_ROOT/spawn-codex-ultra-non-sol-tokens"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex gpt-5 ultra\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "codex-ultra-tokens-non-sol: meta harness not codex"
+  [ "$(meta_field "$meta" model)" = gpt-5 ] || fail "codex-ultra-tokens-non-sol: meta model not gpt-5"
+  [ "$(meta_field "$meta" effort)" = ultra ] || fail "codex-ultra-tokens-non-sol: meta effort not ultra"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "-c 'model_reasoning_effort=\"ultra\"'" \
+    "codex-ultra-tokens-non-sol: launch must omit ultra model_reasoning_effort"
+  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+    "codex-ultra-tokens-non-sol: launch should carry model but omit ultra flag"
+  assert_contains "$out" "warning: codex ultra is verified only for model gpt-5.6-sol" \
+    "codex-ultra-tokens-non-sol: launch should warn and continue with omitted flag"
+  pass "C4b spawn: non-sol Codex secondmate ultra token warns and omits ultra launch flag"
+}
+
 # Precedence: an explicit per-spawn --model overrides the file's model token.
 test_spawn_explicit_model_overrides_secondmate_harness_token() {
   local w sm meta launchlog launch

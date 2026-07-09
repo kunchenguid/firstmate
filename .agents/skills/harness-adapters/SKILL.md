@@ -91,64 +91,8 @@ When a requested effort value is outside the harness-specific accepted set, `fm-
 This preserves launch success instead of passing a known-bad value.
 
 **Codex `ultra` verification (2026-07-09, codex-cli 0.144.0).**
-The local model catalog and one ephemeral read-only launch verified both config-parser acceptance and a real `gpt-5.6-sol` response at `ultra`.
+See docs/codex-ultra-verification.md for commands, full non-sensitive output, and notes.
 
-Commands:
-
-```sh
-codex --version
-jq -c '.models[] | select(.slug == "gpt-5.6-sol") | {slug,display_name,supported_reasoning_levels}' ~/.codex/models_cache.json
-tmp_dir=$(mktemp -d /tmp/fm-codex-ultra-launch.XXXXXX)
-codex --strict-config -a never -s read-only -m gpt-5.6-sol -c 'model_reasoning_effort="ultra"' exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check -C "$tmp_dir" 'Reply with exactly ULTRA_OK. Do not call tools.'
-rc=$?
-rm -rf "$tmp_dir"
-printf 'exit_status=%s\n' "$rc"
-```
-
-Relevant non-sensitive output:
-
-```text
-codex-cli 0.144.0
-{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"medium","description":"Balances speed and reasoning depth for everyday tasks"},{"effort":"high","description":"Greater reasoning depth for complex problems"},{"effort":"xhigh","description":"Extra high reasoning depth for complex problems"},{"effort":"max","description":"Maximum reasoning depth for the hardest problems"},{"effort":"ultra","description":"Maximum reasoning with automatic task delegation"}]}
-OpenAI Codex v0.144.0
-workdir: /tmp/fm-codex-ultra-launch.dAV12v
-model: gpt-5.6-sol
-provider: openai
-approval: never
-sandbox: read-only
-reasoning effort: ultra
-reasoning summaries: none
-codex
-ULTRA_OK
-exit_status=0
-```
-
-## no-mistakes skill invocation
-
-Send the validation skill using the target harness's skill invocation form.
-Natural language is acceptable if uncertain.
-
-- claude: `/<skill>`, for example `/no-mistakes`.
-- codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
-- opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
-- pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
-- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
-
-## claude (VERIFIED)
-
-| Fact | Value |
-|---|---|
-| Busy-pane signature | `esc to interrupt` |
-| Exit command | `/exit` |
-| Interrupt | single Escape |
-| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
-
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
-After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
-
-Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
-A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does not suppress the interactive composer ghost text, verified empirically on v2.1.186.
 As defense in depth for any pane that flag cannot reach, including the captain's own firstmate composer that away-mode reads, the shared `fm_composer_strip_ghost` extractor in `bin/fm-composer-lib.sh` removes dim/faint SGR 2 ghost runs before pending-input classification on both ANSI-capable readers (tmux and herdr).
