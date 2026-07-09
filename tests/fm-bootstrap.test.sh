@@ -92,6 +92,30 @@ SH
   chmod +x "$fakebin/tasks-axi"
 }
 
+# make_base_path_without <tool> <case_dir> echoes a single-directory PATH holding
+# symlinks to every executable currently on BASE_PATH except <tool>. This lets a
+# sub-case assert `command -v <tool>` genuinely fails even on hosts that ship it
+# in BASE_PATH (GitHub's ubuntu runners pre-install azure-cli), since a fakebin
+# prepended to PATH can add a stub but cannot hide a real tool further down.
+make_base_path_without() {
+  local exclude=$1 case_dir=$2 base_dir name
+  base_dir="$case_dir/base-no-$exclude"
+  mkdir -p "$base_dir"
+  local IFS=:
+  local dir
+  for dir in $BASE_PATH; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*; do
+      [ -x "$f" ] && [ ! -d "$f" ] || continue
+      name=$(basename "$f")
+      [ "$name" = "$exclude" ] && continue
+      [ -e "$base_dir/$name" ] && continue
+      ln -s "$f" "$base_dir/$name" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$base_dir"
+}
+
 add_real_jq() {
   local fakebin=$1 real_jq
   real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch profile validation tests"
@@ -465,14 +489,20 @@ test_ado_project_requires_az() {
   git -C "$repo" remote add origin https://dev.azure.com/contoso/Platform/_git/api
   fakebin=$(make_fake_toolchain "$case_dir")
 
+  # A base PATH scrubbed of any real `az`, so the "absent" sub-case is hermetic
+  # even on hosts (e.g. GitHub's ubuntu runners) that ship azure-cli in BASE_PATH.
+  # PATH-prepending the fakebin can add tools but cannot hide one further down.
+  local no_az_base
+  no_az_base=$(make_base_path_without az "$case_dir")
+
   run_ado() {
-    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PATH="$fakebin:${1:-$BASE_PATH}" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
   }
 
-  # az absent -> MISSING: az
+  # az absent -> MISSING: az (run against the az-scrubbed base PATH)
   rm -f "$fakebin/az"
-  out=$(run_ado)
+  out=$(run_ado "$no_az_base")
   printf '%s\n' "$out" | grep -Fx 'MISSING: az (install: brew install azure-cli  # or the platform'"'"'s package manager)' >/dev/null \
     || fail "ado-az: missing az should be reported (got: $out)"
 
