@@ -174,15 +174,16 @@ async function holdTurnLifecycle(server, threadId, opts, turnId = "") {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["turn-lifecycle-polls"],
     "--turn-lifecycle-polls",
-    process.env.FM_CODEX_APP_TURN_LIFECYCLE_POLLS || "4320",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_POLLS || "360",
   )));
   const sleepMs = Math.round(numericOption(
     opts["turn-lifecycle-sleep"],
     "--turn-lifecycle-sleep",
-    process.env.FM_CODEX_APP_TURN_LIFECYCLE_SLEEP || "5",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_SLEEP || "60",
   ) * 1000);
   for (let i = 0; i < polls; i += 1) {
-    if (sleepMs > 0) await delay(sleepMs);
+    if (turnId && await server.waitForTurnCompletion(threadId, turnId, sleepMs)) return;
+    if (!turnId && sleepMs > 0) await delay(sleepMs);
     try {
       let status;
       if (turnId) {
@@ -262,6 +263,8 @@ class AppServer {
     });
     this.nextId = 1;
     this.pending = new Map();
+    this.completedTurns = new Set();
+    this.turnCompletionWaiters = new Map();
     this.stderr = "";
     this.stdoutBuffer = "";
     this.child.stdout.setEncoding("utf8");
@@ -300,7 +303,10 @@ class AppServer {
       this.rejectAll(new Error(`invalid JSON from codex app-server: ${trimmed.slice(0, 200)}`));
       return;
     }
-    if (msg.id == null) return;
+    if (msg.id == null) {
+      this.onNotification(msg);
+      return;
+    }
     const pending = this.pending.get(msg.id);
     if (!pending) return;
     clearTimeout(pending.timer);
@@ -311,6 +317,41 @@ class AppServer {
     } else {
       pending.resolve(msg.result);
     }
+  }
+
+  onNotification(msg) {
+    if (msg.method !== "turn/completed") return;
+    const params = msg.params;
+    const threadId = params && params.threadId;
+    const turnId = params && params.turn && params.turn.id;
+    if (typeof threadId !== "string" || typeof turnId !== "string") return;
+    const key = JSON.stringify([threadId, turnId]);
+    const waiters = this.turnCompletionWaiters.get(key);
+    if (!waiters) {
+      this.completedTurns.add(key);
+      return;
+    }
+    this.turnCompletionWaiters.delete(key);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(true);
+    }
+  }
+
+  waitForTurnCompletion(threadId, turnId, timeoutMs) {
+    const key = JSON.stringify([threadId, turnId]);
+    if (this.completedTurns.delete(key)) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const waiters = this.turnCompletionWaiters.get(key) || new Set();
+      const waiter = { resolve, timer: null };
+      waiter.timer = setTimeout(() => {
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.turnCompletionWaiters.delete(key);
+        resolve(false);
+      }, timeoutMs);
+      waiters.add(waiter);
+      this.turnCompletionWaiters.set(key, waiters);
+    });
   }
 
   rejectAll(err) {

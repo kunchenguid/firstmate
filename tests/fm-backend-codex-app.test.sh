@@ -27,6 +27,9 @@ const turnStartDelayMs = Number(process.env.FM_FAKE_CODEX_TURN_START_DELAY_MS ||
 const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
 const substantiveDelayMs = Number(process.env.FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS || "0");
 const holdActiveUntilSubstantive = process.env.FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE === "1";
+const notifyTurnCompleted = process.env.FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED === "1";
+const notifyTurnCompletedDelayMs = Number(process.env.FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED_DELAY_MS || "0");
+const notifyWrongCompletionFirst = process.env.FM_FAKE_CODEX_NOTIFY_WRONG_COMPLETION_FIRST === "1";
 const metadataFail = process.env.FM_FAKE_CODEX_METADATA_FAIL === "1";
 let substantiveDone = false;
 function write(msg) {
@@ -108,6 +111,15 @@ rl.on("line", line => {
           fs.appendFileSync(substantiveFile, "substantive: bridge still alive\n");
           substantiveDone = true;
         }, substantiveDelayMs);
+      }
+      if (notifyWrongCompletionFirst) {
+        write({ method: "turn/completed", params: { threadId: "thread-unrelated", turn: { id: turnId, status: "completed" } } });
+        write({ method: "turn/completed", params: { threadId, turn: { id: "turn-unrelated", status: "completed" } } });
+      }
+      if (notifyTurnCompleted) {
+        setTimeout(() => {
+          write({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        }, notifyTurnCompletedDelayMs);
       }
     });
   } else if (msg.method === "thread/read") {
@@ -291,7 +303,31 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
 }
 
-test_bridge_send_turn_tracks_turn_status_when_thread_is_not_loaded() {
+test_bridge_send_turn_uses_exact_completion_notification_without_polling() {
+  local dir fb log prompt substantive_file out status i
+  dir="$TMP_ROOT/bridge-turn-notification"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  substantive_file="$dir/substantive.log"
+  printf 'Wait for this exact turn notification, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=50 FM_FAKE_CODEX_NOTIFY_WRONG_COMPLETION_FIRST=1 FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED=1 FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED_DELAY_MS=100 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=3 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.25 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should accept the exact turn completion notification: $out"
+  for ((i = 0; i < 40; i += 1)); do
+    [ -f "$substantive_file" ] && break
+    sleep 0.01
+  done
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should ignore completion notifications for other thread and turn ids"
+  sleep 0.3
+  assert_not_contains "$(cat "$log")" $'request\tthread/turns/list\t' "bridge should not poll turn history after the exact completion notification"
+  pass "fm-codex-bridge: send-turn uses the exact completion notification without polling"
+}
+
+test_bridge_send_turn_falls_back_to_turn_status_polling() {
   local dir fb log prompt substantive_file out status i
   dir="$TMP_ROOT/bridge-turn-not-loaded"
   mkdir -p "$dir/wt"
@@ -311,7 +347,7 @@ test_bridge_send_turn_tracks_turn_status_when_thread_is_not_loaded() {
   done
   assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep the app-server alive until the turn reports completed"
   assert_contains "$(cat "$log")" $'request\tthread/turns/list\t' "bridge should poll the turn lifecycle instead of treating thread notLoaded as completion"
-  pass "fm-codex-bridge: send-turn tracks turn status when the thread shell status is notLoaded"
+  pass "fm-codex-bridge: send-turn falls back to turn status polling without a completion notification"
 }
 
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
@@ -498,7 +534,8 @@ test_backend_capture_returns_empty_parsed_text() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
-test_bridge_send_turn_tracks_turn_status_when_thread_is_not_loaded
+test_bridge_send_turn_uses_exact_completion_notification_without_polling
+test_bridge_send_turn_falls_back_to_turn_status_polling
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
 test_bridge_send_turn_rejects_stale_status_line
 test_bridge_start_thread_requires_reported_cwd

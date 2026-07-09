@@ -187,10 +187,10 @@ to the absolute Firstmate status file before doing substantive work.
 Firstmate then waits up to 180 seconds by default for that line to appear.
 The budget is controlled by `FM_CODEX_APP_RETURN_CHANNEL_POLLS` and `FM_CODEX_APP_RETURN_CHANNEL_SLEEP`, defaulting to 720 polls at 0.25 seconds.
 The startup `send-turn` parent receives that same file, expected line, and timeout budget, records the status-file byte offset before `thread/resume` and `turn/start`, starts a detached worker, and waits until the worker reports that the first turn was accepted and the return channel was verified from new status output.
-After that ready report, the worker keeps the app-server alive by polling the specific turn's lifecycle rather than treating a shell-level `notLoaded` thread status as terminal.
+After that ready report, the worker keeps the app-server alive until the same stdio connection receives `turn/completed` for the exact thread and turn returned by `turn/start`.
 This matters because direct-stdio app-server processes can report a resumed thread as `notLoaded` while the just-started turn is still running; closing the process at that point interrupts the turn.
-The worker keeps the same Codex app-server stdio process alive after that handshake while it polls until the started turn leaves an active state.
-The lifecycle hold is controlled by `FM_CODEX_APP_TURN_LIFECYCLE_POLLS` and `FM_CODEX_APP_TURN_LIFECYCLE_SLEEP`, defaulting to 4320 polls at 5 seconds.
+If the notification is unavailable or missed, the worker polls that specific turn's status as a bounded compatibility fallback rather than treating shell-level thread status as completion.
+The fallback hold is controlled by `FM_CODEX_APP_TURN_LIFECYCLE_POLLS` and `FM_CODEX_APP_TURN_LIFECYCLE_SLEEP`, defaulting to 360 polls at 60 seconds.
 If the expected line does not appear, the spawn archives the thread, removes the startup worktree only when the worktree is clean and still at the verified base commit, and fails with a diagnostic naming the thread id and the missing status file write.
 If the archive attempt fails, startup cleanup stops before removing the worktree, status file, or metadata so the live thread can be recovered manually.
 If the startup worktree is dirty or its git state cannot be verified, startup cleanup writes recovery metadata and preserves the worktree instead of deleting it.
