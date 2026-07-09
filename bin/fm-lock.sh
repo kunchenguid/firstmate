@@ -17,6 +17,10 @@ mkdir -p "$STATE"
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|grok|copilot|^pi$'
 HARNESS_ARGS_RE='(^|[[:space:]/])(claude|codex|opencode|grok|copilot|pi)([[:space:]]|$)'
+# Runtimes that may host a harness under a generic comm name (e.g. MainThread).
+# The args-based scan is restricted to these so unrelated 'gh copilot ...' calls
+# in the parent chain are never mistaken for a harness process.
+INTERP_RE='^(node|python[0-9.]*)$'
 
 harness_pid() {
   local pid=$$ comm args
@@ -26,8 +30,11 @@ harness_pid() {
     if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
       echo "$pid"; return 0
     fi
-    # Some runtimes expose generic process names (for example, MainThread).
-    printf '%s' "$args" | grep -qE "$HARNESS_ARGS_RE" && { echo "$pid"; return 0; }
+    # Some runtimes expose generic process names (e.g. MainThread); only scan
+    # args when comm is a known interpreter so unrelated processes are excluded.
+    if printf '%s' "$(basename "$comm")" | grep -qE "$INTERP_RE"; then
+      printf '%s' "$args" | grep -qE "$HARNESS_ARGS_RE" && { echo "$pid"; return 0; }
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -39,7 +46,10 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE" || printf '%s' "$args" | grep -qE "$HARNESS_ARGS_RE"
+  local base; base=$(basename "$comm")
+  if printf '%s' "$base" | grep -qE "$HARNESS_RE"; then return 0; fi
+  printf '%s' "$base" | grep -qE "$INTERP_RE" && \
+    printf '%s' "$args" | grep -qE "$HARNESS_ARGS_RE"
 }
 
 if [ "${1:-}" = "status" ]; then
