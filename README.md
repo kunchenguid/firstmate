@@ -65,7 +65,7 @@ The first mate detects and offers to install everything else.
 ### Recommended harnesses
 
 **Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session.
-Claude Code and Grok use background-notify wake cycles; Pi uses its generated primary watcher extension.
+Claude Code and Grok use background-notify wake cycles; Pi uses its tracked primary watcher extension.
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 
@@ -96,14 +96,11 @@ grok --trust
 **Pi**
 
 ```sh
-bin/fm-pi-watch-extension.sh
-pi \
-  -e .pi/extensions/fm-primary-turnend-guard.ts \
-  -e state/fm-primary-pi-watch.ts
+pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, run `bin/fm-pi-watch-extension.sh` before the first supervised launch so `state/fm-primary-pi-watch.ts` exists; session start refreshes that bridge after launch.
+For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
 
 ### Talk to it
 
