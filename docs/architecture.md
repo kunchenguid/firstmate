@@ -215,6 +215,9 @@ Memory writes use inspect-then-update: read the current destination first, then 
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
+The captain's half-formed ideas take a separate home: the `parking` skill captures them to `data/parking.md` mid-conversation on the `Parking:`, `park this`, and `put this in parking` reflex, resurfaces them on daily and weekly crons to refine in place, and promotes the ready ones into firstmate intake (and optionally an external tracker).
+The store is firstmate-private and gitignored as part of `data/`, created lazily on the first capture; the skill owns its schema, rituals, decay, clustering, and self-re-arming cron schedule.
+
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
