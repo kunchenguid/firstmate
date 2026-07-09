@@ -20,5 +20,5 @@
       "why": "Use a strong coding profile for broad design and implementation work."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": { "harness": "gemini", "model": "gemini-3.1-pro-preview", "effort": "medium" }
 }
