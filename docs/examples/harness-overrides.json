@@ -1,0 +1,15 @@
+{
+  "claude": {
+    "command": "cc",
+    "args": ["--dangerously-skip-permissions"],
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+      "ANTHROPIC_AUTH_TOKEN": "sk-replace-me"
+    }
+  },
+  "codex": {
+    "env": {
+      "HTTPS_PROXY": "http://proxy.example.com:8080"
+    }
+  }
+}

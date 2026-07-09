@@ -15,10 +15,14 @@ Optional dispatch profiles in `config/crew-dispatch.json` can override that stat
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
 
+The optional local `config/harness-overrides.json` changes HOW a harness launches (its binary, launch args, or launch env), never WHICH harness is selected.
+Every verified fact in this skill still applies unchanged under an override: the recorded `harness=` stays the base adapter, and its busy signature, turn-end hook, interrupt, exit, escape, and skill-invocation forms are unaffected, because firstmate always owns the launch tail (model/effort flags, brief injection, turn-end wiring).
+The full contract lives in `docs/configuration.md`.
+
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
 An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited by secondmate homes.
+`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/harness-overrides.json` are inherited by secondmate homes.
 This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.

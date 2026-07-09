@@ -7,6 +7,7 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
+#                 "HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -534,6 +535,39 @@ crew_dispatch_validate() {
   ' "$file"
 }
 
+# Optional, non-blocking structural check of config/harness-overrides.json, the
+# LOCAL per-harness launch override file (docs/configuration.md). Absent file is
+# silent; an invalid one is reported so the bad file is visible, mirroring
+# crew_dispatch_validate. fm-spawn.sh degrades to built-in defaults when this file
+# is absent or unusable, so this is a diagnostic only, never a hard failure.
+harness_overrides_validate() {
+  local file err
+  file="$CONFIG/harness-overrides.json"
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    echo "HARNESS_OVERRIDES: invalid config/harness-overrides.json - malformed JSON"
+    return 0
+  fi
+  err=$(jq -r '
+    if type != "object" then "top-level value must be an object"
+    elif [to_entries[] | select((.value|type) != "object")] | length > 0 then "each harness entry must be an object"
+    elif [to_entries[] | select(.value|has("command")) | select((.value.command|type) != "string")] | length > 0 then "command must be a string"
+    elif [to_entries[] | select(.value|has("args")) | select((.value.args|type) != "array")] | length > 0 then "args must be an array of strings"
+    elif [to_entries[] | select(.value|has("args")) | .value.args[]? | select(type != "string")] | length > 0 then "args must be an array of strings"
+    elif [to_entries[] | select(.value|has("env")) | select((.value.env|type) != "object")] | length > 0 then "env must be an object"
+    elif [to_entries[] | select(.value|has("env")) | .value.env | to_entries[]? | select((.value|type) != "string")] | length > 0 then "env values must be strings"
+    else empty
+    end
+  ' "$file" 2>/dev/null || true)
+  if [ -n "$err" ]; then
+    echo "HARNESS_OVERRIDES: invalid config/harness-overrides.json - $err"
+  fi
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -575,6 +609,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
+harness_overrides_validate
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi

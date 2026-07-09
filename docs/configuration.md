@@ -127,9 +127,40 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
+The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/harness-overrides.json` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, backlog backend, and per-harness launch overrides use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
+
+## Per-harness launch overrides (config/harness-overrides.json)
+
+`config/harness-overrides.json` is an optional LOCAL, gitignored file that customizes how each harness's CLI is launched without editing firstmate's tracked launch templates.
+It is keyed by harness name, and every field is optional:
+
+```json
+{
+  "claude": {
+    "command": "cc",
+    "args": ["--dangerously-skip-permissions"],
+    "env": { "ANTHROPIC_BASE_URL": "https://gateway.example.com", "ANTHROPIC_AUTH_TOKEN": "sk-..." }
+  },
+  "codex": { "env": { "HTTPS_PROXY": "http://proxy.example.com:8080" } }
+}
+```
+
+`command` replaces the harness's binary or path; an absent or empty `command` uses the built-in binary (for claude that is `claude`).
+`args` is a JSON string array that replaces the harness's default launch args, each element passed as one literal argument; an empty array means no launch args, and an absent `args` keeps the built-in default (for claude that is `--dangerously-skip-permissions`).
+`env` is an object of string values merged over the harness's built-in launch env, with the override winning on a key conflict, and is prepended to the launch as `KEY=value` assignments.
+An absent file, an absent harness key, or an absent field each falls back to the built-in default for that axis, so with no file present the assembled launch command for every harness is byte-identical to the historical one.
+
+The override customizes only the binary, args, and env.
+firstmate always owns the launch tail and supervision wiring: it still appends the model and effort flags and the brief injection (including the harness-specific forms such as codex's turn-end `notify=` config and pi's `-e` extension), and still installs the turn-end hook, none of which an override can touch.
+The file is keyed by harness name, so the recorded `harness=` in `state/<id>.meta` stays the base harness and every supervision fact (busy signature, turn-end hook, exit, escape) keeps applying; the override changes how the harness launches, not which harness it is.
+Override env is never recorded into meta, so a harness secret stays out of firstmate's tracked and state files.
+This file only affects how the selected harness launches; it does not change which harness is selected, so `config/crew-dispatch.json`, `config/crew-harness`, and an explicit per-spawn `--harness` (including a raw launch command, which sets its own command) are all unaffected.
+`fm-spawn.sh` reads the file only when `jq` is available and the JSON is valid, and degrades to the built-in defaults otherwise.
+Bootstrap reports a present-but-invalid file as `HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>` and, when the file is present but `jq` is absent, through the normal `MISSING: jq` install-consent flow; both are non-blocking diagnostics.
+The primary propagates this file into secondmate homes through the same inheritable-config path as `config/crew-dispatch.json`, so a secondmate's own crewmates launch with the primary's overrides.
+See [`docs/examples/harness-overrides.json`](examples/harness-overrides.json) for a starting point to copy into local `config/harness-overrides.json`.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -152,6 +183,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi), lists it with the exact install commands, and installs only after you say go.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/harness-overrides.json` exists, bootstrap likewise requires `jq`, both to validate that file and because `fm-spawn.sh` reads it with `jq`; without `jq` the overrides are ignored and every harness launches with its built-in defaults.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap also prints `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
@@ -167,7 +199,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 `NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; `AGENTS.md` section 3 owns the send procedure.
 The same bootstrap run also emits `SECONDMATE_LIVENESS:` for live secondmate endpoints: `already-live` and `respawned` are handled states, while `skipped` or `respawn failed` means the secondmate still needs attention.
 For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, and `backlog-backend` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `harness-overrides.json` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

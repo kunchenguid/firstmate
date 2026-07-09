@@ -23,6 +23,18 @@ pass() { printf 'ok - %s\n' "$1"; }
 command -v zellij >/dev/null 2>&1 || { echo "skip: zellij not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zellij adapter)"; exit 0; }
 
+# An installed-but-older-than-verified zellij is the same environment gap as an
+# absent one: the adapter refuses that version by design (pinned in
+# tests/fm-backend-zellij.test.sh), so there is no real server to smoke-test
+# against. Skip before the session/trap setup so no cleanup noise is emitted.
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+fm_backend_source zellij || { echo "not ok - fm_backend_source zellij failed" >&2; exit 1; }
+fm_backend_zellij_version_check 2>/dev/null || {
+  echo "skip: installed zellij is older than the verified minimum $FM_BACKEND_ZELLIJ_MIN_MAJOR.$FM_BACKEND_ZELLIJ_MIN_MINOR"
+  exit 0
+}
+
 # shellcheck source=tests/zellij-test-safety.sh
 . "$ROOT/tests/zellij-test-safety.sh"
 

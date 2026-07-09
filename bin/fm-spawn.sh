@@ -48,8 +48,8 @@
 #   still win over the file's tokens.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
-#   dispatch profiles, and backlog backend inherit the primary's settings
-#   (fm-config-inherit-lib.sh).
+#   dispatch profiles, backlog backend, and per-harness launch overrides inherit
+#   the primary's settings (fm-config-inherit-lib.sh).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -66,11 +66,18 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
+#     __ENV__      built-in launch env prefix, MERGED with config/harness-overrides.json .[<harness>].env
+#     __CMD__      built-in binary, replaced by config/harness-overrides.json .[<harness>].command
+#     __ARGS__     built-in launch args, replaced by config/harness-overrides.json .[<harness>].args
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#   config/harness-overrides.json (LOCAL, gitignored) customizes only __ENV__/__CMD__/__ARGS__
+#   per harness; firstmate always owns the model/effort flags, the brief injection, and the
+#   turn-end hook (resolve_launch_overrides; full contract in docs/configuration.md). With no
+#   such file the assembled launch string is byte-identical to the built-in template.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -86,6 +93,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# Optional LOCAL (gitignored) per-harness launch override file; see
+# docs/configuration.md and resolve_launch_overrides.
+HARNESS_OVERRIDES="$CONFIG/harness-overrides.json"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -290,46 +300,86 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# The verified launch command per adapter. The knowledge half of each adapter
-# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
+# The verified launch command per adapter, expressed as a template with three
+# OVERRIDABLE axes and a firstmate-OWNED tail. The overridable axes are the launch
+# env prefix (__ENV__), the binary (__CMD__), and the default launch/autonomy args
+# (__ARGS__); config/harness-overrides.json can replace command and args and merge
+# env per harness (resolve_launch_overrides below; full contract in
+# docs/configuration.md). The tail - the model/effort flags and the brief
+# injection ("$(cat __BRIEF__)", plus the harness-specific turn-end wiring like
+# codex's -c notify=/__TURNEND__ and pi's -e __PIEXT__) - is fixed here and is
+# never reachable by an override, which is what preserves supervision. __ENV__ and
+# __ARGS__ each expand to their content plus one trailing space, or to empty; the
+# one literal space after __CMD__ separates the binary from what follows. The
+# knowledge half of each adapter (busy signature, exit command, dialogs, quirks)
+# lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
-    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
-    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
-    # otherwise-empty composer and would otherwise read like real typed input when
-    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
-    # prefix scoped to this firstmate-launched agent; it never touches the captain's
-    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
-    # does NOT suppress the interactive ghost text (verified empirically), so the env
-    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
-    # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude) printf '%s' '__ENV____CMD__ __ARGS____MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__"$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
+    opencode) printf '%s' '__ENV____CMD__ __MODELFLAG____ARGS__--prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__"$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
-    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
-    # session. --always-approve auto-approves every tool execution (verified: the
-    # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
-    # launch command - it is a Stop-event hook installed below (global hook +
-    # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    grok) printf '%s' '__ENV____CMD__ __ARGS____MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
+  esac
+}
+
+# Built-in defaults for the three overridable launch axes, keyed by harness. They
+# are kind-independent (only the fixed tail differs by kind). These are kept
+# byte-for-byte equal to the historical inline templates, so with no
+# config/harness-overrides.json the assembled launch string is unchanged.
+harness_default_command() {
+  case "$1" in
+    claude) printf '%s' 'claude' ;;
+    codex) printf '%s' 'codex' ;;
+    opencode) printf '%s' 'opencode' ;;
+    pi) printf '%s' 'pi' ;;
+    grok) printf '%s' 'grok' ;;
+  esac
+}
+
+# grok's --always-approve auto-approves every tool execution (verified: the
+# crewmate runs fully autonomously), the targeted equivalent of claude's
+# --dangerously-skip-permissions. opencode and pi carry no default launch args:
+# opencode's autonomy rides its env (OPENCODE_CONFIG_CONTENT) and pi needs none.
+harness_default_args() {
+  case "$1" in
+    claude) printf '%s' '--dangerously-skip-permissions' ;;
+    codex) printf '%s' '--dangerously-bypass-approvals-and-sandbox' ;;
+    grok) printf '%s' '--always-approve' ;;
+    *) : ;;
+  esac
+}
+
+# Built-in launch env, one shell KEY=value assignment per line (the value already
+# quoted as it must appear on the launch line). CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+# disables claude's interactive predicted-next-prompt ghost text, which renders as
+# dim text in an otherwise-empty composer and would otherwise read like real typed
+# input when firstmate captures the pane (see the harness-adapters skill; the CLI's
+# --prompt-suggestions flag is print/SDK-mode only and does NOT suppress the
+# interactive ghost text). It is a per-launch prefix scoped to this
+# firstmate-launched agent and never touches the captain's global config; the
+# dim-aware composer reader in fm-tmux-lib.sh is the defense-in-depth backstop.
+# opencode's env grants blanket tool permission for the unattended run.
+harness_default_env_pairs() {
+  case "$1" in
+    claude) printf '%s\n' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false' ;;
+    opencode) printf '%s\n' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\''' ;;
+    *) : ;;
   esac
 }
 
@@ -462,6 +512,75 @@ effort_flag_for_harness() {
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Resolve the three overridable launch axes for the resolved harness, applying
+# config/harness-overrides.json when it is present, jq is available, and the file
+# is valid JSON. Sets OV_ENV_VALUE, OV_CMD, OV_ARGS_VALUE:
+#   - command: override .[$h].command replaces the built-in binary; absent keeps it.
+#   - args: override .[$h].args (a JSON string array) replaces the built-in launch
+#     args, each element shell-quoted as one literal argument (an empty array means
+#     no args); absent keeps the built-in default.
+#   - env: override .[$h].env is MERGED over the built-in launch env (override wins
+#     on key conflict) and prepended as KEY=value assignments.
+# OV_ENV_VALUE and OV_ARGS_VALUE carry a single trailing space when non-empty (or
+# are empty), matching launch_template's placeholder spacing. The firstmate-owned
+# tail (model/effort flags, brief injection, turn-end wiring) is NOT touched here.
+# An absent file, absent jq, invalid JSON, absent harness key, or absent field each
+# falls back to the built-in default for that axis, so the no-override launch string
+# is byte-identical to the built-in template. Override env is deliberately never
+# recorded into meta.
+resolve_launch_overrides() {  # <harness>
+  local harness=$1 usable=0 cmd raw el first k v line merged
+  local args_str env_pairs ov_env_keys
+  OV_CMD=$(harness_default_command "$harness")
+  args_str=$(harness_default_args "$harness")
+  env_pairs=$(harness_default_env_pairs "$harness")
+  ov_env_keys=
+  if [ -f "$HARNESS_OVERRIDES" ] && command -v jq >/dev/null 2>&1 && jq -e . "$HARNESS_OVERRIDES" >/dev/null 2>&1; then
+    usable=1
+  fi
+  if [ "$usable" = 1 ]; then
+    cmd=$(jq -r --arg h "$harness" 'if ((.[$h]?|type)=="object") and ((.[$h].command?|type)=="string") and ((.[$h].command|length)>0) then .[$h].command else empty end' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+    [ -n "$cmd" ] && OV_CMD=$cmd
+    if jq -e --arg h "$harness" '((.[$h]?|type)=="object") and (.[$h]|has("args")) and ((.[$h].args|type)=="array")' "$HARNESS_OVERRIDES" >/dev/null 2>&1; then
+      raw=$(jq -r --arg h "$harness" '.[$h].args[]' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+      args_str=
+      if [ -n "$raw" ]; then
+        first=1
+        while IFS= read -r el; do
+          if [ "$first" = 1 ]; then first=0; else args_str="$args_str "; fi
+          args_str="$args_str$(shell_quote "$el")"
+        done <<EOF
+$raw
+EOF
+      fi
+    fi
+    ov_env_keys=$(jq -r --arg h "$harness" 'if ((.[$h]?|type)=="object") and ((.[$h].env?|type)=="object") then (.[$h].env|keys_unsorted[]) else empty end' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+  fi
+  # env prefix: built-in pairs whose key is not overridden, then the override pairs.
+  merged=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    k=${line%%=*}
+    if [ -n "$ov_env_keys" ] && printf '%s\n' "$ov_env_keys" | grep -qxF -- "$k"; then
+      continue
+    fi
+    merged="$merged${merged:+ }$line"
+  done <<EOF
+$env_pairs
+EOF
+  if [ -n "$ov_env_keys" ]; then
+    while IFS= read -r k; do
+      [ -n "$k" ] || continue
+      v=$(jq -r --arg h "$harness" --arg k "$k" '.[$h].env[$k] | tostring' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+      merged="$merged${merged:+ }$k=$(shell_quote "$v")"
+    done <<EOF
+$ov_env_keys
+EOF
+  fi
+  if [ -n "$args_str" ]; then OV_ARGS_VALUE="$args_str "; else OV_ARGS_VALUE=; fi
+  if [ -n "$merged" ]; then OV_ENV_VALUE="$merged "; else OV_ENV_VALUE=; fi
 }
 
 resolved_existing_dir() {
@@ -1002,6 +1121,13 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+# Overridable axes first (command, args, env prefix), then the firstmate-owned tail.
+# For the raw-launch-command escape hatch, LAUNCH holds no __ENV__/__CMD__/__ARGS__
+# placeholders, so these substitutions are a no-op there.
+resolve_launch_overrides "$HARNESS"
+LAUNCH=${LAUNCH//__ENV__/$OV_ENV_VALUE}
+LAUNCH=${LAUNCH//__CMD__/$OV_CMD}
+LAUNCH=${LAUNCH//__ARGS__/$OV_ARGS_VALUE}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

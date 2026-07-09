@@ -101,6 +101,9 @@ make_fake_fleet_sync_root() {
 [ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
+# The partial output is on disk from here on; the fake sleep waits for this marker
+# so the bootstrap's fake clock cannot time out before the child has written.
+[ -z "${FM_FAKE_FLEET_SYNC_OUTPUT_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_OUTPUT_MARKER"
 exec perl -e 'sleep 300'
 SH
   chmod +x "$fake_root/bin/fm-fleet-sync.sh"
@@ -131,21 +134,29 @@ add_no_origin_projects() {
 }
 
 run_bootstrap_timeout_case() {
-  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
+  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker output_marker
   override=__unset__
   started_marker=${5:-}
   git_record=${6:-}
   wait_for_marker=${7:-0}
+  output_marker="$fake_root/fleet-sync-output"
+  rm -f "$output_marker"
   [ "$#" -lt 4 ] || override=$4
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
-      SECONDS=$((SECONDS + inc))
-      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
-        FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
-        command sleep 0.01
+      local inc=${1:-1} tries
+      # Yield real time until the fleet-sync child has flushed its partial output,
+      # then advance the fake clock. A fixed number of short yields loses this race
+      # under load and drops the partial output the timeout path must relay.
+      if [ -n "${FM_FAKE_FLEET_SYNC_OUTPUT_MARKER:-}" ]; then
+        tries=0
+        while [ "$tries" -lt 300 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_OUTPUT_MARKER" ]; do
+          command sleep 0.01
+          tries=$((tries + 1))
+        done
       fi
+      SECONDS=$((SECONDS + inc))
     }
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {
@@ -167,6 +178,7 @@ run_bootstrap_timeout_case() {
     if [ "$override" = __unset__ ]; then
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -174,6 +186,7 @@ run_bootstrap_timeout_case() {
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$override" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
