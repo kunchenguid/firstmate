@@ -33,6 +33,11 @@ test_signal_passes_through_and_exits_zero() {
   home=$(make_home signal)
   out="$home/out.txt"
   err="$home/err.txt"
+  # A genuine watcher wake comes from a live task, which always has a
+  # state/<id>.meta; the watcher's orphan-marker guard absorbs a status with no
+  # matching meta as a torn-down task's leftover, so demo needs a meta to
+  # represent a real in-flight task rather than an orphan signal.
+  printf 'window=fm-demo\n' > "$home/state/demo.meta"
   (
     sleep 1
     printf 'done: synthetic wake\n' > "$home/state/demo.status"
@@ -56,6 +61,10 @@ test_check_uses_preserved_watcher_environment() {
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
 SH
   chmod +x "$home/state/env-check.check.sh"
+  # A live per-task check has a matching state/<id>.meta; without it the
+  # watcher's orphan-marker guard absorbs the .check.sh as a torn-down task's
+  # leftover (x-watch.check.sh is the sole exemption).
+  printf 'window=fm-env-check\n' > "$home/state/env-check.meta"
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "check checkpoint exit"
