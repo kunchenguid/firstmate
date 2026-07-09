@@ -100,10 +100,10 @@ Identify a parking cron in `CronList` output by a stable match key: BOTH its exa
 For each of the three crons:
 
 - If NO live cron matches its key, `CronCreate` it with the exact expression above.
-- If a matching cron IS live but within the 7-day expiry window, `CronDelete` that near-expiry cron FIRST, then `CronCreate` a fresh one, so there is never an overlap where both fire.
-- If a matching cron is live and outside the expiry window, do nothing.
+- If a matching cron IS live, `CronDelete` it FIRST, then `CronCreate` a fresh one, so there is never an overlap where both fire.
 
-This is idempotent because it either creates an absent cron or replaces (delete-then-create) a near-expiry one, never adding a second cron alongside a live one.
+This is idempotent because it either creates an absent cron or replaces (delete-then-create) a matching one, never adding a second cron alongside a live one.
+The always-delete-then-create rule is used because `CronList` exposes no creation time, age, or expiry timestamp to tell a near-expiry cron from a fresh one.
 
 If no firstmate session opens for more than 7 days, all three crons lapse; the next ritual or `/parking` re-arms them.
 This lapse-then-self-heal behavior is the accepted tradeoff documented in `README.md`.
