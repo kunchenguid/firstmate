@@ -18,9 +18,16 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
 #
-# Merge method: defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. An explicit
-# caller method is never overridden.
+# Provider is auto-detected from the PR URL via bin/fm-scm-lib.sh. For an Azure
+# DevOps PR URL this script REFUSES: firstmate never merges/completes an ADO PR
+# (captain policy) - the ship path ends at "gates verified green -> ready" and
+# the captain completes it in the ADO UI (squash to match GitHub, never
+# --delete-source-branch). See docs/ado-backend.md. GitHub merge behaviour below
+# is unchanged.
+#
+# Merge method (GitHub): defaults to --squash when the caller passes none of
+# --squash, --merge, --rebase, or --method after the optional -- separator. An
+# explicit caller method is never overridden.
 # Extra args must not include --repo or -R because the repo is parsed from the
 # PR URL.
 #
@@ -38,6 +45,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META; refusing to merge without recording pr=" >&2; exit 1; }
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 
 caller_has_merge_method() {
   local arg
@@ -49,18 +58,17 @@ caller_has_merge_method() {
   return 1
 }
 
+# Parse the PR URL into provider fields (github: PR_OWNER/PR_REPO/PR_NUMBER;
+# ado: recognized but never mergeable here - see below). Preserves the legacy
+# refusal for any unrecognized URL.
 parse_pr_url() {
   local url=$1
-  if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
-    PR_OWNER="${BASH_REMATCH[1]}"
-    PR_REPO="${BASH_REMATCH[2]}"
-    PR_NUMBER="${BASH_REMATCH[3]}"
-    if [[ "$PR_OWNER" != *- ]]; then
-      return 0
-    fi
-  fi
-  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> (got: $url)" >&2
-  return 1
+  fm_scm_parse_pr_url "$url" || return 1
+  PROVIDER=$FM_SCM_PROVIDER
+  PR_NUMBER=$FM_SCM_PR_NUMBER
+  PR_OWNER=$FM_SCM_PR_OWNER
+  PR_REPO=$FM_SCM_PR_REPO
+  return 0
 }
 
 reject_repo_overrides() {
@@ -78,6 +86,16 @@ reject_repo_overrides() {
 
 parse_pr_url "$URL" || exit 1
 reject_repo_overrides "$@" || exit 1
+
+# firstmate never merges/completes an Azure DevOps PR (captain policy): ADO
+# completion is often gated behind required org policies, and the ship path ends
+# at "gates verified green -> ready". Refuse and point the captain at the ADO UI.
+if [ "$PROVIDER" = ado ]; then
+  echo "error: firstmate does not merge Azure DevOps PRs." >&2
+  echo "The gates are verified green; complete this PR yourself in the Azure DevOps UI: $URL" >&2
+  echo "Use squash to match GitHub, and do NOT delete the source branch." >&2
+  exit 1
+fi
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
