@@ -297,7 +297,15 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
+  # When a system 'orca' binary (e.g. GNOME screen reader) is present in BASE_PATH,
+  # command -v finds it and bootstrap stays silent for that tool. Assert the negatives
+  # (tmux and treehouse must not be required) regardless, and the positive only when
+  # the system PATH does not shadow the Orca backend CLI.
+  assert_not_contains "$out" "MISSING: tmux" "tmux should not be required when backend=orca"
+  assert_not_contains "$out" "MISSING: treehouse" "treehouse should not be required when backend=orca"
+  if ! PATH="$BASE_PATH" command -v orca >/dev/null 2>&1; then
+    [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
+  fi
 
   case_dir="$TMP_ROOT/orca-backend-not-selected"
   mkdir -p "$case_dir/home/config"
