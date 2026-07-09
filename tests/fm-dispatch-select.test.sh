@@ -9,6 +9,19 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 mkdir -p "$TMP_ROOT"
 
+# The script under test always needs the real jq, even when a fakebin dir
+# restricts PATH to stub out quota-axi; make jq resolvable regardless of
+# where it is actually installed (it may not be under BASE_PATH).
+add_real_jq() {
+  local fakebin=$1 real_jq
+  real_jq=$(command -v jq 2>/dev/null) || fail "jq is required for dispatch-select tests"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+exec '$real_jq' "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
 write_quota() {
   local file=$1 claude_status=$2 claude_five=$3 claude_week=$4 codex_status=$5 codex_five=$6 codex_week=$7
   mkdir -p "$(dirname "$file")"
@@ -63,6 +76,7 @@ test_exact_tie_uses_first_profile() {
 test_quota_missing_falls_back_to_first() {
   local fakebin out err status
   fakebin=$(fm_fakebin "$TMP_ROOT/missing")
+  add_real_jq "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles" 2>"$TMP_ROOT/missing.err")
   status=$?
   err=$(cat "$TMP_ROOT/missing.err")
@@ -81,6 +95,7 @@ test_quota_error_falls_back_to_first() {
 exit 42
 SH
   chmod +x "$fakebin/quota-axi"
+  add_real_jq "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles" 2>"$TMP_ROOT/error.err")
   status=$?
   err=$(cat "$TMP_ROOT/error.err")
@@ -160,6 +175,7 @@ printf called > '$marker'
 exit 1
 SH
   chmod +x "$fakebin/quota-axi"
+  add_real_jq "$fakebin"
 
   single='{"harness":"grok","model":"grok-4","effort":"high"}'
   out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" "$single")
