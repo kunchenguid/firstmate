@@ -17,6 +17,36 @@ This doc is the reference for the ADO-specific behaviour; the provider abstracti
 - **firstmate never merges/completes an ADO PR.** `bin/fm-pr-merge.sh` refuses an ADO PR URL and points the captain at the Azure DevOps UI. ADO completion is commonly gated behind required branch policies and reviewer rules that belong to a human, so the firstmate ship path ends at "gates verified green -> ready" and the captain completes the PR themselves (squash to match GitHub; do not delete the source branch, so teardown's landed-work check can still resolve the head).
 - **Fork-based ADO contribution is not supported.** If an ADO project needs a fork-and-PR flow, refuse and escalate to the captain rather than guessing an org/fork topology.
 
+## Which ADO gates firstmate gates on
+
+firstmate judges an ADO PR's **content-readiness**, not its human-approval state.
+The distinction matters because ADO branch policies mix two very different kinds of gate, and firstmate must only wait on the ones whose result is a function of the PR's changed content.
+
+firstmate gates on **content-influenced automation gates only**:
+
+- build / test / e2e pipeline status checks
+- code-coverage policy
+- Component Governance (security and license) status checks
+
+These are the gates whose pass/fail is determined by the PR's content, so they are what "gates verified green -> ready" actually verifies.
+
+firstmate **ignores human review, sign-off, and attestation gates** when judging merge-readiness, **even when they are blocking and currently show `rejected`**.
+Those are the captain's responsibility in the ADO UI, not something firstmate blocks on.
+The human-review gate set is:
+
+- **Minimum number of reviewers** / **Required reviewers** (approval count)
+- **Comment requirements** (resolve-all-comments)
+- **Require a merge strategy** (merge-method policy)
+- **Code Review Compliance Policy** (`microsoft-policy-service-CodeReviewCompliancePolicy` genre status) - additional human sign-off on the latest iteration
+- **Ownership Enforcer** (owner reapproval status)
+- **Proof Of Presence** (human attestation)
+
+A PR whose only outstanding blocking gates are human-review or attestation gates is content-ready as far as firstmate is concerned: firstmate reports it ready and stops.
+firstmate never completes ADO PRs regardless - that remains the captain's action in the UI (squash, no delete-source-branch; see the merge-policy note above).
+
+**Expired content build gates** (ADO marks a stale build policy `isExpired=true`) are re-queued on the PR itself with `az repos pr policy queue --id <pr> --evaluation-id <eval>` - PR-native policy re-evaluation, not a standalone pipeline retrigger - as part of driving the PR to content-ready.
+Never silently treat an expired or absent gate as passed: that vacuous-green failure mode is exactly what this ADO support exists to prevent.
+
 ## Prerequisites
 
 - The Azure CLI `az` (`brew install azure-cli`, or your platform's package manager) with the Azure DevOps extension: `az extension add --name azure-devops`.
