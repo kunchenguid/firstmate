@@ -32,8 +32,9 @@
 #                       when this session actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/learnings.md: read-only, always safe, always runs.
+#   4. context digest - data/projects.md, data/secondmates.md, data/charter.md,
+#                       data/captain.md, data/learnings.md: read-only, always
+#                       safe, always runs.
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
 #                       state/*.status tail, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
@@ -238,6 +239,7 @@ fi
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+print_file_or_absent "$DATA/charter.md" "data/charter.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 

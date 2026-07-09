@@ -4,7 +4,8 @@
 # (recovery) into one ordered digest.
 #
 # Coverage:
-#   - absent-file markers vs empty-but-present files in the context digest
+#   - absent-file markers vs empty-but-present files in the context digest,
+#     including persistent secondmate data/charter.md
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's four mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
@@ -247,18 +248,39 @@ EOF
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
+  assert_contains "$out" "data/charter.md" "digest did not label the charter.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly two ABSENT markers (secondmates.md, learnings.md; backlog.md is
-  # covered by its own test) - and the present-but-empty captain.md must NOT
-  # print ABSENT.
+  # Exactly four ABSENT markers (secondmates.md, charter.md, learnings.md,
+  # backlog.md) - and the present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 3 ] || fail "expected 3 ABSENT markers (secondmates.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, charter.md, learnings.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+test_context_digest_prints_secondmate_charter() {
+  local rec root home fakebin out charter_section
+  rec=$(new_world secondmate-charter)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' '# Secondmate Charter' 'Own durable role context.' > "$home/data/charter.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "data/charter.md" "digest did not label the charter.md section"
+  charter_section=$(printf '%s\n' "$out" | awk '/^data\/charter\.md$/{flag=1;next}/^data\//{flag=0}flag')
+  assert_contains "$charter_section" "# Secondmate Charter" "digest did not print charter.md content"
+  assert_contains "$charter_section" "Own durable role context." "digest did not print full charter.md content"
+
+  pass "context digest prints persistent secondmate charter files"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -687,6 +709,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_prints_secondmate_charter
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_status_tail_bounding
