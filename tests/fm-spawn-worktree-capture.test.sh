@@ -36,7 +36,7 @@ case "$*" in
   *"#{pane_current_path}"*)
     n=0
     if [ -n "${FM_FAKE_PANE_COUNTER:-}" ]; then
-      [ -f "$FM_FAKE_PANE_COUNTER" ] && n=$(cat "$FM_FAKE_PANE_COUNTER")
+      [ -s "$FM_FAKE_PANE_COUNTER" ] && n=$(cat "$FM_FAKE_PANE_COUNTER")
       printf '%s\n' "$((n + 1))" > "$FM_FAKE_PANE_COUNTER"
     fi
     if [ "$n" -lt "${FM_FAKE_TRANSIENT_COUNT:-0}" ]; then
