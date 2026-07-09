@@ -10,7 +10,12 @@
 # owns triage and this watcher queues and exits on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active. A
+#                          .status/.turn-ended/.check.sh with no matching
+#                          state/<id>.meta is an orphan from a torn-down task
+#                          (or a leaked writer still touching its old path) and
+#                          is always absorbed and removed, even under afk -
+#                          never classified, never actionable.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -306,10 +311,37 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # line per changed file. .seen-* is updated only after the wake is either
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
+#
+# Orphan guard: fm-teardown.sh removes a task's .status, .turn-ended, and
+# .meta together in one rm -f, so a live task always has a matching
+# state/<id>.meta. A .status/.turn-ended surviving with no matching .meta
+# belongs to a torn-down (or never-recorded) task - most commonly a harness
+# turn-end hook whose command line baked in an absolute path to this file
+# before teardown ran (Stop hooks, opencode's plugin, pi's extension, grok's
+# global hook) and which can keep touching that path if its owning process
+# outlives teardown's cleanup (backend kill best-effort, not guaranteed).
+# Such a file has no owner for firstmate to act on, so it must never wake
+# firstmate no matter how many times it reappears: skip it out of the signal
+# scan entirely (never even reaches classification) and best-effort remove
+# it so a leaked writer cannot leave a permanently "fresh" file sitting in
+# state/. A brand-new task cannot be mistaken for an orphan here: fm-spawn.sh
+# writes state/<id>.meta before it ever launches the agent that could produce
+# the first turn-end, so meta always exists first.
 scan_signals() {
-  local f sig sf
+  local f sig sf base task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in
+      *.status) task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) continue ;;
+    esac
+    if [ ! -e "$STATE/$task.meta" ]; then
+      triage_log "absorbed orphan signal (no state/$task.meta): $f"
+      rm -f "$f" 2>/dev/null || true
+      continue
+    fi
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
@@ -407,6 +439,17 @@ while :; do
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # Same orphan guard as scan_signals: teardown removes .check.sh and
+      # .meta together, so a survivor with no matching .meta belongs to a
+      # torn-down task and must never run or wake firstmate. x-watch.check.sh
+      # is the one exception: fm-bootstrap.sh's X-mode relay poll shim, keyed
+      # by the fixed name "x-watch" rather than a spawned task id, so it has
+      # no state/x-watch.meta by design and must never be treated as an orphan.
+      if [ "$(basename "$c" .check.sh)" != "x-watch" ] && [ ! -e "$STATE/$(basename "$c" .check.sh).meta" ]; then
+        triage_log "absorbed orphan check (no matching .meta): $c"
+        rm -f "$c" 2>/dev/null || true
+        continue
+      fi
       out=$(run_check "$c")
       if [ -n "$out" ]; then
         reason="check: $c: $out"

@@ -111,6 +111,9 @@ test_stale_is_terminal_classifier() {
 test_scan_captain_relevant_statuses_classifier() {
   local dir state out
   dir=$(make_case classify-scan); state="$dir/state"
+  fm_write_meta "$state/one.meta" "window=sess:fm-one"
+  fm_write_meta "$state/two.meta" "window=sess:fm-two"
+  fm_write_meta "$state/three.meta" "window=sess:fm-three"
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
@@ -119,6 +122,18 @@ test_scan_captain_relevant_statuses_classifier() {
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+}
+
+test_scan_captain_relevant_statuses_orphan_guard() {
+  local dir state out
+  dir=$(make_case classify-scan-orphan); state="$dir/state"
+  fm_write_meta "$state/live.meta" "window=sess:fm-live"
+  printf 'done: PR https://x/y/pull/1\n' > "$state/live.status"
+  printf 'done: orphan PR\n' > "$state/ghost.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "live.status" >/dev/null || fail "scan missed the live task's done: status"
+  printf '%s' "$out" | grep -F "ghost.status" >/dev/null && fail "scan surfaced a no-meta orphan done: status"
+  pass "scan_captain_relevant_statuses skips a captain-relevant status with no matching .meta"
 }
 
 test_classifier_primitives() {
@@ -198,6 +213,7 @@ test_signal_crew_provably_working_classifier() {
 test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid
   dir=$(make_case provably-working-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
   # The crew's pipeline is in an actively-running step: positive evidence it is
@@ -220,6 +236,7 @@ test_provably_working_signal_absorbed() {
 test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   : > "$state/task.turn-ended"
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
@@ -235,6 +252,130 @@ test_turn_ended_provably_working_absorbed() {
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
 
+# --- an orphan marker with no matching state/<id>.meta NEVER surfaces --------
+# fm-teardown.sh removes a task's .status, .turn-ended, and .meta together in
+# one rm -f, so a live task always has a matching .meta. A .turn-ended (or
+# .status) file that survives with no .meta belongs to a torn-down task - most
+# plausibly a harness turn-end hook (e.g. a Claude Stop hook) whose command
+# line baked in the absolute state path before teardown ran, still firing if
+# its owning process outlives teardown's best-effort backend kill. Regression
+# for the orphan-signal-forever bug: such a marker must never wake firstmate,
+# no matter how many times it reappears with a fresh mtime, and the watcher
+# should clean it up rather than leave it sitting in state/ forever.
+
+test_orphan_turn_ended_never_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-turn-ended); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # Deliberately NO state/orphan.meta: this id was torn down (or never spawned).
+  : > "$state/orphan.turn-ended"
+  # Even a verdict that would normally be surfaced (crew "not provably
+  # working") must not matter here - the orphan guard runs before any
+  # provably-working read.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan turn-end with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan turn-end enqueued a durable wake record"
+  [ ! -e "$state/orphan.turn-ended" ] || fail "orphan turn-end was not cleaned up"
+  reap "$pid"
+  pass "a turn-end marker with no matching state/<id>.meta never surfaces and is removed"
+}
+
+test_orphan_turn_ended_recreated_every_poll_never_surfaces() {
+  local dir state fakebin out pid i
+  dir=$(make_case orphan-turn-ended-recreated); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  # Simulate a leaked writer that keeps re-touching the orphan marker with a
+  # fresh mtime every poll (the exact reported symptom: recreated even when
+  # manually deleted between cycles). Across several poll cycles this must
+  # never once become an actionable wake.
+  i=0
+  while [ "$i" -lt 5 ]; do
+    : > "$state/ghost.turn-ended"
+    sleep 0.3
+    i=$((i + 1))
+  done
+  if ! wait_live "$pid" 10; then
+    reap "$pid"; fail "watcher exited while an orphan turn-end was repeatedly recreated (should never surface): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "repeatedly recreated orphan turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "repeatedly recreated orphan turn-end enqueued a durable wake record"
+  reap "$pid"
+  pass "an orphan turn-end recreated with a fresh mtime every poll never becomes actionable"
+}
+
+test_orphan_status_with_captain_relevant_verb_never_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-status-verb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/orphan.meta. Even a captain-relevant verb (which would normally
+  # be immediately actionable via signal_reason_is_actionable) must not
+  # surface for an unowned file - the orphan check runs before classification.
+  printf 'needs-decision: pick A or B\n' > "$state/orphan.status"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan captain-relevant status with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan captain-relevant status printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan captain-relevant status enqueued a durable wake record"
+  [ ! -e "$state/orphan.status" ] || fail "orphan captain-relevant status was not cleaned up"
+  reap "$pid"
+  pass "a captain-relevant status with no matching state/<id>.meta never surfaces and is removed"
+}
+
+test_orphan_check_sh_never_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/orphan.meta. A .check.sh that would otherwise print an actionable
+  # line must never even run once its owning task is torn down.
+  cat > "$state/orphan.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "should never run"
+SH
+  chmod +x "$state/orphan.check.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan check.sh with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan check.sh printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan check.sh enqueued a durable wake record"
+  [ ! -e "$state/orphan.check.sh" ] || fail "orphan check.sh was not cleaned up"
+  reap "$pid"
+  pass "a check.sh with no matching state/<id>.meta never runs and is removed"
+}
+
+# --- the X-mode relay poll shim (state/x-watch.check.sh) is exempt ----------
+# x-watch.check.sh (fm-bootstrap.sh's X-mode relay poll shim) is keyed by the
+# fixed name "x-watch", not a spawned task id, so it never has a matching
+# state/x-watch.meta by design. The orphan guard must not treat it as an
+# orphan: it must keep running and must not be deleted.
+test_x_watch_check_sh_survives_orphan_guard_and_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case x-watch-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/x-watch.meta - by design, this shim is never task-keyed.
+  cat > "$state/x-watch.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "check: x-mention deadbeef"
+SH
+  chmod +x "$state/x-watch.check.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher never fired for x-watch.check.sh's actionable output (should surface): $(cat "$out")"
+  fi
+  [ -s "$out" ] || fail "x-watch.check.sh's actionable output did not produce a wake reason"
+  [ -e "$state/x-watch.check.sh" ] || fail "x-watch.check.sh was wrongly deleted as an orphan"
+  pass "x-watch.check.sh survives the orphan guard and keeps running with no state/x-watch.meta"
+}
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
@@ -244,6 +385,7 @@ test_turn_ended_not_working_surfaced() {
   local dir state fakebin out drain_out pid
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   : > "$state/task.turn-ended"
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
@@ -261,6 +403,7 @@ test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
   # A non-no-mistakes crew (no run) whose pane went idle: fm-crew-state falls back
@@ -283,6 +426,7 @@ test_actionable_signal_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
   watch_bg "$state" "$fakebin" "$out"
@@ -628,6 +772,7 @@ fi
 exit 127
 SH
   chmod +x "$fakebin/wc"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
   # Provably working so the no-verb signal is absorbed (which is what writes the
@@ -673,6 +818,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # per-poll signal scan stays quiet) but which was never surfaced (no
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
   # fleet-scan backstop must catch it and wake firstmate.
+  printf 'window=test:fm-miss\nkind=ship\n' > "$state/miss.meta"
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -692,6 +838,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 test_beacon_stays_fresh_while_absorbing() {
   local dir state fakebin out status_file pid m1 m2 now
   dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: a\n' > "$status_file"
   # Provably working so the working: notes are absorbed (the path that must keep the
@@ -723,6 +870,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   status_file="$state/task.status"
   printf 'working: routine note\n' > "$status_file"
   date '+%s' > "$state/.afk"   # away mode: the supervise-daemon owns triage
@@ -743,11 +891,17 @@ test_afk_present_reverts_watcher_to_one_shot() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
+test_scan_captain_relevant_statuses_orphan_guard
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_orphan_turn_ended_never_surfaces
+test_orphan_turn_ended_recreated_every_poll_never_surfaces
+test_orphan_status_with_captain_relevant_verb_never_surfaces
+test_orphan_check_sh_never_runs
+test_x_watch_check_sh_survives_orphan_guard_and_runs
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced

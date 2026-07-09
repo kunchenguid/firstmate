@@ -155,6 +155,13 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 # detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
+# A live task always has a matching state/<id>.meta (fm-teardown.sh removes
+# .status/.turn-ended/.meta together); the watcher's orphan guard absorbs and
+# deletes any *.status/*.turn-ended with no matching .meta before it can ever
+# become a signal, so fake-c1's escalations need this fixture to be seen as a
+# live task's status. Written once; reset_state() never clears *.meta.
+printf 'window=supervisor:fm-fake-c1\nkind=ship\n' > "$STATE_DIR/fake-c1.meta"
+
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \

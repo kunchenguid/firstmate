@@ -293,6 +293,7 @@ test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
   state="$dir/state"
+  fm_write_meta "$state/dup-t6.meta" "window=sess:fm-dup-t6"
   printf 'done: ready\n' > "$state/dup-t6.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
@@ -302,6 +303,17 @@ test_heartbeat_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
   pass "catch-all scan escalates a missed terminal once, not twice"
+}
+
+test_heartbeat_scan_orphan_status_not_escalated() {
+  local dir state
+  dir=$(make_supercase scan-orphan)
+  state="$dir/state"
+  printf 'done: orphan PR\n' > "$state/ghost.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan escalated an orphan .status with no matching .meta"
+  pass "catch-all scan never escalates a no-meta orphan .status (housekeeping stays quiet, even under afk)"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -983,6 +995,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_heartbeat_scan_orphan_status_not_escalated
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
