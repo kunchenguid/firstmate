@@ -24,12 +24,13 @@ fi
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
 test_afk_start_refuses_when_flag_cannot_be_written() {
-  local dir state out status
+  local dir state fakebin out status
   dir=$(make_supercase afk-start-flag-unwritable)
   state="$dir/state"
+  fakebin="$dir/fakebin"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -48,8 +49,8 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
-  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup"
   assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation"
+  assert_absent "$state/.afk" "fm-afk-start.sh left .afk behind after startup validation failed"
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale pidfile-only live pid"
   pass "fm-afk-start.sh ignores stale pidfile-only live pids"
 }
@@ -68,11 +69,26 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
-  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup after rejecting the stale lock"
   assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation after stale lock cleanup"
+  assert_absent "$state/.afk" "fm-afk-start.sh left .afk behind after stale-lock startup validation failed"
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale daemon lock with a reused pid"
   assert_not_contains "$out" "another fm-supervise-daemon is already running" "daemon singleton lock still trusted the reused pid"
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
+}
+
+test_afk_start_does_not_set_flag_when_startup_preflight_fails() {
+  local dir state out status
+  dir=$(make_supercase afk-start-preflight-fail)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when daemon startup preflight fails"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "fm-afk-start.sh did not surface daemon backend validation"
+  assert_absent "$state/.afk" "fm-afk-start.sh set .afk even though daemon startup preflight failed"
+  assert_absent "$state/.supervise-daemon.log" "fm-afk-start.sh started the daemon after startup preflight failed"
+  pass "fm-afk-start.sh leaves afk off when daemon startup preflight fails"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1359,6 +1375,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_does_not_set_flag_when_startup_preflight_fails
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

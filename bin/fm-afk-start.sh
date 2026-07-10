@@ -3,9 +3,9 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk, checks state/.supervise-daemon.lock, and:
-#     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
-#       lock is held by a live daemon;
+#   Checks state/.supervise-daemon.lock, and:
+#     - refreshes state/.afk, prints "afk: daemon already running pid=<pid>",
+#       then exits 0 when that lock is held by a live daemon;
 #     - otherwise execs bin/fm-supervise-daemon.sh in the foreground.
 #
 # Run this command as its own tracked background terminal/session.
@@ -32,10 +32,11 @@ case "${1:-}" in
 esac
 
 mkdir -p "$STATE"
-date '+%s' > "$STATE/.afk"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervise-daemon.sh
+. "$DAEMON"
 
 daemon_lock_owner() {
   local owner
@@ -83,6 +84,7 @@ daemon_lock_held_by_live_daemon() {
 
 pid=$(daemon_lock_pid 2>/dev/null || true)
 if daemon_lock_held_by_live_daemon; then
+  date '+%s' > "$STATE/.afk"
   echo "afk: daemon already running pid=$pid"
   exit 0
 fi
@@ -91,5 +93,18 @@ if fm_pid_alive "$pid" && [ -n "$pid" ]; then
   fm_lock_remove_path "$LOCK" 2>/dev/null || true
 fi
 
+backend=$(discover_supervisor_backend) || true
+if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$backend"; then
+  echo "error: away-mode daemon does not support supervisor backend '$backend' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+  exit 1
+fi
+
+target=$(discover_supervisor_target) || true
+if ! fm_backend_target_exists "$backend" "$target"; then
+  echo "error: supervisor target '$target' does not resolve to a $backend pane; set FM_SUPERVISOR_TARGET" >&2
+  exit 1
+fi
+
+date '+%s' > "$STATE/.afk"
 echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
 exec "$DAEMON"
