@@ -634,19 +634,12 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# Thin adapter over the shared plain-text stripper (bin/fm-composer-lib.sh),
+# used only for STRUCTURAL row/shape detection where ghost text must be kept so
+# the box border or bare prompt glyph is still visible. Content extraction uses
+# the shared fm_composer_strip_ghost instead.
 fm_backend_herdr_strip_ansi() {  # <text>
-  local esc
-  esc=$'\033'
-  printf '%s' "$1" | sed "s/${esc}\\[[0-9;?]*[[:alpha:]]//g"
-}
-
-fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
-  local raw=$1 esc
-  esc=$'\033'
-  case "$raw" in
-    *"${esc}[1m❯ ${esc}[0m${esc}[2m"*|*"${esc}[1m› ${esc}[0m${esc}[2m"*) return 0 ;;
-  esac
-  return 1
+  printf '%s' "$1" | fm_composer_strip_ansi
 }
 
 # fm_backend_herdr_composer_state: classify the composer's own row as
@@ -697,11 +690,16 @@ fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
 #   unknown - the pane could not be read, or no composer row (of either shape)
 #             was found in the captured window.
 #
-# Codex ghost-suggestion note (2026-07-08): herdr's ANSI pane read preserves the
-# faint SGR style Codex uses for idle suggestions after the bare `›` prompt,
-# while real typed input after the same prompt is not faint. The classifier
-# therefore uses ANSI capture when available and treats a faint bare-prompt tail
-# as empty without weakening protection for real typed input.
+# Ghost/placeholder note: herdr's ANSI pane read preserves the harness's own
+# de-emphasis styling, and the classifier extracts real typed content with the
+# shared fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops dim/faint
+# runs (claude's rotating prompt suggestion, codex's idle suggestion after the
+# bare `›` prompt) AND dark/muted truecolor foreground runs (grok's placeholder),
+# while keeping non-de-emphasised real typed input. This is the same owner the
+# tmux adapter routes through, so the two backends cannot drift (task
+# afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
+# that recognized only codex's bold-wrapped bare prompt and missed claude's own
+# dim ghost - the overnight away-mode injection wedge on the primary claude pane.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -712,36 +710,47 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" bordered=0 verdict
+  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  # Structural scan: locate the bottom-most composer row and remember its RAW
+  # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
+  # keeps ghost text so the border/prompt glyph is still visible); the raw row is
+  # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
-    raw_line=$line
-    line=$(fm_backend_herdr_strip_ansi "$line")
-    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed=$(fm_backend_herdr_strip_ansi "$line")
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
-        stripped=$trimmed
         shape=bordered
-        raw_match=$raw_line
+        raw_match=$line
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
-          stripped=$trimmed
           shape=bare
-          raw_match=$raw_line
+          raw_match=$line
           found=1
         fi
         ;;
     esac
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # Content: extract the real typed text from the raw row with the shared,
+  # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
+  # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
+  # faint byte-pattern check (which recognized only Codex's bold-wrapped bare
+  # prompt and missed claude's own dim prompt-suggestion ghost - the overnight
+  # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
+  # dark box border too, which is why the bordered flag was read from the plain
+  # shape above, not from this ghost-stripped content.
+  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bordered ]; then
     bordered=1
-    # Strip the border glyphs, then trim again.
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
@@ -752,14 +761,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
-  # herdr-only override: a bare-shape prompt whose trailing text is rendered
-  # faint in the ANSI capture is a Codex idle ghost suggestion, not real input.
-  if [ "$verdict" = pending ] && [ "$shape" = bare ] \
-     && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
-    verdict=empty
-  fi
-  printf '%s' "$verdict"
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
