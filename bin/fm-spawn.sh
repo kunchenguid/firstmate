@@ -212,6 +212,7 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_LABEL_ABORT_CLEANUP=0
 HERDR_LABEL_ROLLBACK_DIR=
+HERDR_LABEL_SNAPSHOT_READY=0
 HERDR_LABEL_TASK_TMP_PREEXISTED=0
 HERDR_LABEL_GOTMP_PREEXISTED=0
 HERDR_LABEL_GROK_TOKEN_CREATED=
@@ -277,7 +278,7 @@ herdr_labeled_spawn_abort_cleanup() {
       rm -f "$hooks_dir/$HERDR_LABEL_GROK_TOKEN_CREATED"
       ;;
   esac
-  if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+  if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
     if [ -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" ]; then
       mkdir -p "$WT/.claude"
       mv -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" "$WT/.claude/settings.local.json"
@@ -296,6 +297,8 @@ herdr_labeled_spawn_abort_cleanup() {
       rm -f "$WT/.fm-grok-turnend"
     fi
     rmdir "$WT/.opencode/plugins" "$WT/.opencode" "$WT/.claude" 2>/dev/null || true
+  fi
+  if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
     if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null ); then
       sleep 1
       if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null ); then
@@ -311,24 +314,28 @@ herdr_labeled_spawn_abort_cleanup() {
       rmdir "$TASK_TMP/gotmp" 2>/dev/null || true
     fi
   fi
-  for suffix in pi-ext.ts grok-turnend-token; do
-    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" ]; then
-      mv -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" "$STATE/$ID.$suffix"
-    else
-      rm -f "$STATE/$ID.$suffix"
-    fi
-  done
+  if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ]; then
+    for suffix in pi-ext.ts grok-turnend-token; do
+      if [ -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" ]; then
+        mv -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" "$STATE/$ID.$suffix"
+      else
+        rm -f "$STATE/$ID.$suffix"
+      fi
+    done
+  fi
   if [ "$worktree_returned" = 1 ]; then
-    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
-      mv -f "$HERDR_LABEL_ROLLBACK_DIR/meta" "$STATE/$ID.meta"
-    else
-      rm -f "$STATE/$ID.meta"
+    if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ]; then
+      if [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
+        mv -f "$HERDR_LABEL_ROLLBACK_DIR/meta" "$STATE/$ID.meta"
+      else
+        rm -f "$STATE/$ID.meta"
+      fi
     fi
-    rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
-  elif [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
+    [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
+  elif [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ] && [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
     echo "warning: prior metadata for $ID remains at $HERDR_LABEL_ROLLBACK_DIR/meta" >&2
   else
-    rmdir "$HERDR_LABEL_ROLLBACK_DIR" 2>/dev/null || true
+    [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
   fi
 }
 
@@ -986,6 +993,9 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 [ ! -d "$TASK_TMP" ] || HERDR_LABEL_TASK_TMP_PREEXISTED=1
 [ ! -d "$TASK_TMP/gotmp" ] || HERDR_LABEL_GOTMP_PREEXISTED=1
+if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ]; then
+  HERDR_LABEL_ABORT_CLEANUP=1
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -1000,7 +1010,7 @@ if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ]; then
   [ ! -f "$WT/.claude/settings.local.json" ] || cp -p "$WT/.claude/settings.local.json" "$HERDR_LABEL_ROLLBACK_DIR/claude-settings"
   [ ! -f "$WT/.opencode/plugins/fm-turn-end.js" ] || cp -p "$WT/.opencode/plugins/fm-turn-end.js" "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin"
   [ ! -f "$WT/.fm-grok-turnend" ] || cp -p "$WT/.fm-grok-turnend" "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer"
-  HERDR_LABEL_ABORT_CLEANUP=1
+  HERDR_LABEL_SNAPSHOT_READY=1
 fi
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"

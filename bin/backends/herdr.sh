@@ -1218,8 +1218,8 @@ EOF
 
 # fm_backend_herdr_identity_for_tab: return the stable fm-<id> identity for a
 # metadata-recorded tab in this home, session, and workspace.
-fm_backend_herdr_identity_for_tab() {  # <session> <workspace_id> <tab_id>
-  local session=$1 wsid=$2 tab_id=$3 state meta id
+fm_backend_herdr_identity_for_tab() {  # <session> <workspace_id> <tab_id> <pane_id> <live_label>
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 live_label=$5 state meta id recorded_label recorded_worktree live_path
   state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
@@ -1227,6 +1227,11 @@ fm_backend_herdr_identity_for_tab() {  # <session> <workspace_id> <tab_id>
     grep -qxF "herdr_session=$session" "$meta" 2>/dev/null || continue
     grep -qxF "herdr_workspace_id=$wsid" "$meta" 2>/dev/null || continue
     grep -qxF "herdr_tab_id=$tab_id" "$meta" 2>/dev/null || continue
+    recorded_label=$(sed -n 's/^label=//p' "$meta" 2>/dev/null | head -1)
+    recorded_worktree=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
+    [ -n "$recorded_label" ] && [ "$live_label" = "$recorded_label" ] && [ -n "$recorded_worktree" ] || continue
+    live_path=$(fm_backend_herdr_current_path "$session:$pane_id" 2>/dev/null || true)
+    [ "$live_path" = "$recorded_worktree" ] || continue
     id=${meta##*/}
     id=${id%.meta}
     printf 'fm-%s' "$id"
@@ -1251,15 +1256,15 @@ fm_backend_herdr_list_live() {  # <session>
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
-    identity=$(fm_backend_herdr_identity_for_tab "$session" "$wsid" "$tab_id" 2>/dev/null || true)
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
+    [ -n "$pane_id" ] || continue
+    identity=$(fm_backend_herdr_identity_for_tab "$session" "$wsid" "$tab_id" "$pane_id" "$label" 2>/dev/null || true)
     if [ -z "$identity" ]; then
       case "$label" in
         fm-*) identity=$label ;;
         *) continue ;;
       esac
     fi
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$identity"
   done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }

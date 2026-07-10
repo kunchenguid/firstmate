@@ -20,7 +20,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META_LOCK=
 META_SNAPSHOT=
 META_TMP=
+LABEL_RENAME_PENDING=0
+LABEL_TARGET=
+LABEL_WORKSPACE=
+LABEL_TAB=
+LABEL_WORKTREE=
+LABEL_CURRENT=
+LABEL_NEW=
 fm_label_cleanup() {
+  if [ "$LABEL_RENAME_PENDING" = 1 ]; then
+    if ! fm_backend_herdr_rename_owned_task "$LABEL_TARGET" "$LABEL_WORKSPACE" "$LABEL_TAB" "$LABEL_NEW" "$LABEL_WORKTREE" "$LABEL_CURRENT"; then
+      echo "warning: could not restore the prior herdr tab label after metadata update failure" >&2
+    fi
+  fi
   [ -z "$META_TMP" ] || rm -f "$META_TMP"
   [ -z "$META_SNAPSHOT" ] || rm -f "$META_SNAPSHOT"
   [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"
@@ -78,6 +90,13 @@ case "$BACKEND" in
       echo "error: could not corroborate ownership of the live herdr tab for $TASK_ID; refusing to rename" >&2
       exit 1
     fi
+    LABEL_TARGET=$TARGET
+    LABEL_WORKSPACE=$RECORDED_WORKSPACE
+    LABEL_TAB=$RECORDED_TAB
+    LABEL_WORKTREE=$RECORDED_WORKTREE
+    LABEL_CURRENT=$CURRENT_LABEL
+    LABEL_NEW=$NEW_LABEL
+    LABEL_RENAME_PENDING=1
     META_TMP=$(mktemp "$STATE/.$TASK_ID.meta.update.XXXXXX")
     if ! { sed '/^label=/d' "$META_SNAPSHOT" && printf 'label=%s\n' "$NEW_LABEL"; } > "$META_TMP"; then
       echo "error: herdr tab renamed but could not update $META" >&2
@@ -87,8 +106,12 @@ case "$BACKEND" in
       echo "error: herdr tab renamed but metadata changed or disappeared before updating $META" >&2
       exit 1
     fi
-    mv -f "$META_TMP" "$META"
+    if ! mv -f "$META_TMP" "$META"; then
+      echo "error: herdr tab renamed but could not commit metadata update to $META" >&2
+      exit 1
+    fi
     META_TMP=
+    LABEL_RENAME_PENDING=0
     printf 'fm-label: %s -> %s\n' "$TASK_ID" "$NEW_LABEL"
     ;;
   *)
