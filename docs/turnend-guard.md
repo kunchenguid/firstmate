@@ -12,7 +12,8 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, Claude blocks the turn end and the passive harness adapters force a bounded follow-up turn that tells the primary to resume supervision.
+Codex is the temporary fail-open exception while openai/codex#20783 is unresolved: its adapter returns a visible non-blocking warning and records a durable wake for the next foreground checkpoint or session start.
 
 ## Shared Predicate
 
@@ -75,6 +76,10 @@ On 2026-07-10, Codex `0.144.1` persisted the synthetic `<hook_prompt>` continuat
 The persisted UUID mapped exactly to the earlier blocking Stop continuation, matching upstream issue [openai/codex#20783](https://github.com/openai/codex/issues/20783).
 Current upstream source and the available `0.145` alpha remained unfixed on 2026-07-10.
 The tracked Codex adapter therefore records the alarm durably and exits 0 until upstream fixes the item-id serialization path.
+Command run for the isolated live adapter regression on 2026-07-10 with `codex-cli 0.144.1`: `FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs`.
+Observed output: `FIRST_TURN_COMPLETED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, and `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`.
+The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
+It never opens or modifies the live Codex session directory, and it deletes the temporary fixture on exit.
 The Stop payload included `cwd`.
 Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Use the shell tool to run mkdir -p outside && cd outside && pwd, then use the shell tool again to run pwd. Your final answer must include the two observed outputs.'`.
 Observed output: the first command printed `<scratch>/outside`, the second command printed `<scratch>`, the Stop hook process `pwd -P` printed `<scratch>`, payload `cwd` printed `<scratch>`, and `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, and `CODEX_CWD` were empty.
@@ -124,4 +129,5 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 Command run on 2026-07-10: `tests/fm-turnend-guard.test.sh`.
 Observed Codex regression output: `ok - .codex/hooks.json: unhealthy watcher returns systemMessage JSON and queues durably without blocking Codex`.
 The default behavior suite does not invoke live language-model harnesses.
+`FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs` opts into the isolated Codex app-server regression recorded above and fails clearly when Codex auth is unavailable.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
