@@ -144,6 +144,7 @@ test_body_moves_when_last_lines_of_file() {
   local home="$TMP_ROOT/body-eof-main"
   local sub="$TMP_ROOT/body-eof-sub"
   setup_homes "$home" "$sub"
+  printf '%s\n' '## Queued' > "$sub/data/backlog.md"
 
   # No trailing newline after the last body line is still a valid file shape;
   # printf builds that deliberately.
@@ -154,6 +155,8 @@ test_body_moves_when_last_lines_of_file() {
     printf '%s\n' '  ## Intent'
     printf '%s' '  eof body line two'
   } > "$home/data/backlog.md"
+  local expected_destination="$TMP_ROOT/body-eof-expected.md"
+  cp "$home/data/backlog.md" "$expected_destination"
 
   local expected_block
   expected_block=$(extract_item_block "$home/data/backlog.md" eof-item)
@@ -165,6 +168,8 @@ test_body_moves_when_last_lines_of_file() {
   dest_block=$(extract_item_block "$sub/data/backlog.md" eof-item)
   assert_block_equals "destination body block mismatch for EOF item" \
     "$expected_block" "$dest_block"
+  cmp -s "$expected_destination" "$sub/data/backlog.md" \
+    || fail "EOF item transfer changed the final-record terminator"
 
   # Source should have no item residual - only the section heading remains.
   if grep -E 'eof-item|eof body|## Intent' "$home/data/backlog.md" >/dev/null; then
@@ -173,6 +178,66 @@ test_body_moves_when_last_lines_of_file() {
   assert_grep '## Queued' "$home/data/backlog.md" "Queued section heading was lost"
 
   pass "body as last lines of the file moves intact"
+}
+
+test_eof_body_before_seeded_destination_section_keeps_boundary() {
+  local home="$TMP_ROOT/body-eof-seeded-main"
+  local sub="$TMP_ROOT/body-eof-seeded-sub"
+  setup_homes "$home" "$sub"
+
+  {
+    printf '%s\n' '## Queued'
+    printf '%s\n' '- [ ] seeded-eof-item - ends the file (repo: alpha)'
+    printf '%s\n' '  seeded eof body one'
+    printf '%s' '  seeded eof body two'
+  } > "$home/data/backlog.md"
+  local expected_destination="$TMP_ROOT/body-eof-seeded-expected.md"
+  {
+    printf '%s\n' '## In flight'
+    printf '%s\n' ''
+    printf '%s\n' '## Queued'
+    printf '%s\n' ''
+    printf '%s\n' '- [ ] seeded-eof-item - ends the file (repo: alpha)'
+    printf '%s\n' '  seeded eof body one'
+    printf '%s\n' '  seeded eof body two'
+    printf '%s\n' '## Done'
+  } > "$expected_destination"
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design seeded-eof-item >/dev/null \
+    || fail "handoff of EOF body into seeded backlog failed"
+
+  cmp -s "$expected_destination" "$sub/data/backlog.md" \
+    || fail "EOF body did not remain separate from the seeded ## Done heading"
+
+  pass "EOF body before a seeded destination section keeps its boundary"
+}
+
+test_untouched_eof_line_preserves_terminator() {
+  local home="$TMP_ROOT/untouched-eof-main"
+  local sub="$TMP_ROOT/untouched-eof-sub"
+  setup_homes "$home" "$sub"
+
+  {
+    printf '%s\n' '## Queued'
+    printf '%s\n' '- [ ] move-item - remove this block (repo: alpha)'
+    printf '%s\n' '  move body'
+    printf '%s\n' '- [ ] keep-item - retain this block (repo: beta)'
+    printf '%s' '  keep body without a final newline'
+  } > "$home/data/backlog.md"
+  local expected_source="$TMP_ROOT/untouched-eof-expected.md"
+  {
+    printf '%s\n' '## Queued'
+    printf '%s\n' '- [ ] keep-item - retain this block (repo: beta)'
+    printf '%s' '  keep body without a final newline'
+  } > "$expected_source"
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design move-item >/dev/null \
+    || fail "handoff before untouched EOF preservation check failed"
+
+  cmp -s "$expected_source" "$home/data/backlog.md" \
+    || fail "handoff changed an untouched final-record terminator"
+
+  pass "untouched EOF line preserves its original terminator"
 }
 
 test_body_handoff_is_idempotent() {
@@ -272,6 +337,8 @@ EOF
 test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
 test_body_moves_when_last_lines_of_file
+test_eof_body_before_seeded_destination_section_keeps_boundary
+test_untouched_eof_line_preserves_terminator
 test_body_handoff_is_idempotent
 test_indented_heading_is_not_section_boundary
 

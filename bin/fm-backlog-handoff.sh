@@ -155,6 +155,13 @@ validate_backlog_file() {
   fi
 }
 
+file_ends_with_lf() {
+  local path=$1 last_byte
+  [ -s "$path" ] || return 1
+  last_byte=$(tail -c 1 "$path" | od -An -tx1 | tr -d '[:space:]')
+  [ "$last_byte" = "0a" ]
+}
+
 backlog_key_section() {
   local file=$1 key=$2
   [ -f "$file" ] || return 1
@@ -259,7 +266,22 @@ fi
 # it lived under. Body membership is indentation only: a line starting with
 # whitespace continues the block even when its content looks like a heading.
 : > "$MOVED_FILE"
-awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
+MAIN_FINAL_LF=0
+if file_ends_with_lf "$MAIN_BACKLOG"; then
+  MAIN_FINAL_LF=1
+fi
+awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" -v keptfile="$KEPT_FILE" \
+  -v final_lf="$MAIN_FINAL_LF" '
+  function emit_kept(rec) {
+    if (have_kept) print pending_kept > keptfile
+    pending_kept = rec
+    have_kept = 1
+  }
+  function emit_moved(rec) {
+    if (have_moved) print pending_moved > movedfile
+    pending_moved = rec
+    have_moved = 1
+  }
   BEGIN {
     while ((getline k < keysfile) > 0) { if (k != "") want[k] = 1 }
     section = "## Queued"
@@ -268,7 +290,9 @@ awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
   /^## / {
     moving = 0
     section = $0
-    print
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
     next
   }
   /^- \[[ x]\] / {
@@ -277,51 +301,90 @@ awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
     id = rest
     sub(/[ \t].*/, "", id)
     if (id in want) {
-      print section "\t" $0 > movedfile
+      emit_moved(section "\t" $0)
       moving = 1
+      last_source_kept = 0
+      last_source_moved = 1
       next
     }
     moving = 0
-    print
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
     next
   }
   moving && /^[ \t]/ {
-    print section "\t" $0 > movedfile
+    emit_moved(section "\t" $0)
+    last_source_kept = 0
+    last_source_moved = 1
     next
   }
   {
     moving = 0
-    print
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
   }
-' "$MAIN_BACKLOG" > "$KEPT_FILE"
+  END {
+    if (have_kept) {
+      if (last_source_kept && !final_lf) printf "%s", pending_kept > keptfile
+      else print pending_kept > keptfile
+    }
+    if (have_moved) {
+      if (last_source_moved && !final_lf) printf "%s", pending_moved > movedfile
+      else print pending_moved > movedfile
+    }
+  }
+' "$MAIN_BACKLOG"
 
 # Pass 2: insert each moved block at the end of its section in the sub backlog,
 # creating the section heading if the sub backlog lacks it. Records are one
 # physical line each (section TAB line); multi-line bodies are consecutive
 # records under the same section and reassemble in order.
-awk -v movedfile="$MOVED_FILE" '
-  function flush(sec) {
+MOVED_FINAL_LF=0
+if file_ends_with_lf "$MOVED_FILE"; then
+  MOVED_FINAL_LF=1
+fi
+awk -v movedfile="$MOVED_FILE" -v moved_final_lf="$MOVED_FINAL_LF" '
+  function add_record(rec, eol,    tab, sec, line) {
+    tab = index(rec, "\t")
+    if (tab == 0) return
+    sec = substr(rec, 1, tab - 1)
+    line = substr(rec, tab + 1)
+    if (!(sec in items)) { order[++nsec] = sec }
+    items[sec] = items[sec] line eol
+  }
+  function flush(sec, needs_separator) {
     if (sec != "" && (sec in items) && !(sec in flushed)) {
       printf "%s", items[sec]
+      if (needs_separator && items[sec] !~ /\n$/) printf "\n"
       flushed[sec] = 1
     }
   }
   BEGIN {
     nsec = 0
+    have_pending = 0
     while ((getline rec < movedfile) > 0) {
-      tab = index(rec, "\t")
-      if (tab == 0) continue
-      sec = substr(rec, 1, tab - 1)
-      line = substr(rec, tab + 1)
-      if (!(sec in items)) { order[++nsec] = sec }
-      items[sec] = items[sec] line "\n"
+      if (have_pending) add_record(pending, "\n")
+      pending = rec
+      have_pending = 1
+    }
+    if (have_pending) {
+      add_record(pending, moved_final_lf ? "\n" : "")
     }
     cur = ""
   }
-  /^## / { flush(cur); cur = $0; print; next }
+  /^## / { flush(cur, 1); cur = $0; print; next }
   { print }
   END {
-    flush(cur)
+    needs_separator = 0
+    for (i = 1; i <= nsec; i++) {
+      if (!(order[i] in flushed) && order[i] != cur) {
+        needs_separator = 1
+        break
+      }
+    }
+    flush(cur, needs_separator)
     for (i = 1; i <= nsec; i++) {
       s = order[i]
       if (!(s in flushed)) {
