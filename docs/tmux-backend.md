@@ -12,7 +12,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
+- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, `grok`, `cursor`, or `hermes`.
 - `git` with GitHub auth (`gh auth login`).
 - `node`, required by firstmate's universal toolchain.
 - `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, plus `quota-axi` for bootstrap-managed backlog and dispatch support.
@@ -113,7 +113,9 @@ Verified the same session: a persisting parent process running a child command (
 
 The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
 
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
+- `alive` - the name contains `claude`, `codex`, `opencode`, `grok`, `cursor`, or `hermes`.
+The first four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
+`cursor` and `hermes` were added after their process names were verified for the same secondmate-liveness classifier path on 2026-07-05.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 
