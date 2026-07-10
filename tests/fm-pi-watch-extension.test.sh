@@ -1,101 +1,93 @@
 #!/usr/bin/env bash
-# Tests for the generated Pi primary watcher extension and Pi secondmate wiring.
+# Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
-GEN="$ROOT/bin/fm-pi-watch-extension.sh"
+EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
-test_generator_writes_extension() {
-  local home out file text expected_config_source version version_text marker_write
-  home="$TMP_ROOT/home"
-  mkdir -p "$home/state"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN")
-  file="$home/state/fm-primary-pi-watch.ts"
-  version="$home/state/.pi-watch-extension-version"
+install_pi_watch_extension_fixture() {
+  local repo=$1
+  mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
+  cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/node_modules/typebox/package.json" <<'JSON'
+{"name":"typebox","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/typebox/index.js" <<'JS'
+export const Type = {
+  Object(properties) {
+    return { type: "object", properties, additionalProperties: false };
+  },
+};
+JS
+}
+
+test_tracked_extension_present_and_self_hashing() {
+  local text expected_config_source
   expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
-  [ "$out" = "$file" ] || fail "generator printed '$out', expected '$file'"
-  assert_present "$file" "generator did not write the Pi watch extension"
-  assert_present "$version" "generator did not write the Pi watch extension version"
-  version_text=$(cat "$version")
-  text=$(cat "$file")
-  assert_contains "$text" "fm_watch_arm_pi" "generated extension missing tool name"
-  assert_contains "$text" "fm-watch-arm-pi" "generated extension missing command name"
-  assert_contains "$text" "fm-watch-arm.sh" "generated extension missing watcher arm"
-  assert_contains "$text" "sendUserMessage" "generated extension missing Pi wake API"
-  assert_contains "$text" "deliverAs: \"followUp\"" "generated extension missing followUp delivery"
-  assert_contains "$text" ".pi-watch-extension-loaded" "generated extension missing loaded marker"
-  assert_contains "$text" "const extensionVersion = \"$version_text\"" "generated extension missing content version"
-  assert_contains "$text" "sessionOwnsLock" "generated extension missing session lock ownership check"
-  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "generated extension does not distinguish missing lock from another owner"
-  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "generated extension does not read the effective session lock"
-  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "generated extension does not allow a pre-lock load marker"
-  assert_contains "$text" 'if (lockOwnership() === "other") return false' "generated extension overwrites another live session marker"
-  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "generated extension arms without the session lock"
-  marker_write="writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)"
-  assert_contains "$text" "$marker_write" "generated extension does not write the content version and process marker"
-  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "generated extension missing effective config resolution"
-  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "generated extension does not pass the effective config to the watcher arm"
-  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "generated extension does not pass the effective watcher arm script"
-  assert_contains "$text" "$expected_config_source" "generated extension does not source the effective x-mode config"
-  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "generated extension does not restart into a Pi-owned watcher child"
-  assert_not_contains "$text" "[ -f config/x-mode.env ]" "generated extension kept a repo-relative x-mode config path"
-  pass "Pi extension generator writes the firstmate-owned watcher bridge"
-}
-
-test_generator_preserves_loaded_marker_when_unchanged() {
-  local home file marker
-  home="$TMP_ROOT/home-stable"
-  mkdir -p "$home/state"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN" >/dev/null
-  file="$home/state/fm-primary-pi-watch.ts"
-  marker="$home/state/.pi-watch-extension-loaded"
-  touch -t 202001010000 "$file"
-  touch -t 202001010001 "$marker"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$GEN" >/dev/null
-  if [ "$file" -nt "$marker" ]; then
-    fail "generator rewrote identical content and made the extension newer than the loaded marker"
-  fi
-  pass "Pi extension generator preserves mtime when content is unchanged"
-}
-
-test_generator_uses_portable_mktemp_template() {
-  local text
-  text=$(cat "$GEN")
-  assert_contains "$text" "fm-primary-pi-watch.ts.XXXXXX" "generator mktemp template should keep Xs at the end"
-  assert_not_contains "$text" "fm-primary-pi-watch.XXXXXX.ts" "generator mktemp template must not put a suffix after the Xs"
-  pass "Pi extension generator uses a portable mktemp template"
+  assert_present "$EXT" "tracked Pi primary watcher extension is missing"
+  text=$(cat "$EXT")
+  assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
+  assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
+  assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
+  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
+  assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
+  assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
+  assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
+  assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
+  assert_contains "$text" "sessionOwnsLock" "tracked extension missing session lock ownership check"
+  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
+  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
+  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
+  assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
+  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "tracked extension arms without the session lock"
+  assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
+  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
+  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
+  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
+  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
+  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
+  assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
+  assert_contains "$text" 'parameters: Type.Object({})' "tracked extension tool is not using Pi's canonical TypeBox schema"
+  assert_contains "$text" 'content: [{ type: "text", text: result.message }]' "tracked extension tool is missing Pi text content"
+  assert_contains "$text" 'details: result' "tracked extension tool is missing structured result details"
+  assert_contains "$text" 'ctx.ui.notify' "tracked extension command does not notify through Pi's UI"
+  assert_contains "$text" 'process.once("exit", cleanupOnProcessExit)' "tracked extension lacks clean-process-exit cleanup"
+  assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
+  pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
 }
 
 test_spawn_template_mentions_pi_watch_placeholder() {
   local text
   text=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$text" "-e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include both primary extensions"
-  assert_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn does not generate the Pi watch extension before launch"
-  assert_contains "$text" "env FM_HOME=\"\$PROJ_ABS\" FM_ROOT_OVERRIDE=\"\$PROJ_ABS\" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \"\$SCRIPT_DIR/fm-pi-watch-extension.sh\"" "fm-spawn lets primary operational overrides leak into Pi secondmate watch generation"
+  assert_contains "$text" "\$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts" "fm-spawn does not point the Pi secondmate watch placeholder at the tracked extension"
+  assert_not_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn should no longer generate the Pi watch extension before launch"
   assert_contains "$text" "__PITURNEND__" "fm-spawn does not replace the Pi turn-end guard extension placeholder"
   assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
-  pass "Pi secondmate launch wiring includes both primary extensions"
+  pass "Pi secondmate launch wiring includes both tracked primary extensions"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
-  local repo home out status
+  local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" "$GEN" >/dev/null
-  out=$(PLUGIN="$home/state/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let handler = null;
+let notification = "";
 let prompt = "";
 const pi = {
   on() {},
@@ -114,9 +106,19 @@ if (!handler) {
   console.error("Pi watch command was not registered");
   process.exit(1);
 }
-const result = await handler();
-if (!result.includes("started Pi extension arm child")) {
-  console.error(result);
+const result = await handler("", {
+  ui: {
+    notify(message) {
+      notification = message;
+    },
+  },
+});
+if (result !== undefined) {
+  console.error(`Pi command returned a value: ${String(result)}`);
+  process.exit(1);
+}
+if (!notification.includes("started Pi extension arm child")) {
+  console.error(notification);
   process.exit(1);
 }
 for (let i = 0; i < 50 && !prompt; i += 1) {
@@ -140,6 +142,151 @@ EOF
   expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
   [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
   pass "Pi extension reports external healthy watcher output"
+}
+
+test_pi_tool_returns_agent_tool_result() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-tool-result-root"
+  home="$TMP_ROOT/pi-tool-result-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+if (tool.label !== "Arm firstmate watcher") throw new Error(`unexpected label: ${tool.label}`);
+if (tool.parameters?.type !== "object") throw new Error("tool parameters are not a TypeBox object schema");
+const result = await tool.execute("tool-call-1", {}, undefined, undefined, {});
+if (!Array.isArray(result.content) || result.content[0]?.type !== "text") {
+  throw new Error(`invalid tool content: ${JSON.stringify(result)}`);
+}
+if (!result.content[0].text.includes("started Pi extension arm child")) {
+  throw new Error(`unexpected tool text: ${result.content[0].text}`);
+}
+if (result.details?.ok !== true || result.details?.message !== result.content[0].text) {
+  throw new Error(`invalid tool details: ${JSON.stringify(result.details)}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"
+  [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
+  pass "Pi custom tool returns text content and structured details"
+}
+
+test_pi_process_exit_cleanup_listener_lifecycle() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-exit-listener-root"
+  home="$TMP_ROOT/pi-exit-listener-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const before = process.listenerCount("exit");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("Pi extension did not install exactly one process-exit fallback");
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+if (process.listenerCount("exit") !== before) {
+  throw new Error("session_shutdown did not remove the process-exit fallback");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"
+  [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
+  pass "Pi process-exit cleanup listener has a bounded lifecycle"
+}
+
+test_pi_process_exit_cleanup_stops_arm_child() {
+  local repo home plugin cleanup_log pid_file out status pid i
+  repo="$TMP_ROOT/pi-process-exit-root"
+  home="$TMP_ROOT/pi-process-exit-home"
+  cleanup_log="$TMP_ROOT/pi-process-exit-cleaned"
+  pid_file="$TMP_ROOT/pi-process-exit-child.pid"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'printf "cleaned\n" > "$FM_CLEANUP_LOG"; exit 0' TERM
+printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
+while :; do sleep 1; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CLEANUP_LOG="$cleanup_log" FM_CHILD_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-exit", {}, undefined, undefined, {});
+for (let i = 0; i < 50 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
+  [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -f "$cleanup_log" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$cleanup_log" ] || fail "Pi process-exit fallback did not deliver TERM to the arm child"
+  pid=$(cat "$pid_file")
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    fail "Pi arm child $pid survived process-exit cleanup"
+  fi
+  pass "Pi process-exit cleanup stops the attached arm child"
 }
 
 test_opencode_primary_watch_plugin_static_wiring() {
@@ -562,11 +709,12 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
-test_generator_writes_extension
-test_generator_preserves_loaded_marker_when_unchanged
-test_generator_uses_portable_mktemp_template
+test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
+test_pi_tool_returns_agent_tool_result
+test_pi_process_exit_cleanup_listener_lifecycle
+test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config

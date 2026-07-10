@@ -14,7 +14,7 @@ Prerequisites:
 - The Orca app installed at `/Applications/Orca.app`, and **running**.
 - The `orca` CLI: `brew install orca`.
 - `node`, used by firstmate's adapter to parse Orca's JSON output and to gate spawns on runtime readiness.
-- `git` with GitHub auth, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `tasks-axi` 0.1.1 or newer with `update --archive-body`, and `quota-axi` - the same universal requirements as tmux, minus `tmux` and `treehouse` (Orca replaces both).
+- `git` with GitHub auth, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `tasks-axi` 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and `quota-axi` - the same universal requirements as tmux, minus `tmux` and `treehouse` (Orca replaces both).
 
 Select Orca by putting `orca` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=orca` when you launch your harness for a one-off session; telling the first mate in chat to use Orca also works.
 It is never auto-detected.

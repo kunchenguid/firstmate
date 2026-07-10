@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-let skipNextTurnEnd = false;
+let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -49,11 +49,10 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded() {
-  if (lockOwnership() === "other") return false;
+function markLoaded(): void {
+  if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
-  return true;
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -71,28 +70,59 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   });
 }
 
-export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", markLoaded);
+// PreToolUse seatbelt (bin/fm-arm-pretool-check.sh; docs/arm-pretool-check.md).
+// Piggybacks on this same extension file rather than a separate one so no
+// second Pi -e flag is needed at launch - the primary already loads this
+// file for the turn-end guard, and pi.on("tool_call", ...) can block
+// (verified 2026-07-09 against pi 0.80.5: returning {block: true} prevents
+// the bash command from running).
+function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-arm-pretool-check.sh`, ["--command", command], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
 
-  pi.on("turn_end", async () => {
-    if (skipNextTurnEnd) {
-      skipNextTurnEnd = false;
+export default function (pi: ExtensionAPI) {
+  pi.on?.("session_start", () => {
+    markLoaded();
+  });
+
+  pi.on("tool_call", async (event) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const command = String((event.input as { command?: unknown })?.command ?? "");
+    if (!command) return {};
+    const result = await runPretoolCheck(command);
+    if (result.code !== 2) return {};
+    return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+  });
+
+  pi.on("agent_settled", async () => {
+    if (guardFollowupActive) {
+      guardFollowupActive = false;
       return;
     }
 
     const result = await runGuard();
     if (result.code !== 2) return;
 
+    guardFollowupActive = true;
     try {
-      pi.sendUserMessage(
+      await pi.sendUserMessage(
         "TURN WOULD END BLIND - supervision is off. " +
           "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
           result.stderr,
         { deliverAs: "followUp" },
       );
-      skipNextTurnEnd = true;
     } catch {
-      skipNextTurnEnd = false;
+      guardFollowupActive = false;
     }
   });
 

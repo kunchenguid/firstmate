@@ -12,6 +12,10 @@
 # child is reaped when the call returns, leaving NO watcher running and a false
 # "already running" off the dying process. That exact mistake silently took
 # supervision down for ~30 minutes.
+# On a harness with a PreToolUse-equivalent hook, bin/fm-arm-pretool-check.sh
+# applies the command-position policy before the command runs; see
+# docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
+# pre-execution seatbelt, not a substitute for the verification here.
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the

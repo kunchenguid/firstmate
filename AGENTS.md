@@ -77,7 +77,7 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
-config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
+config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
@@ -165,7 +165,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
-  For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1 or whose `tasks-axi update --help` lacks `--archive-body`; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
+  For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1, whose `tasks-axi update --help` lacks `--archive-body`, or whose `tasks-axi mv --help` lacks the `[<id>...]` atomic multi-ID marker; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
   For `quota-axi`, bootstrap requires it because crew-dispatch `quota-balanced` may call it; `bin/fm-dispatch-select.sh` still degrades at runtime when quota data is unavailable.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; section 8 explains why this guard exists and what it protects.
@@ -182,9 +182,9 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>` - the session-start liveness sweep checked a live secondmate's recorded endpoint for a real agent process.
   Treat `already-live` and `respawned` as handled; investigate `skipped` or `respawn failed` because that secondmate is not guaranteed live.
 - `TASKS_AXI: available` - a default-backend capability fact, not a problem; record it silently and use section 10 for backlog mutations.
-  It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer plus `tasks-axi update --help` exposing `--archive-body`.
-  If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` but still falls back to hand-editing and never blocks work.
-  If `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
+  It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the compatibility probe accepts `tasks-axi --version` as 0.1.1 or newer, `tasks-axi update --help` exposing `--archive-body`, and `tasks-axi mv --help` exposing `[<id>...]` for atomic multi-ID moves.
+  If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` but firstmate still hand-edits routine backlog updates and never blocks work.
+  If `config/backlog-backend=manual`, bootstrap hand-edits routine backlog updates and does not suggest installing `tasks-axi`.
 - `NUDGE_SECONDMATES: fm-<id>...` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) actually changed; send a one-line re-read nudge with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` unless `FM_HOME` is already set to the active firstmate home.
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
@@ -377,7 +377,8 @@ When a secondmate is created for a domain, the existing main-backlog items that 
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the scope, and move them with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
 Do not hand off `local-only` items; that work stays with the main firstmate (section 7).
-For idempotence, destination validation, and refusal of `## In flight` entries, load `secondmate-provisioning`.
+For idempotence, destination validation, and the queued-only handoff contract that refuses `## In flight` and historical `## Done` entries, load `secondmate-provisioning`.
+Done records stay with their home for pruning or archiving.
 
 ### Project memory ownership
 
@@ -545,7 +546,8 @@ No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
 For already-live secondmates, use `bin/fm-config-push.sh` when only this inherited config needs to be pushed.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the endpoint to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
-Add the task to `data/backlog.md` under In flight.
+For a ship or scout task, add the task to `data/backlog.md` under In flight.
+A secondmate spawn adds no backlog row: its identity and scope live in `data/secondmates.md`, its runtime lives in `state/<id>.meta`, and section 10 owns the backlog contract.
 
 ### Supervise
 
@@ -812,7 +814,10 @@ As a courtesy, mention cost when unusually much work is running (more than ~8 co
 ## 10. Backlog format
 
 `data/backlog.md` is the durable queue.
-Update it on every dispatch, completion, and decision.
+It tracks work items only, never agents; persistent secondmates never appear as backlog items.
+Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
+When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `tasks-axi hold <id> --reason "<reason>" --kind captain` for a captain-gated thread.
+Update the backlog on every dispatch, completion, and decision for a work item.
 
 ```markdown
 ## In flight
@@ -831,14 +836,14 @@ Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker
 
 A tracked `.tasks.toml` at this repo root pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 The local, gitignored `config/backlog-backend` file is the explicit opt-out knob.
-Absent or `tasks-axi` means use the default tasks-axi backend; `manual` means force hand-editing even when `tasks-axi` is installed.
-Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer and `tasks-axi update --help` exposes `--archive-body`.
+Absent or `tasks-axi` means use the default tasks-axi backend; `manual` means force routine backlog updates to hand-editing even when `tasks-axi` is installed.
+Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer, `tasks-axi update --help` exposes `--archive-body`, and `tasks-axi mv --help` exposes `[<id>...]` for atomic multi-ID moves.
 When the default backend is selected and compatible `tasks-axi` is on PATH, firstmate mutates the backlog through its verbs instead of hand-editing, with secondmate handoffs still going through the validated helper described in section 6.
-When the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap reports it through the normal `MISSING:` consent flow in `docs/configuration.md` "Toolchain", and every firstmate home falls back to hand-editing `data/backlog.md` exactly as this section describes until it is installed.
-When `config/backlog-backend=manual`, every firstmate home hand-edits; bootstrap still requires compatible `tasks-axi` on `PATH` but does not print `TASKS_AXI: available`.
+When the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap reports it through the normal `MISSING:` consent flow in `docs/configuration.md` "Toolchain", and every firstmate home falls back to hand-editing routine `data/backlog.md` updates exactly as this section describes until it is installed.
+When `config/backlog-backend=manual`, every firstmate home hand-edits routine backlog updates; bootstrap still requires compatible `tasks-axi` on `PATH` but does not print `TASKS_AXI: available`.
 The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
 Secondmates inherit `config/backlog-backend` from the primary.
-If the primary leaves the file absent, each home uses the default tasks-axi backend path with its own `.tasks.toml`; if the primary opts out with `manual`, secondmate homes hand-edit too.
+If the primary leaves the file absent, each home uses the default tasks-axi backend path with its own `.tasks.toml`; if the primary opts out with `manual`, secondmate homes hand-edit routine backlog updates too.
 Keep Done to the 10 most recent entries.
 With the active compatible tasks-axi backend, `tasks-axi done` auto-prunes Done and archives pruned entries to `data/done-archive.md`, so do not hand-prune.
 When hand-editing, prune older Done entries manually whenever you add to the section.
@@ -853,7 +858,7 @@ Map firstmate's real backlog operations to the approved commands:
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
 - Read an item's full notes: `tasks-axi show <id> --full`.
-- Hand a task off to a secondmate home: keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
+- Hand a task off to a secondmate home: load `secondmate-provisioning`, then keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
 - Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.
 
 **Note hygiene:** Keep free-form backlog and task note/status prose free of volatile incidental specifics that rot: temp paths, in-flight versions, moving state locations, and ephemeral IDs.
@@ -872,7 +877,9 @@ The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
-For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
+For a crewmate task that will drive Herdr lifecycle behavior, add `--herdr-lab`: the scaffold embeds the hard Herdr-isolation contract backed by `bin/fm-herdr-lab.sh` (a never-`default` lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire), and the flag is rejected for `--secondmate` briefs.
+The flag must be explicit because the scaffold cannot read the `{TASK}` text it fills in later, so every ship or scout brief scaffolded without it carries a loud not-enabled gate telling the crewmate to stop and regenerate with `--herdr-lab` if the task turns out to touch Herdr lifecycle.
+For secondmates use `bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
