@@ -243,6 +243,7 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
+  printf '%s\n' '# Standing monitors' '' '## Morning scan' > "$home/data/monitors.md"
   # secondmates.md and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -254,9 +255,11 @@ EOF
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
+  assert_contains "$out" "data/monitors.md" "digest did not label the monitors.md section"
+  assert_contains "$out" "## Morning scan" "digest did not print monitors.md content"
 
-  # Exactly two ABSENT markers (secondmates.md, learnings.md; backlog.md is
-  # covered by its own test) - and the present-but-empty captain.md must NOT
+  # Exactly three ABSENT markers (secondmates.md, learnings.md, backlog.md) -
+  # and the present-but-empty captain.md must NOT
   # print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
   [ "$absent_count" -eq 3 ] || fail "expected 3 ABSENT markers (secondmates.md, learnings.md, backlog.md), got $absent_count: $out"

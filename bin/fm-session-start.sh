@@ -5,8 +5,9 @@
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/learnings.md, then run fm-lock.sh, fm-wake-drain.sh,
-# then read data/backlog.md, every state/*.meta, and every state/*.status.
+# data/captain.md, data/learnings.md, data/monitors.md, then run fm-lock.sh,
+# fm-wake-drain.sh, then read data/backlog.md, every state/*.meta, and every
+# state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -33,7 +34,8 @@
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/learnings.md: read-only, always safe, always runs.
+#                       data/learnings.md, data/monitors.md: read-only, always
+#                       safe, always runs.
 #   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
 #                       state/*.status tail, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
@@ -227,6 +229,7 @@ print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_file_or_absent "$DATA/monitors.md" "data/monitors.md"
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"

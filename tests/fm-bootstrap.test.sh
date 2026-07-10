@@ -143,7 +143,7 @@ add_no_origin_projects() {
 run_bootstrap_timeout_case() {
   local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
   override=__unset__
-  started_marker=${5:-}
+  started_marker=${5:-"$home/.fake-fleet-sync-started"}
   git_record=${6:-}
   wait_for_marker=${7:-0}
   [ "$#" -lt 4 ] || override=$4
@@ -151,6 +151,11 @@ run_bootstrap_timeout_case() {
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
       local inc=${1:-1}
+      if [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ] && [ "${FM_FAKE_SLEEP_WAITED_FOR_FLEET_START:-0}" -lt 50 ]; then
+        FM_FAKE_SLEEP_WAITED_FOR_FLEET_START=$((${FM_FAKE_SLEEP_WAITED_FOR_FLEET_START:-0} + 1))
+        command sleep 0.01
+        return 0
+      fi
       SECONDS=$((SECONDS + inc))
       if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
         FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
@@ -309,6 +314,50 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_standing_monitors_are_reported_when_manifest_has_sections() {
+  local case_dir fakebin out expect
+
+  case_dir="$TMP_ROOT/monitors-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "missing monitors manifest should stay silent, got: $out"
+
+  case_dir="$TMP_ROOT/monitors-empty"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# Standing monitors' 'intro text only' > "$case_dir/home/data/monitors.md"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "manifest with no monitor sections should stay silent, got: $out"
+
+  case_dir="$TMP_ROOT/monitors-present"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/data/monitors.md" <<'EOF'
+# Standing monitors
+
+## Morning revenue scan
+- **Schedule:** `0 9 * * *`
+- **Cron prompt:** `Run the revenue scan.`
+
+## Evening support scan
+- **Schedule:** `0 18 * * *`
+- **Cron prompt:** `Run the support scan.`
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  expect='MONITORS: 2 standing monitor(s) in data/monitors.md - re-arm any not currently scheduled'
+  [ "$out" = "$expect" ] || fail "monitor manifest report mismatch, expected '$expect', got: $out"
+
+  pass "bootstrap reports standing monitor manifests without making them fatal"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out expected
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -454,6 +503,7 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_standing_monitors_are_reported_when_manifest_has_sections
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
