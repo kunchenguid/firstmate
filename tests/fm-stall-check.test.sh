@@ -357,6 +357,143 @@ EOF
   pass "does not flag advisor with a busy pane"
 }
 
+# Build a fleet-shaped git layout under <dir>: a bare origin, a clone with a
+# committed+pushed main, and one crew worktree per named branch off main.
+# Echoes the clone path. Used by the unlanded-work sweep tests, which need real
+# worktree git state rather than fake tmux panes.
+setup_git_fleet() {
+  local dir=$1 clone
+  clone="$dir/clone"
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git init -q -b main "$dir/origin.git" --bare
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git clone -q "$dir/origin.git" "$clone" 2>/dev/null
+  git -C "$clone" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+  git -C "$clone" push -q -u origin main
+  printf '%s\n' "$clone"
+}
+
+add_worktree() { # <clone> <lab-dir> <branch-suffix>
+  git -C "$1" worktree add -q -b "fm/$3" "$2/$3" main
+}
+
+crew_commit() { # <lab-dir> <branch-suffix> <msg>
+  git -C "$1/$2" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "$3"
+}
+
+write_meta() { # <dir> <id> <worktree> <kind> <mode> [pr]
+  {
+    printf 'window=fm-%s\n' "$2"
+    printf 'worktree=%s\n' "$3"
+    printf 'kind=%s\n' "$4"
+    printf 'mode=%s\n' "$5"
+    [ -n "${6:-}" ] && printf 'pr=%s\n' "$6"
+  } > "$1/state/$2.meta"
+}
+
+test_unlanded_work_matrix() {
+  local dir clone lab out
+  dir=$(make_case unlanded)
+  lab="$dir/lab"
+  mkdir -p "$lab"
+  clone=$(setup_git_fleet "$lab")
+  printf '## In flight\n## Queued\n## Done\n' > "$dir/data/backlog.md"
+
+  add_worktree "$clone" "$lab" unpushed-a1
+  crew_commit "$lab" unpushed-a1 "committed work not pushed"
+  write_meta "$dir" unpushed-a1 "$lab/unpushed-a1" ship no-mistakes
+
+  add_worktree "$clone" "$lab" pushed-b2
+  crew_commit "$lab" pushed-b2 "committed work pushed"
+  git -C "$lab/pushed-b2" push -q -u origin fm/pushed-b2
+  write_meta "$dir" pushed-b2 "$lab/pushed-b2" ship no-mistakes
+
+  add_worktree "$clone" "$lab" clean-c3
+  write_meta "$dir" clean-c3 "$lab/clean-c3" ship no-mistakes
+
+  add_worktree "$clone" "$lab" localonly-d4
+  crew_commit "$lab" localonly-d4 "local-only work"
+  write_meta "$dir" localonly-d4 "$lab/localonly-d4" ship local-only
+
+  add_worktree "$clone" "$lab" scout-e5
+  crew_commit "$lab" scout-e5 "scout scratch"
+  write_meta "$dir" scout-e5 "$lab/scout-e5" scout no-mistakes
+
+  add_worktree "$clone" "$lab" prparked-f6
+  crew_commit "$lab" prparked-f6 "pr parked"
+  write_meta "$dir" prparked-f6 "$lab/prparked-f6" ship no-mistakes https://github.com/x/y/pull/1
+
+  add_worktree "$clone" "$lab" secondmate-g7
+  crew_commit "$lab" secondmate-g7 "secondmate work"
+  write_meta "$dir" secondmate-g7 "$lab/secondmate-g7" secondmate no-mistakes
+
+  out=$(run_check "$dir") || fail "unlanded-work check exited non-zero"
+  printf '%s\n' "$out" | grep -F 'unlanded?: unpushed-a1 - 1 commit(s) not on any remote' >/dev/null \
+    || fail "unpushed crew branch not flagged: $out"
+  printf '%s\n' "$out" | grep -E 'unlanded\?: (pushed-b2|clean-c3|localonly-d4|scout-e5|prparked-f6|secondmate-g7)' >/dev/null \
+    && fail "a landed/exempt case was wrongly flagged: $out"
+  pass "flags an unpushed crew branch and exempts pushed/clean/local-only/scout/pr-parked/secondmate"
+}
+
+test_unlanded_work_fork_remote_is_landed() {
+  local dir clone lab out
+  dir=$(make_case unlanded_fork)
+  lab="$dir/lab"
+  mkdir -p "$lab"
+  clone=$(setup_git_fleet "$lab")
+  printf '## In flight\n## Queued\n## Done\n' > "$dir/data/backlog.md"
+
+  git init -q -b main "$lab/fork.git" --bare
+  add_worktree "$clone" "$lab" forked-h8
+  crew_commit "$lab" forked-h8 "fork-pushed work"
+  git -C "$lab/forked-h8" remote add fork "$lab/fork.git"
+  git -C "$lab/forked-h8" push -q -u fork fm/forked-h8
+  write_meta "$dir" forked-h8 "$lab/forked-h8" ship no-mistakes
+
+  out=$(run_check "$dir") || fail "fork-remote check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for work reachable from a fork remote, got: $out"
+  pass "does not flag committed work already pushed to any remote (fork counts)"
+}
+
+test_unlanded_work_mid_rebase_exempt() {
+  local dir clone lab out
+  dir=$(make_case unlanded_rebase)
+  lab="$dir/lab"
+  mkdir -p "$lab"
+  clone=$(setup_git_fleet "$lab")
+  printf '## In flight\n## Queued\n## Done\n' > "$dir/data/backlog.md"
+
+  # Seed a shared file, then conflict crew and main on the same line so a rebase
+  # stops mid-flight, leaving the rebase-merge state dir in place.
+  printf 'v0\n' > "$clone/shared.txt"
+  git -C "$clone" -c user.name=t -c user.email=t@t add shared.txt
+  git -C "$clone" -c user.name=t -c user.email=t@t commit -q -m "add shared"
+  git -C "$clone" push -q origin main
+  add_worktree "$clone" "$lab" rebasing-i9
+  printf 'CREW\n' > "$lab/rebasing-i9/shared.txt"
+  git -C "$lab/rebasing-i9" -c user.name=t -c user.email=t@t add shared.txt
+  git -C "$lab/rebasing-i9" -c user.name=t -c user.email=t@t commit -q -m "crew edit"
+  printf 'MAIN\n' > "$clone/shared.txt"
+  git -C "$clone" -c user.name=t -c user.email=t@t add shared.txt
+  git -C "$clone" -c user.name=t -c user.email=t@t commit -q -m "main edit"
+  git -C "$clone" push -q origin main
+  git -C "$lab/rebasing-i9" fetch -q origin
+  git -C "$lab/rebasing-i9" rebase origin/main >/dev/null 2>&1 || true
+  write_meta "$dir" rebasing-i9 "$lab/rebasing-i9" ship no-mistakes
+
+  out=$(run_check "$dir") || fail "mid-rebase check exited non-zero"
+  [ -z "$out" ] || fail "expected silence while worktree is mid-rebase, got: $out"
+
+  # After aborting the rebase, the real unpushed commit is flagged again.
+  git -C "$lab/rebasing-i9" rebase --abort
+  out=$(run_check "$dir") || fail "post-abort check exited non-zero"
+  printf '%s\n' "$out" | grep -F 'unlanded?: rebasing-i9' >/dev/null \
+    || fail "unpushed commit not flagged after rebase abort: $out"
+  pass "exempts a worktree mid-rebase, flags the same unpushed commit after abort"
+}
+
 test_guard_surfaces_stall_pointer() {
   local dir err
   dir=$(make_case guard)
@@ -392,4 +529,7 @@ test_advisor_needs_decision_not_flagged
 test_advisor_with_child_work_not_flagged
 test_advisor_with_terminal_idle_child_flagged
 test_advisor_busy_not_flagged
+test_unlanded_work_matrix
+test_unlanded_work_fork_remote_is_landed
+test_unlanded_work_mid_rebase_exempt
 test_guard_surfaces_stall_pointer

@@ -163,11 +163,19 @@ window_for_meta() {
   grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+worktree_for_meta() {
+  grep '^worktree=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 kind_for_meta() {
   local kind
   kind=$(grep '^kind=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$kind" ] || kind=ship
   printf '%s\n' "$kind"
+}
+
+mode_for_meta() {
+  grep '^mode=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 home_for_secondmate_meta() { # <id> <meta>
@@ -338,6 +346,50 @@ check_advisor_idle_stalls() {
   done
 }
 
+# True while a rebase is in progress in the worktree. .git is a pointer file in
+# a worktree, so the rebase state dir is resolved via git rather than $wt/.git.
+rebase_in_progress() { # <worktree>
+  local wt=$1 d
+  for d in rebase-merge rebase-apply; do
+    local p
+    p=$(git -C "$wt" rev-parse --git-path "$d" 2>/dev/null) || continue
+    case "$p" in /*) : ;; *) p="$wt/$p" ;; esac
+    [ -d "$p" ] && return 0
+  done
+  return 1
+}
+
+# Unlanded-work sweep. Flags an in-flight crew whose worktree HEAD carries
+# commits reachable from no remote-tracking branch at all - committed work living
+# only in a disposable worktree, which teardown would discard. This matches
+# teardown's own landed-definition (git log HEAD --not --remotes): work reachable
+# from ANY remote (origin, the no-mistakes gate remote during validation, or a
+# contributor fork for upstream contributions) is teardown-safe and not flagged,
+# which also removes any default-branch-name dependence. Local remote-tracking
+# refs only (no network), so it is cheap enough to run on the fast path. It is a
+# verify-candidate ("unlanded?:"): a squash-merged branch whose remote copy was
+# deleted can also match, so the finding says push-it-or-confirm-merged rather
+# than asserting loss.
+check_unlanded_work() {
+  local meta id kind wt unpushed
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] && continue
+    [ "$kind" = scout ] && continue          # scout deliverable is the report, not a branch
+    [ "$(mode_for_meta "$meta")" = local-only ] && continue  # no remote by design; landed = merged to local main, checked at teardown
+    meta_has_pr "$id" && continue            # PR-parked: already tracked by the merge poll
+    wt=$(worktree_for_meta "$meta")
+    [ -n "$wt" ] || continue
+    [ -d "$wt" ] || continue
+    rebase_in_progress "$wt" && continue     # mid-rebase: HEAD is detached, branch temporarily empty
+    unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)
+    [ "${unpushed:-0}" -gt 0 ] 2>/dev/null || continue
+    printf 'unlanded?: %s - %s commit(s) not on any remote, lost on teardown; push it or confirm it is a merged branch\n' "$id" "$unpushed"
+  done
+}
+
 # --fast skips checks that spawn a tmux peek per pane. fm-guard runs in this
 # mode on the hot supervision path, where it only needs the presence of a
 # finding from the cheap backlog/state reads; a full sweep (including the pane
@@ -350,6 +402,7 @@ esac
 check_finished_not_advanced
 check_unblocked_queued
 check_date_gates
+check_unlanded_work
 if ! "$FAST"; then
   check_idle_stalls
   check_advisor_idle_stalls

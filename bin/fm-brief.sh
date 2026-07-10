@@ -158,7 +158,8 @@ EOF
 
 case "$MODE" in
   direct-PR)
-    SETUP2=""
+    SETUP2="
+2. As soon as you have your first commit, push your branch so committed work is never local-only: \`git push -u origin fm/$ID\`. Keep it pushed as you commit."
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -184,7 +185,8 @@ EOF
     ;;
   *)  # no-mistakes (default)
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+3. As soon as you have your first commit, push your branch so committed work is never local-only: \`git push -u origin fm/$ID\`. Keep it pushed as you commit; the no-mistakes pipeline still handles the validation-phase history rewrite."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
