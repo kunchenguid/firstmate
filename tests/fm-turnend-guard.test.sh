@@ -19,6 +19,12 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
+# omp (Oh My Pi) exports OMPCODE=1 (and CLAUDECODE=1) into child shells, and
+# fm-harness.sh detect_own checks OMPCODE first. Drop it so an ambient omp
+# session can't override the CLAUDECODE=1 pins below (CI has no such marker).
+# Extends the ambient-marker isolation from #432.
+unset OMPCODE
+
 REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------

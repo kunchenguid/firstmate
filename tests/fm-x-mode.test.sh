@@ -21,6 +21,12 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 [ -n "$JQ_DIR" ] && BASE_PATH="$JQ_DIR:$BASE_PATH"
 TMP_ROOT=$(fm_test_tmproot fm-x-mode-tests)
 
+# omp (Oh My Pi) exports OMPCODE=1 (and CLAUDECODE=1) into child shells, and
+# fm-harness.sh detect_own checks OMPCODE first. Drop it so an ambient omp
+# session can't override the CLAUDECODE=1 harness pins below (CI has no such
+# marker). Extends the ambient-marker isolation from #432.
+unset OMPCODE
+
 # A fakebin `curl` that mimics the relay: it reads its behavior from env
 # (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE, and
 # FAKE_REQCTX_CODE/FAKE_REQCTX_BODY for the request-context lookup), records each
