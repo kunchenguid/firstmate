@@ -122,6 +122,9 @@ Idle secondmate panes are healthy; teardown is explicit and refuses while the se
 
 Secondmate homes stay on the same firstmate version as the primary checkout.
 On locked session start, `fm-bootstrap.sh` fast-forwards each live secondmate home recorded in `state/*.meta` to the primary default-branch commit with no origin fetch.
+Linked-worktree homes share the primary's object store, so that local target is available immediately.
+A standalone clone that does not contain the target remains unchanged in the local sweep and receives firstmate updates through `/updatefirstmate`'s origin refresh instead.
+The seeded-home identity marker's ignored state and upgrade path are documented in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
 The live signal is a `state/<id>.meta` record with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` directories untouched.
 The same locked session start probes each live secondmate endpoint for a real agent process and respawns only a confidently dead endpoint; inconclusive probes are reported and never acted on.

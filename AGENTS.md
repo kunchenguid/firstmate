@@ -149,9 +149,10 @@ Tell the captain another active session is already managing the work and operate
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 The locked fleet-sync sweep runs via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1 (set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning).
-The locked local secondmate sync sweep fast-forwards every live secondmate home's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
+The locked local secondmate sync sweep fast-forwards every live secondmate home to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
 The live set comes from `state/<id>.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
-This is a purely local fast-forward (every secondmate home is a worktree of this same repo, sharing one object store), never a fetch from origin and never a surprise pull: the version followed is simply whatever the primary is currently on, which only the captain changes deliberately via `git pull` or `/updatefirstmate`.
+This is a purely local fast-forward for linked-worktree homes, which share the primary's object store, never a fetch from origin or a surprise pull.
+A standalone clone that lacks the primary target is skipped untouched by this local sweep and advances through `/updatefirstmate`'s origin refresh instead.
 A tracked-files fast-forward never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a dirty, diverged, or in-flight home is skipped untouched.
 The same sweep also propagates the primary's declared inheritable config (`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`; sections 4 and 10) into each live secondmate home's `config/`, so every secondmate's own crewmates, dispatch profiles, and backlog backend stay on the primary's settings.
 Because `config/` is gitignored this is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared inheritable items (never `config/secondmate-harness`).
@@ -749,7 +750,7 @@ If a guard warning says queued wakes are pending, drain them before doing anythi
 If a guard warning says watcher liveness is stale, drain any queued wakes and then resume the emitted supervision protocol.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
-Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
+Firstmate's primary checkout (the repo root, `FM_ROOT`) and crewmate worktrees share the treehouse pool, while a secondmate home may be a linked worktree or a standalone clone, and the primary must stay on its default branch.
 If a crewmate sent to work firstmate-on-itself branches or commits in the primary instead of its own isolated worktree, the primary is stranded on a feature branch (the failure this guards against); the guard names the offending branch and prints the non-destructive restore (`git -C <root> checkout <default>`), so the tangle surfaces on the very next fleet action.
 The check is scoped precisely to the primary: detached HEAD (the legitimate resting state of crewmate worktrees and secondmate homes on the default branch) and the default branch itself never alarm; only a named non-default branch checked out in the primary does.
 The same assertion runs at session start as the bootstrap `TANGLE:` line inside the `bin/fm-session-start.sh` digest (section 3), with read-only wording when this session does not hold the fleet lock.
