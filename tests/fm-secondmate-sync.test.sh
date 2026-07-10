@@ -598,9 +598,10 @@ test_seed_marker_clean_when_gitignored() {
 # --- T13: an existing marker-only-dirty home converges on the next sweep --------
 # The convergence chicken-and-egg: existing homes predate the fix, so their marker
 # is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
-# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap - it advances
-# the home past the fix commit, after which the now-ignored marker reads clean with
-# no hand intervention.
+# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
+# linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
+# Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
+# Once advanced, the now-ignored marker reads clean with no hand intervention.
 test_seed_marker_converges_existing_home() {
   local w c0 base
   w=$(new_world marker-converge)            # primary does NOT ignore the marker yet
