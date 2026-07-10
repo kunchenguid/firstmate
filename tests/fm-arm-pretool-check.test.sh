@@ -118,6 +118,10 @@ matrix_case D51 deny '~/firstmate/bin/fm-watch.sh --restart'
 matrix_case D52 deny "bin/fm-\$'\x77'atch-arm.sh &"
 matrix_case D53 deny 'bin/fm-$"watch"-arm.sh &'
 matrix_case D54 deny 'bin/fm-watch-$"arm".sh &'
+matrix_case D55 deny 'while true; do pkill -f fm-watch; done'
+matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
+matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
+matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -135,6 +139,7 @@ matrix_case E13 allow "printf '%s\\n' 'argument has ; and fm-watch-arm.sh and &&
 matrix_case E14 allow '$FM_HOME/bin/fm-teardown.sh &'
 matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -213,6 +218,9 @@ test_direct_policy_contract() {
   local heredoc_data heredoc_watcher
   assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
+  assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
+  assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
+  assert_policy direct-loop-no-kill-allowed allow 'for f in 1; do echo fm-watch; done'
   assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
   assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
   assert_policy direct-unclassifiable $'deny\tunclassifiable-protected-command' "bin/fm-watch-arm.sh 'unterminated"

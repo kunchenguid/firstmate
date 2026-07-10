@@ -37,6 +37,11 @@ function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
+function rawMentionsBroadKill(command) {
+  const normalized = normalizeLineContinuations(command);
+  return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+}
+
 function normalizeLineContinuations(source) {
   return source.replace(/\\\r?\n/g, "");
 }
@@ -713,11 +718,11 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
@@ -832,10 +837,11 @@ function analyzeProgram(command, context, depth = 0) {
   const directProtected = nodeInfos.some((info) => Boolean(info.protectedKind));
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
-  if (unsupported && (protectedFound || rawMentionsProtected(command))) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
