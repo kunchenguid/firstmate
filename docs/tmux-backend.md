@@ -98,7 +98,8 @@ The repository regression ran against another private socket and produced:
 ```text
 $ tests/fm-backend-tmux-smoke.test.sh
 @1
-ok - real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate
+@2
+ok - real tmux: fm_backend_tmux_create_task preserves existing indexes, appends windows, and refuses a duplicate
 ok - real tmux: fm_backend_tmux_send_text_line sends literal text and submits with Enter
 ok - real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter submit as two separate steps
 ok - real tmux: fm_backend_tmux_capture's -S -N bound trims old history for a small window and reaches it for a large one
