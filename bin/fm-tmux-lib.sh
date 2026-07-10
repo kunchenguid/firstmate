@@ -142,16 +142,25 @@ fm_pane_is_busy() {  # <target>
 # wording, different risk levels) in Claude Code 2.1.205, and does not appear
 # in the separate one-time folder-trust dialog ("Quick safety check..."),
 # which spawn already peeks and accepts at launch (harness-adapters skill).
+# That phrase alone is unremarkable confirmation wording ordinary CLI tools
+# (git, npm, etc.) can print mid-task with no dialog involved, so detection
+# requires the compound signature: the phrase together with either the
+# numbered "N. Yes"/"N. No" option lines or the "Permission rule ... requires
+# confirmation" line that only this dialog renders.
 FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT='Do you want to proceed\?'
+FM_TMUX_PERMISSION_DIALOG_CONFIRM_REGEX_DEFAULT='^[0-9]+\.[[:space:]]*(Yes|No)\b|Permission rule .*requires confirmation'
 
 # fm_pane_shows_permission_dialog: 0 if the pane's tail shows an interactive
 # permission-confirmation dialog. Scans a wider window than fm_pane_is_busy's
 # busy-footer check (the dialog box spans several lines, not just a footer).
+# Requires the compound signature (see the regex comment above) so ordinary
+# CLI confirmation prompts unrelated to a permission dialog do not false-match.
 fm_pane_shows_permission_dialog() {  # <target>
-  local win=$1 tail40
+  local win=$1 tail40 lines
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' \
-    | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}"
+  lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$')
+  printf '%s' "$lines" | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}" || return 1
+  printf '%s' "$lines" | grep -qiE "${FM_PERMISSION_DIALOG_CONFIRM_REGEX:-$FM_TMUX_PERMISSION_DIALOG_CONFIRM_REGEX_DEFAULT}"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,

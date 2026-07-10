@@ -154,6 +154,23 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
+# crew_backend_tail40: memoized non-tmux 40-line capture, shared by
+# crew_pane_is_busy and crew_pane_shows_permission_dialog so a single
+# crew-state read never pays for two backend-capture round trips for the
+# same target.
+CREW_TAIL40_CACHED=0
+CREW_TAIL40_TARGET=""
+CREW_TAIL40=""
+crew_backend_tail40() {  # <target>
+  if [ "$CREW_TAIL40_CACHED" = 1 ] && [ "$CREW_TAIL40_TARGET" = "$1" ]; then
+    printf '%s' "$CREW_TAIL40"
+    return 0
+  fi
+  CREW_TAIL40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+  CREW_TAIL40_TARGET=$1
+  CREW_TAIL40_CACHED=1
+  printf '%s' "$CREW_TAIL40"
+}
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
 # available, else the shared tmux pane-regex reader (fm_pane_is_busy,
@@ -187,7 +204,7 @@ crew_pane_is_busy() {  # <target>
       case "$bs" in
         busy) return 0 ;;
         *)
-          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+          tail40=$(crew_backend_tail40 "$1") || return 1
           printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
             | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
           ;;
@@ -204,10 +221,11 @@ crew_pane_shows_permission_dialog() {  # <target>
   case "$TASK_BACKEND" in
     tmux) fm_pane_shows_permission_dialog "$1" ;;
     *)
-      local tail40
-      tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' \
-        | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}"
+      local tail40 lines
+      tail40=$(crew_backend_tail40 "$1") || return 1
+      lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$')
+      printf '%s' "$lines" | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}" || return 1
+      printf '%s' "$lines" | grep -qiE "${FM_PERMISSION_DIALOG_CONFIRM_REGEX:-$FM_TMUX_PERMISSION_DIALOG_CONFIRM_REGEX_DEFAULT}"
       ;;
   esac
 }

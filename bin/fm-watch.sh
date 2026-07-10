@@ -126,8 +126,14 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # see fm-tmux-lib.sh's FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT for the full
 # rationale. A stale pane matching this is flagged distinctly in the wake
 # reason so the recovery path answers it directly instead of interrupting or
-# relaunching (stuck-crewmate-recovery skill).
+# relaunching (stuck-crewmate-recovery skill). The phrase alone is
+# unremarkable confirmation wording ordinary CLI tools can print with no
+# dialog involved, so detection requires it together with the compound
+# confirm signature (numbered "N. Yes"/"N. No" options, or "Permission rule
+# ... requires confirmation") - see fm-tmux-lib.sh's
+# FM_TMUX_PERMISSION_DIALOG_CONFIRM_REGEX_DEFAULT.
 PERMISSION_DIALOG_REGEX=${FM_PERMISSION_DIALOG_REGEX:-'Do you want to proceed\?'}
+PERMISSION_DIALOG_CONFIRM_REGEX=${FM_PERMISSION_DIALOG_CONFIRM_REGEX:-'^[0-9]+\.[[:space:]]*(Yes|No)\b|Permission rule .*requires confirmation'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -203,9 +209,14 @@ window_is_busy() {  # <window> <tail40>
 # permission-confirmation dialog (task crew-rmrf-fix-q3). Reuses the same
 # bounded capture already read for hashing, so this adds no extra backend
 # calls. Scans the whole tail, not just the footer lines: the dialog box spans
-# several lines, unlike the busy footer.
+# several lines, unlike the busy footer. Requires the compound signature (see
+# the regex comment above) so ordinary CLI confirmation prompts do not
+# false-match.
 window_shows_permission_dialog() {  # <tail40>
-  printf '%s' "$1" | grep -v '^[[:space:]]*$' | grep -qiE "$PERMISSION_DIALOG_REGEX"
+  local lines
+  lines=$(printf '%s' "$1" | grep -v '^[[:space:]]*$')
+  printf '%s' "$lines" | grep -qiE "$PERMISSION_DIALOG_REGEX" || return 1
+  printf '%s' "$lines" | grep -qiE "$PERMISSION_DIALOG_CONFIRM_REGEX"
 }
 
 # stale_reason_for: compose the wake reason for a surfaced stale window,
