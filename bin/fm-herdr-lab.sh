@@ -158,8 +158,32 @@ fm_herdr_lab_cancel_provision() { # <pid>
 }
 
 fm_herdr_lab_provision() { # <session>
-  local name=$1 running attempt server_pid
-  fm_herdr_lab_prepare "$name" || return 1
+  local name=$1 sessions tripwire running attempt server_pid
+  fm_herdr_lab_validate_name "$name" || return 1
+  command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
+  command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
+
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot list Herdr sessions before provisioning '$name'"
+    return 1
+  }
+  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
+    tripwire=$(fm_herdr_lab_tripwire_path "$name")
+    [ -f "$tripwire" ] || {
+      fm_herdr_lab_error "missing fleet-state tripwire for existing session '$name'; refusing to adopt it"
+      return 1
+    }
+    fm_herdr_lab_refuse_if_default "$name" || return 1
+    running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
+      '.sessions[]? | select(.name == $name) | .running' 2>/dev/null)
+    [ "$running" = false ] || {
+      fm_herdr_lab_error "session '$name' is not stopped; refusing to re-provision it"
+      return 1
+    }
+    fm_herdr_lab_check_tripwire "$name" || return 1
+  else
+    fm_herdr_lab_prepare "$name" || return 1
+  fi
   fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
   server_pid=$!
   attempt=0
@@ -180,7 +204,7 @@ fm_herdr_lab_provision() { # <session>
   return 1
 }
 
-fm_herdr_lab_verify_tripwire() { # <session>
+fm_herdr_lab_check_tripwire() { # <session>
   local name=$1 tripwire before after
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -195,6 +219,12 @@ fm_herdr_lab_verify_tripwire() { # <session>
     fm_herdr_lab_error "after:  $after"
     return 1
   }
+}
+
+fm_herdr_lab_verify_tripwire() { # <session>
+  local name=$1 tripwire
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  tripwire=$(fm_herdr_lab_tripwire_path "$name")
   rm -f "$tripwire"
 }
 
@@ -211,7 +241,7 @@ fm_herdr_lab_stop() { # <session>
 }
 
 fm_herdr_lab_teardown() { # <session>
-  local name=$1 tripwire sessions
+  local name=$1 tripwire sessions delete_status=0
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -229,7 +259,19 @@ fm_herdr_lab_teardown() { # <session>
   fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
   sleep 0.5
   fm_herdr_lab_refuse_if_default "$name" || return 1
-  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || true
+  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot confirm removal of lab session '$name' after teardown"
+    return 1
+  }
+  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
+    if [ "$delete_status" -ne 0 ]; then
+      fm_herdr_lab_error "session delete failed for '$name' and the lab session remains"
+    else
+      fm_herdr_lab_error "lab session '$name' remains after teardown"
+    fi
+    return 1
+  fi
   fm_herdr_lab_verify_tripwire "$name"
 }
 

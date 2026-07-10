@@ -61,6 +61,7 @@ case "$1 ${2:-}" in
     ;;
   "session delete")
     [ "$3" = "$session" ] || exit 92
+    [ "${FM_FAKE_HERDR_DELETE_FAIL:-}" != 1 ] || exit 93
     printf '%s\n' deleted > "$state/$session"
     ;;
   *)
@@ -80,6 +81,7 @@ run_with_fake() {
     FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
+    FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -166,6 +168,33 @@ test_changed_default_trips_after_teardown() {
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
 
+test_stopped_owned_lab_can_reprovision() {
+  local name="fm-lab-reprovision-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "initial provision failed"
+  run_with_fake fm_herdr_lab_stop "$name" || fail "guarded stop failed"
+  [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "guarded stop did not stop the lab session"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "stop removed the lab ownership tripwire"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "re-provision after guarded stop failed"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "re-provision did not restart the stopped lab session"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "re-provision removed the lab ownership tripwire"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after re-provision failed"
+  pass "fm-herdr-lab: an owned stopped lab can re-provision safely"
+}
+
+test_failed_delete_retains_tripwire() {
+  local name="fm-lab-delete-failure-$$" status=0
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "delete-failure fixture provision failed"
+  FM_FAKE_HERDR_DELETE_FAIL=1 run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "failed delete must fail teardown"
+  [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "failed delete unexpectedly removed the lab session"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "failed delete removed the ownership tripwire"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "retry after failed delete did not clean up the lab session"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful retry left the ownership tripwire behind"
+  pass "fm-herdr-lab: failed deletion retains ownership until absence is confirmed"
+}
+
 test_timed_out_provision_cancels_late_launch() {
   local name="fm-lab-late-launch-$$" status=0
   cat > "$FAKEBIN/sleep" <<'SH'
@@ -177,7 +206,7 @@ exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
 SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=1 \
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
@@ -196,4 +225,6 @@ test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_stopped_owned_lab_can_reprovision
+test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
