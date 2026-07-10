@@ -10,8 +10,14 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 # The move is delegated to `tasks-axi mv`, so this suite exercises the real
-# binary. Skip cleanly when it is absent (matching the backend smoke suites).
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (required by the delegated handoff path)"; exit 0; }
+# binary. Skip cleanly when it is absent OR too old for atomic multi-ID mv
+# (matching the backend smoke suites; the handoff path requires tasks-axi 0.2.2+).
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
+if ! command -v tasks-axi >/dev/null 2>&1 || ! fm_tasks_axi_compatible; then
+  echo "skip: compatible tasks-axi not found (required by the delegated handoff path)"
+  exit 0
+fi
 
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
 

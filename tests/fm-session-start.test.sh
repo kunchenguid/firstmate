@@ -26,7 +26,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+fm_sanitized_base_path
+BASE_PATH=${FM_TEST_BASE_PATH:-$FM_SANITIZED_BASE_PATH}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -186,7 +187,13 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  # These tests simulate the primary harness through the fake `ps` stub, so any
+  # real harness env marker inherited from a shell that is itself a coding agent
+  # (e.g. CLAUDECODE=1 under Claude Code) must be cleared - otherwise fm-harness.sh's
+  # Layer-1 env detection short-circuits before the fake `ps` and the wrong
+  # supervision block renders (e.g. claude instead of the faked pi).
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT "$SESSION_START"
 }
 
 hash_file_for_test() {

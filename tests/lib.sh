@@ -91,6 +91,40 @@ SH
   done
 }
 
+# fm_sanitized_base_path populates FM_SANITIZED_BASE_PATH with a directory of
+# symlinks to the real system tools in /usr/bin and /usr/sbin, MINUS the
+# firstmate-managed toolset that the fakebin stubs are meant to own. Tool-
+# detection tests build a fakebin and prepend it to a base PATH; a host that
+# ships a same-named binary (e.g. /usr/bin/orca, the GNOME screen reader, or a
+# system /usr/bin/node) would otherwise leak through the base PATH and satisfy a
+# MISSING-tool assertion the fakebin controls. Every managed tool is already
+# stubbed by the suite's fake toolchain when a test needs it present, so
+# excluding them from the base is safe. Built once per process.
+#
+# Call it as a bare statement (not in a command substitution) so its temp-dir
+# cleanup registers in the caller's shell rather than a subshell that exits and
+# deletes the dir immediately; read the result from FM_SANITIZED_BASE_PATH.
+fm_sanitized_base_path() {
+  [ -n "${FM_SANITIZED_BASE_PATH:-}" ] && return 0
+  local dir base src name
+  local blocklist=" tmux node gh gh-axi chrome-devtools-axi lavish-axi orca treehouse no-mistakes tasks-axi quota-axi "
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-base-path.XXXXXX")
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
+    trap fm_test_cleanup EXIT
+  fi
+  FM_TEST_CLEANUP_DIRS+=("$dir")
+  for base in /usr/bin /usr/sbin; do
+    [ -d "$base" ] || continue
+    for src in "$base"/*; do
+      name=${src##*/}
+      case "$blocklist" in *" $name "*) continue ;; esac
+      [ -e "$dir/$name" ] && continue
+      ln -s "$src" "$dir/$name" 2>/dev/null || true
+    done
+  done
+  FM_SANITIZED_BASE_PATH=$dir
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

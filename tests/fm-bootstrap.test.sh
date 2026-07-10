@@ -19,7 +19,8 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+fm_sanitized_base_path
+BASE_PATH=${FM_TEST_BASE_PATH:-$FM_SANITIZED_BASE_PATH}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 
 # A fake toolchain where every required tool is present and gh is authenticated.
