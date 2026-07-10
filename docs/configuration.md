@@ -168,7 +168,33 @@ The shell scripts do not match those rules; firstmate chooses the best matching 
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
-The canonical schema, array `use` form, `select` strategies, and quota-balanced fallback contract live in `AGENTS.md` section 4.
+This section is the single owner of the canonical schema and its per-field semantics; `AGENTS.md` section 4 keeps only the dispatch procedure and points here.
+
+```json
+{
+  "rules": [
+    {
+      "when": "<natural-language condition describing a kind of task>",
+      "use": [
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+      ],
+      "select": "<optional strategy>",
+      "why": "<optional rationale that helps firstmate choose>"
+    }
+  ],
+  "default": { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+}
+```
+
+Per rule, `when` and `use` are required.
+`use` may be a single profile object or an ordered array of profile objects; the single-object form stays fully backward-compatible, and every profile needs `harness`.
+`use.model`, `use.effort`, and `why` are optional.
+`select` is optional and currently supports `quota-balanced`.
+Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
+`default` is optional.
+An omitted model or effort means the selected harness uses its own default for that axis.
+If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files produce a `CREW_DISPATCH: active config/crew-dispatch.json` block that lists each rule and prints `default:` when present.
@@ -196,7 +222,7 @@ Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
 The locked session-start bootstrap step also runs the guarded local secondmate sync for recorded live secondmate homes, then propagates declared inheritable local config into each validated live home.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason or config inheritance failed, and `NUDGE_SECONDMATES:` only when a running home advanced and its instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed.
-`NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; `AGENTS.md` section 3 owns the send procedure.
+`NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; the `bootstrap-diagnostics` skill owns the send procedure.
 The same bootstrap run also emits `SECONDMATE_LIVENESS:` for live secondmate endpoints: `already-live` and `respawned` are handled states, while `skipped` or `respawn failed` means the secondmate still needs attention.
 For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, and `backlog-backend` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
@@ -216,7 +242,10 @@ For direct client invocations, environment values override `.env`; bootstrap act
 
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a check shim that runs `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, only an X instance speeds up because a non-X home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
+Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
+While away mode is active the daemon owns the watcher and its default cadence applies; away-mode X cadence is a deferred follow-up.
 When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
 Steady-state off is silent and writes nothing.
 X mode is purely additive: no edit is made to `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-wake-lib.sh`, or the afk daemon (`bin/fm-supervise-daemon.sh` and the `afk` skill).
