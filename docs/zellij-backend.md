@@ -15,7 +15,7 @@ Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and quota-axi); treehouse still provides the worktree, zellij only provides the session.
+- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
@@ -57,7 +57,7 @@ No empirical evidence surfaced during verification that forces a different conta
 Because every task in every firstmate home - primary or secondmate - shares this ONE session's tab bar with no per-home container split, and zellij enforces no tab-name uniqueness at all (verified: two tabs can share a name), two firstmate homes whose task ids happen to collide could send/peek/close each other's tabs.
 This is the exact gap a captain-directed no-mistakes review gate caught for the cmux backend (`docs/cmux-backend.md` "Task container shape") - cmux's fix was ported here for the identical reason, sharing its tag-derivation code (`bin/fm-backend-hometag-lib.sh`).
 
-The caller-facing task label stays `fm-<id>` in meta and briefs, while `fm-send.sh` and `fm-peek.sh` also accept exact task ids before the legacy `fm-<id>` selector fallback.
+The caller-facing task label stays `fm-<id>` in meta and briefs; task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 The actual zellij tab title a NEW task's tab is created with is home-scoped: `fm-<home-label>-<id>`.
 `<home-label>` is `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_ROOT` path - the same identity scheme as cmux's home label (`docs/cmux-backend.md` "Task container shape"), so e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` or `fm-2ndmate-sm1-9f8e7d6c-fix-login-k3`.
 The path hash means even two independent PRIMARY installations on one machine (each with no `.fm-secondmate-home` marker, so both would otherwise resolve to the same `firstmate` prefix) still get distinct tags.
