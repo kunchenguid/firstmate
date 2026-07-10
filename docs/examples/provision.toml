@@ -35,3 +35,10 @@ env_files = [".env", ".env.local", "backend/.env", "backend/service-account.json
 # your stack (npm / pnpm / yarn / uv / etc.). A non-zero exit is reported as a
 # provisioning failure (which warns but never blocks the spawn).
 setup_cmd = "npm install && (cd backend && npm install)"
+
+# Optional: bound setup_cmd (in seconds) so a hanging or interactive install can
+# never block a spawn. Defaults to 600. The env var FM_PROVISION_SETUP_TIMEOUT
+# overrides this key for a single spawn. Only a positive integer is accepted; an
+# invalid value warns and falls back to 600. On expiry the whole setup process
+# group is killed and it is treated as a (non-blocking) provisioning failure.
+setup_timeout = 600

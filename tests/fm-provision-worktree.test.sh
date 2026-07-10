@@ -139,6 +139,24 @@ test_fails_on_setup_cmd_failure() {
   pass "fails cleanly (exit 1) when setup_cmd exits non-zero"
 }
 
+test_setup_cmd_times_out() {
+  new_case setuptimeout
+  printf 'K=v\n' > "$SRC_DIR/.env"
+  # A setup_cmd that would hang for 30s must be killed by the tiny timeout and
+  # reported as a best-effort failure, completing well under those 30s.
+  write_config "$HOME_DIR" App "$(printf 'env_source_dir = "%s"\nenv_files = [".env"]\nsetup_cmd = "sleep 30"\n' "$SRC_DIR")"
+  local start end elapsed
+  start=$(date +%s)
+  FM_PROVISION_SETUP_TIMEOUT=2 run_provision "$HOME_DIR" App "$WT_DIR"
+  end=$(date +%s)
+  elapsed=$((end - start))
+  expect_code 1 "$RUN_RC" "a timed-out setup_cmd must exit non-zero"
+  [ "$elapsed" -lt 20 ] || fail "timeout must not hang: took ${elapsed}s"
+  assert_contains "$RUN_OUT" "timeout" "the timeout must be warned about"
+  assert_present "$WT_DIR/.env" "env file should copy even if setup_cmd later times out"
+  pass "bounds setup_cmd by a timeout and kills a hanging install"
+}
+
 test_never_emits_env_contents() {
   new_case nosecret
   local secret="S3CR3T-do-not-print-abc123"
@@ -203,6 +221,7 @@ test_skips_missing_source_files_with_warning
 test_runs_setup_cmd
 test_fails_on_missing_source_dir
 test_fails_on_setup_cmd_failure
+test_setup_cmd_times_out
 test_never_emits_env_contents
 test_refuses_unsafe_paths
 test_idempotent_rerun

@@ -26,18 +26,27 @@
 #                                                         # account JSON) so the worktree
 #                                                         # backend can actually start.
 #   setup_cmd = "npm install && (cd backend && npm install)"  # run in the worktree root
+#   setup_timeout = 600  # optional; positive integer seconds bounding setup_cmd
 # Blank lines and lines starting with # are ignored. Keys may be quoted with
 # single or double quotes. env_files must be a single-line array.
+#
+# setup_cmd is bounded by a timeout so a hanging/interactive install can never
+# block a spawn indefinitely (best-effort intent). The bound defaults to 600s.
+# Precedence: env FM_PROVISION_SETUP_TIMEOUT overrides the per-project
+# setup_timeout config key, which overrides the 600s default. Only a positive
+# integer number of seconds is accepted; an invalid/empty value warns and falls
+# back to the default. On expiry the whole setup process group is killed and the
+# timeout is treated as a best-effort failure (rc=1), never an abort.
 #
 # Behavior:
 #   - No config for <project>: exit 0 silently (provisioning is opt-in per project).
 #   - Copy each listed env file, preserving its relative path (parent dirs created).
 #     A source file that does not exist is skipped with a noted warning, not a failure.
 #     Env file CONTENTS are never read or printed - only cp'd and named.
-#   - Run setup_cmd in the worktree root.
+#   - Run setup_cmd in the worktree root, bounded by setup_timeout.
 #   - Progress goes to stderr. Idempotent (overwriting copies, re-runnable installs).
 #   - Exit non-zero only on a real failure: the configured env_source_dir is missing,
-#     a present source file fails to copy, or setup_cmd exits non-zero.
+#     a present source file fails to copy, or setup_cmd exits non-zero or times out.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +55,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -87,6 +96,7 @@ trim() {
 
 ENV_SOURCE_DIR=
 SETUP_CMD=
+SETUP_TIMEOUT_CONFIG=
 ENV_FILES=()
 
 parse_array() {  # <bracketed-array-value> -> appends to ENV_FILES
@@ -117,6 +127,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$key" in
     env_source_dir) ENV_SOURCE_DIR=$(dequote "$val") ;;
     setup_cmd) SETUP_CMD=$(dequote "$val") ;;
+    setup_timeout) SETUP_TIMEOUT_CONFIG=$(dequote "$val") ;;
     env_files) parse_array "$val" ;;
     *) log "ignoring unknown config key: $key" ;;
   esac
@@ -175,9 +186,67 @@ if [ "${#ENV_FILES[@]}" -gt 0 ]; then
 fi
 
 # --- run setup command ------------------------------------------------------
+
+# A positive integer (in seconds) or nothing.
+is_positive_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ]
+}
+
+# Resolve the setup_cmd timeout: FM_PROVISION_SETUP_TIMEOUT env, then the
+# per-project setup_timeout config key, then a 600s default. An invalid value at
+# either level warns and falls back to the default.
+resolve_setup_timeout() {
+  local default=600
+  if [ -n "${FM_PROVISION_SETUP_TIMEOUT:-}" ]; then
+    if is_positive_int "$FM_PROVISION_SETUP_TIMEOUT"; then
+      printf '%s' "$FM_PROVISION_SETUP_TIMEOUT"; return 0
+    fi
+    log "invalid FM_PROVISION_SETUP_TIMEOUT (not a positive integer); using ${default}s"
+    printf '%s' "$default"; return 0
+  fi
+  if [ -n "$SETUP_TIMEOUT_CONFIG" ]; then
+    if is_positive_int "$SETUP_TIMEOUT_CONFIG"; then
+      printf '%s' "$SETUP_TIMEOUT_CONFIG"; return 0
+    fi
+    log "invalid setup_timeout in config (not a positive integer); using ${default}s"
+    printf '%s' "$default"; return 0
+  fi
+  printf '%s' "$default"
+}
+
+# Run setup_cmd bounded by <timeout> seconds. Portable (no timeout/gtimeout
+# binary): job control makes the backgrounded subshell its own process-group
+# leader, so on expiry the WHOLE group (setup_cmd plus any children it spawned)
+# is signalled. Returns the command's exit status, or 1 on timeout.
+run_setup_with_timeout() {
+  local timeout=$1 pid pgid waited=0
+  set -m
+  ( cd "$WT" && bash -c "$SETUP_CMD" ) &
+  pid=$!
+  set +m
+  pgid=$pid  # job control put the subshell in its own group, led by its own pid
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout" ]; then
+      log "setup_cmd exceeded ${timeout}s timeout; killed"
+      kill -TERM -"$pgid" 2>/dev/null || true
+      sleep 2
+      kill -KILL -"$pgid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
 if [ -n "$SETUP_CMD" ]; then
-  log "running setup in worktree root"
-  if ( cd "$WT" && bash -c "$SETUP_CMD" ); then
+  SETUP_TIMEOUT=$(resolve_setup_timeout)
+  log "running setup in worktree root (timeout ${SETUP_TIMEOUT}s)"
+  if run_setup_with_timeout "$SETUP_TIMEOUT"; then
     log "setup complete"
   else
     log "setup_cmd failed"
