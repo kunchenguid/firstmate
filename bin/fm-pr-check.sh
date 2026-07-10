@@ -6,6 +6,9 @@
 # GitHub PRs use gh. Codebase MRs use bytedcli; missing or unauthenticated
 # bytedcli makes the poll stay silent, while direct invocations print the helper
 # error if the initial head lookup fails.
+# The poll needs bin/fm-scm-lib.sh; if that path ever stops resolving the poll
+# wakes firstmate once with a diagnostic and records state/<id>.check.error
+# rather than going silently blind.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -39,12 +42,21 @@ if [ -f "$META" ]; then
 fi
 
 quoted_url=$(printf "%s\n" "$URL" | sed "s/'/'\\\\''/g")
-quoted_root=$(printf "%s\n" "$FM_ROOT" | sed "s/'/'\\\\''/g")
+quoted_lib=$(printf "%s\n" "$FM_ROOT/bin/fm-scm-lib.sh" | sed "s/'/'\\\\''/g")
+quoted_marker=$(printf "%s\n" "$STATE/$ID.check.error" | sed "s/'/'\\\\''/g")
+rm -f "$STATE/$ID.check.error"
 cat > "$STATE/$ID.check.sh" <<EOF
 # shellcheck shell=bash
-FM_ROOT='$quoted_root'
+fm_scm_lib='$quoted_lib'
+fm_scm_marker='$quoted_marker'
 # shellcheck source=bin/fm-scm-lib.sh
-. "\$FM_ROOT/bin/fm-scm-lib.sh"
+if [ ! -r "\$fm_scm_lib" ] || ! . "\$fm_scm_lib"; then
+  if [ ! -e "\$fm_scm_marker" ]; then
+    : > "\$fm_scm_marker" 2>/dev/null || true
+    echo "poll broken: cannot load \$fm_scm_lib; merge polling for '$quoted_url' is not running"
+  fi
+  exit 0
+fi
 state=\$(fm_scm_pr_state "" '$quoted_url' 2>/dev/null || true)
 case "\$state" in
   MERGED|merged) echo "merged" ;;

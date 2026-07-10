@@ -21,11 +21,24 @@ fm_scm_github_repo_path_safe() {
 }
 
 fm_scm_codebase_repo_path_safe() {
-  local path=$1
+  local path=$1 segment rest segments=0
   case "$path" in
     ''|/*|*/|*'//'*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
   esac
-  [[ "$path" =~ ^[A-Za-z0-9._/-]+$ ]]
+  rest=$path
+  while [ -n "$rest" ]; do
+    segment=${rest%%/*}
+    if [ "$segment" = "$rest" ]; then
+      rest=
+    else
+      rest=${rest#*/}
+    fi
+    [[ "$segment" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || return 1
+    segments=$((segments + 1))
+  done
+  [ "$segments" -ge 2 ]
 }
 
 fm_scm_strip_git_suffix() {
@@ -344,6 +357,54 @@ fm_scm_fetch_pr_head() {
   git -C "$worktree" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
+# Echo the commit the PR/MR head points at, fetching it into the worktree first.
+# A recorded head that already resolves locally wins; otherwise GitHub resolves
+# through refs/pull/<n>/head with git alone, and Codebase asks bytedcli for the
+# head commit and its source ref.
+fm_scm_resolve_pr_head() {
+  local worktree=$1 target=$2 recorded_head=${3:-} parsed provider info head source_ref number
+  if [ -n "$recorded_head" ] \
+    && git -C "$worktree" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    printf '%s\n' "$recorded_head"
+    return 0
+  fi
+  [ -n "$target" ] || return 1
+  if parsed=$(fm_scm_parse_pr_url "$target" 2>/dev/null); then
+    IFS=$'\t' read -r provider _ _ <<EOF
+$parsed
+EOF
+  else
+    case "$target" in
+      [0-9]*) ;;
+      *) return 1 ;;
+    esac
+    parsed=$(fm_scm_remote_info "$worktree") || return 1
+    IFS=$'\t' read -r provider _ <<EOF
+$parsed
+EOF
+  fi
+
+  case "$provider" in
+    github)
+      number=$(fm_scm_target_number "$worktree" "$target") || return 1
+      git -C "$worktree" remote get-url origin >/dev/null 2>&1 || return 1
+      git -C "$worktree" fetch --quiet origin "refs/pull/$number/head" >/dev/null 2>&1 || return 1
+      head=$(git -C "$worktree" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+      ;;
+    codebase)
+      info=$(fm_scm_pr_info "$worktree" "$target" 2>/dev/null) || return 1
+      IFS=$'\t' read -r _ _ head source_ref <<EOF
+$info
+EOF
+      [ -n "$head" ] || return 1
+      fm_scm_fetch_pr_head "$worktree" codebase "$target" "$head" "$source_ref" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$head" ] || return 1
+  printf '%s\n' "$head"
+}
+
 fm_scm_reject_url_override_args() {
   local arg
   for arg in "$@"; do
@@ -371,7 +432,17 @@ fm_scm_codebase_caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*|--merge-method|--merge-method=*|--squash-commits|--squash-commits=*) return 0 ;;
+      --squash|--merge|--rebase|--method|--method=*|--merge-method|--merge-method=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+fm_scm_codebase_caller_has_squash_commits() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --squash-commits|--squash-commits=*) return 0 ;;
     esac
   done
   return 1
@@ -408,7 +479,10 @@ fm_scm_codebase_merge() {
 
   FM_SCM_CODEBASE_MERGE_ARGS=()
   if ! fm_scm_codebase_caller_has_merge_method "$@"; then
-    FM_SCM_CODEBASE_MERGE_ARGS+=(--merge-method merge_commit --squash-commits true)
+    FM_SCM_CODEBASE_MERGE_ARGS+=(--merge-method merge_commit)
+    if ! fm_scm_codebase_caller_has_squash_commits "$@"; then
+      FM_SCM_CODEBASE_MERGE_ARGS+=(--squash-commits true)
+    fi
   fi
 
   while [ "$#" -gt 0 ]; do

@@ -4,10 +4,12 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
-# When state/<id>.meta records pr= for an open PR, the compare side is the PR
-# head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
-# stays current after no-mistakes fix rounds push to the PR; if the PR head
-# cannot be resolved, the script falls back to the local branch with a warning.
+# When state/<id>.meta records pr= for an open PR/MR, the compare side is the
+# PR/MR head (recorded pr_head= when reachable, else resolved and fetched
+# through the bin/fm-scm-lib.sh provider seam, which covers GitHub PRs and
+# Codebase MRs) so review stays current after no-mistakes fix rounds push to the
+# PR; if the head cannot be resolved, the script falls back to the local branch
+# with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -17,6 +19,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 
 usage() {
   echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
@@ -72,43 +76,11 @@ if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; th
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
 
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
-  if [ -n "$recorded_head" ] \
-    && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
-    printf '%s' "$recorded_head"
-    return 0
-  fi
-  n=$(pr_number_from_target "$pr_url") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
-  [ -n "$resolved" ] || return 1
-  printf '%s' "$resolved"
-}
-
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
-  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
+  if PR_HEAD=$(fm_scm_resolve_pr_head "$WT" "$PR_URL" "$PR_HEAD_RECORDED" 2>/dev/null); then
     COMPARE_REF=$PR_HEAD
   else
     echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2

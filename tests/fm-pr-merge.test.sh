@@ -16,6 +16,9 @@
 #   (h) repo override args fail fast because the repo comes from the URL
 #   (i) Codebase MR URL is parsed to number + -R for bytedcli and records head
 #   (j) Codebase merge-method shims map onto bytedcli's actual flags
+#   (k) a lone --squash-commits does not suppress the default Codebase method
+#   (l) flag-like, traversing, or single-segment Codebase repo paths fail fast
+#   (m) the armed merge poll wakes once, not silently, when fm-scm-lib.sh is gone
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -372,6 +375,76 @@ test_codebase_merge_method_shims_map_to_bytedcli_flags() {
   pass "fm-pr-merge maps Codebase merge-method shims onto bytedcli flags"
 }
 
+test_codebase_squash_commits_keeps_default_merge_method() {
+  local case_dir
+  case_dir=$(make_case codebase-squash-commits)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/bytedcli.log"
+
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --squash-commits false \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-squash-commits: fm-pr-merge failed"
+
+  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method merge_commit --squash-commits false' "$case_dir/bytedcli.log" \
+    || fail "codebase-squash-commits: --squash-commits suppressed firstmate's default --merge-method"
+  pass "fm-pr-merge keeps its default Codebase merge method when only --squash-commits is passed"
+}
+
+test_rejects_unsafe_codebase_repo_paths() {
+  local case_dir rc url
+  for url in https://code.byted.org/-R/merge_requests/1 \
+    https://code.byted.org/platform/../etc/merge_requests/1 \
+    https://code.byted.org/lonely/merge_requests/1; do
+    case_dir=$(make_case "unsafe-codebase-$RANDOM")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+    add_bytedcli_mock "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+    : > "$case_dir/bytedcli.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "unsafe-codebase: fm-pr-merge should refuse $url"
+    assert_no_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+      "unsafe-codebase: $url was recorded in meta"
+    assert_absent "$case_dir/state/task-x1.check.sh" \
+      "unsafe-codebase: $url armed a merge poll"
+    [ ! -s "$case_dir/bytedcli.log" ] || fail "unsafe-codebase: bytedcli was invoked for $url"
+  done
+  pass "fm-pr-merge refuses Codebase MR URLs with flag-like, traversing, or single-segment repo paths"
+}
+
+test_merge_poll_reports_a_broken_scm_lib_once() {
+  local case_dir shim first second
+  case_dir=$(make_case broken-scm-lib)
+  mkdir -p "$case_dir/wt" "$case_dir/root/bin"
+  cp "$ROOT/bin/fm-scm-lib.sh" "$case_dir/root/bin/fm-scm-lib.sh"
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-axi.log"
+
+  FM_ROOT_OVERRIDE="$case_dir/root" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_GUARD_GRACE=999999 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://github.com/example/repo/pull/31 >/dev/null 2>&1 \
+    || fail "broken-scm-lib: fm-pr-check failed to arm the poll"
+
+  shim="$case_dir/state/task-x1.check.sh"
+  rm -f "$case_dir/root/bin/fm-scm-lib.sh"
+  first=$(PATH="$case_dir/fakebin:$PATH" bash "$shim" 2>/dev/null)
+  second=$(PATH="$case_dir/fakebin:$PATH" bash "$shim" 2>/dev/null)
+
+  assert_contains "$first" 'poll broken' \
+    "broken-scm-lib: an unloadable fm-scm-lib.sh must wake firstmate instead of polling silently"
+  [ -z "$second" ] || fail "broken-scm-lib: the diagnostic must not repeat on every poll"
+  assert_present "$case_dir/state/task-x1.check.error" \
+    "broken-scm-lib: no durable marker was left for the broken poll"
+  pass "the merge poll surfaces an unloadable fm-scm-lib.sh once instead of going blind"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -384,3 +457,6 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_codebase_url_records_head_and_invokes_bytedcli_merge
 test_codebase_merge_method_shims_map_to_bytedcli_flags
+test_codebase_squash_commits_keeps_default_merge_method
+test_rejects_unsafe_codebase_repo_paths
+test_merge_poll_reports_a_broken_scm_lib_once

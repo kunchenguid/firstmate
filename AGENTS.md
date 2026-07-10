@@ -563,7 +563,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
-When the task meta records `pr=`, the helper also compares that base against the authoritative PR head (`pr_head=` when reachable, otherwise a fresh `refs/pull/<n>/head` fetch) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
+When the task meta records `pr=`, the helper also compares that base against the authoritative PR/MR head (`pr_head=` when reachable, otherwise the head resolved through the provider seam) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
 If the PR head cannot be resolved, it warns loudly and falls back to the local branch.
 In target project repos shipped through that project's own no-mistakes pipeline, commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
 Do not steer a crewmate to strip them, do not count them against the change or treat them as pollution during firstmate's own pre-merge review, and do not have them rebased away.

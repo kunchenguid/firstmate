@@ -8,6 +8,7 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) pr= is a Codebase MR URL -> resolve its head through the provider seam
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -69,7 +70,29 @@ run_review_diff() {
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
     "$REVIEW_DIFF" "$@"
+}
+
+# bytedcli mock answering `mr get` with the MR head commit and its source ref,
+# which is the only Codebase lookup the review diff needs. Args: case_dir head
+add_bytedcli_mock() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "--json codebase mr get 24 -R platform/team/repo")
+    cat <<'JSON'
+{"status":"success","data":{"merge_request":{"Number":24,"Status":"opened"},"version":{"SourceCommitId":"$head","SourceRef":"refs/merge-requests/24/head"}},"error":null}
+JSON
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -141,7 +164,25 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_codebase_mr_head_resolves_through_provider_seam() {
+  local case_dir out
+  case_dir=$(make_case codebase-mr)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/24/head"
+  add_bytedcli_mock "$case_dir" "$PR_SHA"
+  write_task_meta "$case_dir" "pr=https://code.byted.org/platform/team/repo/merge_requests/24"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "codebase-mr: diff should use the MR head from bytedcli"
+  assert_not_contains "$out" 'stale-local' "codebase-mr: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "codebase-mr: should not warn when the MR head resolves"
+  pass "fm-review-diff resolves a Codebase MR head through the provider seam"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_codebase_mr_head_resolves_through_provider_seam

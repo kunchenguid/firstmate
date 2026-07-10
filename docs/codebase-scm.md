@@ -1,11 +1,12 @@
 # GitHub and Codebase PR/MR Providers
 
-Firstmate's PR-ready, merge, and teardown loop supports GitHub pull requests and ByteDance Codebase merge requests through one shared provider seam in `bin/fm-scm-lib.sh`.
-Callers should use `bin/fm-pr-check.sh`, `bin/fm-pr-merge.sh`, and `bin/fm-teardown.sh`; they should not call `gh-axi pr merge` or `bytedcli codebase mr merge` directly for task work.
+Firstmate's PR-ready, review, merge, and teardown loop supports GitHub pull requests and ByteDance Codebase merge requests through one shared provider seam in `bin/fm-scm-lib.sh`.
+Callers should use `bin/fm-pr-check.sh`, `bin/fm-review-diff.sh`, `bin/fm-pr-merge.sh`, and `bin/fm-teardown.sh`; they should not call `gh-axi pr merge` or `bytedcli codebase mr merge` directly for task work.
 
 Provider detection is URL-first.
 `https://github.com/<owner>/<repo>/pull/<number>` selects GitHub.
 `https://code.byted.org/<repo-path>/merge_requests/<number>` and `https://code-tx.byted.org/<repo-path>/merge_requests/<number>` select Codebase.
+A Codebase `<repo-path>` must have at least two segments, each starting with an alphanumeric or underscore, so a flag-like path such as `-R` or a traversing `..` segment is refused before it reaches `bytedcli`.
 When teardown has no recorded `pr=`, it detects the fallback provider from the worktree's `origin` remote host before looking up a merged PR/MR by the task branch.
 
 GitHub behavior stays on the existing tools.
