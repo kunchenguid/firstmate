@@ -421,6 +421,56 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   pass "fm_backend_herdr_create_task: a same-labeled tab with a live (even idle) registered agent still refuses exactly as before"
 }
 
+test_create_task_refuses_known_human_labeled_tab_when_agent_live() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/dup-known-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse the prior metadata-recorded tab even after its display label changed"
+  assert_contains "$out" "fm-task-a' already exists" "create_task did not report the stable identity collision"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a second tab for the same stable task identity"
+  pass "fm_backend_herdr_create_task: prior tab metadata preserves stable duplicate identity after a human-readable rename"
+}
+
+test_create_task_allows_same_human_display_for_distinct_identities() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/distinct-identities-same-display"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-b /tmp/proj' "$ROOT" ) \
+    || fail "create_task should allow a distinct stable identity when another task has the same human display label"
+  [ "$out" = "w1:t3 w1:p3" ] || fail "create_task returned unexpected ids for the distinct task: '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''--label'$'\x1f''fm-task-b' "create_task did not create under the distinct stable identity"
+  pass "fm_backend_herdr_create_task: identical human display text cannot collide across distinct fm-<id> identities"
+}
+
+test_create_task_replaces_known_human_labeled_husk() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/known-human-husk"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-task-a","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2' "$ROOT" ) \
+    || fail "create_task should replace the metadata-recorded human-labeled husk"
+  [ "$out" = "w1:t3 w1:p3" ] || fail "create_task returned unexpected ids after replacing the human-labeled husk: '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the prior metadata-recorded husk"
+  assert_contains "$(cat "$log")" $'\x1f''--label'$'\x1f''fm-task-a' "create_task did not create the replacement under its stable identity"
+  pass "fm_backend_herdr_create_task: metadata preserves stable husk replacement after a human-readable rename"
+}
+
 test_create_task_refuses_when_any_duplicate_label_is_live() {
   local dir log resp fb out status
   dir="$TMP_ROOT/dup-mixed-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -704,6 +754,46 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
     "list_live must never query the primary's (or a sibling secondmate's) workspace"
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
+}
+
+test_list_live_maps_recorded_human_label_and_excludes_manual_colon_tab() {
+  local dir log resp fb out home state
+  dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$TMP_ROOT/list-live-human-home"; state="$home/state"; mkdir -p "$state"
+  cat > "$state/task-a.meta" <<'EOF'
+window=fmtest:w1:p1
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t1
+herdr_pane_id=w1:p1
+label=project: validating
+EOF
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"project: validating"},{"tab_id":"w1:t2","label":"manual: notes"},{"tab_id":"w1:t3","label":"fm-legacy"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
+  assert_contains "$out" $'fmtest:w1:p1\tfm-task-a' "list_live did not recover the stable identity for the metadata-recorded human label"
+  assert_contains "$out" $'fmtest:w1:p3\tfm-legacy' "list_live did not preserve legacy fm-* discovery"
+  case "$out" in
+    *"manual: notes"*) fail "list_live misclassified an unrecorded manual colon tab as a Firstmate task" ;;
+  esac
+  pass "fm_backend_herdr_list_live: metadata maps human labels to stable identities and excludes manual colon tabs"
+}
+
+test_fm_spawn_writes_meta_before_human_label_rename() {
+  local meta_line rename_line cleanup_line kill_line
+  meta_line=$(grep -nF "} > \"\$STATE/\$ID.meta\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  rename_line=$(grep -nF "if [ \"\$BACKEND\" = herdr ] && [ \"\$LABEL_SET\" -eq 1 ] && ! fm_backend_herdr_rename_task" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
+  cleanup_line=$(grep -nF "rm -f \"\$STATE/\$ID.meta\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  kill_line=$(grep -nF "fm_backend_herdr_kill \"\$T\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  [ -n "$meta_line" ] && [ -n "$rename_line" ] || fail "fm-spawn is missing the metadata-write or display-rename step"
+  [ "$meta_line" -lt "$rename_line" ] || fail "fm-spawn must keep the stable fm-<id> label until metadata is durable"
+  [ "$rename_line" -lt "$cleanup_line" ] && [ "$cleanup_line" -lt "$kill_line" ] || fail "fm-spawn must remove metadata and kill the tab when the display rename fails"
+  pass "fm-spawn: human display rename follows durable metadata and cleans up atomically on failure"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -2113,6 +2203,9 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_no_jq_reserved_keyword_arg_names
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
+test_create_task_refuses_known_human_labeled_tab_when_agent_live
+test_create_task_allows_same_human_display_for_distinct_identities
+test_create_task_replaces_known_human_labeled_husk
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk
@@ -2124,6 +2217,8 @@ test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
+test_list_live_maps_recorded_human_label_and_excludes_manual_colon_tab
+test_fm_spawn_writes_meta_before_human_label_rename
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

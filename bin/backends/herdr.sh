@@ -31,8 +31,8 @@
 #
 # Recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> or <project>: <phase> tab
-# labels), never trusts a stored pane id blindly: fm_backend_herdr_list_live.
+# verification doc) uses stable fm-<id> labels plus metadata-backed tab-id
+# mapping for human-readable labels: fm_backend_herdr_list_live.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -492,12 +492,12 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+fm_backend_herdr_create_task() {  # <container> <identity> <cwd> <seeded_default_tab_id> <known_tab_id>
+  local container=$1 identity=$2 cwd=$3 seeded_tab_id=${4:-} known_tab_id=${5:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$identity" --arg known "$known_tab_id" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want or ($known != "" and .tab_id == $known)) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
@@ -507,7 +507,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
       if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
-        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+        echo "error: herdr tab identity '$identity' already exists in workspace $wsid (session $session)" >&2
         return 1
       fi
       dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
@@ -515,7 +515,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$identity" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
@@ -531,18 +531,24 @@ EOF
 $dup_tab_ids
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+      echo "error: could not verify herdr husk removal for tab identity '$identity' in workspace $wsid (session $session)" >&2
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
-    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
-      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
-    remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
+    remaining_dup_tabs=
+    while IFS= read -r dup; do
+      [ -n "$dup" ] || continue
+      if printf '%s' "$list" | jq -e --arg prior "$dup" '.result.tabs[]? | select(.tab_id == $prior)' >/dev/null 2>&1; then
+        remaining_dup_tabs="${remaining_dup_tabs}${remaining_dup_tabs:+ }${dup}"
+      fi
+    done <<EOF
+$dup_tab_ids
+EOF
     if [ -n "$remaining_dup_tabs" ]; then
-      echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+      echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for identity '$identity' in workspace $wsid (session $session)" >&2
       return 1
     fi
   fi
@@ -1183,29 +1189,52 @@ EOF
   return 1
 }
 
-# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id> or <project>: <phase>) in
+# fm_backend_herdr_identity_for_tab: return the stable fm-<id> identity for a
+# metadata-recorded tab in this home, session, and workspace.
+fm_backend_herdr_identity_for_tab() {  # <session> <workspace_id> <tab_id>
+  local session=$1 wsid=$2 tab_id=$3 state meta id
+  state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -qx 'backend=herdr' "$meta" 2>/dev/null || continue
+    grep -qxF "herdr_session=$session" "$meta" 2>/dev/null || continue
+    grep -qxF "herdr_workspace_id=$wsid" "$meta" 2>/dev/null || continue
+    grep -qxF "herdr_tab_id=$tab_id" "$meta" 2>/dev/null || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    printf 'fm-%s' "$id"
+    return 0
+  done
+  return 1
+}
+
+# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every stable
+# fm-<id> tab plus every human-labeled tab backed by this home's metadata in
 # <session>'s, THIS HOME'S OWN workspace (fm_backend_herdr_workspace_label -
-# never another home's), by LABEL - never by trusting a stored pane id, since
-# ids are not guaranteed stable across every server lifecycle (see
-# herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
+# never another home's). A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
 # workspace because FM_HOME already names it - no glue needed, unlike the
 # primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
 # workspace that does not exist yet simply lists nothing. One
-# "<session>:<pane_id>\t<label>" line per live task tab.
+# "<session>:<pane_id>\t<identity>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id
+  local session=$1 wsid tabs tab_id label identity pane_id
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
   [ -n "$wsid" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
+    identity=$(fm_backend_herdr_identity_for_tab "$session" "$wsid" "$tab_id" 2>/dev/null || true)
+    if [ -z "$identity" ]; then
+      case "$label" in
+        fm-*) identity=$label ;;
+        *) continue ;;
+      esac
+    fi
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label | startswith("fm-")) or (.label | contains(": "))) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+    printf '%s:%s\t%s\n' "$session" "$pane_id" "$identity"
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

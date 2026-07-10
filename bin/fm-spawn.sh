@@ -734,7 +734,7 @@ case "$BACKEND" in
     # secondmate's home), so FM_HOME here still names the primary. Shadow it
     # to PROJ_ABS for just these two calls (bash restores it automatically
     # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    # in the secondmate's own workspace, not the primary's "firstmate-crew" one.
     HERDR_LABEL_HOME=$FM_HOME
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
@@ -750,7 +750,15 @@ case "$BACKEND" in
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$SPAWN_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_KNOWN_TAB_ID=
+    HERDR_PRIOR_META="$STATE/$ID.meta"
+    if [ -f "$HERDR_PRIOR_META" ] \
+      && [ "$(fm_meta_get "$HERDR_PRIOR_META" backend)" = herdr ] \
+      && [ "$(fm_meta_get "$HERDR_PRIOR_META" herdr_session)" = "$HERDR_SES" ] \
+      && [ "$(fm_meta_get "$HERDR_PRIOR_META" herdr_workspace_id)" = "$HERDR_WORKSPACE_ID" ]; then
+      HERDR_KNOWN_TAB_ID=$(fm_meta_get "$HERDR_PRIOR_META" herdr_tab_id)
+    fi
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_KNOWN_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -1048,6 +1056,12 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ] && ! fm_backend_herdr_rename_task "$T" "$SPAWN_LABEL"; then
+  rm -f "$STATE/$ID.meta"
+  fm_backend_herdr_kill "$T"
+  echo "error: could not apply herdr display label for $W" >&2
+  exit 1
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

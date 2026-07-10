@@ -321,7 +321,7 @@ fi
 fm_backend_herdr_kill "$TARGET" || fail "kill on an already-dead target must stay best-effort (never fail)"
 pass "real herdr: kill removes the pane and is idempotent/best-effort"
 
-# --- list_live (label-based recovery discovery) ------------------------------
+# --- list_live (stable-label recovery discovery) -----------------------------
 
 # Real firstmate spawns always re-run container_ensure immediately before
 # create_task (bin/fm-spawn.sh), never reusing a container reference from an

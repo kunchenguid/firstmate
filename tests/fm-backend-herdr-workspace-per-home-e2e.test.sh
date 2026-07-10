@@ -63,10 +63,11 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
-WT1=; WT2=
+WT1=; WT2=; WT3=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
+  [ -n "$WT3" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT3" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
@@ -80,8 +81,9 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
 PRIMARY_HOME="$TMP_ROOT/primary-home"
-mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
+mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/data/cm3" "$PRIMARY_HOME/config"
 printf 'trivial e2e primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm1/brief.md"
+printf 'trivial e2e second primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm3/brief.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
@@ -102,7 +104,7 @@ make_scratch_project() {  # <dir>
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
 
-# --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
+# --- 1. primary-shaped home: a crewmate spawns into firstmate-crew -----------
 
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
@@ -133,6 +135,20 @@ pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmat
 CM1_TAB_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null | jq -r --arg tab "$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)" '.result.tabs[]? | select(.tab_id == $tab) | .label')
 [ "$CM1_TAB_LABEL" = "scratch-project-1: building" ] || fail "the labeled spawn should create a human-readable herdr tab, got '$CM1_TAB_LABEL'"
 pass "real herdr E2E: --label renders the project-prefixed herdr tab label"
+
+CM3_OUT="$TMP_ROOT/cm3.out"; CM3_ERR="$TMP_ROOT/cm3.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm3 "$PROJ1" "sh -c 'echo second-primary-crew-ok'" --backend herdr \
+  --label building \
+  >"$CM3_OUT" 2>"$CM3_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "a second task with the same project and phase label failed to spawn"$'\n'"--- stdout ---"$'\n'"$(cat "$CM3_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM3_ERR")"
+CM3_META="$PRIMARY_HOME/state/cm3.meta"
+[ -f "$CM3_META" ] || fail "no meta written for cm3"
+WT3=$(grep '^worktree=' "$CM3_META" | cut -d= -f2-)
+CM3_TAB_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null | jq -r --arg tab "$(grep '^herdr_tab_id=' "$CM3_META" | cut -d= -f2-)" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM3_TAB_LABEL" = "scratch-project-1: building" ] || fail "the second task should keep the same human display label, got '$CM3_TAB_LABEL'"
+pass "real herdr E2E: distinct fm-<id> identities can share the same project and phase display label"
 
 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-label.sh" cm1 validating >/dev/null \
   || fail "fm-label.sh could not update the live herdr tab"
@@ -197,11 +213,16 @@ pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands i
 
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
+MANUAL_TAB=$(herdr tab create --workspace "$CM1_WSID" --cwd "$TMP_ROOT" --label "manual: notes" --no-focus --session "$SESSION" 2>/dev/null | jq -r '.result.tab.tab_id // empty')
+[ -n "$MANUAL_TAB" ] || fail "could not create the manual colon-labeled tab fixture"
+
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$PRIMARY_LIVE" "scratch-project-1: validating" "the primary home's list_live did not see its labeled task"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not recover cm1's stable identity"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm3" "the primary home's list_live did not recover cm3's distinct stable identity"
+assert_not_contains_local "$PRIMARY_LIVE" "manual: notes" "the primary home's list_live must not classify a manual colon-labeled tab as a Firstmate task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
-pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
+pass "real herdr E2E: list_live maps human labels through task metadata and excludes a manual colon tab"
 
 SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
 assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
