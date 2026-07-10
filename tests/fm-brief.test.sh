@@ -103,11 +103,13 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "Herdr lab brief missing its hard safety contract"
-  assert_grep "HERDR_LAB_SESSION=\$(bin/fm-herdr-lab.sh name $id)" "$brief" \
+  assert_grep "HERDR_LAB_HELPER='$ROOT/bin/fm-herdr-lab.sh'" "$brief" \
+    "Herdr lab brief must bind the absolute Firstmate helper path"
+  assert_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name $id)" "$brief" \
     "Herdr lab brief missing helper-owned session naming"
-  assert_grep "bin/fm-herdr-lab.sh provision" "$brief" \
+  assert_grep "\"\$HERDR_LAB_HELPER\" provision \"\$HERDR_LAB_SESSION\"" "$brief" \
     "Herdr lab brief missing helper-owned provisioning"
-  assert_grep "bin/fm-herdr-lab.sh teardown" "$brief" \
+  assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
     "Herdr lab brief missing helper-owned teardown"
   assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
     "Herdr lab brief missing the per-call trailing session contract"
@@ -120,6 +122,23 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
     "Herdr lab brief retained the unguarded declaration"
   pass "fm-brief.sh: --herdr-lab emits the complete hard safety contract"
+}
+
+test_herdr_lab_contract_quotes_foreign_firstmate_path() {
+  local home id brief foreign_root helper
+  home="$TMP_ROOT/herdr-lab-foreign-home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  mkdir -p "$home/data"
+  id="brief-herdr-lab-foreign-d2"
+  helper=$(printf '%s' "$foreign_root/bin/fm-herdr-lab.sh" | sed "s/'/'\\\\''/g")
+  helper="'$helper'"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-lab >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "HERDR_LAB_HELPER=$helper" "$brief" \
+    "Herdr lab brief must shell-quote an absolute Firstmate helper path"
+  assert_no_grep "bin/fm-herdr-lab.sh name $id" "$brief" \
+    "Herdr lab brief must not invoke a worktree-relative helper"
+  pass "fm-brief.sh: --herdr-lab uses its quoted Firstmate-owned helper path"
 }
 
 test_herdr_lab_omission_is_loud_for_ship_and_scout() {
@@ -163,5 +182,6 @@ test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
+test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates

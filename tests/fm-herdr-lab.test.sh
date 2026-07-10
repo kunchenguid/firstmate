@@ -10,6 +10,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
 FAKE_LOG="$TMP_ROOT/herdr.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
+REAL_SLEEP=$(command -v sleep)
 mkdir -p "$FAKE_STATE"
 printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
 : > "$FAKE_LOG"
@@ -42,6 +43,9 @@ case "$1 ${2:-}" in
     fi
     ;;
   "server --session")
+    if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
+      "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
+    fi
     printf '%s\n' running > "$state/$session"
     ;;
   "status --json")
@@ -73,6 +77,9 @@ run_with_fake() {
   PATH="$FAKEBIN:$PATH" \
     FM_FAKE_HERDR_STATE="$FAKE_STATE" \
     FM_FAKE_HERDR_LOG="$FAKE_LOG" \
+    FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
+    FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
+    FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -159,7 +166,34 @@ test_changed_default_trips_after_teardown() {
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
 
+test_timed_out_provision_cancels_late_launch() {
+  local name="fm-lab-late-launch-$$" status=0
+  cat > "$FAKEBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_HERDR_FAST_POLL:-}" = 1 ]; then
+  exit 0
+fi
+exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
+SH
+  chmod +x "$FAKEBIN/sleep"
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=1 \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "timed-out provision must fail"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" \
+    "timed-out provision must retain its tripwire until teardown"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after timed-out provision failed"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "teardown after timed-out provision did not remove its tripwire"
+  "$REAL_SLEEP" 1.1
+  if [ -f "$FAKE_STATE/$name" ] && [ "$(cat "$FAKE_STATE/$name")" = running ]; then
+    fail "timed-out provision left a late-starting lab session after teardown"
+  fi
+  pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_timed_out_provision_cancels_late_launch

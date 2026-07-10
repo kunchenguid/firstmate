@@ -144,20 +144,38 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   fm_herdr_lab_raw "$name" "$@"
 }
 
+fm_herdr_lab_cancel_provision() { # <pid>
+  local pid=$1 attempt=0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 10 ]; do
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 fm_herdr_lab_provision() { # <session>
-  local name=$1 running attempt
+  local name=$1 running attempt server_pid
   fm_herdr_lab_prepare "$name" || return 1
-  (fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &)
+  fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
+  server_pid=$!
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
     if [ "$running" = true ]; then
-      fm_herdr_lab_refuse_if_default "$name" || return 1
+      fm_herdr_lab_refuse_if_default "$name" || {
+        fm_herdr_lab_cancel_provision "$server_pid"
+        return 1
+      }
       return 0
     fi
     sleep 0.2
     attempt=$((attempt + 1))
   done
+  fm_herdr_lab_cancel_provision "$server_pid"
   fm_herdr_lab_error "lab session '$name' did not report running within 10 seconds"
   return 1
 }
