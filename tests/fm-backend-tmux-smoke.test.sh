@@ -40,7 +40,9 @@ export PATH
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
-SESSION="smoke"
+# Use a numeric session name to cover tmux's ambiguous bare-target parsing.
+# fm_backend_tmux_create_task must qualify it as a session, not window index 0.
+SESSION="0"
 WINDOW="fm-smoke1"
 TARGET="$SESSION:$WINDOW"
 

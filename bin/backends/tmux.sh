@@ -88,6 +88,10 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
+  # The trailing colon makes this unambiguously a session target. Without it,
+  # a numeric session name such as "0" is parsed as window index 0 and every
+  # later spawn collides with the first task window instead of allocating the
+  # next free index.
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
