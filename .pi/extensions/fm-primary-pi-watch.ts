@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 type ArmResult = {
   ok: boolean;
@@ -63,11 +64,10 @@ function sessionOwnsLock(): boolean {
   return lockOwnership() === "owned";
 }
 
-function markLoaded() {
-  if (lockOwnership() === "other") return false;
+function markLoaded(): void {
+  if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
-  return true;
 }
 
 function actionableLine(output: string): string {
@@ -86,6 +86,16 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 }
 
 export default function (pi: ExtensionAPI) {
+  function stopArm(): void {
+    if (child) child.kill("SIGTERM");
+    child = null;
+  }
+
+  const cleanupOnProcessExit = () => {
+    stopArm();
+  };
+  process.once("exit", cleanupOnProcessExit);
+
   async function sendWake(message: string) {
     await pi.sendUserMessage(
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first, handle the queued wake, then resume Pi supervision.`,
@@ -140,26 +150,38 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  pi.on?.("session_start", markLoaded);
+  pi.on?.("session_start", () => {
+    markLoaded();
+  });
   pi.on?.("session_shutdown", () => {
-    if (child) child.kill("TERM");
-    child = null;
+    stopArm();
+    process.off("exit", cleanupOnProcessExit);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
-    description: "Arm firstmate watcher supervision through the Pi extension.",
-    handler: async () => startArm().message,
+    description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
+    handler: async (_args, ctx) => {
+      const result = startArm();
+      ctx.ui.notify(result.message, result.ok ? "info" : "warning");
+    },
   });
 
   pi.registerTool?.({
     name: "fm_watch_arm_pi",
-    description: "Arm firstmate watcher supervision through the Pi extension.",
-    parameters: {
-      type: "object",
-      properties: {},
-      additionalProperties: false,
+    label: "Arm firstmate watcher",
+    description: "Arm Pi watcher supervision. Always use this tool instead of running bin/fm-watch-arm.sh through bash.",
+    promptSnippet: "Arm firstmate watcher supervision through Pi without a foreground bash arm.",
+    promptGuidelines: [
+      "For Pi watcher supervision, call fm_watch_arm_pi instead of running bin/fm-watch-arm.sh through bash.",
+    ],
+    parameters: Type.Object({}),
+    execute: async () => {
+      const result = startArm();
+      return {
+        content: [{ type: "text", text: result.message }],
+        details: result,
+      };
     },
-    execute: async () => startArm(),
   });
 
   markLoaded();

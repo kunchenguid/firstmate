@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-let skipNextTurnEnd = false;
+let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -49,11 +49,10 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded() {
-  if (lockOwnership() === "other") return false;
+function markLoaded(): void {
+  if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
-  return true;
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -92,7 +91,9 @@ function runPretoolCheck(command: string): Promise<{ code: number; stderr: strin
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", markLoaded);
+  pi.on?.("session_start", () => {
+    markLoaded();
+  });
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
@@ -103,25 +104,25 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("turn_end", async () => {
-    if (skipNextTurnEnd) {
-      skipNextTurnEnd = false;
+  pi.on("agent_settled", async () => {
+    if (guardFollowupActive) {
+      guardFollowupActive = false;
       return;
     }
 
     const result = await runGuard();
     if (result.code !== 2) return;
 
+    guardFollowupActive = true;
     try {
-      pi.sendUserMessage(
+      await pi.sendUserMessage(
         "TURN WOULD END BLIND - supervision is off. " +
           "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
           result.stderr,
         { deliverAs: "followUp" },
       );
-      skipNextTurnEnd = true;
     } catch {
-      skipNextTurnEnd = false;
+      guardFollowupActive = false;
     }
   });
 

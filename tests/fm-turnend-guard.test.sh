@@ -576,16 +576,129 @@ test_pi_extension_forces_followup() {
   ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
-  assert_contains "$content" 'turn_end' "pi extension must run on turn_end"
+  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
-  assert_contains "$content" 'skipNextTurnEnd' "pi extension must carry a loop guard"
+  assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
+  assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
   assert_contains "$content" 'session-start operating block' "pi extension must use harness-neutral repair wording"
   assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
   assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
+  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
+  assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
+  assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
   assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
-  pass ".pi primary extension: turn_end forces one follow-up through the shared guard"
+  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
+}
+
+test_pi_extension_injects_once_per_logical_agent_run() {
+  local repo home ext log out status
+  repo="$TMP_ROOT/pi-logical-run-root"
+  home="$TMP_ROOT/pi-logical-run-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-logical-run-guard.log"
+  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'logical-run guard fired\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message, options) {
+    prompts += 1;
+    if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
+    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("agent_settled handler was not registered");
+
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
+
+for (let i = 0; i < 3; i += 1) {
+  await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
+}
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
+
+const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
+if (guardRuns !== 2) throw new Error(`guard predicate ran ${guardRuns} times for two logical runs`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard must inject once for no-tool and multi-tool logical runs"
+  [ -z "$out" ] || fail "Pi logical-run guard test printed output: $out"
+  pass ".pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up"
+}
+
+test_pi_extension_retries_after_followup_delivery_failure() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-delivery-failure-root"
+  home="$TMP_ROOT/pi-delivery-failure-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'delivery failure guard\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let attempts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage() {
+    attempts += 1;
+    if (attempts === 1) throw new Error("synthetic delivery failure");
+    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const settled = handlers.get("agent_settled");
+await settled({ type: "agent_settled" }, {});
+await settled({ type: "agent_settled" }, {});
+if (attempts !== 2) throw new Error(`expected delivery retry, saw ${attempts} attempts`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard latch must reset after follow-up delivery failure"
+  [ -z "$out" ] || fail "Pi delivery-failure guard test printed output: $out"
+  pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
 test_grok_hook_invokes_adapter() {
@@ -629,4 +742,6 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_forces_followup
+test_pi_extension_injects_once_per_logical_agent_run
+test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
