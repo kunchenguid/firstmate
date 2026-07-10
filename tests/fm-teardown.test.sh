@@ -1179,8 +1179,8 @@ test_empty_retry_wait_uses_default_without_aborting() {
   set +e
   TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
-  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS= \
-  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS= \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS='' \
   FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -1211,7 +1211,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
 
   set +e
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
-  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS= \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0.1 \
   FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
