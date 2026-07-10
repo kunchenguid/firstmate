@@ -314,6 +314,24 @@ test_close_owned_task_requires_confirmed_absence() {
   pass "fm_backend_herdr_close_owned_task: closure succeeds only after the owned tab is confirmed absent"
 }
 
+test_task_ownership_uses_exact_recorded_workspace_id() {
+  local dir log resp fb
+  dir="$TMP_ROOT/owned-exact-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"},{"workspace_id":"w2","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-owned"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w2:t2","foreground_cwd":"/tmp/owned-worktree"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_is_owned fmtest:w2:p2 w2 w2:t2 fm-owned /tmp/owned-worktree' "$ROOT" \
+    || fail "task ownership should inspect the exact recorded workspace when labels collide"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w2' \
+    "task ownership did not inspect the exact recorded workspace"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
+    "task ownership selected the first label-matching workspace instead of the recorded workspace"
+  pass "fm_backend_herdr_task_is_owned: verifies the exact recorded workspace despite duplicate labels"
+}
+
 test_fm_label_updates_herdr_tab_and_meta() {
   local dir log resp fb home state out
   dir="$TMP_ROOT/fm-label-herdr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1310,6 +1328,63 @@ SH
   [ -z "$(find "$state" -maxdepth 1 -name ".fm-spawn-$id.*" -print -quit)" ] \
     || fail "fm-spawn left a partial rollback snapshot after cleanup"
   pass "fm-spawn: incomplete labeled-spawn snapshot setup closes the tab and preserves prior state"
+}
+
+test_fm_spawn_snapshot_cleanup_failure_keeps_live_task() {
+  local dir home state project wt fakebin log id out status rollback
+  dir="$TMP_ROOT/spawn-label-cleanup-failure"; home="$dir/home"; state="$home/state"; project="$dir/project"; wt="$dir/worktree"
+  fakebin="$dir/fakebin"; log="$dir/herdr.log"; id="label-cleanup-failure"
+  mkdir -p "$home/data/$id" "$state" "$fakebin"
+  fm_git_init_commit "$project"
+  git -C "$project" worktree add -q -b "$id" "$wt"
+  printf 'cleanup failure test\n' > "$home/data/$id/brief.md"
+  printf 'fm-%s\n' "$id" > "$dir/live-label"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
+  "tab list")
+    if [ -e "${FM_FAKE_TAB_STATE:?}" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s"}]}}\n' "$(cat "${FM_FAKE_LIVE_LABEL:?}")"
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
+    ;;
+  "tab create") touch "${FM_FAKE_TAB_STATE:?}"; printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' ;;
+  "pane list") printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
+  "tab rename") printf '%s\n' "${4:?}" > "${FM_FAKE_LIVE_LABEL:?}" ;;
+esac
+SH
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for arg in "$@"; do
+  case "$arg" in
+    "${FM_FAKE_STATE:?}"/.fm-spawn-"${FM_FAKE_ID:?}".*) exit 86 ;;
+  esac
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/herdr" "$fakebin/rm"
+  out=$( PATH="$fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$home" HERDR_SESSION=fmtest \
+    FM_HERDR_LOG="$log" FM_FAKE_WORKTREE="$wt" FM_FAKE_LIVE_LABEL="$dir/live-label" \
+    FM_FAKE_STATE="$state" FM_FAKE_ID="$id" FM_FAKE_TAB_STATE="$dir/tab-live" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "fm-spawn should keep the live task when rollback snapshot cleanup fails: $out"
+  assert_contains "$out" "could not remove herdr rollback snapshot" "fm-spawn did not warn about failed rollback snapshot cleanup"
+  assert_contains "$out" "spawned $id" "fm-spawn exited before launching the agent after snapshot cleanup failed"
+  assert_contains "$(cat "$state/$id.meta")" "label=project: building" "fm-spawn did not retain current live-task metadata"
+  [ "$(cat "$dir/live-label")" = "project: building" ] || fail "fm-spawn did not retain the applied display label"
+  rollback=$(find "$state" -maxdepth 1 -type d -name ".fm-spawn-$id.*" -print -quit)
+  [ -n "$rollback" ] || fail "fm-spawn unexpectedly removed the snapshot after the injected cleanup failure"
+  /bin/rm -rf "$rollback" "/tmp/fm-$id"
+  git -C "$project" worktree remove --force "$wt"
+  pass "fm-spawn: snapshot cleanup failure warns and preserves the live task"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -2706,6 +2781,7 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_rename_task_resolves_tab_from_pane_target
 test_close_owned_task_requires_confirmed_absence
+test_task_ownership_uses_exact_recorded_workspace_id
 test_fm_label_updates_herdr_tab_and_meta
 test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
@@ -2744,6 +2820,7 @@ test_list_live_maps_recorded_human_label_and_excludes_manual_colon_tab
 test_fm_spawn_rejects_secondmate_label_before_guard
 test_fm_spawn_rolls_back_failed_human_label_rename
 test_fm_spawn_rolls_back_when_label_snapshot_setup_fails
+test_fm_spawn_snapshot_cleanup_failure_keeps_live_task
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

@@ -1240,8 +1240,10 @@ if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ] \
   exit 1
 fi
 if [ "$HERDR_LABEL_ABORT_CLEANUP" = 1 ]; then
+  if ! rm -rf "$HERDR_LABEL_ROLLBACK_DIR"; then
+    echo "warning: could not remove herdr rollback snapshot for $ID at $HERDR_LABEL_ROLLBACK_DIR; continuing with the live task" >&2
+  fi
   HERDR_LABEL_ABORT_CLEANUP=0
-  rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
 fi
 
 sq_brief=$(shell_quote "$BRIEF")

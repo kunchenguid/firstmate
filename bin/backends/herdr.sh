@@ -584,11 +584,16 @@ fm_backend_herdr_rename_task() {  # <target> <label>
 }
 
 fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
-  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 live_workspace tabs live_label pane_id live_path
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 workspaces workspace_label expected_workspace_label tabs live_label pane_id live_path
   [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
   fm_backend_herdr_target_ready "$target" || return 1
-  live_workspace=$(fm_backend_herdr_workspace_find "$FM_BACKEND_HERDR_SESSION" "$workspace_id") || return 1
-  [ "$live_workspace" = "$workspace_id" ] || return 1
+  workspaces=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" workspace list 2>/dev/null) || return 1
+  workspace_label=$(printf '%s' "$workspaces" | jq -er --arg ws "$workspace_id" \
+    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // empty) else error("missing result.workspaces") end' 2>/dev/null) || return 1
+  expected_workspace_label=$(fm_backend_herdr_workspace_label)
+  if [ "$workspace_label" != "$expected_workspace_label" ]; then
+    [ "$expected_workspace_label" = firstmate-crew ] && [ "$workspace_label" = firstmate ] || return 1
+  fi
   tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
   live_label=$(printf '%s' "$tabs" | jq -er --arg tab "$tab_id" '.result.tabs[] | select(.tab_id == $tab) | .label' 2>/dev/null | head -1) || return 1
   [ "$live_label" = "$current_label" ] || return 1
