@@ -9,6 +9,10 @@ set -u
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
+# The move is delegated to `tasks-axi mv`, so this suite exercises the real
+# binary. Skip cleanly when it is absent (matching the backend smoke suites).
+command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (required by the delegated handoff path)"; exit 0; }
+
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
 
 setup_homes() {
@@ -145,10 +149,10 @@ test_body_moves_when_last_lines_of_file() {
   local home="$TMP_ROOT/body-eof-main"
   local sub="$TMP_ROOT/body-eof-sub"
   setup_homes "$home" "$sub"
-  printf '%s\n' '## Queued' > "$sub/data/backlog.md"
 
-  # No trailing newline after the last body line is still a valid file shape;
-  # printf builds that deliberately.
+  # A source item that ends the file with no trailing newline is a valid shape;
+  # printf builds that deliberately. It must move whole, indented ## line
+  # included, into the destination the handoff seeds.
   {
     printf '%s\n' '## Queued'
     printf '%s\n' '- [ ] eof-item - ends the file (repo: alpha)'
@@ -156,8 +160,20 @@ test_body_moves_when_last_lines_of_file() {
     printf '%s\n' '  ## Intent'
     printf '%s' '  eof body line two'
   } > "$home/data/backlog.md"
+  # tasks-axi owns the destination format: the moved block lands under ## Queued
+  # in the standard three-section scaffold the handoff seeds for a fresh home.
   local expected_destination="$TMP_ROOT/body-eof-expected.md"
-  cp "$home/data/backlog.md" "$expected_destination"
+  {
+    printf '%s\n' '## In flight'
+    printf '%s\n' ''
+    printf '%s\n' '## Queued'
+    printf '%s\n' '- [ ] eof-item - ends the file (repo: alpha)'
+    printf '%s\n' '  eof body line one'
+    printf '%s\n' '  ## Intent'
+    printf '%s\n' '  eof body line two'
+    printf '%s\n' ''
+    printf '%s\n' '## Done'
+  } > "$expected_destination"
 
   local expected_block
   expected_block=$(extract_item_block "$home/data/backlog.md" eof-item)
@@ -170,7 +186,7 @@ test_body_moves_when_last_lines_of_file() {
   assert_block_equals "destination body block mismatch for EOF item" \
     "$expected_block" "$dest_block"
   cmp -s "$expected_destination" "$sub/data/backlog.md" \
-    || fail "EOF item transfer changed the final-record terminator"
+    || fail "EOF item did not land byte-exact under the seeded destination scaffold"
 
   # Source should have no item residual - only the section heading remains.
   if grep -E 'eof-item|eof body|## Intent' "$home/data/backlog.md" >/dev/null; then
@@ -192,15 +208,18 @@ test_eof_body_before_seeded_destination_section_keeps_boundary() {
     printf '%s\n' '  seeded eof body one'
     printf '%s' '  seeded eof body two'
   } > "$home/data/backlog.md"
+  # tasks-axi owns the destination whitespace: the moved block sits directly
+  # under ## Queued with the section separator before the following ## Done, and
+  # the EOF body stays a clean line above that heading (its boundary is kept).
   local expected_destination="$TMP_ROOT/body-eof-seeded-expected.md"
   {
     printf '%s\n' '## In flight'
     printf '%s\n' ''
     printf '%s\n' '## Queued'
-    printf '%s\n' ''
     printf '%s\n' '- [ ] seeded-eof-item - ends the file (repo: alpha)'
     printf '%s\n' '  seeded eof body one'
     printf '%s\n' '  seeded eof body two'
+    printf '%s\n' ''
     printf '%s\n' '## Done'
   } > "$expected_destination"
 
@@ -287,6 +306,48 @@ EOF
   assert_grep '  neighbor body' "$home/data/backlog.md" "neighbor body was disturbed by re-run"
 
   pass "body-carrying handoff is idempotent: re-run changes nothing"
+}
+
+test_noncanonical_indented_continuations_refuse_without_changes() {
+  local home="$TMP_ROOT/noncanonical-main"
+  local sub="$TMP_ROOT/noncanonical-sub"
+  setup_homes "$home" "$sub"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] malformed-body - must not orphan continuations (repo: alpha)
+ one-space continuation
+EOF
+  printf '\ttab continuation\n' >> "$home/data/backlog.md"
+  cat >> "$home/data/backlog.md" <<'EOF'
+- [ ] untouched-item - remains in the main backlog (repo: beta)
+  canonical body
+EOF
+  cat > "$sub/data/backlog.md" <<'EOF'
+## Queued
+- [ ] resident-item - remains in the secondmate backlog (repo: alpha)
+  resident body
+EOF
+
+  local source_before="$TMP_ROOT/noncanonical-source-before.md"
+  local destination_before="$TMP_ROOT/noncanonical-destination-before.md"
+  local out
+  cp "$home/data/backlog.md" "$source_before"
+  cp "$sub/data/backlog.md" "$destination_before"
+
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design malformed-body 2>&1); then
+    fail "handoff accepted a noncanonical indented continuation"
+  fi
+
+  assert_contains "$out" "malformed-body" "refusal did not name the selected item"
+  assert_contains "$out" "one-space continuation" "refusal did not name the one-space continuation"
+  assert_contains "$out" "tab continuation" "refusal did not name the tab continuation"
+  cmp -s "$source_before" "$home/data/backlog.md" \
+    || fail "noncanonical-continuation refusal changed the main backlog"
+  cmp -s "$destination_before" "$sub/data/backlog.md" \
+    || fail "noncanonical-continuation refusal changed the secondmate backlog"
+
+  pass "noncanonical one-space and tab continuations refuse without changes"
 }
 
 test_indented_heading_is_not_section_boundary() {
@@ -418,6 +479,7 @@ test_body_moves_when_last_lines_of_file
 test_eof_body_before_seeded_destination_section_keeps_boundary
 test_untouched_eof_line_preserves_terminator
 test_body_handoff_is_idempotent
+test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
 
 echo "ALL TESTS PASSED"

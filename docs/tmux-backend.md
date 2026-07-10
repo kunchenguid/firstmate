@@ -15,7 +15,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 - A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
 - `git` with GitHub auth (`gh auth login`).
 - `node`, required by firstmate's universal toolchain.
-- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and `quota-axi` for bootstrap-managed backlog and dispatch support.
+- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, plus `quota-axi` for bootstrap-managed backlog and dispatch support.
 
 The first mate detects missing tools at session start and offers to install them after you approve.
 
@@ -78,6 +78,9 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
+
+Agent liveness and composer safety are separate checks.
+During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 

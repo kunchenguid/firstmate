@@ -17,7 +17,7 @@ Prerequisites:
 
 - The cmux app itself, installed from [cmux.com](https://cmux.com) or `brew install --cask cmux`, version 0.64.17 or newer.
 - `jq`, required to parse cmux's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body`, and quota-axi); treehouse still provides the worktree, cmux only provides the session.
+- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and quota-axi); treehouse still provides the worktree, cmux only provides the session.
 - The cmux CLI binary is not guaranteed to be on `PATH` after a plain app install (see "CLI is not on PATH by default" below) - the adapter falls back to the well-known bundle path automatically, so this is not a blocker, just something to be aware of if you want to run `cmux` yourself from a shell.
 
 **One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all.
@@ -268,9 +268,10 @@ Verified live: two workspaces created with the identical title `fm-test-dup` bot
 
 cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and unlike herdr's later `--format ansi` path for Codex ghost suggestions.
 Per this build task's explicit direction, `fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural border-row classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach: it locates the composer's own row as the only captured line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain ASCII `|`), scanning forward and keeping the LAST match so an earlier border-shaped line can never outrank the real bottom-anchored composer row.
+After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt with no boxed composer row reads `unknown`, not empty.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
 `tests/fm-backend-cmux.test.sh` pins this exact regression shape (`test_send_text_submit_popup_autocomplete_requires_second_enter`), verifying the adapter retries a genuine second Enter rather than declaring victory after the first one closes a popup.
-All four backends (tmux, herdr, zellij, cmux) expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
+All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
 
 ## Test safety
 

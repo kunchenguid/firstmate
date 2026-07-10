@@ -33,6 +33,14 @@
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
+#
+# Composer-content classification (empty|pending|unknown, and the fleet-wide
+# rule that a BARE shell prompt glyph is a dead shell, not an empty agent
+# composer) is NOT owned here: it is the shared bin/fm-composer-lib.sh, sourced
+# below and reused by every backend adapter so the decision cannot drift.
+
+# shellcheck source=bin/fm-composer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
@@ -104,12 +112,14 @@ fm_tmux_strip_ghost() {
 }
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
-#   empty   - no pending input (blank, a bare prompt, a busy footer, or only dim
-#             ghost/placeholder text). Safe to inject; also the positive
+#   empty   - no pending input (blank, a busy footer, an empty agent composer, or
+#             only dim ghost/placeholder text). Safe to inject; also the positive
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error). The caller decides.
+#   unknown - the pane could not be read (tmux error), OR the cursor line is a
+#             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
+#             composer, so NOT a safe injection target. The caller decides.
 #
 # The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
 # the single composer row (-S/-E), then run through fm_tmux_strip_ghost so dim/faint
@@ -117,35 +127,34 @@ fm_tmux_strip_ghost() {
 # never surfaced. The detector then strips the harness's box-drawing composer
 # borders ("│ … │", heavy "┃", or a plain ASCII "|") using literal-string
 # substitution (bash 3.2 safe, locale-independent — no \u escapes, no multibyte
-# character classes), and asks whether anything real is left.
+# character classes), remembers whether the row was bordered (a genuine composer
+# box), and delegates the empty/pending/unknown decision to the shared owner
+# fm_composer_classify_content (bin/fm-composer-lib.sh). The bordered flag is
+# what lets a bordered `│ > │` (claude's own idle composer) read empty while a
+# bare, unbordered `$ ` dead-shell prompt reads unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw line stripped
+  local target=$1 cy raw line trimmed stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
   line=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
-  # Strip the composer box borders (literal glyphs — no character classes).
-  stripped=${line//│/}      # U+2502 light vertical (claude)
-  stripped=${stripped//┃/}  # U+2503 heavy vertical
-  stripped=${stripped//|/}  # ASCII pipe
-  # Trim surrounding whitespace.
+  trimmed="${line#"${line%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  case "$trimmed" in
+    '│'*'│') stripped=${trimmed#│}; stripped=${stripped%│}; bordered=1 ;;
+    '┃'*'┃') stripped=${trimmed#┃}; stripped=${stripped%┃}; bordered=1 ;;
+    '|'*'|') stripped=${trimmed#|}; stripped=${stripped%|}; bordered=1 ;;
+    *) stripped=$trimmed ;;
+  esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # Nothing left inside the box = empty composer.
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \
-     && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
+  # A busy footer landing on the cursor line is not pending input (tmux-specific:
+  # only tmux captures the raw cursor row, which may BE the footer).
+  if [ -n "$stripped" ] \
+     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  # Just a bare prompt glyph = empty composer (idle).
-  case "$stripped" in
-    '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # A busy footer landing on the cursor line is not pending input.
-  if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'; return 0
+  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted

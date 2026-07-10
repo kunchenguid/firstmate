@@ -170,6 +170,50 @@ test_crew_is_provably_working_classifier() {
   pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
+# status_is_paused: the shared pause verb test both consumers read (so neither
+# hardcodes the literal). Matches only the verb before the first colon, so a reason
+# that merely mentions "paused" does not false-match, and a genuine blocker stays a
+# blocker.
+test_status_is_paused_classifier() {
+  status_is_paused 'paused: holding for the upstream release' || fail "paused verb not recognized"
+  status_is_paused '  paused:   waiting on a rate-limit reset' || fail "leading-space paused verb not recognized"
+  status_is_paused 'blocked: the build is paused upstream' && fail "a blocked line mentioning paused false-matched"
+  status_is_paused 'working: paused the animation loop' && fail "a working line mentioning paused false-matched"
+  status_is_paused 'done: shipped' && fail "done classified as paused"
+  status_is_paused '' && fail "empty line classified as paused"
+  # A pause is deliberately NOT captain-relevant: it is a stop-nagging signal, not
+  # work to keep surfacing.
+  status_is_captain_relevant 'paused: holding for the upstream release' && fail "paused is captain-relevant (should not be)"
+  pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
+}
+
+# crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
+# reasons - working (active run/busy pane), paused (declared external wait), or none
+# (surface it) - so the watcher's stale path gets both for one bounded call.
+# crew_is_paused delegates to it exactly as crew_is_provably_working does.
+test_crew_absorb_class_classifier() {
+  local dir fakebin
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
+  crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
+  ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
+  [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
+  ! crew_is_paused a || fail "unknown crew classed paused"
+  [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -470,6 +514,267 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
+#     cadence, never wedge-escalated ------------------------------------------
+# The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
+# release (paused: ...) whose idle pane tripped repeated possible-wedge escalations
+# all day. With the paused verb, its stale is absorbed like a working crew but never
+# uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
+# the pause's own status-file age, so a churny idle pane cannot reset the cadence)
+# for a recheck, so a forgotten pause cannot rot invisibly.
+test_nonterminal_stale_paused_absorbed_then_resurfaced() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  # A DECLARED pause (not captain-relevant), .seen-* primed so the signal scan does
+  # not pre-empt the stale path.
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # crew_absorb_class reads the declared pause from fm-crew-state.sh.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+
+  # Phase A: a fresh pause (status file just written) under a high re-surface
+  # threshold is absorbed - no wake, no wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
+  [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
+  reap "$pid"
+
+  # Phase B: age the pause past the (now normal) threshold by backdating its
+  # status file, re-prime .seen-* to the new signature so the signal scan stays
+  # quiet, and confirm it re-surfaces as a paused recheck - never a wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  : > "$out"
+  printf 'idle, holding for upstream (token 2)' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not re-surface a declared pause past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
+  pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+test_secondmate_paused_resurfaces_in_normal_mode() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-held.status"
+  window="test:fm-secondmate-held"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-held.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-held_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not re-surface a paused secondmate"
+  grep -F "stale: $window" "$out" >/dev/null || fail "paused secondmate did not emit a stale recheck"
+  grep -F "awaiting external" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
+  grep -F "possible wedge" "$out" >/dev/null && fail "paused secondmate was mislabeled a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared paused secondmate re-surfaces on the bounded normal-mode cadence"
+}
+
+test_secondmate_nonpaused_stale_remains_suppressed() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case secondmate-stale-suppressed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-working.status"
+  window="test:fm-secondmate-working"
+  printf 'idle while the parent supervises\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-working.meta"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle while the parent supervises")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced an ordinary secondmate stale pane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  pass "a non-paused secondmate retains normal stale suppression"
+}
+
+test_secondmate_unpause_clears_pause_tracking() {
+  local dir state fakebin out statusf window key pid
+  dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/secondmate-resumed.status"; window="test:fm-secondmate-resumed"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
+  printf 'working: upstream landed\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-resumed_status"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  : > "$state/.paused-resurfaced-$key"
+  : > "$state/.stale-$key"
+  : > "$state/.stale-since-$key"
+  : > "$state/.wedge-escalations-$key"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 20 || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed secondmate retained the pause marker"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "resumed secondmate retained stale tracking"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "resumed secondmate retained wedge tracking"; }
+  reap "$pid"
+  pass "a resumed secondmate clears pause and stale tracking before stale exemption"
+}
+
+test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-transition"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/transition.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/transition.status"
+  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash did not enter paused mode"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "pause transition retained its wedge timer"; }
+  reap "$pid"
+
+  printf 'working: upstream landed, resuming\n' > "$state/transition.status"
+  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"
+  fi
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash retained paused mode after resume"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged stale hash did not restart wedge tracking after resume"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
+}
+
+test_nonterminal_paused_rechecks_authoritative_state() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-paused-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-recheck"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-recheck.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/pause-recheck.status"
+  sig=$(seen_sig "$state/pause-recheck.status"); printf '%s' "$sig" > "$state/.seen-pause-recheck_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"
+  fi
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run retained paused mode"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "authoritative active run did not resume wedge tracking"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared pause is periodically rechecked against authoritative active-run state"
+}
+
+test_paused_authoritative_working_preserves_wedge_timer() {
+  local dir state fakebin out capture_file window key pane_hash sig pid since
+  dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-working"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-working.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/paused-working.status"
+  sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  since=$(cat "$state/.stale-since-$key")
+  sleep 2
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
+    || { reap "$pid"; fail "repeat authoritative working recheck reset the wedge timer"; }
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "authoritative working state did not wedge-escalate past the threshold"
+  grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -746,11 +1051,49 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+# A paused pane can first appear as a changed hash. In AFK mode that initial path
+# must still hand off the plain window identity to the daemon, rather than running
+# the normal-mode pause re-surface and decorating the stale identity.
+test_afk_paused_changed_pane_hands_off_plain_stale() {
+  local dir state fakebin out drain_out capture_file statusf window key sig pid back
+  dir=$(make_case afk-paused-changed-pane); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-afk-held"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/afk-held.meta"
+  statusf="$state/afk-held.status"
+  printf 'paused: awaiting the upstream tool release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
+  date '+%s' > "$state/.afk"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+
+  # Deliberately do not seed .hash-*: this is the changed-pane path that used to
+  # call handle_paused_stale before AFK's one-shot daemon handoff.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
+  [ ! -e "$state/.paused-$key" ] || fail "AFK watcher recorded normal-mode pause tracking instead of handing off"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after AFK paused stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "stale: $window" >/dev/null \
+    || fail "AFK paused stale was not queued with the plain window identity"
+  pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
+test_status_is_paused_classifier
+test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -763,9 +1106,17 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_secondmate_paused_resurfaces_in_normal_mode
+test_secondmate_nonpaused_stale_remains_suppressed
+test_secondmate_unpause_clears_pause_tracking
+test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
+test_nonterminal_paused_rechecks_authoritative_state
+test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
+test_afk_paused_changed_pane_hands_off_plain_stale

@@ -13,6 +13,9 @@
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
 #   fmx_request_inbox_context <state> <request_id> - infer reply platform/limit
 #                                from a stashed mention payload
+#   fmx_request_relay_context <request_id> - resolve reply platform/limit
+#                                AUTHORITATIVELY from the relay by request_id when
+#                                no local inbox payload survives
 #   fmx_reply_limit_for_platform <platform> <explicit-limit> - pick split budget
 #   fmx_split_thread <max> <cap> - split a reply (stdin) into a numbered thread
 #   fmx_image_payload_file <path> <client> <payload-file> - encode one image
@@ -139,6 +142,71 @@ fmx_request_inbox_context() {
         reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
       }
   ' "$inbox"
+}
+
+# fmx_request_relay_context <request_id>: resolve the reply platform/limit
+# AUTHORITATIVELY from the relay by request_id, for when no local inbox payload
+# survives - e.g. the task is linked to its mention AFTER the inbox file was
+# drained (posting the ack reply removes it), which otherwise strands the link
+# with no platform and silently defaults follow-ups to the X 280-char budget.
+# The request_id is the durable key the relay still holds within the follow-up
+# window, so this makes the local ordering of link-vs-cleanup irrelevant.
+#
+# POSTs {request_id} to $RELAY/connector/request-context and prints
+# {"platform":"...","reply_max_chars":"..."} in the SAME shape as
+# fmx_request_inbox_context, so callers feed both through the identical
+# normalization and fmx_reply_limit_for_platform path.
+#
+# Best-effort by design: it prints the empty-context shape and returns non-zero
+# when the query cannot run (no token, no curl/jq) or the relay does not resolve
+# it (non-2xx - e.g. an older relay without this endpoint, or a request already
+# swept past its window). Callers must treat that as "unknown" and warn loudly
+# rather than silently defaulting to the X budget. Requires fmx_load_config to
+# have populated FMX_TOKEN and FMX_RELAY first.
+fmx_request_relay_context() {
+  local rid=$1 payload_file body_file code rc ctx empty='{"platform":"","reply_max_chars":""}'
+  [ -n "${FMX_TOKEN:-}" ] || { printf '%s\n' "$empty"; return 1; }
+  command -v curl >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 1; }
+  command -v jq >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 1; }
+  payload_file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reqctx.XXXXXX") || { printf '%s\n' "$empty"; return 1; }
+  body_file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reqctx-body.XXXXXX") || { rm -f "$payload_file"; printf '%s\n' "$empty"; return 1; }
+  if ! jq -cn --arg rid "$rid" '{request_id:$rid}' > "$payload_file" 2>/dev/null; then
+    rm -f "$payload_file" "$body_file"; printf '%s\n' "$empty"; return 1
+  fi
+  code=$(fmx_post_json request-context "$payload_file" "$body_file"); rc=$?
+  rm -f "$payload_file"
+  if [ "$rc" != 0 ]; then rm -f "$body_file"; printf '%s\n' "$empty"; return 1; fi
+  case "$code" in
+    2[0-9][0-9]) ;;
+    *) rm -f "$body_file"; printf '%s\n' "$empty"; return 1 ;;
+  esac
+  ctx=$(jq -c '
+    def norm_platform:
+      tostring | ascii_downcase
+      | if . == "discord" or . == "discordapp" then "discord"
+        elif . == "x" or . == "twitter" then "x"
+        else "" end;
+    def first_string($items):
+      [$items[] | select(type == "string" and length > 0)][0] // "";
+    def first_limit($items):
+      [$items[]
+        | select(type == "number" or type == "string")
+        | tostring
+        | select(test("^[0-9]+$"))][0] // "";
+    {
+      platform: (first_string([.reply_platform, .platform, .target_platform, .source_platform, .provider]) | norm_platform),
+      reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
+    }
+  ' "$body_file" 2>/dev/null) || ctx=
+  rm -f "$body_file"
+  [ -n "$ctx" ] || { printf '%s\n' "$empty"; return 1; }
+  # A 200 that resolved neither a platform nor a limit is treated as unresolved so
+  # the caller warns instead of recording a link with no split budget.
+  if [ "$(printf '%s' "$ctx" | jq -r '.platform // ""')" = "" ] \
+    && [ "$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""')" = "" ]; then
+    printf '%s\n' "$empty"; return 1
+  fi
+  printf '%s\n' "$ctx"
 }
 
 # fmx_reply_limit_for_platform <platform> <explicit-limit>: choose the split

@@ -112,6 +112,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"
 
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_CMUX_ROOT/bin/fm-composer-lib.sh"
+
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
 FM_BACKEND_CMUX_MIN_MAJOR=0
 FM_BACKEND_CMUX_MIN_MINOR=64
@@ -555,20 +561,10 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   stripped=${stripped//|/}
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  case "$stripped" in
-    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_CMUX_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'
+  # A row was found only by the bordered shape above, so content came from a
+  # genuine composer box - delegate to the shared owner with bordered=1. A bare
+  # dead-shell prompt has no bordered row and already returned 'unknown' above.
+  fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_CMUX_IDLE_RE"
 }
 
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,

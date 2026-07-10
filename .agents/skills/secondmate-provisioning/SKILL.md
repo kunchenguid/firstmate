@@ -59,6 +59,7 @@ The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
+It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
@@ -71,6 +72,7 @@ Because this resolves from the file on every spawn, the pin is durable across ev
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
+That no-fetch path advances a linked worktree immediately; a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
 The same launch also propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into the secondmate home's `config/`.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited-config change without running the tracked-file fast-forward or nudging the agents.
@@ -99,9 +101,12 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 ```
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
-The helper resolves the secondmate home from `data/secondmates.md` and mechanically moves each named item from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
-It moves each item's whole block - the `- [ ] <id> ...` header plus every following indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
-It refuses `## In flight` entries because active task ownership also lives in tmux and `state/`.
+The helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
+This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
+It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
+It refuses a selected item with a single-space or tab-indented continuation rather than risk leaving content orphaned in the main backlog.
+It accepts in-scope `## Queued` entries only and refuses `## In flight` and historical `## Done` entries.
+Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items.

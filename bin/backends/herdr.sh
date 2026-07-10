@@ -49,6 +49,12 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
@@ -706,7 +712,7 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
+  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" bordered=0 verdict
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
@@ -734,6 +740,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   if [ "$shape" = bordered ]; then
+    bordered=1
     # Strip the border glyphs, then trim again.
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
@@ -741,26 +748,18 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
   fi
-  # A bare prompt glyph = empty composer.
-  case "$stripped" in
-    '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # Strip a leading prompt glyph before judging what remains.
-  case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
-    printf 'empty'; return 0
+  # Delegate the empty/pending/unknown decision to the shared owner. The bare
+  # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
+  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # via the no-composer-row path above, exactly as before.
+  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+  # herdr-only override: a bare-shape prompt whose trailing text is rendered
+  # faint in the ANSI capture is a Codex idle ghost suggestion, not real input.
+  if [ "$verdict" = pending ] && [ "$shape" = bare ] \
+     && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
+    verdict=empty
   fi
-  if [ "$shape" = bare ] && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
-    faint_tail=1
-  fi
-  [ "$faint_tail" -eq 1 ] && { printf 'empty'; return 0; }
-  printf 'pending'
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,

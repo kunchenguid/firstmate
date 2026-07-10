@@ -7,7 +7,7 @@
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
@@ -2025,8 +2025,8 @@ EOF
   pass "fm-backlog-handoff aborts atomically on unmatched, in-flight, and unregistered targets"
 }
 
-test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
-  local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
+test_backlog_handoff_refuses_done_items_and_non_secondmate_homes() {
+  local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside before_main before_sub out
   home="$TMP_ROOT/handoff-safety-main"
   subhome="$TMP_ROOT/handoff-safety-sub"
   projhome="$TMP_ROOT/handoff-safety-proj"
@@ -2035,22 +2035,26 @@ test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
   outside="$TMP_ROOT/handoff-safety-outside"
   mkdir -p "$home/data" "$home/state"
 
-  # A Done item handed into a secondmate backlog lacking a Done section gets one.
   seed_secondmate_home_marker "$subhome" archive
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '## Queued\n- [ ] keep-me - stays (repo: alpha)\n' > "$subhome/data/backlog.md"
   printf -- '- archive - archival (home: %s; scope: archival; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
-  cat > "$home/data/backlog.md" <<'EOF'
-## Done
-- [x] shipped-task - shipped thing - local main (merged 2026-06-19)
-EOF
-  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" archive shipped-task >/dev/null \
-    || fail "handoff of a Done item failed"
-  grep -F '## Done' "$subhome/data/backlog.md" >/dev/null \
-    || fail "handoff did not create the missing Done section in the secondmate backlog"
-  awk '/^## Done/{d=1;next} /^## /{d=0} d && /shipped-task/{found=1} END{exit found?0:1}' "$subhome/data/backlog.md" \
-    || fail "Done item did not land under the created Done section"
-  grep -F 'keep-me' "$subhome/data/backlog.md" >/dev/null || fail "handoff clobbered the existing secondmate backlog content"
+  printf '##\tDone\n- [x] shipped-task - shipped thing - local main (merged 2026-06-19)\n' > "$home/data/backlog.md"
+  before_main="$TMP_ROOT/handoff-safety-main.before"
+  before_sub="$TMP_ROOT/handoff-safety-sub.before"
+  cp "$home/data/backlog.md" "$before_main"
+  cp "$subhome/data/backlog.md" "$before_sub"
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" archive shipped-task 2>&1); then
+    fail "handoff accepted a Done backlog item"
+  fi
+  printf '%s\n' "$out" | grep -F 'shipped-task' >/dev/null \
+    || fail "Done-item refusal did not name the selected item"
+  printf '%s\n' "$out" | grep -F 'queued work only' >/dev/null \
+    || fail "Done-item refusal did not state the queued-only contract"
+  cmp -s "$before_main" "$home/data/backlog.md" \
+    || fail "Done-item refusal mutated the main backlog"
+  cmp -s "$before_sub" "$subhome/data/backlog.md" \
+    || fail "Done-item refusal mutated the secondmate backlog"
 
   # A registered home that is not a seeded secondmate home (e.g. a project clone)
   # is refused, and nothing is written into it.
@@ -2091,7 +2095,7 @@ EOF
   fi
   [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
   grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
-  pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
+  pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
 test_fm_home_parameterization
@@ -2151,4 +2155,4 @@ test_secondmate_teardown_path_boundary_matrix
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
-test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home
+test_backlog_handoff_refuses_done_items_and_non_secondmate_homes

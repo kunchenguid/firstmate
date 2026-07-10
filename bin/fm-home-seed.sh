@@ -16,7 +16,7 @@
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, a .fm-secondmate-home marker is written, and
+#       initialized, an ignored .fm-secondmate-home identity marker is written, and
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are

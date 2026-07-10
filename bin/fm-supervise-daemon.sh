@@ -4,10 +4,11 @@
 # Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events only. This is the token-efficient replacement for the
-# prior always-inject daemon: routine signal/stale/heartbeat wakes cost zero
-# firstmate context; only done/needs-decision/blocked/failed/persistent-wedge/
-# check-output events reach the LLM, and even then as one pre-read digest per
+# captain-relevant events plus bounded declared-pause rechecks. This is the
+# token-efficient replacement for the prior always-inject daemon: routine
+# signal/stale/heartbeat wakes cost zero firstmate context; only done/
+# needs-decision/blocked/failed/persistent-wedge/check-output events and a
+# declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
@@ -36,11 +37,13 @@
 #     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane is escalated only after it has been
-#     idle for STALE_ESCALATE_SECS (configurable), rechecked once. A wedged
-#     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
-#     lost. Crewmates are autonomous, so a delayed stale response does not stall
-#     a healthy crewmate's own progress.
+#   - Bounded wedge latency: a stale pane without a declared external wait is
+#     escalated only after it has been idle for STALE_ESCALATE_SECS
+#     (configurable), rechecked once. A wedged crewmate is therefore detected
+#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     Crewmates are autonomous, so a delayed stale response does not stall a
+#     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
@@ -81,6 +84,8 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
+#                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -382,6 +387,15 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
+  if [ -n "$last" ] && status_is_paused "$last"; then
+    # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
+    # so this is not a wedge. The caller records a pause marker (long re-surface
+    # cadence in housekeeping) rather than a wedge stale marker. Cheap: reuses the
+    # status line already read, no fm-crew-state.sh call, mirroring the daemon's
+    # existing status-log classification.
+    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
@@ -432,6 +446,79 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
+}
+
+# Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
+# first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
+# longer than a wedge) and re-surfaces the pause once per window. Recording is
+# create-if-absent so the timestamp is stable across a churny idle pane (many
+# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+pause_marker_record() {  # <window> <state> - create if absent
+  local win=$1 state=$2 key marker
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  marker="$state/.subsuper-paused-$key"
+  [ -e "$marker" ] || _now > "$marker"
+}
+
+pause_marker_remove() {  # <window> <state>
+  local win=$1 state=$2 key
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  rm -f "$state/.subsuper-paused-$key"
+}
+
+clear_pause_tracking() {  # <window> <state>
+  local win=$1 state=$2 task key watcher_key
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  watcher_key=$(_stale_key "$win")
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+}
+
+reconcile_pause_tracking() {  # <window> <state> <last-status-line>
+  local win=$1 state=$2 last=$3 task key marker watcher_key
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  marker="$state/.subsuper-paused-$key"
+  watcher_key=$(_stale_key "$win")
+  if status_is_paused "$last"; then
+    stale_marker_remove "$win" "$state"
+    pause_marker_record "$win" "$state"
+  elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    clear_pause_tracking "$win" "$state"
+  fi
+}
+
+migrate_watcher_pause_markers() {  # <state>
+  local state=$1 meta win task key last watcher_key
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    win=$(fm_backend_target_of_meta "$meta")
+    [ -n "$win" ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    key=$(_stale_key "$task")
+    watcher_key=$(_stale_key "$win")
+    last=$(last_status_line "$state/$task.status")
+    if status_is_paused "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+      reconcile_pause_tracking "$win" "$state" "$last"
+    fi
+  done
+}
+
+sync_pause_markers_from_signal() {  # <state> <signal files>
+  local state=$1 paths=$2 f last task win
+  local -a files
+  read -r -a files <<<"$paths"
+  for f in "${files[@]}"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    last=$(last_status_line "$f")
+    task=$(basename "$f"); task=${task%.status}
+    win=$(window_for_task "$task" "$state" 2>/dev/null || true)
+    [ -n "$win" ] || continue
+    reconcile_pause_tracking "$win" "$state" "$last"
+  done
 }
 
 # Record the seen-status marker for a captain-relevant status line so the
@@ -499,9 +586,15 @@ pane_is_busy() {  # <target> [backend]
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
-# pane_input_pending: dispatches through fm_backend_composer_state, which for
-# tmux calls the exact same fm_tmux_composer_state this function called
-# directly before - byte-identical for the default/omitted-backend case.
+# pane_input_pending: the standalone "is there real unsubmitted text" predicate,
+# dispatching through fm_backend_composer_state (byte-identical to a direct
+# fm_tmux_composer_state call for the default/omitted-backend case). inject_msg
+# no longer routes its composer-guard through this boolean: a safe injection
+# target must be affirmatively 'empty', and a boolean pending/not-pending check
+# cannot distinguish an empty agent composer from a bare dead-shell prompt or an
+# unreadable pane (both 'unknown'), so inject_msg reads the full tri-state
+# verdict directly. This predicate is retained as the shared pending check and
+# as the vehicle for the composer-classifier dispatch regression tests.
 pane_input_pending() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
   [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
@@ -601,11 +694,15 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
+#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
+#     digest and reset the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
+  migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -641,8 +738,6 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     # Reconstruct the backend target from metadata, with the live tmux list as the
     # legacy fallback for old markers that predate meta lookup.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
@@ -650,12 +745,58 @@ housekeeping() {  # <state>
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
+    task=$(window_to_task "$win" "$state")
+    last=$(last_status_line "$state/$task.status")
+    if [ -n "$last" ] && status_is_paused "$last"; then
+      reconcile_pause_tracking "$win" "$state" "$last"
+      continue
+    fi
+    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
+    esac
+  done
+
+  # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
+  # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
+  # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
+  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
+  # still declaring the pause -> escalate a recheck digest and reset the marker so
+  # the window repeats.
+  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  for marker in "$state"/.subsuper-paused-*; do
+    [ -e "$marker" ] || continue
+    key="${marker##*.subsuper-paused-}"
+    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
+    if [ -z "$win" ]; then
+      rm -f "$marker"; continue
+    fi
+    task=$(window_to_task "$win" "$state")
+    last=$(last_status_line "$state/$task.status")
+    if [ -z "$last" ] || ! status_is_paused "$last"; then
+      reconcile_pause_tracking "$win" "$state" "$last"
+      continue
+    fi
+    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    [ "$age" -ge "$pause_secs" ] || continue
+    stale_window_is_busy "$win" "$state"
+    case "$?" in
+      0) rm -f "$marker" ;;
+      2) rm -f "$marker" ;;
+      *)
+        last=$(last_status_line "$state/$task.status")
+        if [ -n "$last" ] && status_is_paused "$last"; then
+          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          _now > "$marker"
+        else
+          rm -f "$marker"
+        fi
+        ;;
     esac
   done
 
@@ -714,7 +855,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict
+  local msg=$1 state target backend retries sleep_s verdict composer
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -734,17 +875,24 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use pane. Two checks:
+  # (3) Busy-guard: never inject into an in-use pane.
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
-  #   b) pane_input_pending: the cursor line has real unsubmitted text after
-  #      dim/faint ghost text and borders are ignored (a human's half-typed line,
-  #      or a previous injection whose Enter was swallowed).
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
-  if pane_input_pending "$target" "$backend"; then
-    log "inject deferred: supervisor pane has pending input (non-empty composer)"
+  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
+  #      composer. The shared classifier (fm_backend_composer_state ->
+  #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
+  #      for real unsubmitted text (a human's half-typed line, or a swallowed
+  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
+  #      exited to its login shell) or an unreadable pane. Neither is a safe
+  #      target - typing the escalation into a shell could execute it - so defer
+  #      on anything that is not affirmatively 'empty'. A deferred escalation
+  #      stays buffered for the next cycle or the catch-up flush.
+  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  if [ "$composer" != empty ]; then
+    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -795,7 +943,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled
+  local reason=$1 state=$2 decision action distilled task last
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -812,20 +960,46 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  if [ "$action" = "escalate" ]; then
-    log "escalate: $reason -> $distilled"
-    escalate_add "$state" "$distilled"
-    # A terminal-stale escalate must not leave a persistence marker behind, or
-    # housekeeping re-escalates the same pane as a false wedge later.
-    [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-    mark_escalated_seen "$kind" "$arg" "$state"
-    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
-  else
-    # Transient (non-terminal) stale: record/refresh the marker so housekeeping
-    # can age it; the persistence recheck, not this wake, escalates a wedge.
-    [ "$kind" = "stale" ] && stale_marker_record "$arg" "$state"
-    log "self-handle: $reason -> $distilled"
-  fi
+  [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
+  case "$action" in
+    escalate)
+      log "escalate: $reason -> $distilled"
+      escalate_add "$state" "$distilled"
+      # A terminal-stale escalate must not leave a persistence marker behind, or
+      # housekeeping re-escalates the same pane as a false wedge later.
+      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+      mark_escalated_seen "$kind" "$arg" "$state"
+      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      ;;
+    pause)
+      # Declared external-wait pause: record a pause marker (long re-surface
+      # cadence in housekeeping) and drop any wedge stale marker, so a pane that
+      # transitioned working->paused is not still wedge-aged. Only stale produces
+      # this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_record "$arg" "$state"
+      fi
+      log "self-handle (paused): $reason -> $distilled"
+      ;;
+    *)
+      # Transient (non-terminal) stale: record/refresh the wedge marker so
+      # housekeeping can age it, and drop any pause marker (a crew that left its
+      # pause reverts to normal wedge aging). The persistence recheck, not this
+      # wake, escalates a wedge.
+      if [ "$kind" = "stale" ]; then
+        task=$(window_to_task "$arg" "$state")
+        last=$(last_status_line "$state/$task.status")
+        if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+          stale_marker_remove "$arg" "$state"
+        else
+          pause_marker_remove "$arg" "$state"
+          stale_marker_record "$arg" "$state"
+        fi
+      fi
+      log "self-handle: $reason -> $distilled"
+      ;;
+  esac
 }
 
 # --- log --------------------------------------------------------------------
@@ -959,6 +1133,7 @@ fm_super_main() {
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""

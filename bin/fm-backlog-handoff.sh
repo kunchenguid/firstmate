@@ -7,20 +7,41 @@
 #
 # Scope-matching is firstmate's JUDGMENT: you pass the task-id keys you have
 # already judged in-scope for the secondmate. This script performs only the
-# mechanical move - it removes each matched item BLOCK (the `- [ ] <id> ...`
-# header line plus every following body line - indented lines and blank
-# separators between paragraphs - up to the next item line or column-0 section
-# heading) from data/backlog.md under the active firstmate home and appends
-# that full block, under the same section heading, to the secondmate home's
-# data/backlog.md (home resolved from data/secondmates.md). Body membership is
-# by position, not content: an indented line or a blank line continues the
-# block, and indented lines that look like markdown headings (e.g.
-# `  ## Intent`) stay in the item and are not treated as section boundaries.
-# It never changes a line's text, never writes into a
-# project (it refuses a home that is not a firstmate home), and is idempotent:
-# a key already present in the secondmate backlog is reported and skipped (no
-# duplicate header or body), so re-running converges. If any key matches neither
-# backlog, nothing is moved. See AGENTS.md project management and task lifecycle.
+# fleet-level validation that the backlog backend cannot know, then DELEGATES
+# the actual item move to `tasks-axi mv`, the single owner of the backlog
+# format. Delegating the move is the durability end-state: it removes the awk
+# that used to re-implement block extraction and insertion here, so the format
+# has exactly one parser and cannot drift out of sync (the body-orphaning class
+# of bug fixed in PR #401 was exactly that drift).
+#
+# What this script still owns (never delegated):
+#   - resolving the secondmate home from data/secondmates.md;
+#   - proving the destination is a genuine seeded secondmate home
+#     (.fm-secondmate-home marker, AGENTS.md + bin/), never a project clone, the
+#     active home, or the firstmate repo;
+#   - moving only `## Queued` items, refusing `## In flight` and historical
+#     `## Done` records, which must stay with their home for pruning or
+#     archiving;
+#   - the multi-key classification and idempotent per-key reporting: a key
+#     already present in the secondmate backlog is reported and skipped, and if
+#     any key matches neither backlog nothing is moved.
+#
+# What `tasks-axi mv <id>... --to <dest>` owns: moving each full item BLOCK
+# byte-exact (header, body lines, blank separators, and indented pseudo-headings
+# such as `  ## Intent`), preserving destination section placement, and moving a
+# whole connected set (a blocker and its dependents) atomically with blocked-by
+# links preserved. It refuses a move that would strand a dependency across the
+# two files; that error is surfaced verbatim and nothing is moved.
+#
+# Item bodies must use at least two leading spaces. The helper refuses a selected
+# item with a single-space or tab-indented continuation rather than risk leaving
+# it orphaned, because tasks-axi treats only two-or-more-space lines as body.
+# The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`
+# (introduced in 0.2.2). Bootstrap requires it fleet-wide, so this works
+# everywhere; the `config/backlog-backend=manual` knob only governs firstmate's
+# own hand-editing of its own backlog, not this validated helper. Idempotent:
+# re-running converges. Atomic: on any move failure nothing moves.
+# See AGENTS.md project management and task lifecycle.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 set -eu
 
@@ -30,6 +51,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -157,19 +180,23 @@ validate_backlog_file() {
   fi
 }
 
-file_ends_with_lf() {
-  local path=$1 last_byte
-  [ -s "$path" ] || return 1
-  last_byte=$(tail -c 1 "$path" | od -An -tx1 | tr -d '[:space:]')
-  [ "$last_byte" = "0a" ]
-}
-
+# Classify a single key by the section it lives under (## In flight /
+# ## Queued / ## Done), or return non-zero if no `- [ ] <key>` / `- [x] <key>`
+# header exists in the file. This reads only section headings and item header
+# lines - never item bodies - so it drives the fleet-level classification (in-
+# flight refusal, already-present idempotency, missing-key abort) without
+# re-implementing the block/body move semantics that tasks-axi mv owns.
 backlog_key_section() {
   local file=$1 key=$2
   [ -f "$file" ] || return 1
   awk -v key="$key" '
     BEGIN { section = "## Queued" }
-    /^## / { section = $0; next }
+    /^##[[:space:]]+/ {
+      section = $0
+      sub(/^##[[:space:]]+/, "## ", section)
+      sub(/[[:space:]]+$/, "", section)
+      next
+    }
     /^- \[[ x]\] / {
       rest = $0
       sub(/^- \[[ x]\] +/, "", rest)
@@ -178,6 +205,23 @@ backlog_key_section() {
       if (id == key) { print section; found = 1; exit }
     }
     END { exit found ? 0 : 1 }
+  ' "$file"
+}
+
+backlog_key_noncanonical_body_lines() {
+  local file=$1 key=$2
+  awk -v key="$key" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (capturing) exit
+      if (id == key) { capturing = 1 }
+      next
+    }
+    capturing && /^##[[:space:]]+/ { exit }
+    capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
   ' "$file"
 }
 
@@ -194,15 +238,18 @@ TO_MOVE=()
 ALREADY=()
 MISSING=()
 IN_FLIGHT=()
+DONE=()
+NOT_QUEUED=()
 for key in "$@"; do
   if backlog_key_section "$SUB_BACKLOG" "$key" >/dev/null; then
     ALREADY+=("$key")
   elif section=$(backlog_key_section "$MAIN_BACKLOG" "$key"); then
-    if [ "$section" = "## In flight" ]; then
-      IN_FLIGHT+=("$key")
-    else
-      TO_MOVE+=("$key")
-    fi
+    case "$section" in
+      "## Queued") TO_MOVE+=("$key") ;;
+      "## In flight") IN_FLIGHT+=("$key") ;;
+      "## Done") DONE+=("$key") ;;
+      *) NOT_QUEUED+=("$key") ;;
+    esac
   else
     MISSING+=("$key")
   fi
@@ -211,6 +258,14 @@ done
 FAILED=0
 if [ "${#IN_FLIGHT[@]}" -gt 0 ]; then
   echo "error: refusing to hand off in-flight backlog items: ${IN_FLIGHT[*]}" >&2
+  FAILED=1
+fi
+if [ "${#DONE[@]}" -gt 0 ]; then
+  echo "error: refusing to hand off Done (historical) backlog items: ${DONE[*]}; handoffs move in-scope queued work only - Done records stay with their home and are pruned/archived." >&2
+  FAILED=1
+fi
+if [ "${#NOT_QUEUED[@]}" -gt 0 ]; then
+  echo "error: refusing to hand off non-queued backlog items: ${NOT_QUEUED[*]}; handoffs move in-scope queued work only." >&2
   FAILED=1
 fi
 if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -227,184 +282,50 @@ if [ "${#TO_MOVE[@]}" -eq 0 ]; then
   exit 0
 fi
 
+FAILED=0
+for key in "${TO_MOVE[@]}"; do
+  while IFS= read -r line; do
+    printf 'error: refusing to hand off %s: non-2-space continuation line: %s\n' \
+      "$key" "$line" >&2
+    FAILED=1
+  done < <(backlog_key_noncanonical_body_lines "$MAIN_BACKLOG" "$key")
+done
+if [ "$FAILED" -ne 0 ]; then
+  echo "       nothing was moved." >&2
+  exit 1
+fi
+
+if ! fm_tasks_axi_compatible; then
+  echo "error: tasks-axi with atomic multi-ID mv support (0.2.2+) is required to move backlog items" >&2
+  exit 1
+fi
+
+# Seed the destination with firstmate's standard three-section scaffold when it
+# does not exist yet, so the moved item lands under the right section. (Left to
+# create the file itself, tasks-axi mv writes its own `# Backlog` title format,
+# which is not firstmate's home-backlog convention.)
 mkdir -p "$SUB_HOME/data"
-SUB_EXISTED=0
+SUB_CREATED=0
 if [ ! -f "$SUB_BACKLOG" ]; then
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$SUB_BACKLOG"
-else
-  SUB_EXISTED=1
+  SUB_CREATED=1
 fi
 
-MAIN_DIR=$(dirname "$MAIN_BACKLOG")
-SUB_DIR=$(dirname "$SUB_BACKLOG")
-KEYS_FILE=$(mktemp "$MAIN_DIR/.fm-handoff-keys.XXXXXX")
-MOVED_FILE=$(mktemp "$MAIN_DIR/.fm-handoff-moved.XXXXXX")
-KEPT_FILE=$(mktemp "$MAIN_DIR/.fm-handoff-kept.XXXXXX")
-SUB_TMP=$(mktemp "$SUB_DIR/.fm-handoff-sub.XXXXXX")
-MAIN_BAK=$(mktemp "$MAIN_DIR/.fm-handoff-main-bak.XXXXXX")
-SUB_BAK=$(mktemp "$SUB_DIR/.fm-handoff-sub-bak.XXXXXX")
-CHANGES_STARTED=0
-COMMITTED=0
-cleanup() {
-  if [ "$CHANGES_STARTED" -eq 1 ] && [ "$COMMITTED" -eq 0 ]; then
-    cp "$MAIN_BAK" "$MAIN_BACKLOG" 2>/dev/null || true
-    if [ "$SUB_EXISTED" -eq 1 ]; then
-      cp "$SUB_BAK" "$SUB_BACKLOG" 2>/dev/null || true
-    else
-      rm -f "$SUB_BACKLOG"
-    fi
+# Delegate the move to tasks-axi. Passing the whole in-scope set to one call is a
+# single atomic transaction, so a connected set (blocker + dependents) moves
+# together and, on any failure, neither backlog's content changes - the only
+# cleanup is a scaffold we just created. tasks-axi writes both its success and
+# error output to stdout, so capture it and surface it only on failure.
+if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" 2>&1); then
+  if [ "$SUB_CREATED" -eq 1 ]; then
+    rm -f "$SUB_BACKLOG"
   fi
-  rm -f "$KEYS_FILE" "$MOVED_FILE" "$KEPT_FILE" "$SUB_TMP" "$MAIN_BAK" "$SUB_BAK"
-}
-trap cleanup EXIT
-printf '%s\n' "${TO_MOVE[@]}" > "$KEYS_FILE"
-cp "$MAIN_BACKLOG" "$MAIN_BAK"
-if [ "$SUB_EXISTED" -eq 1 ]; then
-  cp "$SUB_BACKLOG" "$SUB_BAK"
+  if [ -n "$MV_OUT" ]; then
+    printf '%s\n' "$MV_OUT" >&2
+  fi
+  echo "error: tasks-axi mv failed; nothing was moved." >&2
+  exit 1
 fi
-
-# Pass 1: drop each matched item block from the main backlog, capturing every
-# removed line (header + body) tagged with the "## " section heading it lived
-# under. Body membership is position, not content: an indented line or a blank
-# line continues the block (blank separators between paragraphs stay with the
-# item), even when an indented line's content looks like a heading. Only a next
-# item header or a column-0 "## " heading ends the block.
-: > "$MOVED_FILE"
-MAIN_FINAL_LF=0
-if file_ends_with_lf "$MAIN_BACKLOG"; then
-  MAIN_FINAL_LF=1
-fi
-awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" -v keptfile="$KEPT_FILE" \
-  -v final_lf="$MAIN_FINAL_LF" '
-  function emit_kept(rec) {
-    if (have_kept) print pending_kept > keptfile
-    pending_kept = rec
-    have_kept = 1
-  }
-  function emit_moved(rec) {
-    if (have_moved) print pending_moved > movedfile
-    pending_moved = rec
-    have_moved = 1
-  }
-  BEGIN {
-    while ((getline k < keysfile) > 0) { if (k != "") want[k] = 1 }
-    section = "## Queued"
-    moving = 0
-  }
-  /^## / {
-    moving = 0
-    section = $0
-    emit_kept($0)
-    last_source_kept = 1
-    last_source_moved = 0
-    next
-  }
-  /^- \[[ x]\] / {
-    rest = $0
-    sub(/^- \[[ x]\] +/, "", rest)
-    id = rest
-    sub(/[ \t].*/, "", id)
-    if (id in want) {
-      emit_moved(section "\t" $0)
-      moving = 1
-      last_source_kept = 0
-      last_source_moved = 1
-      next
-    }
-    moving = 0
-    emit_kept($0)
-    last_source_kept = 1
-    last_source_moved = 0
-    next
-  }
-  moving && /^([ \t].*)?$/ {
-    emit_moved(section "\t" $0)
-    last_source_kept = 0
-    last_source_moved = 1
-    next
-  }
-  {
-    moving = 0
-    emit_kept($0)
-    last_source_kept = 1
-    last_source_moved = 0
-  }
-  END {
-    if (have_kept) {
-      if (last_source_kept && !final_lf) printf "%s", pending_kept > keptfile
-      else print pending_kept > keptfile
-    }
-    if (have_moved) {
-      if (last_source_moved && !final_lf) printf "%s", pending_moved > movedfile
-      else print pending_moved > movedfile
-    }
-  }
-' "$MAIN_BACKLOG"
-
-# Pass 2: insert each moved block at the end of its section in the sub backlog,
-# creating the section heading if the sub backlog lacks it. Records are one
-# physical line each (section TAB line); multi-line bodies are consecutive
-# records under the same section and reassemble in order.
-MOVED_FINAL_LF=0
-if file_ends_with_lf "$MOVED_FILE"; then
-  MOVED_FINAL_LF=1
-fi
-awk -v movedfile="$MOVED_FILE" -v moved_final_lf="$MOVED_FINAL_LF" '
-  function add_record(rec, eol,    tab, sec, line) {
-    tab = index(rec, "\t")
-    if (tab == 0) return
-    sec = substr(rec, 1, tab - 1)
-    line = substr(rec, tab + 1)
-    if (!(sec in items)) { order[++nsec] = sec }
-    items[sec] = items[sec] line eol
-  }
-  function flush(sec, needs_separator) {
-    if (sec != "" && (sec in items) && !(sec in flushed)) {
-      printf "%s", items[sec]
-      if (needs_separator && items[sec] !~ /\n$/) printf "\n"
-      flushed[sec] = 1
-    }
-  }
-  BEGIN {
-    nsec = 0
-    have_pending = 0
-    while ((getline rec < movedfile) > 0) {
-      if (have_pending) add_record(pending, "\n")
-      pending = rec
-      have_pending = 1
-    }
-    if (have_pending) {
-      add_record(pending, moved_final_lf ? "\n" : "")
-    }
-    cur = ""
-  }
-  /^## / { flush(cur, 1); cur = $0; print; next }
-  { print }
-  END {
-    needs_separator = 0
-    for (i = 1; i <= nsec; i++) {
-      if (!(order[i] in flushed) && order[i] != cur) {
-        needs_separator = 1
-        break
-      }
-    }
-    flush(cur, needs_separator)
-    for (i = 1; i <= nsec; i++) {
-      s = order[i]
-      if (!(s in flushed)) {
-        print ""
-        print s
-        printf "%s", items[s]
-        flushed[s] = 1
-      }
-    }
-  }
-' "$SUB_BACKLOG" > "$SUB_TMP"
-
-CHANGES_STARTED=1
-mv "$SUB_TMP" "$SUB_BACKLOG"
-mv "$KEPT_FILE" "$MAIN_BACKLOG"
-COMMITTED=1
 
 echo "handed off ${#TO_MOVE[@]} item(s) to $ID: ${TO_MOVE[*]}"
 echo "  into $SUB_BACKLOG"

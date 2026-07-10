@@ -15,7 +15,7 @@ Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body`, and quota-axi); treehouse still provides the worktree, zellij only provides the session.
+- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, and quota-axi); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
@@ -184,7 +184,7 @@ This is why `fm_backend_zellij_kill` resolves the owning tab id from the pane wh
 ## Composer verification: delta-based
 
 Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` still uses a content-diff strategy: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
-This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state only for pending-input guards and submit fallback.
+This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state for the affirmative-empty injection guard and submit fallback.
 All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching.
 
 ## Session safety
