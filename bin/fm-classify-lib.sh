@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests and, for the always-on watcher, the provably-working predicate that makes
-# no-verb signal and stale-pane wakes safe to absorb.
+# tests, declared-external-wait vocabulary, and the working/paused absorb
+# classification that makes no-verb signal and stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -13,11 +13,11 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The one exception is the "provably working" predicate (crew_is_provably_working
-# and its signal-path wrapper). It is NOT a pure status-file read: it reuses
+# The one exception is the absorb classification (crew_absorb_class and its
+# working/paused wrappers). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn or went stale shows positive evidence
-# it is still working. Callers run it ONLY on no-verb signal handling and first
+# whether a crew that just stopped its turn or went stale is working, deliberately
+# paused, or neither. Callers run it ONLY on no-verb signal handling and first
 # sighting of a stale hash, never on every wake, so the per-wake triage stays
 # cheap.
 

@@ -4,10 +4,11 @@
 # Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events only. This is the token-efficient replacement for the
-# prior always-inject daemon: routine signal/stale/heartbeat wakes cost zero
-# firstmate context; only done/needs-decision/blocked/failed/persistent-wedge/
-# check-output events reach the LLM, and even then as one pre-read digest per
+# captain-relevant events plus bounded declared-pause rechecks. This is the
+# token-efficient replacement for the prior always-inject daemon: routine
+# signal/stale/heartbeat wakes cost zero firstmate context; only done/
+# needs-decision/blocked/failed/persistent-wedge/check-output events and a
+# declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
@@ -36,11 +37,13 @@
 #     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane is escalated only after it has been
-#     idle for STALE_ESCALATE_SECS (configurable), rechecked once. A wedged
-#     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
-#     lost. Crewmates are autonomous, so a delayed stale response does not stall
-#     a healthy crewmate's own progress.
+#   - Bounded wedge latency: a stale pane without a declared external wait is
+#     escalated only after it has been idle for STALE_ESCALATE_SECS
+#     (configurable), rechecked once. A wedged crewmate is therefore detected
+#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     Crewmates are autonomous, so a delayed stale response does not stall a
+#     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
@@ -81,6 +84,8 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
+#                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan

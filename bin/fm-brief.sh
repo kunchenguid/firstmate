@@ -152,7 +152,7 @@ A message with NO marker is the captain typing directly into your pane: treat it
 
 # Escalation to main firstmate
 Handle routine work yourself.
-Escalate only true captain-relevant outcomes by appending one line:
+Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.

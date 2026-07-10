@@ -6,8 +6,11 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. While state/.afk exists, the daemon
-# owns triage and this watcher queues and exits on every wake. Printed reason lines:
+# working signal is never silently swallowed. A declared external-wait pause is
+# the separate idle absorb case and re-surfaces only on its long bounded cadence,
+# although its initial no-verb status signal still surfaces in normal mode.
+# While state/.afk exists, the daemon owns triage and this watcher queues and exits
+# on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
@@ -15,8 +18,10 @@
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. Only when
-#                          NOT provably working does the log's last line decide:
+#                          firstmate hands it to a no-mistakes validation. A declared
+#                          external-wait pause is absorbed instead with its own long
+#                          re-surface cadence, never as a wedge. Only when neither
+#                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"

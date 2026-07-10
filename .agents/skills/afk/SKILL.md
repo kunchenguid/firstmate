@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate only captain-relevant events as one batched digest, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -39,9 +39,8 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** to the captain that away-mode is active: the daemon will
-   self-handle routine wakes, escalate only captain-relevant events, and the
-   captain can exit by sending any real message.
+4. **Acknowledge** to the captain that away-mode is active.
+   The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
 
 ## How to exit afk
 
@@ -118,20 +117,17 @@ did not land instead of leaving it unsubmitted.
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
-Only captain-relevant events escalate to firstmate's context, and even then as
-one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, the signal/stale
-tests, and the fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same
-library the always-on watcher uses for its own triage when afk is off, so the two
-modes apply one identical policy. While `state/.afk` exists the daemon owns the
-watcher, so the watcher reverts to one-shot and lets the daemon do the triage -
-the two never run their triage at the same time.
+Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
 
 - `signal` whose status content has no captain-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> self-handle. Captain-relevant verb -> escalate.
+- `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
+  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
@@ -206,6 +202,7 @@ These properties must hold:
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
 - Wedge detection is bounded-latency, not lossy.
+- Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
