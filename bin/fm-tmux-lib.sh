@@ -114,7 +114,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive
+  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted

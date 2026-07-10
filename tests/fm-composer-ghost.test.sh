@@ -221,6 +221,19 @@ test_dark_truecolor_ghost_only_composer_is_not_pending() {
   pass "fm_pane_input_pending: a dark truecolor ghost-only composer (grok placeholder) is NOT pending"
 }
 
+test_dark_truecolor_bare_shell_prompt_is_unknown() {
+  local dir fb capture out
+  dir="$TMP_ROOT/dark-shell-prompt"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '\033[38;2;50;47;70m$\033[0m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "dark truecolor bare shell prompt must read unknown, got '$out'"
+  pass "fm_tmux_composer_state: a dark truecolor bare shell prompt reads unknown"
+}
+
 test_real_text_with_trailing_ghost_is_pending() {
   local dir fb capture
   dir="$TMP_ROOT/mixed"; mkdir -p "$dir"
@@ -270,5 +283,6 @@ test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
+test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_peek_output_is_escape_free

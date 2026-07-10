@@ -179,8 +179,14 @@ fm_composer_idle_matches() {
   esac
 }
 
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive}
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+  plain_content=${5:-$content}
+  if [ "$bordered" != 1 ]; then
+    case "$plain_content" in
+      '>'|'$'|'%'|'#') printf 'unknown'; return 0 ;;
+    esac
+  fi
   # A bare prompt glyph on its own row.
   case "$content" in
     '❯'|'›')
