@@ -70,6 +70,7 @@ last_status_line() {
 status_is_captain_relevant() {
   local line=$1
   [ -n "$line" ] || return 1
+  status_is_paused "$line" && return 1
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 

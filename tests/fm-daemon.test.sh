@@ -156,13 +156,15 @@ test_stale_terminal_escalates() {
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
 test_stale_paused_classifies_pause() {
-  local dir state out
+  local dir state out pause_reason
   dir=$(make_supercase stale-paused)
   state="$dir/state"
-  printf 'paused: holding for the upstream tool release\n' > "$state/held-w9.status"
+  pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
+  status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
+  printf '%s\n' "$pause_reason" > "$state/held-w9.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
-  pass "stale + declared pause classifies as pause, not wedge or terminal"
+  pass "paused reasons with captain phrases remain pause-classified"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
