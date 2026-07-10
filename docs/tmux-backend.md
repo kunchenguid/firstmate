@@ -113,6 +113,31 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=1`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Numeric session names and `-t` target syntax
+
+tmux's own default session name is a bare number (`0` for the first unnamed session), and a bare numeric `-t` target is ambiguous: tmux's target-window resolution prefers a window-INDEX match in the current session over a session-NAME match.
+Every session's initial window already occupies index 0, so `new-window -t "0"` fails even when a session named `0` exists and has room.
+This hit live on 2026-07-09: a spawn into a session named `0` failed with `create window failed: index 0 in use` even though the session name itself was free.
+`fm_backend_tmux_create_task` (`bin/backends/tmux.sh`) therefore appends a trailing colon to the session name (`-t "$ses:"`) in both its duplicate-check `list-windows` call and its `new-window` call, which forces session-name interpretation.
+
+Verified empirically with real tmux 3.4 on a private socket, 2026-07-09:
+
+```sh
+$ tmux new-session -d -s 0
+$ tmux new-window -d -t "0" -n probe
+create window failed: index 0 in use
+$ tmux new-window -d -t "=0" -n probe
+create window failed: index 0 in use
+$ tmux new-window -d -t "0:" -n probe
+$ tmux list-windows -t "0:" -F '#{window_index} #{window_name}'
+0 bash
+1 probe
+```
+
+The leading `=` exact-match prefix does not help - it still resolves as a window index - so the trailing colon is the verified fix, not a stylistic choice.
+The regression is covered by `tests/fm-backend-tmux-smoke.test.sh`'s numeric-session block, which creates a session literally named `0` and asserts `fm_backend_tmux_create_task` succeeds against it.
+No other call site in `bin/backends/tmux.sh` passes a bare session name to `-t`; every other target is already a full `session:window` pair.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
