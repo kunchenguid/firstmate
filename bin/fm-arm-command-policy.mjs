@@ -15,6 +15,7 @@ const REASONS = {
   "watcher-nested": "a protected watcher command must not run through a wrapper, substitution, or compound command",
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
+  "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
 };
 
 function parseArguments(argv) {
@@ -33,7 +34,7 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch-(?:arm|checkpoint)\.sh\b/.test(normalizeLineContinuations(command));
+  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
 function normalizeLineContinuations(source) {
@@ -573,18 +574,23 @@ function commandPosition(tokens) {
   return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads };
 }
 
+const PROTECTED_SCRIPTS = [
+  { relative: "bin/fm-watch-arm.sh", kind: "arm" },
+  { relative: "bin/fm-watch-checkpoint.sh", kind: "checkpoint" },
+  { relative: "bin/fm-watch.sh", kind: "watch" },
+];
+
 function protectedIdentity(value, root) {
   const normalized = path.normalize(value);
-  const arm = "bin/fm-watch-arm.sh";
-  const checkpoint = "bin/fm-watch-checkpoint.sh";
-  if (normalized === arm || normalized === `./${arm}` || normalized === path.join(root, arm)) return "arm";
-  if (normalized === checkpoint || normalized === `./${checkpoint}` || normalized === path.join(root, checkpoint)) return "checkpoint";
+  for (const { relative, kind } of PROTECTED_SCRIPTS) {
+    if (normalized === relative || normalized === path.join(root, relative) || normalized.endsWith(`/${relative}`)) return kind;
+  }
   return "";
 }
 
 function hasUnclassifiableProtectedExpansion(word, root) {
   if (!word?.unquotedExpansion || protectedIdentity(word.value, root)) return false;
-  return /(?:^|\/)fm-watch-/.test(word.value);
+  return /(?:^|\/)fm-watch/.test(word.value);
 }
 
 function shellInvocation(position) {
@@ -848,7 +854,7 @@ function setupKind(info, context) {
 }
 
 function finalProtectedAllowed(info) {
-  if (!info.protectedKind || info.redirection || info.substitution) return false;
+  if (!info.protectedKind || info.protectedKind === "watch" || info.redirection || info.substitution) return false;
   if (!ordinaryWordsOnly(info.tokens) || info.position.prefixAssignments > 0) return false;
   const wrappers = info.position.wrappers;
   return wrappers.length === 0 || (wrappers.length === 1 && wrappers[0] === "exec");
@@ -877,6 +883,7 @@ function decision(command, root, home) {
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
+  if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");
   if (analysis.nestedProtected) return deny("watcher-nested");
 
   const separators = analysis.program.separators;

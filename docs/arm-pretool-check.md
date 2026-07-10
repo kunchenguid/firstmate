@@ -31,8 +31,11 @@ The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
-The wrapper may fast-allow commands with no `fm-watch` byte sequence.
-That prefilter is a strict superset only and owns no semantic exception.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence.
+It first mirrors the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines - and then tests the normalized text for `fm-watch`; any match delegates to the classifier.
+Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
+The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
+Deeper obfuscation such as dynamic or ANSI-C-encoded payloads stays the classifier's and the post-arm liveness guards' responsibility.
 
 Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with exit 0 and no output.
 This transport behavior prevents a broken hook from denying every shell tool call.
@@ -43,16 +46,21 @@ Malformed or unsupported shell syntax that contains a protected command is a sem
 The tokenizer recognizes cooked words with quote provenance, comments, heredoc bodies, shell list operators, pipelines, redirections, command and process substitutions, parenthesized subshells, brace groups, and literal nested execution payloads.
 Quoted text, comments, heredoc bodies, and later argument words are data positions unless a recognized execution sink recursively executes them.
 
-The following lexical command words are protected executions:
+A command word in executed position is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
 
 ```text
-bin/fm-watch-arm.sh
-./bin/fm-watch-arm.sh
-<code-root>/bin/fm-watch-arm.sh
-bin/fm-watch-checkpoint.sh
-./bin/fm-watch-checkpoint.sh
-<code-root>/bin/fm-watch-checkpoint.sh
+bin/fm-watch-arm.sh          (arm; blessed entry point)
+bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
+bin/fm-watch.sh              (watch; protected but never blessed)
 ```
+
+The relative form, the `<code-root>`-anchored absolute form, and any word ending in `/bin/<script>` all resolve to that identity.
+Suffix matching recognizes an expanded-path prefix statically, so `$FM_HOME/bin/fm-watch-arm.sh`, `$HOME/firstmate/bin/fm-watch-arm.sh`, and `~/firstmate/bin/fm-watch-arm.sh` are the arm identity.
+The classifier never expands the variable or tilde; it matches the literal bytes only.
+This covers statically-visible literal words in command position; opaque dynamic dataflow such as `bash -lc "$WHOLE_COMMAND"` remains out of scope.
+
+`bin/fm-watch.sh` is protected but is not a blessed entry point.
+A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
 
 The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
 
@@ -69,6 +77,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
+`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 
@@ -111,6 +120,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
+| `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
 Reason codes are the stable contract for tests and adapters.
 Prose may improve without changing adapter behavior.

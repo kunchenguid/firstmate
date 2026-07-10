@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2016
+# shellcheck disable=SC1091,SC2016,SC2088
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
@@ -109,6 +109,12 @@ matrix_case D42 deny 'bin/fm-watch-{arm,checkpoint}.sh &'
 matrix_case D43 deny 'bin/fm-watch-arm.sh* &'
 matrix_case D44 deny "pattern='fm-watch'; pkill -f \"\$pattern\""
 matrix_case D45 deny "p=\$(pgrep -f '/bin/fm-watch.sh'); q=\$p; kill \$q"
+matrix_case D46 deny '$FM_HOME/bin/fm-watch-arm.sh &'
+matrix_case D47 deny '$HOME/firstmate/bin/fm-watch-arm.sh | cat'
+matrix_case D48 deny '~/firstmate/bin/fm-watch-arm.sh &'
+matrix_case D49 deny 'bin/fm-watch.sh'
+matrix_case D50 deny '$FM_HOME/bin/fm-watch.sh'
+matrix_case D51 deny '~/firstmate/bin/fm-watch.sh --restart'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -123,6 +129,9 @@ matrix_case E10 deny "eval 'bin/fm-watch-arm.sh &'"
 matrix_case E11 deny "exec bash -lc 'bin/fm-watch-arm.sh &'"
 matrix_case E12 allow 'bash -lc "$WATCHER_COMMAND" # fm-watch-arm.sh'
 matrix_case E13 allow "printf '%s\\n' 'argument has ; and fm-watch-arm.sh and &&'"
+matrix_case E14 allow '$FM_HOME/bin/fm-teardown.sh &'
+matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
+matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -166,7 +175,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
@@ -207,6 +216,12 @@ test_direct_policy_contract() {
   assert_policy direct-unsupported $'deny\tunclassifiable-protected-command' 'if true; then bin/fm-watch-arm.sh; fi'
   assert_policy direct-constructed-payload $'deny\twatcher-nested' "WATCHER='bin/fm-watch-arm.sh &'; bash -lc \"\$WATCHER\""
   assert_policy direct-parameter-export allow 'export FM_HOME=${HOME}; bin/fm-watch-checkpoint.sh --seconds 180'
+  assert_policy direct-expanded-arm-blessed allow '$FM_HOME/bin/fm-watch-arm.sh'
+  assert_policy direct-expanded-arm-background $'deny\twatcher-background' '$FM_HOME/bin/fm-watch-arm.sh &'
+  assert_policy direct-expanded-arm-pipeline $'deny\twatcher-pipeline' '$HOME/firstmate/bin/fm-watch-arm.sh | cat'
+  assert_policy direct-watch-not-blessed $'deny\twatcher-direct' 'bin/fm-watch.sh'
+  assert_policy direct-watch-expanded $'deny\twatcher-direct' '$FM_HOME/bin/fm-watch.sh'
+  assert_policy direct-watch-safe-shape $'deny\twatcher-direct' 'cd /tmp; bin/fm-watch.sh'
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
@@ -271,6 +286,40 @@ test_stdin_unrelated_command_allowed() {
   rc=$?
   [ "$rc" -eq 0 ] || fail "an unrelated command must pass through allowed, got exit $rc"
   pass "stdin: unrelated command is a fast allow"
+}
+
+test_prefilter_is_strict_superset() {
+  local rc
+  # A command with no fm-watch substring is fast-allowed by the transport
+  # prefilter without ever invoking the classifier.
+  "$CHECK" --command 'ls -la /bin && echo done' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a command with no fm-watch substring must be fast-allowed, got exit $rc"
+  # A deniable protected execution carries the fm-watch bytes, so the prefilter
+  # must delegate to the classifier and the deny must survive.
+  "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a deniable fm-watch command, not fast-allow it, got exit $rc"
+  # A broad watcher kill also contains the fm-watch bytes and must still deny.
+  "$CHECK" --command "pkill -f '/bin/fm-watch.sh'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a broad watcher kill, not fast-allow it, got exit $rc"
+  # Obfuscated protected paths lose the literal fm-watch bytes (a line
+  # continuation or a quote splits them), yet the classifier reconstructs them.
+  # The prefilter normalizes those bytes first, so both must still delegate and
+  # deny rather than slip through as a fast allow.
+  "$CHECK" --command "$(printf 'bin/fm-watc\\\nh-arm.sh &')" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a line-continuation-split protected path, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'bin/fm-"watch-arm.sh" &' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a quote-split protected path, not fast-allow it, got exit $rc"
+  # A benign command that only mentions fm-watch as data still reaches the
+  # classifier and is allowed there, proving the prefilter owns no verdict.
+  "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
+  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------
@@ -464,6 +513,7 @@ test_stdin_grok_schema_deny
 test_stdin_claude_codex_schema_allow
 test_stdin_claude_codex_schema_deny
 test_stdin_unrelated_command_allowed
+test_prefilter_is_strict_superset
 test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
