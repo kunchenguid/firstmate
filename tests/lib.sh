@@ -91,6 +91,47 @@ SH
   done
 }
 
+# --- node .ts imports ---------------------------------------------------------
+#
+# Suites exercising the tracked Pi extensions import .ts files from node. Type
+# stripping is default-on only from node 22.18/23.6 onward; older nodes need
+# --experimental-strip-types (plus --no-warnings so the experimental notice does
+# not pollute empty-output assertions). fm_node_ts probes once per test process
+# and runs node with whatever flags this node version needs.
+
+FM_NODE_TS_FLAGS=
+FM_NODE_TS_PROBED=
+
+fm_node_ts_probe() {
+  # Self-contained temp handling: fm_test_tmproot is not used here because a
+  # probe may run inside a command substitution, and the probe cleans up its
+  # one dir immediately rather than deferring to the EXIT trap.
+  local dir probe script rc
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-node-ts-probe.XXXXXX") || return 1
+  probe="$dir/probe.ts"
+  printf 'export const ok: number = 1;\n' > "$probe"
+  script='import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.argv[1]).href);'
+  FM_NODE_TS_PROBED=1
+  rc=1
+  if node --input-type=module -e "$script" "$probe" >/dev/null 2>&1; then
+    FM_NODE_TS_FLAGS=
+    rc=0
+  elif node --experimental-strip-types --no-warnings --input-type=module -e "$script" "$probe" >/dev/null 2>&1; then
+    FM_NODE_TS_FLAGS='--experimental-strip-types --no-warnings'
+    rc=0
+  fi
+  rm -rf "$dir"
+  return "$rc"
+}
+
+fm_node_ts() {
+  if [ -z "$FM_NODE_TS_PROBED" ]; then
+    fm_node_ts_probe || fail "node $(node --version 2>/dev/null || echo '(missing)') cannot import .ts modules even with --experimental-strip-types"
+  fi
+  # shellcheck disable=SC2086 # deliberate word-split of the probed flag string
+  node $FM_NODE_TS_FLAGS "$@"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
