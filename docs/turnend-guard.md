@@ -34,7 +34,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 
 ## Harness Integrations
 
-All verified primary harnesses have a tracked integration:
+The verified primary turn-end integrations are:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
@@ -54,6 +54,9 @@ Each adapter carries its own in-process or environment loop guard so the forced 
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
+
+Cursor and hermes are verified crewmate adapters but do not yet have tracked primary turn-end guard integrations.
+Their interactive turn-end hook surfaces are either unverified or require higher-blast-radius user config writes, so a firstmate primary running on those harnesses relies on `fm-guard.sh` and the watcher arm checks rather than this push-based guard.
 
 ## Empirical Validation
 
@@ -117,3 +120,4 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
+Live harness validation is the empirical evidence recorded above.

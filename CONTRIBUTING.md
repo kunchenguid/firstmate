@@ -91,6 +91,7 @@ tests/fm-afk-inject-herdr-e2e.test.sh     # real-herdr end-to-end test of the af
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, fleet-sync timeout, and crew-dispatch reporting tests
 tests/fm-session-start.test.sh            # fm-session-start.sh: ABSENT vs empty-vs-present digest files, lock-refusal read-only path skipping every mutating step, diagnostics-first section ordering, status-tail bounding, tmux/herdr endpoint liveness, and composition of the real fm-lock/fm-bootstrap/fm-wake-drain scripts
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
+tests/fm-cursor-hermes-harness.test.sh    # cursor and hermes adapter detection, launch mechanics, model/effort flags, brief delivery, busy signatures, and lock-holder recognition tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, single-project name resolution, and bootstrap relay
 tests/fm-fleet-snapshot-view.test.sh      # read-only fleet snapshot JSON and Markdown view coverage: stable ordering, current-state vs status-event separation, backlog parsing, scout reports, secondmate return-channel guidance, and operational directory overrides
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox and request-id relay context recovery, platform-budget warnings, reply threading, dismiss, completion follow-up counters/caps, dry-run preview, and .env-presence activation tests
@@ -125,6 +126,7 @@ tests/fm-backend-orca.test.sh             # fake Orca CLI unit tests for primiti
 tests/cmux-test-safety.sh                 # guarded cleanup helper for real-cmux tests, refusing to close anything except a matching fm-test- workspace
 tests/fm-backend-cmux.test.sh             # fake cmux CLI unit tests for the experimental cmux adapter, including socket auth, title scoping, target recovery, fresh-surface liveness, current-path probing, structural composer verification, and secondmate refusal
 tests/fm-backend-cmux-smoke.test.sh       # real cmux adapter smoke test, skipped when cmux or jq is unavailable or the socket is not password-mode authenticated, using fm-test- workspaces and guarded cleanup
+tests/watchdog/test-metrics.sh            # watchdog metric collection, parser mismatch failures, unknown-harness tolerance, and config/default threshold tests
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)

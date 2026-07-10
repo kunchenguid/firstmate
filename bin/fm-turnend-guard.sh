@@ -5,13 +5,13 @@
 # supervision script happens to run. A primary session that ends a turn without
 # resuming its harness supervision protocol, and then never runs another
 # fleet-touching command itself, can sit blind for hours.
-# This script is push-based: verified harness turn-end hooks invoke it every time
-# the primary is about to end a turn.
+# This script is push-based: verified primary turn-end hooks invoke it every
+# time the primary is about to end a turn.
 # Claude and codex can block directly by preserving exit status 2 and stderr.
 # OpenCode, pi, and grok adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive.
-# See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
-# and fail-open tradeoffs.
+# See docs/turnend-guard.md for the integrated harness mechanics, validation
+# evidence, hookless verified adapters, and fail-open tradeoffs.
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, any

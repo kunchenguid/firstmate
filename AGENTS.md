@@ -763,14 +763,18 @@ The check is scoped precisely to the primary: detached HEAD (the legitimate rest
 The same assertion runs at session start as the bootstrap `TANGLE:` line inside the `bin/fm-session-start.sh` digest (section 3), with read-only wording when this session does not hold the fleet lock.
 Two further guards prevent the tangle upstream: `fm-spawn` refuses to launch unless treehouse or Orca yields a genuine isolated worktree distinct from the primary checkout, and every ship brief's first instruction has the crewmate verify it is in its own worktree before branching (section 11).
 
-On every verified primary harness (`claude`, `codex`, `opencode`, `pi`, and `grok`), "no turn ends blind" has a structural backstop beyond the pull-based `fm-guard.sh` banner.
+On every primary harness with a verified turn-end integration (`claude`, `codex`, `opencode`, `pi`, and `grok`), "no turn ends blind" has a structural backstop beyond the pull-based `fm-guard.sh` banner.
 The shared predicate is `bin/fm-turnend-guard.sh`: when tasks are in flight without a live identity-matched watcher lock and fresh beacon, direct-blocking harnesses block the turn end and passive harnesses force one bounded follow-up turn.
 It shares status fields with `fm-guard.sh` via `bin/fm-supervision-lib.sh`, uses `bin/fm-wake-lib.sh` for live watcher lock health, and never blocks or follows up more than once per turn.
 It is scoped to fire only in the actual primary checkout - never in a crewmate/scout worktree or a secondmate home - and stays silent when supervision is healthy.
-See `docs/turnend-guard.md` for the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
+See `docs/turnend-guard.md` for the per-harness hook mechanisms, empirical validation, scoping details, hookless verified adapters, and documented fail-open tradeoffs.
 Watcher liveness is harness-aware.
 Do not assume one primary harness can use another harness's foreground or background shape.
 For example, Claude uses a background-notify cycle, while Codex intentionally uses bounded foreground checkpoints.
+Watcher liveness is not enough if you are foreground-blocked.
+Whenever one or more tasks are in flight, do not run long foreground-blocking operations in your own session.
+This is about firstmate's own session: it includes a no-mistakes pipeline firstmate runs for this repo, long builds, and any other multi-minute command.
+Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.

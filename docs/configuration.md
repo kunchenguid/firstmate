@@ -128,10 +128,10 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
+claude, codex, opencode, pi, grok, cursor, and hermes are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
-Primary-session turn-end guard integrations for verified harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
+Primary-session turn-end guard integrations for harnesses that expose a verified turn-end mechanism are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
@@ -148,6 +148,8 @@ The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+Cursor and hermes are hookless crewmate adapters today; supervision relies on their verified busy footers plus stale-pane detection.
+Hermes also differs from the prompt-taking adapters because `hermes chat` accepts no positional prompt, so `fm-spawn.sh` launches the TUI and sends a single-line pointer to the on-disk brief as the first interactive message.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

@@ -56,7 +56,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- A verified agent harness: Claude Code, Grok, Pi, Codex, OpenCode, Cursor, or Hermes.
 - Git with GitHub auth (`gh auth login`).
 - tmux, for the reference session backend.
 
@@ -157,7 +157,7 @@ Full architecture - the supervision engine, worktree isolation, secondmates, dis
 ## Built-in skills
 
 Firstmate ships these user-invocable built-in skills.
-Claude and grok use the slash form shown here; codex uses the same names with `$`, such as `$afk`.
+Claude, grok, and cursor use the slash form shown here; codex uses the same names with `$`, such as `$afk`; hermes has no verified firstmate-skill slash form, so use natural language there.
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
