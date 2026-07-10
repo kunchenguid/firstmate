@@ -108,6 +108,7 @@ try {
   let stderr = "";
   let activeTurn;
   const pending = new Map();
+  const hookWarnings = [];
 
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
@@ -137,7 +138,7 @@ try {
         activeTurn = undefined;
         reject(new Error("turn timed out after 40 seconds"));
       }, 40000);
-      activeTurn = { resolve, reject, timer };
+      activeTurn = { resolve, reject, timer, agentOutput: "" };
     });
   }
 
@@ -171,12 +172,31 @@ try {
       else waiter.resolve(message.result);
       return;
     }
+    if (message.method === "hook/completed") {
+      const run = message.params?.run;
+      if (run?.eventName === "stop") {
+        for (const entry of run.entries || []) {
+          if (typeof entry?.text === "string") hookWarnings.push(entry.text);
+        }
+        if (typeof run.statusMessage === "string") hookWarnings.push(run.statusMessage);
+      }
+    }
     if (!activeTurn) return;
-    if (message.method === "turn/completed") {
+    if (message.method === "item/completed" && message.params?.item?.type === "agentMessage") {
+      const text = message.params.item.text;
+      if (typeof text === "string") activeTurn.agentOutput += text;
+    } else if (message.method === "turn/completed") {
       const waiter = activeTurn;
       activeTurn = undefined;
       clearTimeout(waiter.timer);
-      waiter.resolve(message.params);
+      const turn = message.params?.turn;
+      if (turn?.status !== "completed" || turn.error != null) {
+        waiter.reject(new Error(`turn ended as ${turn?.status || "unknown"}: ${JSON.stringify(turn?.error ?? null)}`));
+      } else if (!waiter.agentOutput.trim()) {
+        waiter.reject(new Error("completed turn emitted no nonempty agent message"));
+      } else {
+        waiter.resolve({ turn, agentOutput: waiter.agentOutput });
+      }
     } else if (message.method === "error") {
       const waiter = activeTurn;
       activeTurn = undefined;
@@ -218,6 +238,11 @@ try {
   await runTurn("msg_e2e_first");
   console.log("FIRST_TURN_COMPLETED");
 
+  if (!hookWarnings.some((warning) => warning.includes("openai/codex#20783"))) {
+    throw new Error("Codex app-server emitted no Stop-hook warning containing openai/codex#20783");
+  }
+  console.log("SYSTEM_MESSAGE_WARNING_OBSERVED");
+
   const persisted = sessionFiles(path.join(codexHome, "sessions"))
     .map((file) => fs.readFileSync(file, "utf8"))
     .join("\n");
@@ -234,6 +259,7 @@ try {
 
   await runTurn("msg_e2e_second");
   console.log("SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED");
+  console.log("SECOND_AGENT_MESSAGE_OBSERVED");
 } finally {
   await stopChild(child);
   fs.rmSync(tempRoot, { recursive: true, force: true });

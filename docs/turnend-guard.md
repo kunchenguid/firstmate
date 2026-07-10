@@ -77,8 +77,9 @@ The persisted UUID mapped exactly to the earlier blocking Stop continuation, mat
 Current upstream source and the available `0.145` alpha remained unfixed on 2026-07-10.
 The tracked Codex adapter therefore records the alarm durably and exits 0 until upstream fixes the item-id serialization path.
 Command run for the isolated live adapter regression on 2026-07-10 with `codex-cli 0.144.1`: `FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs`.
-Observed output: `FIRST_TURN_COMPLETED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, and `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`.
+Observed output: `FIRST_TURN_COMPLETED`, `SYSTEM_MESSAGE_WARNING_OBSERVED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`, and `SECOND_AGENT_MESSAGE_OBSERVED`.
 The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
+It requires both turn notifications to report `status=completed` with no turn error, requires a nonempty agent message from each turn, and requires the Stop-hook notification to contain the openai/codex#20783 system warning.
 It never opens or modifies the live Codex session directory, and it deletes the temporary fixture on exit.
 The Stop payload included `cwd`.
 Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Use the shell tool to run mkdir -p outside && cd outside && pwd, then use the shell tool again to run pwd. Your final answer must include the two observed outputs.'`.
