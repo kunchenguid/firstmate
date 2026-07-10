@@ -79,7 +79,7 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # is why the bordered flag is read from the plain row, not the ghost-stripped
 # one). Both are internal only, never surfaced. The detector strips the harness's
 # box-drawing composer borders ("│ … │", heavy "┃", or a plain ASCII "|") using
-# literal-string substitution (bash 3.2 safe, locale-independent — no \u escapes,
+# literal-string substitution (bash 3.2 safe, locale-independent - no \u escapes,
 # no multibyte character classes), and delegates the empty/pending/unknown
 # decision to the shared owner fm_composer_classify_content
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
