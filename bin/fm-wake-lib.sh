@@ -328,6 +328,29 @@ fm_lock_acquire_wait() {
   done
 }
 
+fm_task_lock_acquire_wait() {
+  local lockdir=$1 timeout=${FM_TASK_LOCK_WAIT_SECONDS:-120} started=$SECONDS next_notice=5 elapsed holder
+  case "$timeout" in
+    ''|*[!0-9]*|0)
+      echo "error: FM_TASK_LOCK_WAIT_SECONDS must be a positive integer" >&2
+      return 1
+      ;;
+  esac
+  while ! fm_lock_try_acquire "$lockdir"; do
+    elapsed=$((SECONDS - started))
+    holder=${FM_LOCK_HELD_PID:-unknown}
+    if [ "$elapsed" -ge "$timeout" ]; then
+      echo "error: timed out after ${elapsed}s waiting for task lock $lockdir held by pid $holder" >&2
+      return 1
+    fi
+    if [ "$elapsed" -ge "$next_notice" ]; then
+      echo "waiting for task lock $lockdir held by pid $holder (${elapsed}s elapsed)" >&2
+      next_notice=$((next_notice + 5))
+    fi
+    sleep 0.1
+  done
+}
+
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}

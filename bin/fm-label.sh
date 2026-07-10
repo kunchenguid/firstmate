@@ -70,7 +70,7 @@ META=$(fm_backend_meta_for_selector "$RAW_ID" "$STATE" 2>/dev/null || true)
 TASK_ID=${META##*/}
 TASK_ID=${TASK_ID%.meta}
 META_LOCK="$STATE/.$TASK_ID.meta.lock"
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 if ! LOCKED_META=$(fm_backend_meta_for_selector "$RAW_ID" "$STATE" 2>/dev/null); then
   echo "error: could not re-read metadata for $RAW_ID in $STATE" >&2
   exit 1

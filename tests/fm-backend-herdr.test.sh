@@ -642,6 +642,44 @@ test_fm_promote_waits_for_metadata_lock_and_preserves_label() {
   pass "fm-promote.sh: waits for the metadata lock and preserves a concurrent label update"
 }
 
+test_task_metadata_lock_wait_is_bounded_and_actionable() {
+  local dir state meta lock acquired release holder_pid recorded_holder out status
+  dir="$TMP_ROOT/task-meta-lock-timeout"; state="$dir/home/state"; meta="$state/promote.meta"
+  mkdir -p "$state"
+  printf 'window=fmtest:w1:p2\nkind=scout\n' > "$meta"
+  lock="$state/.promote.meta.lock"
+  acquired="$dir/acquired"
+  release="$dir/release"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT" "$lock" "$acquired" "$release" &
+  holder_pid=$!
+  while [ ! -e "$acquired" ]; do sleep 0.02; done
+  recorded_holder=$(cat "$lock/pid")
+
+  out=$( FM_TASK_LOCK_WAIT_SECONDS=1 FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-promote.sh" promote 2>&1 )
+  status=$?
+  touch "$release"
+  wait "$holder_pid"
+  [ "$status" -ne 0 ] || fail "fm-promote should stop waiting for a live task-lock holder after the configured bound"
+  assert_contains "$out" "timed out after" "task-lock timeout did not report the bounded wait"
+  assert_contains "$out" "$lock" "task-lock timeout did not identify the lock path"
+  assert_contains "$out" "held by pid $recorded_holder" "task-lock timeout did not identify the live holder pid"
+  [ ! -e "$lock" ] || fail "task-lock holder did not release its lock after the timeout test"
+
+  out=$( FM_TASK_LOCK_WAIT_SECONDS=0 bash -c '. "$1/bin/fm-wake-lib.sh"; fm_task_lock_acquire_wait "$2"' _ "$ROOT" "$lock" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "task-lock waits must not accept an unbounded zero timeout"
+  assert_contains "$out" "must be a positive integer" "task-lock wait did not reject an unbounded zero timeout clearly"
+  pass "task metadata locks: bounded waits report the lock path and live holder pid"
+}
+
 test_fm_pr_check_queries_without_lock_and_preserves_concurrent_metadata() {
   local dir state meta lock fakebin rc head
   dir="$TMP_ROOT/fm-pr-check-meta-lock"; state="$dir/home/state"; meta="$state/check.meta"
@@ -678,8 +716,13 @@ SH
 
 test_fm_pr_check_waits_for_coherent_initial_metadata_snapshot() {
   local dir state meta lock fakebin acquired release gh_called writer_pid check_pid rc head
-  dir="$TMP_ROOT/fm-pr-check-initial-snapshot"; state="$dir/home/state"; meta="$state/check.meta"
-  fakebin="$dir/fakebin"; acquired="$dir/writer-acquired"; release="$dir/release-writer"; gh_called="$dir/gh-called"
+  dir="$TMP_ROOT/fm-pr-check-initial-snapshot"
+  state="$dir/home/state"
+  meta="$state/check.meta"
+  fakebin="$dir/fakebin"
+  acquired="$dir/writer-acquired"
+  release="$dir/release-writer"
+  gh_called="$dir/gh-called"
   head=deadbeefcafefeed0000000000000000deadbeef
   mkdir -p "$state" "$dir/worktree" "$fakebin"
   printf 'generation=prior-generation\nwindow=prior-window\nworktree=%s\nkind=ship\n' "$dir/worktree" > "$meta"
@@ -704,6 +747,7 @@ SH
   writer_pid=$!
   while [ ! -e "$acquired" ]; do sleep 0.02; done
 
+  # shellcheck disable=SC2031
   PATH="$fakebin:$PATH" FM_FAKE_GH_CALLED="$gh_called" FM_FAKE_PR_HEAD="$head" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
     "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr" &
@@ -719,6 +763,7 @@ SH
   expect_code 0 "$rc" "fm-pr-check should accept the coherent replacement metadata snapshot"
   grep -qx 'generation=replacement-generation' "$meta" || fail "fm-pr-check lost the replacement generation"
   grep -qx 'window=reused-window' "$meta" || fail "fm-pr-check read or overwrote partial replacement metadata"
+  # shellcheck disable=SC2031
   grep -qx "worktree=$dir/worktree" "$meta" || fail "fm-pr-check lost the replacement worktree"
   grep -qx 'pr=https://github.com/example/repo/pull/7' "$meta" || fail "fm-pr-check did not record the PR after the coherent snapshot"
   grep -qx "pr_head=$head" "$meta" || fail "fm-pr-check did not record the PR head after the coherent snapshot"
@@ -798,6 +843,21 @@ SH
   assert_contains "$out" "not armed: task check metadata changed during PR lookup" "fm-pr-check did not report the token mismatch"
   [ ! -e "$lock" ] || fail "fm-pr-check left the metadata lock behind after a token mismatch"
   pass "fm-pr-check.sh: rejects stale PR state when a respawn reuses runtime identity"
+}
+
+test_fm_pr_check_reports_absent_metadata() {
+  local dir state out status
+  dir="$TMP_ROOT/fm-pr-check-absent-meta"; state="$dir/home/state"
+  mkdir -p "$state"
+
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" missing https://github.com/example/repo/pull/7 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-pr-check should refuse to arm a poll without task metadata"
+  assert_contains "$out" "not armed: no metadata for task missing" "fm-pr-check conflated absent metadata with a concurrent generation change"
+  assert_not_contains "$out" "metadata changed during PR lookup" "fm-pr-check reported a generation race when metadata never existed"
+  [ ! -e "$state/missing.check.sh" ] || fail "fm-pr-check armed an orphan poll without task metadata"
+  pass "fm-pr-check.sh: reports initially absent task metadata distinctly"
 }
 
 test_metadata_writers_release_locks_on_errors() {
@@ -898,11 +958,9 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   dir="$TMP_ROOT/legacy-owned-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
   printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/3.out"
-  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/4.out"
-  printf '{"result":{"panes":[{"pane_id":"w0:p2","tab_id":"w0:t2"}]}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/6.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w0:p2","tab_id":"w0:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/4.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" HERDR_SESSION=active FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned archived:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" \
@@ -941,7 +999,8 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -eq 2 ] || fail "malformed legacy tab inventory should fail closed with status 2, got $status: $out"
+  [ "$status" -eq 3 ] || fail "malformed legacy tab inventory should report a probe failure with status 3, got $status: $out"
+  assert_contains "$out" "could not parse herdr tab inventory" "malformed legacy tab inventory did not identify the failed probe"
 
   dir="$TMP_ROOT/legacy-malformed-workspace-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":"unreadable"}}\n' > "$resp/1.out"
@@ -949,7 +1008,17 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -eq 2 ] || fail "malformed legacy workspace inventory should fail closed with status 2, got $status: $out"
+  [ "$status" -eq 3 ] || fail "malformed legacy workspace inventory should report a probe failure with status 3, got $status: $out"
+  assert_contains "$out" "could not parse herdr workspace inventory" "malformed legacy workspace inventory did not identify the failed probe"
+
+  dir="$TMP_ROOT/legacy-workspace-list-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 3 ] || fail "failed legacy workspace query should report a probe failure with status 3, got $status: $out"
+  assert_contains "$out" "could not list herdr workspaces" "failed legacy workspace query did not identify the failed probe"
   pass "legacy workspace compatibility: cross-session live endpoints are reused, confirmed absence respawns normally, and unreadable state fails closed"
 }
 
@@ -1056,20 +1125,37 @@ test_create_task_replaces_known_human_labeled_husk() {
   pass "fm_backend_herdr_create_task: metadata preserves stable husk replacement after a human-readable rename"
 }
 
-test_create_task_does_not_close_recycled_known_tab_id() {
-  local dir log resp fb out
+test_create_task_refuses_recycled_known_tab_id_on_cwd_mismatch() {
+  local dir log resp fb out status
   dir="$TMP_ROOT/recycled-known-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"/tmp/manual-work"}}}\n' > "$resp/3.out"
-  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" ) \
-    || fail "create_task should fail safe when a stored tab id points at an uncorroborated tab"
-  [ "$out" = "w1:t3 w1:p3" ] || fail "create_task returned unexpected ids beside an uncorroborated known tab: '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse when a stored live tab's cwd does not match its recorded worktree"
+  assert_contains "$out" "cwd corroboration failed" "create_task did not name cwd corroboration as the refusal reason"
+  assert_contains "$out" "recorded '/tmp/prior-worktree', live '/tmp/manual-work'" "create_task did not report the recorded and live cwd values"
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task closed a tab based on a recycled stored id"
-  pass "fm_backend_herdr_create_task: a stored tab id needs label and worktree corroboration before husk cleanup"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task created a duplicate beside an uncorroborated live tab"
+  pass "fm_backend_herdr_create_task: cwd mismatch on a recorded live tab fails closed"
+}
+
+test_create_task_refuses_recycled_known_tab_id_on_label_mismatch() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/recycled-known-tab-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"manually renamed","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse when a stored live tab's label does not match its recorded label"
+  assert_contains "$out" "label corroboration failed" "create_task did not name label corroboration as the refusal reason"
+  assert_contains "$out" "recorded 'project: validating', live 'manually renamed'" "create_task did not report the recorded and live label values"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task created a duplicate beside a live tab with an uncorroborated label"
+  pass "fm_backend_herdr_create_task: label mismatch on a recorded live tab fails closed"
 }
 
 test_create_task_refuses_when_any_duplicate_label_is_live() {
@@ -3102,10 +3188,12 @@ test_fm_label_rejects_secondmate_before_rename
 test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_rolls_back_live_label_when_metadata_commit_fails
 test_fm_promote_waits_for_metadata_lock_and_preserves_label
+test_task_metadata_lock_wait_is_bounded_and_actionable
 test_fm_pr_check_queries_without_lock_and_preserves_concurrent_metadata
 test_fm_pr_check_waits_for_coherent_initial_metadata_snapshot
 test_fm_pr_check_discards_head_after_worktree_generation_changes
 test_fm_pr_check_discards_head_after_token_changes_with_reused_runtime_identity
+test_fm_pr_check_reports_absent_metadata
 test_metadata_writers_release_locks_on_errors
 test_fm_label_nonherdr_is_clear_noop
 test_fm_spawn_help_includes_complete_header
@@ -3125,7 +3213,8 @@ test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_known_human_labeled_tab_when_agent_live
 test_create_task_allows_same_human_display_for_distinct_identities
 test_create_task_replaces_known_human_labeled_husk
-test_create_task_does_not_close_recycled_known_tab_id
+test_create_task_refuses_recycled_known_tab_id_on_cwd_mismatch
+test_create_task_refuses_recycled_known_tab_id_on_label_mismatch
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk

@@ -936,11 +936,11 @@ fmx_meta_lock_acquire() {
   base=${meta##*/}
   [ "$dir" != "$meta" ] || dir=.
   lock_path="$dir/.$base.lock"
-  if ! declare -F fm_lock_acquire_wait >/dev/null 2>&1; then
+  if ! declare -F fm_task_lock_acquire_wait >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FMX_LIB_DIR/fm-wake-lib.sh" || return 1
   fi
-  fm_lock_acquire_wait "$lock_path" || return 1
+  fm_task_lock_acquire_wait "$lock_path" || return 1
   printf -v "$outvar" '%s' "$lock_path"
 }
 

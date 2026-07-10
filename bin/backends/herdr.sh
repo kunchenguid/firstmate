@@ -498,7 +498,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <identity> <cwd> <seeded_default_tab_id> <known_tab_id> <known_label> <known_worktree>
-  local container=$1 identity=$2 cwd=$3 seeded_tab_id=${4:-} known_tab_id=${5:-} known_label=${6:-} known_worktree=${7:-} session wsid list dup_tabs dup dup_pane known_current_label known_pane known_path dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 identity=$2 cwd=$3 seeded_tab_id=${4:-} known_tab_id=${5:-} known_label=${6:-} known_worktree=${7:-} session wsid list dup_tabs dup dup_pane known_tab_present known_current_label known_pane known_path dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -506,13 +506,31 @@ fm_backend_herdr_create_task() {  # <container> <identity> <cwd> <seeded_default
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
-  if [ -n "$known_tab_id" ] && [ -n "$known_label" ] && [ -n "$known_worktree" ]; then
-    known_current_label=$(printf '%s' "$list" | jq -r --arg known "$known_tab_id" '.result.tabs[]? | select(.tab_id == $known) | .label' 2>/dev/null | head -1)
-    if [ "$known_current_label" = "$known_label" ]; then
+  if [ -n "$known_tab_id" ]; then
+    known_tab_present=$(printf '%s' "$list" | jq -r --arg known "$known_tab_id" '[.result.tabs[]? | select(.tab_id == $known)] | length' 2>/dev/null) || {
+      echo "error: could not inspect recorded herdr tab $known_tab_id in workspace $wsid (session $session); refusing duplicate spawn" >&2
+      return 1
+    }
+    case "$known_tab_present" in
+      ''|*[!0-9]*)
+        echo "error: could not inspect recorded herdr tab $known_tab_id in workspace $wsid (session $session); refusing duplicate spawn" >&2
+        return 1
+        ;;
+    esac
+    if [ "$known_tab_present" -gt 0 ]; then
+      known_current_label=$(printf '%s' "$list" | jq -r --arg known "$known_tab_id" '.result.tabs[]? | select(.tab_id == $known) | .label // empty' 2>/dev/null | head -1)
+      if [ -z "$known_label" ] || [ "$known_current_label" != "$known_label" ]; then
+        echo "error: prior herdr tab $known_tab_id is still present in workspace $wsid (session $session), but label corroboration failed (recorded '${known_label:-<missing>}', live '${known_current_label:-<missing>}'); refusing duplicate spawn" >&2
+        return 1
+      fi
       known_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$known_tab_id" 2>/dev/null || true)
       known_path=
       [ -z "$known_pane" ] || known_path=$(fm_backend_herdr_current_path "$session:$known_pane" 2>/dev/null || true)
-      if [ "$known_path" = "$known_worktree" ] && ! printf '%s\n' "$dup_tabs" | grep -qxF "$known_tab_id"; then
+      if [ -z "$known_worktree" ] || [ "$known_path" != "$known_worktree" ]; then
+        echo "error: prior herdr tab $known_tab_id is still present in workspace $wsid (session $session), but cwd corroboration failed (recorded '${known_worktree:-<missing>}', live '${known_path:-<unavailable>}'); refusing duplicate spawn" >&2
+        return 1
+      fi
+      if ! printf '%s\n' "$dup_tabs" | grep -qxF "$known_tab_id"; then
         dup_tabs="${dup_tabs}${dup_tabs:+$'\n'}${known_tab_id}"
       fi
     fi
@@ -571,18 +589,12 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
-fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
-  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 workspaces workspace_label expected_workspace_label tabs live_label pane_id live_path
-  [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
-  fm_backend_herdr_target_ready "$target" || return 1
-  workspaces=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" workspace list 2>/dev/null) || return 1
-  workspace_label=$(printf '%s' "$workspaces" | jq -er --arg ws "$workspace_id" \
-    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // empty) else error("missing result.workspaces") end' 2>/dev/null) || return 1
+fm_backend_herdr_task_is_owned_ready() {  # <target> <workspace_id> <tab_id> <current_label> <worktree> <workspace_label> <tabs_json>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 workspace_label=$6 tabs=$7 expected_workspace_label live_label pane_id live_path
   expected_workspace_label=$(fm_backend_herdr_workspace_label)
   if [ "$workspace_label" != "$expected_workspace_label" ]; then
     [ "$expected_workspace_label" = firstmate-crew ] && [ "$workspace_label" = firstmate ] || return 1
   fi
-  tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
   live_label=$(printf '%s' "$tabs" | jq -er --arg tab "$tab_id" '.result.tabs[] | select(.tab_id == $tab) | .label' 2>/dev/null | head -1) || return 1
   [ "$live_label" = "$current_label" ] || return 1
   pane_id=$(fm_backend_herdr_pane_for_tab "$FM_BACKEND_HERDR_SESSION" "$workspace_id" "$tab_id" 2>/dev/null) || return 1
@@ -591,22 +603,48 @@ fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_
   [ "$live_path" = "$worktree" ] || return 1
 }
 
+fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 workspaces workspace_label tabs
+  [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
+  fm_backend_herdr_target_ready "$target" || return 1
+  workspaces=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" workspace list 2>/dev/null) || return 1
+  workspace_label=$(printf '%s' "$workspaces" | jq -er --arg ws "$workspace_id" \
+    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // empty) else error("missing result.workspaces") end' 2>/dev/null) || return 1
+  tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
+  fm_backend_herdr_task_is_owned_ready "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" "$workspace_label" "$tabs"
+}
+
 fm_backend_herdr_legacy_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
   local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 session list workspace_label tabs tab_present
-  fm_backend_herdr_parse_target "$target" || return 2
+  if ! fm_backend_herdr_parse_target "$target"; then
+    echo "error: could not parse recorded herdr target '$target' while probing prior task ownership" >&2
+    return 3
+  fi
   session=$FM_BACKEND_HERDR_SESSION
-  fm_backend_herdr_version_check || return 2
-  fm_backend_herdr_server_ensure "$session" || return 2
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2
+  fm_backend_herdr_version_check || return 3
+  fm_backend_herdr_server_ensure "$session" || return 3
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    echo "error: could not list herdr workspaces in session '$session' while probing prior task ownership" >&2
+    return 3
+  }
   workspace_label=$(printf '%s' "$list" | jq -r --arg ws "$workspace_id" \
-    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // "") else error("missing result.workspaces") end' 2>/dev/null) || return 2
+    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // "") else error("missing result.workspaces") end' 2>/dev/null) || {
+    echo "error: could not parse herdr workspace inventory in session '$session' while probing prior task ownership" >&2
+    return 3
+  }
   [ -n "$workspace_label" ] || return 1
   [ "$workspace_label" = firstmate ] || return 1
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || return 2
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || {
+    echo "error: could not list herdr tabs in workspace $workspace_id (session $session) while probing prior task ownership" >&2
+    return 3
+  }
   tab_present=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
-    'if (.result.tabs | type) == "array" then ([.result.tabs[] | select(.tab_id == $tab)] | length) else error("missing result.tabs") end' 2>/dev/null) || return 2
+    'if (.result.tabs | type) == "array" then ([.result.tabs[] | select(.tab_id == $tab)] | length) else error("missing result.tabs") end' 2>/dev/null) || {
+    echo "error: could not parse herdr tab inventory in workspace $workspace_id (session $session) while probing prior task ownership" >&2
+    return 3
+  }
   [ "$tab_present" -gt 0 ] || return 1
-  fm_backend_herdr_task_is_owned "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" || return 2
+  fm_backend_herdr_task_is_owned_ready "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" "$workspace_label" "$tabs" || return 2
 }
 
 fm_backend_herdr_rename_owned_task() {  # <target> <workspace_id> <tab_id> <current_label> <worktree> <new_label>

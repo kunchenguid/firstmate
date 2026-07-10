@@ -122,7 +122,7 @@ teardown_release_meta_lock() {
   return "$status"
 }
 trap teardown_release_meta_lock EXIT
-fm_lock_acquire_wait "$TEARDOWN_META_LOCK"
+fm_task_lock_acquire_wait "$TEARDOWN_META_LOCK"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
@@ -170,7 +170,7 @@ remove_task_state_files() {
   local state=$1 id=$2 lock status=0
   lock="$state/.$id.meta.lock"
   if [ "$lock" != "$TEARDOWN_META_LOCK" ]; then
-    fm_lock_acquire_wait "$lock"
+    fm_task_lock_acquire_wait "$lock"
   fi
   if remove_pr_poll_artifacts "$state" "$id"; then
     rm -f "$state/$id.status" "$state/$id.turn-ended" "$state/$id.meta" "$state/$id.pi-ext.ts" "$state/$id.grok-turnend-token" || status=$?

@@ -30,7 +30,7 @@ promote_cleanup() {
 trap promote_cleanup EXIT
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 

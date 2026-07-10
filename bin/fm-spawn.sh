@@ -428,7 +428,7 @@ fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 SPAWN_META_LOCK="$STATE/.$ID.meta.lock"
-fm_lock_acquire_wait "$SPAWN_META_LOCK"
+fm_task_lock_acquire_wait "$SPAWN_META_LOCK"
 SPAWN_GENERATION=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
 if [ "${#SPAWN_GENERATION}" -ne 32 ] || [[ "$SPAWN_GENERATION" == *[!0-9a-f]* ]]; then
   echo "error: could not generate a unique spawn generation for $ID" >&2
@@ -899,10 +899,16 @@ case "$BACKEND" in
         :
       else
         legacy_status=$?
-        if [ "$legacy_status" -eq 2 ]; then
-          echo "error: prior herdr metadata for $W points at a legacy workspace but live task ownership could not be corroborated; refusing to create a duplicate in firstmate-crew" >&2
-          exit 1
-        fi
+        case "$legacy_status" in
+          2)
+            echo "error: prior herdr metadata for $W points at a live legacy tab but label, pane, and cwd ownership could not be corroborated; refusing to create a duplicate in firstmate-crew" >&2
+            exit 1
+            ;;
+          3)
+            echo "error: prior herdr metadata for $W could not be probed safely; refusing to create a duplicate in firstmate-crew" >&2
+            exit 1
+            ;;
+        esac
         HERDR_PRIOR_SESSION=
         HERDR_PRIOR_WORKSPACE_ID=
       fi

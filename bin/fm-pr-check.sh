@@ -52,7 +52,7 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
@@ -80,7 +80,7 @@ if [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ] && command -v gh >/dev/null 2>&1; 
 fi
 
 META_LOCK="$STATE/.$ID.meta.lock"
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata changed during PR lookup" >&2
   exit 1
