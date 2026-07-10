@@ -30,10 +30,15 @@ test_script_parses() {
 }
 
 test_help_includes_entire_header() {
-  local help
-  help=$("$ROOT/bin/fm-brief.sh" --help)
+  local help status=0
+  help=$("$ROOT/bin/fm-brief.sh" --help 2>&1) || status=$?
+  expect_code 0 "$status" "fm-brief.sh --help"
+  assert_contains "$help" "[--budget '<text>']" \
+    "fm-brief.sh --help omitted --budget from usage"
+  assert_contains "$help" "--budget '<text>' adds a task-specific hard stop" \
+    "fm-brief.sh --help omitted --budget documentation"
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
-  pass "fm-brief.sh: --help renders the complete header"
+  pass "fm-brief.sh: --help includes the complete header"
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
