@@ -877,7 +877,7 @@ For scout tasks add `--scout`: the scaffold swaps the definition of done for the
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For a crewmate task that will drive Herdr lifecycle behavior, add `--herdr-lab`: the scaffold embeds the hard Herdr-isolation contract backed by `bin/fm-herdr-lab.sh` (a never-`default` lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire), and the flag is rejected for `--secondmate` briefs.
 The flag must be explicit because the scaffold cannot read the `{TASK}` text it fills in later, so every ship or scout brief scaffolded without it carries a loud not-enabled gate telling the crewmate to stop and regenerate with `--herdr-lab` if the task turns out to touch Herdr lifecycle.
-For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
+For secondmates use `bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
