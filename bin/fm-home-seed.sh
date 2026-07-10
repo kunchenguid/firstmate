@@ -804,17 +804,25 @@ write_registry() {
 }
 
 refuse_populated_projectless_home() {
-  local home=$1 project_path project
+  local home=$1 project_path project registry_entries
   local clones=()
   local registry_projects=()
+  if [ -d "$home/projects" ] && ! find -P "$home/projects" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1; then
+    echo "error: cannot inspect existing projects directory at $home/projects; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
   for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
     [ -e "$project_path" ] || [ -L "$project_path" ] || continue
     clones+=("$(basename "$project_path")")
   done
   if [ -f "$home/data/projects.md" ]; then
+    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+      echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
+      return 1
+    }
     while IFS= read -r project; do
       [ -n "$project" ] && registry_projects+=("$project")
-    done < <(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md")
+    done <<< "$registry_entries"
   fi
   [ "${#clones[@]}" -eq 0 ] && [ "${#registry_projects[@]}" -eq 0 ] && return 0
 

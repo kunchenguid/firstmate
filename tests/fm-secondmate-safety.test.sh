@@ -473,6 +473,71 @@ EOF
   pass "home seeding refuses project-less conversion of a populated home"
 }
 
+test_home_seed_refuses_projectless_home_with_uninspectable_projects() {
+  local home sub err
+  home="$TMP_ROOT/no-projects-uninspectable-home"
+  sub="$TMP_ROOT/no-projects-uninspectable-subhome"
+  err="$TMP_ROOT/no-projects-uninspectable.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/hidden-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$sub/projects/hidden-clone"
+  chmod 311 "$sub/projects"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 700 "$sub/projects"
+    fail "project-less seed accepted a home whose projects directory could not be inspected"
+  fi
+  chmod 700 "$sub/projects"
+  grep -F 'cannot inspect existing projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not explain the projects inspection failure"
+  grep -F 'resolve its access permissions or retire or clean this home' "$err" >/dev/null \
+    || fail "project-less seed did not explain how to resolve the inspection failure"
+  assert_present "$sub/projects/hidden-clone/.git" "project-less inspection refusal removed the existing clone"
+  assert_absent "$sub/.fm-secondmate-home" "project-less inspection refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less inspection refusal copied a charter"
+  assert_absent "$sub/state" "project-less inspection refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less inspection refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes whose projects directory cannot be inspected"
+}
+
+test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
+  local home sub err registry_before
+  home="$TMP_ROOT/no-projects-uninspectable-registry-home"
+  sub="$TMP_ROOT/no-projects-uninspectable-registry-subhome"
+  err="$TMP_ROOT/no-projects-uninspectable-registry.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data"
+  mark_firstmate_home "$sub"
+  printf '%s\n' '- hidden-registry [direct-PR] - retained project entry (added 2026-06-22)' > "$sub/data/projects.md"
+  registry_before=$(cat "$sub/data/projects.md")
+  chmod 000 "$sub/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 600 "$sub/data/projects.md"
+    fail "project-less seed accepted a home whose project registry could not be inspected"
+  fi
+  chmod 600 "$sub/data/projects.md"
+  grep -F 'cannot inspect existing project registry' "$err" >/dev/null \
+    || fail "project-less seed did not explain the project registry inspection failure"
+  grep -F 'resolve its access permissions or retire or clean this home' "$err" >/dev/null \
+    || fail "project-less seed did not explain how to resolve the project registry inspection failure"
+  [ "$registry_before" = "$(cat "$sub/data/projects.md")" ] \
+    || fail "project-less inspection refusal changed the project registry"
+  assert_absent "$sub/.fm-secondmate-home" "project-less registry inspection refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less registry inspection refusal copied a charter"
+  assert_absent "$sub/state" "project-less registry inspection refusal left an operational directory"
+  assert_absent "$sub/projects" "project-less registry inspection refusal created a projects directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less registry inspection refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes whose project registry cannot be inspected"
+}
+
 test_home_seed_refuses_missing_projects_without_signal() {
   # Accidental omission of the project list, with no deliberate --no-projects
   # signal, must fail loudly and leave nothing behind, so a forgotten argument is
@@ -1935,6 +2000,8 @@ test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
 test_home_seed_refuses_projectless_conversion_of_populated_home
+test_home_seed_refuses_projectless_home_with_uninspectable_projects
+test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_registry_delimiter_home
