@@ -7,14 +7,18 @@
 #
 # Scope-matching is firstmate's JUDGMENT: you pass the task-id keys you have
 # already judged in-scope for the secondmate. This script performs only the
-# mechanical move - it removes each matched line from data/backlog.md under the
-# active firstmate home and appends it, under the same section heading, to the
-# secondmate home's data/backlog.md (home resolved from data/secondmates.md). It
-# never changes a line's text, never writes into a project (it refuses a home
-# that is not a firstmate home), and is idempotent: a key already present in the
-# secondmate backlog is reported and skipped, so re-running converges. If any key
-# matches neither backlog, nothing is moved. See AGENTS.md project management
-# and task lifecycle.
+# mechanical move - it removes each matched item BLOCK (the `- [ ] <id> ...`
+# header line plus every following indented body line up to the next item line
+# or section heading) from data/backlog.md under the active firstmate home and
+# appends that full block, under the same section heading, to the secondmate
+# home's data/backlog.md (home resolved from data/secondmates.md). Body
+# membership is indentation, not content: indented lines that look like
+# markdown headings (e.g. `  ## Intent`) stay in the item and are not treated
+# as section boundaries. It never changes a line's text, never writes into a
+# project (it refuses a home that is not a firstmate home), and is idempotent:
+# a key already present in the secondmate backlog is reported and skipped (no
+# duplicate header or body), so re-running converges. If any key matches neither
+# backlog, nothing is moved. See AGENTS.md project management and task lifecycle.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 set -eu
 
@@ -250,27 +254,51 @@ if [ "$SUB_EXISTED" -eq 1 ]; then
   cp "$SUB_BACKLOG" "$SUB_BAK"
 fi
 
-# Pass 1: drop the matched lines from the main backlog, capturing each removed
-# line tagged with the "## " section heading it lived under.
+# Pass 1: drop each matched item block from the main backlog, capturing every
+# removed line (header + indented body) tagged with the "## " section heading
+# it lived under. Body membership is indentation only: a line starting with
+# whitespace continues the block even when its content looks like a heading.
 : > "$MOVED_FILE"
 awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
   BEGIN {
     while ((getline k < keysfile) > 0) { if (k != "") want[k] = 1 }
     section = "## Queued"
+    moving = 0
   }
-  /^## / { section = $0; print; next }
+  /^## / {
+    moving = 0
+    section = $0
+    print
+    next
+  }
   /^- \[[ x]\] / {
     rest = $0
     sub(/^- \[[ x]\] +/, "", rest)
     id = rest
     sub(/[ \t].*/, "", id)
-    if (id in want) { print section "\t" $0 > movedfile; next }
+    if (id in want) {
+      print section "\t" $0 > movedfile
+      moving = 1
+      next
+    }
+    moving = 0
+    print
+    next
   }
-  { print }
+  moving && /^[ \t]/ {
+    print section "\t" $0 > movedfile
+    next
+  }
+  {
+    moving = 0
+    print
+  }
 ' "$MAIN_BACKLOG" > "$KEPT_FILE"
 
-# Pass 2: insert each moved line at the end of its section in the sub backlog,
-# creating the section heading if the sub backlog lacks it.
+# Pass 2: insert each moved block at the end of its section in the sub backlog,
+# creating the section heading if the sub backlog lacks it. Records are one
+# physical line each (section TAB line); multi-line bodies are consecutive
+# records under the same section and reassemble in order.
 awk -v movedfile="$MOVED_FILE" '
   function flush(sec) {
     if (sec != "" && (sec in items) && !(sec in flushed)) {
