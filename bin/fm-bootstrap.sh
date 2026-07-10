@@ -165,6 +165,9 @@ fleet_sync() {
       kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+      # SECONDS ticks on wall-clock boundaries unaligned with the sleep loop, so
+      # elapsed can overshoot by a second; the loop guarantees the timeout was hit.
+      [ "$elapsed" -le "$timeout" ] || elapsed=$timeout
       fleet_sync_relay_all_output "$tmp"
       echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${elapsed}s)"
       rm -f "$tmp"
