@@ -48,6 +48,8 @@
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
 
+FMX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
@@ -928,15 +930,22 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
-# atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
-# reply-platform context, dropping any prior link and preserving every other meta
-# line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
-# carry it forward onto a successor task instead of granting a fresh follow-up
-# budget against a binding the relay already knows about. Returns non-zero if
-# <meta> is missing or the rewrite fails.
-fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp
+fmx_meta_lock_acquire() {
+  local meta=$1 outvar=$2 dir base lock_path
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  lock_path="$dir/.$base.lock"
+  if ! declare -F fm_lock_acquire_wait >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FMX_LIB_DIR/fm-wake-lib.sh" || return 1
+  fi
+  fm_lock_acquire_wait "$lock_path" || return 1
+  printf -v "$outvar" '%s' "$lock_path"
+}
+
+fmx_meta_link_set_unlocked() {
+  local meta=$1 rid=$2 ts=$3 followups=$4 platform=$5 reply_max=$6 tmp
   [ -f "$meta" ] || return 1
   tmp=$(fmx_meta_tmp "$meta") || return 1
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
@@ -955,10 +964,27 @@ fmx_meta_link_set() {
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
-# fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
-# line, preserving every other meta line including link and reply context.
-# Returns non-zero if <meta> is missing or the rewrite fails.
-fmx_meta_followups_set() {
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
+# atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
+# reply-platform context, dropping any prior link and preserving every other meta
+# line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
+# carry it forward onto a successor task instead of granting a fresh follow-up
+# budget against a binding the relay already knows about. Returns non-zero if
+# <meta> is missing or the rewrite fails.
+fmx_meta_link_set() {
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} meta_lock rc=0
+  [ -f "$meta" ] || return 1
+  fmx_meta_lock_acquire "$meta" meta_lock || return 1
+  if [ ! -f "$meta" ]; then
+    rc=1
+  elif ! fmx_meta_link_set_unlocked "$meta" "$rid" "$ts" "$followups" "$platform" "$reply_max"; then
+    rc=1
+  fi
+  fm_lock_release "$meta_lock" || rc=1
+  return "$rc"
+}
+
+fmx_meta_followups_set_unlocked() {
   local meta=$1 n=$2 tmp
   [ -f "$meta" ] || return 1
   tmp=$(fmx_meta_tmp "$meta") || return 1
@@ -969,11 +995,23 @@ fmx_meta_followups_set() {
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
-# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
-# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
-# succeeds whether or not a link is present, and is a no-op when <meta> is
-# missing.
-fmx_meta_link_clear() {
+# fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
+# line, preserving every other meta line including link and reply context.
+# Returns non-zero if <meta> is missing or the rewrite fails.
+fmx_meta_followups_set() {
+  local meta=$1 n=$2 meta_lock rc=0
+  [ -f "$meta" ] || return 1
+  fmx_meta_lock_acquire "$meta" meta_lock || return 1
+  if [ ! -f "$meta" ]; then
+    rc=1
+  elif ! fmx_meta_followups_set_unlocked "$meta" "$n"; then
+    rc=1
+  fi
+  fm_lock_release "$meta_lock" || rc=1
+  return "$rc"
+}
+
+fmx_meta_link_clear_unlocked() {
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
   tmp=$(fmx_meta_tmp "$meta") || return 1
@@ -981,4 +1019,19 @@ fmx_meta_link_clear() {
     rm -f "$tmp"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}
+
+# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
+# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
+# succeeds whether or not a link is present, and is a no-op when <meta> is
+# missing.
+fmx_meta_link_clear() {
+  local meta=$1 meta_lock rc=0
+  [ -f "$meta" ] || return 0
+  fmx_meta_lock_acquire "$meta" meta_lock || return 1
+  if [ -f "$meta" ] && ! fmx_meta_link_clear_unlocked "$meta"; then
+    rc=1
+  fi
+  fm_lock_release "$meta_lock" || rc=1
+  return "$rc"
 }

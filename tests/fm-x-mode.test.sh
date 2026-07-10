@@ -2440,6 +2440,83 @@ test_meta_rewrites_do_not_depend_on_tmpdir() {
   pass "meta rewrites are independent of TMPDIR"
 }
 
+test_meta_rewrites_serialize_with_task_lock() {
+  local operation home fakebin meta lock holder_ready holder_go mv_ready mv_go holder_pid writer_pid i rc
+  for operation in link followups clear; do
+    home="$TMP_ROOT/meta-lock-$operation"
+    mkdir -p "$home/state"
+    fakebin=$(fm_fakebin "$home")
+    meta="$home/state/task.meta"
+    lock="$home/state/.task.meta.lock"
+    holder_ready="$home/holder-ready"
+    holder_go="$home/holder-go"
+    mv_ready="$home/mv-ready"
+    mv_go="$home/mv-go"
+    printf 'kind=ship\nlabel=project: queued\nx_request=req-old\nx_request_ts=1700000000\nx_followups=0\n' > "$meta"
+    cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "${FMX_TEST_META:-}" ]; then
+  : > "$FMX_TEST_MV_READY"
+  while [ ! -e "$FMX_TEST_MV_GO" ]; do sleep 0.01; done
+fi
+exec /bin/mv "$@"
+SH
+    chmod +x "$fakebin/mv"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$2"
+      : > "$3"
+      while [ ! -e "$4" ]; do sleep 0.01; done
+      sed "/^label=/d" "$5" > "$5.lock-update"
+      printf "%s\n" "label=project: validating" >> "$5.lock-update"
+      /bin/mv "$5.lock-update" "$5"
+      fm_lock_release "$2"
+    ' _ "$ROOT" "$lock" "$holder_ready" "$holder_go" "$meta" &
+    holder_pid=$!
+    i=0
+    while [ ! -e "$holder_ready" ] && [ "$i" -lt 200 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+    [ -e "$holder_ready" ] || { : > "$holder_go"; wait "$holder_pid" 2>/dev/null || true; fail "$operation lock holder did not start"; }
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FMX_TEST_META="$meta" FMX_TEST_MV_READY="$mv_ready" FMX_TEST_MV_GO="$mv_go" \
+      FMX_TEST_OPERATION="$operation" ROOT="$ROOT" bash -c '
+        . "$ROOT/bin/fm-x-lib.sh"
+        case "$FMX_TEST_OPERATION" in
+          link) fmx_meta_link_set "$FMX_TEST_META" req-new 1700000100 0 x 280 ;;
+          followups) fmx_meta_followups_set "$FMX_TEST_META" 2 ;;
+          clear) fmx_meta_link_clear "$FMX_TEST_META" ;;
+        esac
+      ' &
+    writer_pid=$!
+    sleep 0.2
+    if [ -e "$mv_ready" ]; then
+      : > "$holder_go"
+      : > "$mv_go"
+      wait "$holder_pid" 2>/dev/null || true
+      wait "$writer_pid" 2>/dev/null || true
+      fail "$operation metadata rewrite reached its commit while the task lock was held"
+    fi
+    : > "$holder_go"
+    wait "$holder_pid" || fail "$operation lock holder failed"
+    : > "$mv_go"
+    wait "$writer_pid"; rc=$?
+    expect_code 0 "$rc" "$operation metadata rewrite exit"
+    assert_grep "label=project: validating" "$meta" "$operation metadata rewrite must preserve the locked label update"
+    [ "$(grep -c '^label=' "$meta")" = 1 ] || fail "$operation metadata rewrite duplicated the label"
+    case "$operation" in
+      link) assert_grep "x_request=req-new" "$meta" "link rewrite must commit after the task lock is released" ;;
+      followups) assert_grep "x_followups=2" "$meta" "follow-up rewrite must commit after the task lock is released" ;;
+      clear) assert_no_grep "x_request=" "$meta" "clear rewrite must commit after the task lock is released" ;;
+    esac
+    [ ! -e "$lock" ] || fail "$operation metadata rewrite left the task lock behind"
+  done
+  pass "X metadata rewrites serialize with the shared task lock"
+}
+
 test_link_rejects_unsafe_and_missing() {
   local home rc
   home="$TMP_ROOT/link-bad"; mkdir -p "$home/state"
@@ -2845,6 +2922,7 @@ test_link_carry_count_and_ts_preserve_followup_binding
 test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
+test_meta_rewrites_serialize_with_task_lock
 test_link_rejects_unsafe_and_missing
 test_followup_check_states
 test_followup_check_expired_prunes_link
