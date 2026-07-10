@@ -19,6 +19,11 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# When the optional Z3 completeness gate (bin/fm-completeness-check.sh) is
+# available, it additionally proves the teardown claim consistent with the
+# directives before anything irreversible runs (skipped under --force and for
+# secondmates); without the solver it fails open and the bash checks above
+# remain the hard guarantee.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check for ordinary tasks and discards
 #   secondmate child work for kind=secondmate. Only use it when the captain has
@@ -425,7 +430,7 @@ if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; 
   gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
   gate_rc=$?
   set -e
-  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
+  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then
     printf '%s\n' "$gate_out" >&2
     echo "REFUSED: completeness gate blocked teardown of $ID." >&2
     exit 1

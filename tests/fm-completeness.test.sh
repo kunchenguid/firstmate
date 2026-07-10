@@ -54,11 +54,38 @@ else
   fail "strict mode did not enforce on tooling breakage"
 fi
 
+# A corrupt (unparseable) rules file is tooling breakage too: fail-open by
+# default, hard error under strict - never a wedged lifecycle.
+printf '{ not json' > "$TMP_ROOT/corrupt.json"
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/corrupt.json" "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "fail-open on corrupt rules file exits 0"
+else
+  fail "corrupt rules file did not fail open"
+fi
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/corrupt.json" "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces (exit 3) on corrupt rules file"
+else
+  fail "strict mode did not enforce on corrupt rules file"
+fi
+
 # Unknown argument is a usage error.
 if [ "$(rc_of --bogus x)" = "64" ]; then
   pass "unknown argument exits 64"
 else
   fail "unknown argument did not exit 64"
+fi
+
+# An undeclared axis value is a typo, not a pass: blocking usage error, never
+# fail-open, even where the solver is absent.
+if [ "$(rc_of --kind ship --landed nonne)" = "64" ]; then
+  pass "undeclared axis value exits 64 (blocking, not fail-open)"
+else
+  fail "undeclared axis value did not exit 64"
+fi
+if [ "$(rc_of --kind ship --landed pushed --meta 'bad key')" = "64" ]; then
+  pass "malformed --meta key exits 64"
+else
+  fail "malformed --meta key did not exit 64"
 fi
 
 # --- Solver-dependent tier ---------------------------------------------------
@@ -115,4 +142,49 @@ if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id scout-x >/dev/null 2>&1
   pass "--id scout derivation clears once report exists"
 else
   fail "--id scout derivation did not clear with report present"
+fi
+
+# A self-contradictory rules file is a bug in the directives: prove_consistency
+# rejects it and the gate fails open rather than issuing verdicts from nonsense.
+cat > "$TMP_ROOT/contradictory.json" <<'JSON'
+{
+  "axes": {"kind": ["ship", "scout", "secondmate"], "landed": ["merged", "pushed", "local_merged", "none"], "report": ["present", "absent"], "worktree": ["clean", "holds_unlanded_work"], "captain_approval": ["granted", "not_required", "pending"]},
+  "hard_rules": [
+    {"name": "A", "require": {"worktree": "clean"}, "reason": "x"},
+    {"name": "B", "forbid": {"worktree": "clean"}, "reason": "y"}
+  ],
+  "soft_rules": []
+}
+JSON
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/contradictory.json" "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "contradictory rules file fails open"
+else
+  fail "contradictory rules file did not fail open"
+fi
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/contradictory.json" "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces on contradictory rules file"
+else
+  fail "strict mode did not enforce on contradictory rules file"
+fi
+
+# Local-only derivation mirrors fm-teardown.sh's main-or-master fallback: a
+# repo whose default branch is master must still block on unmerged work.
+PROJ="$TMP_ROOT/proj-master"
+git -c init.defaultBranch=master init -q "$PROJ"
+git -C "$PROJ" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$PROJ" checkout -q -b fm/ship-m
+git -C "$PROJ" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unmerged
+mkdir -p "$HOME_DIR/data/ship-m"
+printf 'kind=ship\nmode=local-only\nworktree=%s\nproject=%s\n' "$PROJ" "$PROJ" > "$HOME_DIR/state/ship-m.meta"
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1; echo $?)" = "2" ]; then
+  pass "local-only master-default repo with unmerged work is blocked"
+else
+  fail "local-only master-default repo with unmerged work was not blocked"
+fi
+git -C "$PROJ" checkout -q master
+git -C "$PROJ" merge -q --ff-only fm/ship-m
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "local-only master-default repo clears once merged"
+else
+  fail "local-only master-default repo did not clear after merge"
 fi

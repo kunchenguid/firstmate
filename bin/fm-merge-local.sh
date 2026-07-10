@@ -8,7 +8,11 @@
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md sections 1, 6, 7.
-# Usage: fm-merge-local.sh <task-id>
+# The formal completeness gate (bin/fm-completeness-check.sh --gate merge) runs
+# first: assert the captain's approval via FM_CAPTAIN_APPROVED (granted|yes|1|true,
+# or not_required under yolo). When the solver tooling is present an unasserted
+# approval blocks the merge; when it is absent the gate fails open.
+# Usage: FM_CAPTAIN_APPROVED=granted fm-merge-local.sh <task-id>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +53,7 @@ set +e
 gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
 gate_rc=$?
 set -e
-if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
+if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then
   printf '%s\n' "$gate_out" >&2
   echo "REFUSED: completeness gate blocked the local merge of $ID." >&2
   echo "Assert the captain's approval explicitly, e.g. FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID" >&2

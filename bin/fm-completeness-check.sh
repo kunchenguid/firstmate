@@ -19,9 +19,11 @@
 #   --mode <strict|graded>         strict (default) gates on invariants; graded also scores soft rules
 #   --meta <key>                   set a soft-rule metadata key true (repeatable)
 #
-# Exit: 0 = SAT (proceed), 2 = UNSAT (blocked), 0 = tooling unavailable (FAIL-OPEN,
-# warns and defers to the caller's own checks) unless FM_COMPLETENESS_STRICT=1.
-# Set FM_COMPLETENESS_GATE=0 to skip the gate entirely (still exits 0).
+# Exit: 0 = SAT (proceed), 2 = UNSAT (blocked), 64 = invalid facts/usage (a typo,
+# not a pass - callers must treat it as blocking), 0 = tooling unavailable or
+# broken (FAIL-OPEN, warns and defers to the caller's own checks) unless
+# FM_COMPLETENESS_STRICT=1. Set FM_COMPLETENESS_GATE=0 to skip the gate entirely
+# (still exits 0).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,7 +80,7 @@ command -v python3 >/dev/null 2>&1 || fail_open "python3 not found"
 git_unlanded_facts() {
   # Mirror fm-teardown.sh's notion of "landed" so the gate never diverges from
   # the script it guards. Sets LANDED and WORKTREE for a ship task.
-  local wt=$1 proj=$2 mode=$3 dirty unpushed default unmerged
+  local wt=$1 proj=$2 mode=$3 dirty unpushed default branch unmerged
   if [ ! -d "$wt" ]; then
     # No worktree on disk means there is nothing to discard, exactly as
     # fm-teardown.sh skips its unlanded check when [ ! -d "$WT" ]. Resolve to a
@@ -94,10 +96,26 @@ git_unlanded_facts() {
   fi
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
   unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
+  # Name the concrete evidence so a blocked claim's output cites it alongside
+  # the violated rule (uncommitted changes are never landed).
+  [ -z "$dirty" ] || echo "completeness gate: uncommitted changes present in $wt" >&2
   if [ "$mode" = "local-only" ]; then
     default=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-    [ -n "$default" ] || default=main
-    unmerged=$(git -C "$wt" log --oneline HEAD --not "$default" -- 2>/dev/null | head -1 || true)
+    if [ -z "$default" ]; then
+      for branch in main master; do
+        if git -C "$proj" show-ref --verify --quiet "refs/heads/$branch"; then
+          default=$branch
+          break
+        fi
+      done
+    fi
+    if [ -n "$default" ]; then
+      unmerged=$(git -C "$wt" log --oneline HEAD --not "$default" -- 2>/dev/null | head -1 || true)
+    else
+      # No determinable default branch: fm-merge-local.sh/fm-teardown.sh refuse
+      # here, so the gate mirrors them by treating the work as unmerged.
+      unmerged="no-default-branch"
+    fi
     if [ -z "$unmerged" ]; then
       LANDED="${LANDED:-local_merged}"
     elif [ -z "$unpushed" ]; then
@@ -111,8 +129,13 @@ git_unlanded_facts() {
       WORKTREE="${WORKTREE:-clean}"
     fi
   else
-    if [ -z "$unpushed" ]; then LANDED="${LANDED:-pushed}"; else LANDED="${LANDED:-none}"; fi
-    if [ -n "$dirty" ] || [ -n "$unpushed" ]; then
+    # Unpushed commits alone are not provably unlanded for a remote-backed
+    # task: fm-teardown.sh's work_is_landed recognizes squash-merged PRs and
+    # content already present in the default branch (gh-backed), which git
+    # alone cannot see here. Resolve to the non-blocking value and defer to
+    # the guarded script's own landed checks; uncommitted changes still block.
+    LANDED="${LANDED:-pushed}"
+    if [ -n "$dirty" ]; then
       WORKTREE="${WORKTREE:-holds_unlanded_work}"
     else
       WORKTREE="${WORKTREE:-clean}"
@@ -178,6 +201,29 @@ fi
 
 case "$ID" in *\"*|*\\*) echo "fm-completeness-check: refusing id with quote/backslash" >&2; exit 64 ;; esac
 
+# Every interpolated axis value must be one the rules file declares. An
+# undeclared value is a typo or corrupted meta, not a pass: refuse loudly
+# (exit 64) instead of letting the engine's error fail open.
+validate_axis() {
+  local name=$1 value=$2 allowed=$3
+  case " $allowed " in
+    *" $value "*) ;;
+    *) echo "fm-completeness-check: invalid $name '$value' (expected one of: $allowed)" >&2; exit 64 ;;
+  esac
+}
+validate_axis --gate "${GATE:-teardown}" "teardown merge done"
+validate_axis --mode "$MODE" "strict graded"
+validate_axis --kind "$KIND" "ship scout secondmate"
+validate_axis --landed "$LANDED" "merged pushed local_merged none"
+validate_axis --report "$REPORT" "present absent"
+validate_axis --worktree "$WORKTREE" "clean holds_unlanded_work"
+validate_axis --captain-approval "$APPROVAL" "granted not_required pending"
+for key in ${META_KEYS[@]+"${META_KEYS[@]}"}; do
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) echo "fm-completeness-check: invalid --meta key '$key' (expected [A-Za-z0-9_]+)" >&2; exit 64 ;;
+  esac
+done
+
 # Build the metadata object from repeated --meta keys.
 meta_json="{}"
 if [ "${#META_KEYS[@]}" -gt 0 ]; then
@@ -201,25 +247,34 @@ err=$(cat "$errfile" 2>/dev/null || true)
 rm -f "$errfile"
 set -e
 
-if [ "$rc" = "3" ]; then
-  fail_open "engine error: ${err:-unknown}"
-fi
-
 label="${ID:-task}${GATE:+ ($GATE)}"
-if [ "$rc" = "0" ]; then
-  if [ "$MODE" = "graded" ]; then
-    compliance=$(printf '%s' "$out" | sed -n 's/.*"compliance": \([0-9.]*\).*/\1/p')
-    echo "completeness gate: SAT - $label clears every invariant (compliance ${compliance:-1.0})"
-  else
-    echo "completeness gate: SAT - $label clears every invariant"
-  fi
-  exit 0
-fi
-
-reason=$(printf '%s' "$out" | sed -n 's/.*"reason": "\(.*\)", "violated_rules.*/\1/p')
-violated=$(printf '%s' "$out" | sed -n 's/.*"violated_rules": \[\(.*\)\], "counterexample.*/\1/p')
-echo "completeness gate: BLOCKED - $label is provably premature" >&2
-[ -n "$violated" ] && echo "  violated: $violated" >&2
-[ -n "$reason" ] && echo "  reason: $reason" >&2
-[ -z "$reason" ] && echo "  $out" >&2
-exit 2
+case "$rc" in
+  0)
+    if [ "$MODE" = "graded" ]; then
+      compliance=$(printf '%s' "$out" | sed -n 's/.*"compliance": \([0-9.]*\).*/\1/p')
+      echo "completeness gate: SAT - $label clears every invariant (compliance ${compliance:-1.0})"
+    else
+      echo "completeness gate: SAT - $label clears every invariant"
+    fi
+    exit 0
+    ;;
+  2)
+    reason=$(printf '%s' "$out" | sed -n 's/.*"reason": "\(.*\)", "violated_rules.*/\1/p')
+    violated=$(printf '%s' "$out" | sed -n 's/.*"violated_rules": \[\(.*\)\], "counterexample.*/\1/p')
+    echo "completeness gate: BLOCKED - $label is provably premature" >&2
+    [ -n "$violated" ] && echo "  violated: $violated" >&2
+    [ -n "$reason" ] && echo "  reason: $reason" >&2
+    [ -z "$reason" ] && echo "  $out" >&2
+    exit 2
+    ;;
+  64)
+    echo "completeness gate: INVALID FACTS for $label - ${err:-unknown}" >&2
+    exit 64
+    ;;
+  3)
+    fail_open "engine error: ${err:-unknown}"
+    ;;
+  *)
+    fail_open "unexpected engine exit $rc: ${err:-unknown}"
+    ;;
+esac

@@ -27,8 +27,10 @@ I/O: reads one JSON object of facts on stdin, e.g.
 `mode` is "strict" (default, hard invariants only) or "graded" (also scores soft
 rules). All other top-level keys except name/mode/metadata are axis values.
 
-Prints a JSON result on stdout. Exit 0 if SAT, 2 if UNSAT, 3 on a usage/tooling
-error (so the bash wrapper can fail-open and defer to its own checks).
+Prints a JSON result on stdout. Exit 0 if SAT, 2 if UNSAT, 3 on a tooling error
+(so the bash wrapper can fail-open and defer to its own checks), 64 when the
+facts themselves are invalid (a typo, not a pass - callers must treat it as
+blocking, never fail-open).
 """
 from __future__ import annotations
 
@@ -39,6 +41,11 @@ import sys
 EXIT_SAT = 0
 EXIT_UNSAT = 2
 EXIT_ERROR = 3
+EXIT_BAD_FACTS = 64
+
+
+class RulesError(Exception):
+    """The rules file itself is broken (a tooling error, not a verdict)."""
 
 
 def _default_rules_path() -> str:
@@ -142,6 +149,11 @@ def check(spec: dict, facts: dict) -> dict:
 
     consts, variables = _build_axes(z3, declared)
 
+    if not prove_consistency(z3, spec, consts, variables):
+        raise RulesError(
+            "hard rule set is unsatisfiable over free axes; the rules file "
+            "contradicts itself (a bug in the directives, not the task)")
+
     violated = _verify_hard(z3, spec, fact_axes, consts, variables)
     sat = not violated
 
@@ -178,9 +190,13 @@ def main() -> int:
     try:
         with open(rules_path, encoding="utf-8") as handle:
             spec = json.load(handle)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(json.dumps({"error": "cannot read rules file %s: %s"
                           % (rules_path, exc)}), file=sys.stderr)
+        return EXIT_ERROR
+    if not isinstance(spec, dict):
+        print(json.dumps({"error": "rules file %s is not a JSON object"
+                          % rules_path}), file=sys.stderr)
         return EXIT_ERROR
 
     try:
@@ -189,8 +205,13 @@ def main() -> int:
         print(json.dumps({"error": "z3-solver not importable: %s" % exc}),
               file=sys.stderr)
         return EXIT_ERROR
-    except (ValueError, KeyError) as exc:
-        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+    except ValueError as exc:
+        print(json.dumps({"error": "invalid facts: %s" % exc}),
+              file=sys.stderr)
+        return EXIT_BAD_FACTS
+    except (RulesError, KeyError, TypeError, AttributeError) as exc:
+        print(json.dumps({"error": "broken rules file %s: %s"
+                          % (rules_path, exc)}), file=sys.stderr)
         return EXIT_ERROR
 
     print(json.dumps(out))
