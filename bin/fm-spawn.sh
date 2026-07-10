@@ -27,8 +27,11 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   --label <text> records a human-readable crewmate/scout label and, on herdr,
-#   names the tab "<project>: <text>"; without it the current fm-<id> tab label is kept.
+#   --label <text> is standard for ordinary crewmate/scout lifecycle spawns.
+#   Pass a plain-language task description; the script records it and, on herdr,
+#   names the tab "<project>: <text>". Keep it current on phase changes such as
+#   building, validating, and awaiting captain with fm-label.sh <id> <phase-text>.
+#   Without --label, the current fm-<id> tab label is kept for compatibility.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch

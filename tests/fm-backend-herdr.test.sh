@@ -682,6 +682,7 @@ test_fm_pr_check_discards_head_after_worktree_generation_changes() {
   fakebin="$dir/fakebin"; head=deadbeefcafefeed0000000000000000deadbeef
   mkdir -p "$state" "$dir/old-worktree" "$dir/new-worktree" "$fakebin"
   printf 'window=fmtest:w1:p2\nworktree=%s\nkind=ship\n' "$dir/old-worktree" > "$meta"
+  printf 'existing replacement-generation poll\n' > "$state/check.check.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -706,8 +707,11 @@ SH
   grep -qx 'label=project: respawned' "$meta" || fail "fm-pr-check lost metadata committed by the replacement generation"
   ! grep -q '^pr=' "$meta" || fail "fm-pr-check applied a PR URL to the replacement worktree generation"
   ! grep -q '^pr_head=' "$meta" || fail "fm-pr-check applied a PR head fetched for the prior worktree generation"
+  [ "$(cat "$state/check.check.sh")" = "existing replacement-generation poll" ] || fail "fm-pr-check overwrote the replacement generation's poll"
+  assert_contains "$out" "not armed: task check metadata changed during PR lookup" "fm-pr-check did not report the stale metadata generation"
+  assert_not_contains "$out" "armed: state/check.check.sh" "fm-pr-check falsely reported a poll armed for a stale generation"
   [ ! -e "$lock" ] || fail "fm-pr-check left the task metadata lock behind after a generation change"
-  pass "fm-pr-check.sh: discards PR head fetched for a replaced worktree generation"
+  pass "fm-pr-check.sh: discards stale PR state and preserves a replacement generation's poll"
 }
 
 test_metadata_writers_release_locks_on_errors() {
@@ -750,11 +754,16 @@ EOF
 }
 
 test_fm_spawn_help_includes_complete_header() {
-  local out
+  local out label_out
   out=$("$ROOT/bin/fm-spawn.sh" --help)
   assert_contains "$out" "grok uses a firstmate-owned global hook" "fm-spawn help omitted the Grok hook note"
   assert_contains "$out" "On success prints: spawned <id>" "fm-spawn help omitted the success-output contract"
-  pass "fm-spawn.sh: help includes the complete contiguous header"
+  assert_contains "$out" "standard for ordinary crewmate/scout lifecycle spawns" "fm-spawn help omitted the standard label lifecycle policy"
+  assert_contains "$out" "fm-label.sh <id> <phase-text>" "fm-spawn help omitted the phase-label update command"
+  label_out=$("$ROOT/bin/fm-label.sh" --help)
+  assert_contains "$label_out" "Usage: fm-label.sh <id|fm-id> <phase-text>" "fm-label help omitted its usage"
+  assert_contains "$label_out" "lifecycle phase changes" "fm-label help omitted its lifecycle purpose"
+  pass "fm-spawn.sh and fm-label.sh: help includes the complete label lifecycle"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -809,13 +818,15 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/6.out"
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
-  PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" \
-    || fail "corroborated live legacy task should select its existing workspace"
-  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp fmtest w0' "$ROOT" ) \
-    || fail "container ensure should reuse a corroborated preferred legacy workspace"
-  [ "$out" = $'fmtest:w0\t' ] || fail "container ensure did not target the corroborated legacy workspace: '$out'"
+  PATH="$fb:$PATH" HERDR_SESSION=active FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned archived:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" \
+    || fail "corroborated live legacy task in another named session should select its existing workspace"
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=active FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp archived w0' "$ROOT" ) \
+    || fail "container ensure should reuse a corroborated preferred legacy workspace in its recorded session"
+  [ "$out" = $'archived:w0\t' ] || fail "container ensure did not target the corroborated legacy session and workspace: '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=archived" "legacy recovery did not inspect the recorded named session"
+  assert_not_contains "$(cat "$log")" $'HERDR_SESSION=active\x1fworkspace\x1fcreate' "legacy recovery created a duplicate workspace in the active session"
 
   dir="$TMP_ROOT/legacy-recycled-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/1.out"
@@ -823,8 +834,8 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/3.out"
   printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"manual"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=active FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned archived:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -eq 2 ] || fail "uncorroborated recycled legacy workspace should fail closed with status 2, got $status: $out"
 
@@ -853,7 +864,7 @@ test_legacy_workspace_preference_requires_owned_live_task() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -eq 2 ] || fail "malformed legacy workspace inventory should fail closed with status 2, got $status: $out"
-  pass "legacy workspace compatibility: confirmed absent tabs respawn normally while unreadable or uncorroborated live state fails closed"
+  pass "legacy workspace compatibility: cross-session live endpoints are reused, confirmed absence respawns normally, and unreadable state fails closed"
 }
 
 test_create_task_refuses_duplicate_label() {

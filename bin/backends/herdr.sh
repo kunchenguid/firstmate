@@ -337,10 +337,13 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [preferred_legacy_works
 # CONTAINER=${RAW%%$'\t'*}; SEEDED_TAB_ID=${RAW#*$'\t'}. The seeded tab id
 # must be threaded through to fm_backend_herdr_create_task, which is the only
 # function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
-fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [prior_session] [prior_workspace_id]
+fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [owned_legacy_session] [owned_legacy_workspace_id]
   local cwd=${1:-$PWD} prior_session=${2:-} prior_workspace_id=${3:-} preferred_legacy_workspace_id='' session label
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
+  if [ -n "$prior_session" ] && [ -n "$prior_workspace_id" ]; then
+    session=$prior_session
+  fi
   fm_backend_herdr_server_ensure "$session" || return 1
   [ "$prior_session" != "$session" ] || preferred_legacy_workspace_id=$prior_workspace_id
   fm_backend_herdr_workspace_ensure "$session" "$cwd" "$preferred_legacy_workspace_id" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
@@ -591,8 +594,7 @@ fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_
 fm_backend_herdr_legacy_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
   local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 session list workspace_label tabs tab_present
   fm_backend_herdr_parse_target "$target" || return 2
-  session=$(fm_backend_herdr_session)
-  [ "$FM_BACKEND_HERDR_SESSION" = "$session" ] || return 1
+  session=$FM_BACKEND_HERDR_SESSION
   fm_backend_herdr_version_check || return 2
   fm_backend_herdr_server_ensure "$session" || return 2
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2

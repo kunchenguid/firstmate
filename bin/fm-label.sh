@@ -2,10 +2,20 @@
 # Update a live task's human-readable herdr tab label.
 # Usage: fm-label.sh <id|fm-id> <phase-text>
 # Herdr labels are rendered as "<project>: <phase-text>" and recorded in meta.
+# Use this on lifecycle phase changes such as building, validating, and awaiting captain.
 # Non-herdr backends are intentionally a successful no-op with an explanatory message.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  sed -n '1d; /^#/ { s/^# \{0,1\}//; p; d; }; q' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"

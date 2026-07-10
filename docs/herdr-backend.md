@@ -30,7 +30,7 @@ For `--secondmate` launches, secondmate home sync and inherited local-material p
 No first-run provisioning is needed beyond having `herdr` and `jq` on `PATH`; firstmate creates the workspace and tab it needs on first spawn.
 
 Watching and attaching: each firstmate home gets its own herdr workspace (the primary uses `firstmate-crew`; each secondmate uses `2ndmate-<secondmate-id>`), with one tab per task inside it.
-Tabs keep the `fm-<id>` label by default, while a crewmate or scout `fm-spawn.sh --label <text>` renders the tab as `<project>: <text>` and records the rendered value as `label=` in task metadata.
+Ordinary crewmate and scout spawns carry the lifecycle label required by `AGENTS.md`; `fm-spawn.sh --label <text>` renders the tab as `<project>: <text>` and records the rendered value as `label=` in task metadata, while omitted labels retain the `fm-<id>` compatibility behavior.
 `--label` is rejected for `--secondmate` spawns because secondmate workspace labels already provide durable visibility and their recovery metadata belongs to the primary home.
 `bin/fm-label.sh <id> <phase-text>` updates a live herdr tab to `<project>: <phase-text>` and updates the same metadata field.
 Attach to the selected `HERDR_SESSION` and switch to the workspace for the home you want to watch to see every one of that home's tasks as tabs in one tab bar.
@@ -110,7 +110,8 @@ Once a workspace exists, spawning - primary or secondmate, workspace or tab - sh
 ### Label collisions: adopt-don't-duplicate, unchanged in spirit
 
 Herdr enforces NO label uniqueness at all for either workspaces or tabs (re-verified for workspaces specifically in this pass: creating a second workspace with an already-used label succeeds and produces two workspaces sharing that label).
-`fm_backend_herdr_workspace_find` therefore adopts the FIRST matching workspace `jq` returns for a home's own label - in practice list order, normally creation order / the oldest - rather than attempting to disambiguate; this mirrors the pre-existing tab duplicate-label check in `fm_backend_herdr_create_task` (which still refuses an exact duplicate TAB label within the adopted workspace).
+`fm_backend_herdr_workspace_find` therefore adopts the FIRST matching workspace `jq` returns for a home's own label - in practice list order, normally creation order / the oldest - rather than attempting to disambiguate.
+Task ownership is different: the stable `fm-<id>` identity drives duplicate and husk checks, while optional human display labels may be shared by distinct tasks and are corroborated through recorded session, workspace, tab, pane, label, and worktree metadata.
 Practical consequence: if a user manually creates their own herdr workspace that happens to share a firstmate home's label (`firstmate-crew`, or `2ndmate-<some-id>`), firstmate's next spawn silently ADOPTS that pre-existing workspace as if it were its own, rather than creating a second one or refusing.
 This is a pre-existing characteristic of the adapter's find-before-create pattern, not a new risk introduced by the per-home refinement; avoid naming a personal herdr workspace `firstmate-crew` or `2ndmate-<secondmate-id>` if you want to keep it separate from firstmate's own space.
 
@@ -119,7 +120,7 @@ This is a pre-existing characteristic of the adapter's find-before-create patter
 Existing live tasks are unaffected by this change: a task's meta already records its own `window=`/`herdr_pane_id=` target, which every backend-scoped operation (send/capture/kill/busy-state) resolves directly and never re-derives from a workspace label.
 So a task spawned before this pass keeps working exactly as before, from whatever workspace it already lives in (the old shared `firstmate` workspace, or a pre-rename `firstmate-<secondmate-id>` workspace if that is where its home's tasks previously landed).
 New primary tasks use `firstmate-crew`; the one compatibility exception is a same-id recovery whose prior metadata still corroborates a live tab in the older `firstmate` workspace by session, workspace, tab, label, pane, and worktree.
-That recovery reuses the legacy workspace so it refuses or replaces the existing task there instead of creating a duplicate in `firstmate-crew`; stale or uncorroborated metadata never selects a legacy workspace, and no workspace is renamed or migrated.
+That recovery inspects and reuses the recorded named session and legacy workspace so it refuses or replaces the existing task there instead of creating a duplicate in the active session's `firstmate-crew`; confirmed absence permits a normal spawn, unreadable or uncorroborated live state fails closed, and no workspace is renamed or migrated.
 New workspace lookup does not adopt old secondmate labels: for new spawns, recovery, and list-live, the adapter exact-matches the current label derived from `FM_HOME` (`2ndmate-<secondmate-id>`).
 If an older live workspace is still labeled `firstmate-<secondmate-id>`, rename it with `herdr workspace rename <workspace_id> 2ndmate-<secondmate-id>` before expecting new tasks or recovery/list-live to use that workspace.
 
@@ -582,7 +583,7 @@ This exercises the fm-spawn.sh-level behavior the adapter-primitive smoke test c
 1. A primary-shaped home spawns an ordinary crewmate (`cm1`) on the herdr backend: its tab lands in a workspace herdr itself labels `firstmate-crew`.
 2. The PRIMARY spawns a `--secondmate` task (`e2esm1`, home = the secondmate-shaped scratch home): its tab lands in a DIFFERENT workspace than `cm1`'s, labeled `2ndmate-e2esm1` by herdr - proving the `fm-spawn.sh` FM_HOME-shadow glue for this one launched-by-the-primary case.
 3. A crewmate (`cm2`) is spawned by running `bin/fm-spawn.sh` again, this time with `FM_HOME` set to the SECONDMATE's own home (simulating the secondmate running its own spawn, exactly as it would live) - no special-casing needed. Its tab lands in the SAME workspace as `e2esm1`'s (`2ndmate-e2esm1`), never the primary's - confirming per-home resolution "falls out" naturally for this path, as the design predicted, now proven rather than merely inspected.
-4. `fm_backend_herdr_list_live`, called with `FM_HOME` set to each home in turn, sees only that home's own tab(s): the primary's list shows only `cm1`; the secondmate's list shows both `e2esm1` and `cm2`, and neither list leaks into the other.
+4. `fm_backend_herdr_list_live`, called with `FM_HOME` set to each home in turn, maps metadata-corroborated human display labels back to distinct stable `fm-<id>` identities, preserves legacy `fm-<id>` labels, excludes manual tabs, and sees only that home's own tasks: the primary's list shows only `cm1` and `cm3`; the secondmate's list shows both `e2esm1` and `cm2`, and neither list leaks into the other.
 5. `bin/fm-teardown.sh cm1` closes only `cm1`'s pane - the secondmate's own pane and `cm2`'s pane, both confirmed still open via `herdr pane get`, survive untouched. `bin/fm-teardown.sh cm2` (run with the secondmate's own `FM_HOME`) then closes only `cm2`'s pane, leaving the secondmate's own pane (same workspace) open.
 
 All ten assertions passed on the real binary on the first run.
