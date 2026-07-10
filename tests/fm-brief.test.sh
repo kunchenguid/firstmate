@@ -24,6 +24,13 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
+test_help_includes_entire_header() {
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  pass "fm-brief.sh: --help renders the complete header"
+}
+
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry defaults to no-mistakes.
 write_registry() {
@@ -252,6 +259,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 }
 
 test_script_parses
+test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

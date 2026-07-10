@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Behavior tests for Grok-harness hook authentication and teardown cleanup.
 set -u
 
 # shellcheck source=tests/lib.sh

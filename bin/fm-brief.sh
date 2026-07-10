@@ -50,7 +50,11 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
 }
 
 case "${1:-}" in
