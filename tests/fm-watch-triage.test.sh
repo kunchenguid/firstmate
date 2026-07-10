@@ -735,6 +735,46 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
+test_paused_authoritative_working_preserves_wedge_timer() {
+  local dir state fakebin out capture_file window key pane_hash sig pid since
+  dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-working"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-working.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/paused-working.status"
+  sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  since=$(cat "$state/.stale-since-$key")
+  sleep 2
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
+    || { reap "$pid"; fail "repeat authoritative working recheck reset the wedge timer"; }
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "authoritative working state did not wedge-escalate past the threshold"
+  grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -1036,6 +1076,7 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
+test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed

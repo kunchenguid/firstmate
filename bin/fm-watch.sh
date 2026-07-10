@@ -323,13 +323,21 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+clear_pause_state() {  # <window>
+  local win=$1 key
+  key=${win//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+}
+
 clear_pause_tracking() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
-    "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_pause_state "$win"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
 pause_state_class() {  # <window> <task>
@@ -675,9 +683,9 @@ EOF
             if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_tracking "$w"
+                working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         date +%s > "$ssf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
