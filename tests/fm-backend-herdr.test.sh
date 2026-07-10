@@ -676,6 +676,56 @@ SH
   pass "fm-pr-check.sh: queries without the metadata lock and preserves concurrent metadata"
 }
 
+test_fm_pr_check_waits_for_coherent_initial_metadata_snapshot() {
+  local dir state meta lock fakebin acquired release gh_called writer_pid check_pid rc head
+  dir="$TMP_ROOT/fm-pr-check-initial-snapshot"; state="$dir/home/state"; meta="$state/check.meta"
+  fakebin="$dir/fakebin"; acquired="$dir/writer-acquired"; release="$dir/release-writer"; gh_called="$dir/gh-called"
+  head=deadbeefcafefeed0000000000000000deadbeef
+  mkdir -p "$state" "$dir/worktree" "$fakebin"
+  printf 'generation=prior-generation\nwindow=prior-window\nworktree=%s\nkind=ship\n' "$dir/worktree" > "$meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+touch "${FM_FAKE_GH_CALLED:?}"
+printf '%s\n' "${FM_FAKE_PR_HEAD:?}"
+SH
+  chmod +x "$fakebin/gh"
+  lock="$state/.check.meta.lock"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock"
+    printf '%s\n' 'generation=replacement-generation' > "$meta"
+    touch "$acquired"
+    while [ ! -e "$release" ]; do sleep 0.02; done
+    printf 'window=reused-window\nworktree=%s\nkind=ship\n' "$dir/worktree" >> "$meta"
+    fm_lock_release "$lock"
+  ) &
+  writer_pid=$!
+  while [ ! -e "$acquired" ]; do sleep 0.02; done
+
+  PATH="$fakebin:$PATH" FM_FAKE_GH_CALLED="$gh_called" FM_FAKE_PR_HEAD="$head" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr" &
+  check_pid=$!
+  sleep 0.3
+  [ ! -e "$gh_called" ] || fail "fm-pr-check queried GitHub before the metadata writer completed"
+  kill -0 "$check_pid" 2>/dev/null || fail "fm-pr-check exited instead of waiting for the initial metadata lock"
+
+  touch "$release"
+  wait "$writer_pid"
+  wait "$check_pid"
+  rc=$?
+  expect_code 0 "$rc" "fm-pr-check should accept the coherent replacement metadata snapshot"
+  grep -qx 'generation=replacement-generation' "$meta" || fail "fm-pr-check lost the replacement generation"
+  grep -qx 'window=reused-window' "$meta" || fail "fm-pr-check read or overwrote partial replacement metadata"
+  grep -qx "worktree=$dir/worktree" "$meta" || fail "fm-pr-check lost the replacement worktree"
+  grep -qx 'pr=https://github.com/example/repo/pull/7' "$meta" || fail "fm-pr-check did not record the PR after the coherent snapshot"
+  grep -qx "pr_head=$head" "$meta" || fail "fm-pr-check did not record the PR head after the coherent snapshot"
+  [ ! -e "$lock" ] || fail "fm-pr-check left the metadata lock behind after waiting for the initial snapshot"
+  pass "fm-pr-check.sh: waits for a coherent initial metadata snapshot"
+}
+
 test_fm_pr_check_discards_head_after_worktree_generation_changes() {
   local dir state meta lock fakebin head out status
   dir="$TMP_ROOT/fm-pr-check-generation-change"; state="$dir/home/state"; meta="$state/check.meta"
@@ -702,7 +752,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
     "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 2>&1 )
   status=$?
-  expect_code 0 "$status" "fm-pr-check should tolerate a worktree generation change during PR lookup: $out"
+  expect_code 1 "$status" "fm-pr-check should fail closed after a worktree generation change during PR lookup: $out"
   grep -qx "worktree=$dir/new-worktree" "$meta" || fail "fm-pr-check overwrote the replacement worktree metadata"
   grep -qx 'label=project: respawned' "$meta" || fail "fm-pr-check lost metadata committed by the replacement generation"
   ! grep -q '^pr=' "$meta" || fail "fm-pr-check applied a PR URL to the replacement worktree generation"
@@ -712,6 +762,42 @@ SH
   assert_not_contains "$out" "armed: state/check.check.sh" "fm-pr-check falsely reported a poll armed for a stale generation"
   [ ! -e "$lock" ] || fail "fm-pr-check left the task metadata lock behind after a generation change"
   pass "fm-pr-check.sh: discards stale PR state and preserves a replacement generation's poll"
+}
+
+test_fm_pr_check_discards_head_after_token_changes_with_reused_runtime_identity() {
+  local dir state meta lock fakebin head out status
+  dir="$TMP_ROOT/fm-pr-check-token-change"; state="$dir/home/state"; meta="$state/check.meta"
+  fakebin="$dir/fakebin"; head=deadbeefcafefeed0000000000000000deadbeef
+  mkdir -p "$state" "$dir/worktree" "$fakebin"
+  printf 'generation=prior-generation\nwindow=fmtest:w1:p2\nworktree=%s\nterminal=term-1\nkind=ship\n' "$dir/worktree" > "$meta"
+  printf 'existing replacement-generation poll\n' > "$state/check.check.sh"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "${FM_FAKE_ROOT:?}/bin/fm-wake-lib.sh"
+fm_lock_acquire_wait "${FM_FAKE_META_LOCK:?}"
+sed 's/^generation=.*/generation=replacement-generation/' "${FM_FAKE_META:?}" > "${FM_FAKE_META:?}.next"
+printf '%s\n' 'label=project: respawned' >> "${FM_FAKE_META:?}.next"
+mv "${FM_FAKE_META:?}.next" "${FM_FAKE_META:?}"
+fm_lock_release "${FM_FAKE_META_LOCK:?}"
+printf '%s\n' "${FM_FAKE_PR_HEAD:?}"
+SH
+  chmod +x "$fakebin/gh"
+  lock="$state/.check.meta.lock"
+
+  out=$( PATH="$fakebin:$PATH" FM_FAKE_ROOT="$ROOT" FM_FAKE_META_LOCK="$lock" FM_FAKE_META="$meta" \
+    FM_FAKE_PR_HEAD="$head" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 2>&1 )
+  status=$?
+  expect_code 1 "$status" "fm-pr-check should fail closed when a reused runtime identity has a new token: $out"
+  grep -qx 'generation=replacement-generation' "$meta" || fail "fm-pr-check overwrote the replacement generation token"
+  grep -qx 'label=project: respawned' "$meta" || fail "fm-pr-check lost replacement-generation metadata"
+  ! grep -q '^pr=' "$meta" || fail "fm-pr-check applied a PR URL to the replacement generation"
+  ! grep -q '^pr_head=' "$meta" || fail "fm-pr-check applied a PR head to the replacement generation"
+  [ "$(cat "$state/check.check.sh")" = "existing replacement-generation poll" ] || fail "fm-pr-check overwrote the replacement generation's poll"
+  assert_contains "$out" "not armed: task check metadata changed during PR lookup" "fm-pr-check did not report the token mismatch"
+  [ ! -e "$lock" ] || fail "fm-pr-check left the metadata lock behind after a token mismatch"
+  pass "fm-pr-check.sh: rejects stale PR state when a respawn reuses runtime identity"
 }
 
 test_metadata_writers_release_locks_on_errors() {
@@ -3017,7 +3103,9 @@ test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_rolls_back_live_label_when_metadata_commit_fails
 test_fm_promote_waits_for_metadata_lock_and_preserves_label
 test_fm_pr_check_queries_without_lock_and_preserves_concurrent_metadata
+test_fm_pr_check_waits_for_coherent_initial_metadata_snapshot
 test_fm_pr_check_discards_head_after_worktree_generation_changes
+test_fm_pr_check_discards_head_after_token_changes_with_reused_runtime_identity
 test_metadata_writers_release_locks_on_errors
 test_fm_label_nonherdr_is_clear_noop
 test_fm_spawn_help_includes_complete_header

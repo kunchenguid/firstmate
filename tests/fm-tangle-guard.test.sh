@@ -186,7 +186,7 @@ run_spawn() {
 }
 
 test_spawn_isolation_abort() {
-  local home proj fakebin out status
+  local home proj fakebin out status first_generation second_generation
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
@@ -211,6 +211,15 @@ test_spawn_isolation_abort() {
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
+  first_generation=$(sed -n 's/^generation=//p' "$home/state/ok-isolated-ff6.meta")
+  [ "${#first_generation}" -eq 32 ] || fail "successful spawn did not record a 128-bit generation"
+  case "$first_generation" in *[!0-9a-f]*) fail "successful spawn recorded a malformed generation" ;; esac
+
+  out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "replacement spawn into the same worktree should succeed"
+  second_generation=$(sed -n 's/^generation=//p' "$home/state/ok-isolated-ff6.meta")
+  [ "${#second_generation}" -eq 32 ] || fail "replacement spawn did not record a 128-bit generation"
+  [ "$second_generation" != "$first_generation" ] || fail "replacement spawn reused the prior generation"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 

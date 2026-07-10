@@ -249,6 +249,7 @@ orca_spawn_abort_cleanup() {
       mkdir -p "$STATE" 2>/dev/null || true
       if [ -d "$STATE" ]; then
         {
+          echo "generation=$SPAWN_GENERATION"
           echo "window=$W"
           echo "worktree=${WT:-}"
           echo "project=$PROJ_ABS"
@@ -428,6 +429,11 @@ ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 SPAWN_META_LOCK="$STATE/.$ID.meta.lock"
 fm_lock_acquire_wait "$SPAWN_META_LOCK"
+SPAWN_GENERATION=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
+if [ "${#SPAWN_GENERATION}" -ne 32 ] || [[ "$SPAWN_GENERATION" == *[!0-9a-f]* ]]; then
+  echo "error: could not generate a unique spawn generation for $ID" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1197,6 +1203,7 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
+  echo "generation=$SPAWN_GENERATION"
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"

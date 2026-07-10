@@ -462,6 +462,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-pathless-cleanup'$'\x1f''--force'$'\x1f''--json' \
     "pathless cleanup should attempt helper-backed worktree removal"
   assert_present "$state/$id.meta" "failed pathless cleanup should preserve metadata"
+  grep -Eq '^generation=[0-9a-f]{32}$' "$state/$id.meta" || fail "preserved pathless metadata missing a unique generation"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved pathless metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
@@ -493,6 +494,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
   assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
     "spawn output missing Orca window/worktree summary"
+  grep -Eq '^generation=[0-9a-f]{32}$' "$state/$id.meta" || fail "Orca spawn metadata missing a unique generation"
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
@@ -657,6 +659,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-cleanup-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should attempt helper cleanup before preserving metadata"
   assert_present "$state/$id.meta" "failed Orca abort cleanup should preserve metadata"
+  grep -Eq '^generation=[0-9a-f]{32}$' "$state/$id.meta" || fail "preserved Orca abort metadata missing a unique generation"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"

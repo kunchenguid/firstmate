@@ -35,6 +35,8 @@ NUMBER=$FM_PR_NUMBER
 META="$STATE/$ID.meta"
 META_LOCK="$STATE/.$ID.meta.lock"
 META_TMP=
+LOOKUP_GENERATION_COUNT=0
+LOOKUP_GENERATION=
 LOOKUP_WT=
 LOOKUP_WINDOW=
 LOOKUP_TERMINAL=
@@ -50,13 +52,18 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
+fm_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+LOOKUP_GENERATION_COUNT=$(grep -c '^generation=' "$META" || true)
+LOOKUP_GENERATION=$(grep '^generation=' "$META" | cut -d= -f2- || true)
 LOOKUP_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 LOOKUP_WINDOW=$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)
 LOOKUP_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
+fm_lock_release "$META_LOCK"
+META_LOCK=
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -72,6 +79,7 @@ if [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ] && command -v gh >/dev/null 2>&1; 
   fi
 fi
 
+META_LOCK="$STATE/.$ID.meta.lock"
 fm_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata changed during PR lookup" >&2
@@ -80,8 +88,13 @@ fi
 LOCKED_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 LOCKED_WINDOW=$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)
 LOCKED_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
-if [ "$LOCKED_WT" != "$LOOKUP_WT" ] || [ "$LOCKED_WINDOW" != "$LOOKUP_WINDOW" ] \
-  || [ "$LOCKED_TERMINAL" != "$LOOKUP_TERMINAL" ]; then
+LOCKED_GENERATION_COUNT=$(grep -c '^generation=' "$META" || true)
+LOCKED_GENERATION=$(grep '^generation=' "$META" | cut -d= -f2- || true)
+if ! { [ "$LOOKUP_GENERATION_COUNT" -eq 1 ] && [ -n "$LOOKUP_GENERATION" ] \
+    && [ "$LOCKED_GENERATION_COUNT" -eq 1 ] && [ "$LOCKED_GENERATION" = "$LOOKUP_GENERATION" ]; } \
+  && ! { [ "$LOOKUP_GENERATION_COUNT" -eq 0 ] && [ "$LOCKED_GENERATION_COUNT" -eq 0 ] \
+    && [ "$LOCKED_WT" = "$LOOKUP_WT" ] && [ "$LOCKED_WINDOW" = "$LOOKUP_WINDOW" ] \
+    && [ "$LOCKED_TERMINAL" = "$LOOKUP_TERMINAL" ]; }; then
   echo "error: task metadata changed during PR lookup" >&2
   exit 1
 fi
