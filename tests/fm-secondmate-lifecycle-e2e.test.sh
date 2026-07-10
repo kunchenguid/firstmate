@@ -24,7 +24,7 @@
 #   - teardown removes meta and the registry route only after removing the home
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)

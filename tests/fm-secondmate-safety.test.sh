@@ -7,7 +7,7 @@
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
