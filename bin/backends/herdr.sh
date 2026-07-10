@@ -492,15 +492,26 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <identity> <cwd> <seeded_default_tab_id> <known_tab_id>
-  local container=$1 identity=$2 cwd=$3 seeded_tab_id=${4:-} known_tab_id=${5:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+fm_backend_herdr_create_task() {  # <container> <identity> <cwd> <seeded_default_tab_id> <known_tab_id> <known_label> <known_worktree>
+  local container=$1 identity=$2 cwd=$3 seeded_tab_id=${4:-} known_tab_id=${5:-} known_label=${6:-} known_worktree=${7:-} session wsid list dup_tabs dup dup_pane known_current_label known_pane known_path dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$identity" --arg known "$known_tab_id" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want or ($known != "" and .tab_id == $known)) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$identity" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
+  if [ -n "$known_tab_id" ] && [ -n "$known_label" ] && [ -n "$known_worktree" ]; then
+    known_current_label=$(printf '%s' "$list" | jq -r --arg known "$known_tab_id" '.result.tabs[]? | select(.tab_id == $known) | .label' 2>/dev/null | head -1)
+    if [ "$known_current_label" = "$known_label" ]; then
+      known_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$known_tab_id" 2>/dev/null || true)
+      known_path=
+      [ -z "$known_pane" ] || known_path=$(fm_backend_herdr_current_path "$session:$known_pane" 2>/dev/null || true)
+      if [ "$known_path" = "$known_worktree" ] && ! printf '%s\n' "$dup_tabs" | grep -qxF "$known_tab_id"; then
+        dup_tabs="${dup_tabs}${dup_tabs:+$'\n'}${known_tab_id}"
+      fi
+    fi
+  fi
   dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do

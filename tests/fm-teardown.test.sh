@@ -1263,6 +1263,46 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_teardown_waits_for_metadata_update_lock() {
+  local case_dir lock acquired release holder_pid teardown_pid rc
+  case_dir=$(make_case metadata-update-lock)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "discarded under force"
+  lock="$case_dir/state/.task-x1.meta.lock"
+  acquired="$case_dir/lock-acquired"
+  release="$case_dir/release-lock"
+
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT" "$lock" "$acquired" "$release" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$acquired" ] || break
+    sleep 0.02
+  done
+  [ -e "$acquired" ] || fail "metadata lock holder did not acquire its lock"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  sleep 0.3
+  kill -0 "$teardown_pid" 2>/dev/null || fail "teardown did not wait for the metadata update lock"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "teardown removed metadata while its update lock was held"
+
+  touch "$release"
+  wait "$holder_pid"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "metadata-update-lock: teardown should finish after the label update lock releases"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown left metadata after acquiring its update lock"
+  pass "teardown serializes metadata removal with live label updates"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1272,6 +1312,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_teardown_waits_for_metadata_update_lock
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

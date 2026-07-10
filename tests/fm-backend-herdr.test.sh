@@ -318,6 +318,62 @@ EOF
   pass "fm-label.sh: updates a herdr tab label and records the rendered label in metadata"
 }
 
+test_fm_label_rejects_secondmate_before_rename() {
+  local dir log resp fb home state out status
+  dir="$TMP_ROOT/fm-label-secondmate"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; state="$home/state"; mkdir -p "$state"
+  cat > "$state/domain.meta" <<EOF
+window=fmtest:w1:p2
+project=$dir/secondmate-home
+kind=secondmate
+backend=herdr
+EOF
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    "$ROOT/bin/fm-label.sh" domain validating 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-label should reject secondmate metadata"
+  assert_contains "$out" "not secondmates" "fm-label did not clearly reject a secondmate label"
+  [ ! -s "$log" ] || fail "fm-label contacted herdr before rejecting secondmate metadata"
+  pass "fm-label.sh: rejects secondmate metadata before any live rename"
+}
+
+test_fm_label_does_not_recreate_removed_metadata() {
+  local dir log fakebin home state meta out status
+  dir="$TMP_ROOT/fm-label-removed-meta"; fakebin="$dir/fakebin"; log="$dir/log"; home="$dir/home"; state="$home/state"; meta="$state/removed.meta"
+  mkdir -p "$fakebin" "$state"; : > "$log"
+  cat > "$meta" <<EOF
+window=fmtest:w1:p2
+project=$dir/project-name
+kind=ship
+backend=herdr
+EOF
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"tab_id":"w1:t2"}}}\n' ;;
+  "tab rename")
+    [ -L "${FM_FAKE_META_LOCK:?}" ]
+    rm -f "${FM_FAKE_META:?}"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  out=$( PATH="$fakebin:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_META="$meta" \
+    FM_FAKE_META_LOCK="$state/.removed.meta.lock" "$ROOT/bin/fm-label.sh" removed validating 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-label should fail when metadata disappears during the rename"
+  assert_contains "$out" "metadata changed or disappeared" "fm-label did not report concurrent metadata removal"
+  [ ! -e "$meta" ] || fail "fm-label recreated metadata removed during its live rename"
+  [ ! -e "$state/.removed.meta.lock" ] || fail "fm-label left its metadata update lock behind"
+  [ -z "$(find "$state" -maxdepth 1 \( -name '.removed.meta.snapshot.*' -o -name '.removed.meta.update.*' \) -print -quit)" ] \
+    || fail "fm-label left metadata update temporaries behind"
+  pass "fm-label.sh: serializes metadata updates and never recreates a concurrently removed record"
+}
+
 test_fm_label_nonherdr_is_clear_noop() {
   local dir home state out fallback_out
   dir="$TMP_ROOT/fm-label-tmux"; home="$dir/home"; state="$home/state"; mkdir -p "$state"
@@ -428,11 +484,13 @@ test_create_task_refuses_known_human_labeled_tab_when_agent_live() {
   dir="$TMP_ROOT/dup-known-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"/tmp/prior-worktree"}}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should refuse the prior metadata-recorded tab even after its display label changed"
   assert_contains "$out" "fm-task-a' already exists" "create_task did not report the stable identity collision"
@@ -459,18 +517,36 @@ test_create_task_replaces_known_human_labeled_husk() {
   dir="$TMP_ROOT/known-human-husk"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
-  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
-  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-task-a","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"/tmp/prior-worktree"}}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/7.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-task-a","workspace_id":"w1"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" ) \
     || fail "create_task should replace the metadata-recorded human-labeled husk"
   [ "$out" = "w1:t3 w1:p3" ] || fail "create_task returned unexpected ids after replacing the human-labeled husk: '$out'"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the prior metadata-recorded husk"
   assert_contains "$(cat "$log")" $'\x1f''--label'$'\x1f''fm-task-a' "create_task did not create the replacement under its stable identity"
   pass "fm_backend_herdr_create_task: metadata preserves stable husk replacement after a human-readable rename"
+}
+
+test_create_task_does_not_close_recycled_known_tab_id() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/recycled-known-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"project: validating","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"/tmp/manual-work"}}}\n' > "$resp/3.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-task-a /tmp/proj "" w1:t2 "project: validating" /tmp/prior-worktree' "$ROOT" ) \
+    || fail "create_task should fail safe when a stored tab id points at an uncorroborated tab"
+  [ "$out" = "w1:t3 w1:p3" ] || fail "create_task returned unexpected ids beside an uncorroborated known tab: '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task closed a tab based on a recycled stored id"
+  pass "fm_backend_herdr_create_task: a stored tab id needs label and worktree corroboration before husk cleanup"
 }
 
 test_create_task_refuses_when_any_duplicate_label_is_live() {
@@ -804,11 +880,16 @@ EOF
 }
 
 test_fm_spawn_rolls_back_failed_human_label_rename() {
-  local mode dir home state project wt fakebin log treehouse_log id out status prior rollback treehouse_fail
+  local mode dir home state project wt fakebin log treehouse_log id out status prior rollback treehouse_fail grok_home prior_token
   for mode in success failure; do
     dir="$TMP_ROOT/spawn-label-rollback-$mode"; home="$dir/home"; state="$home/state"; project="$dir/project"; wt="$dir/worktree"
     fakebin="$dir/fakebin"; log="$dir/herdr.log"; treehouse_log="$dir/treehouse.log"; id="label-rollback-$mode"
     mkdir -p "$home/data/$id" "$state" "$fakebin"
+    grok_home="$dir/grok"
+    prior_token=fm.abcdefghijkl
+    mkdir -p "$grok_home/hooks/fm-turn-end.d"
+    printf 'prior authorization\n' > "$grok_home/hooks/fm-turn-end.d/$prior_token"
+    printf '%s\n' "$prior_token" > "$state/$id.grok-turnend-token"
     fm_git_init_commit "$project"
     git -C "$project" worktree add -q -b "$id" "$wt"
     mkdir -p "$wt/.claude"
@@ -862,14 +943,17 @@ SH
     [ "$mode" != failure ] || treehouse_fail=1
     out=$( PATH="$fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$home" HERDR_SESSION=fmtest \
       FM_HERDR_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_WORKTREE="$wt" \
-      FM_TREEHOUSE_FAIL="$treehouse_fail" \
+      FM_TREEHOUSE_FAIL="$treehouse_fail" GROK_HOME="$grok_home" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
     status=$?
     [ "$status" -ne 0 ] || fail "fm-spawn should fail when the herdr display rename fails"
     assert_contains "$out" "could not apply herdr display label" "fm-spawn did not report the failed display rename"
     assert_contains "$(cat "$log")" "pane close w1:p-new" "fm-spawn did not close the failed herdr endpoint"
-    [ ! -e "$state/$id.pi-ext.ts" ] && [ ! -e "$state/$id.grok-turnend-token" ] \
-      || fail "fm-spawn left per-task hook state after rename failure"
+    [ ! -e "$state/$id.pi-ext.ts" ] || fail "fm-spawn left current-attempt hook state after rename failure"
+    [ "$(cat "$state/$id.grok-turnend-token")" = "$prior_token" ] \
+      || fail "fm-spawn did not restore the prior Grok token record"
+    [ "$(cat "$grok_home/hooks/fm-turn-end.d/$prior_token")" = "prior authorization" ] \
+      || fail "fm-spawn deleted a prior Grok authorization during rollback"
     if [ "$mode" = success ]; then
       cmp -s "$prior" "$state/$id.meta" || fail "fm-spawn did not restore the prior recovery metadata"
       [ ! -d "$wt" ] || fail "fm-spawn left the acquired treehouse worktree after rename failure"
@@ -2288,6 +2372,8 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_rename_task_resolves_tab_from_pane_target
 test_fm_label_updates_herdr_tab_and_meta
+test_fm_label_rejects_secondmate_before_rename
+test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_nonherdr_is_clear_noop
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
@@ -2304,6 +2390,7 @@ test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_known_human_labeled_tab_when_agent_live
 test_create_task_allows_same_human_display_for_distinct_identities
 test_create_task_replaces_known_human_labeled_husk
+test_create_task_does_not_close_recycled_known_tab_id
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk

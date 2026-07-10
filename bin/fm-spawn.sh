@@ -212,6 +212,7 @@ HERDR_LABEL_ABORT_CLEANUP=0
 HERDR_LABEL_ROLLBACK_DIR=
 HERDR_LABEL_TASK_TMP_PREEXISTED=0
 HERDR_LABEL_GOTMP_PREEXISTED=0
+HERDR_LABEL_GROK_TOKEN_CREATED=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -262,16 +263,15 @@ orca_spawn_abort_cleanup() {
 }
 
 herdr_labeled_spawn_abort_cleanup() {
-  local token hooks_dir suffix worktree_returned=1
+  local hooks_dir suffix worktree_returned=1
   [ "$HERDR_LABEL_ABORT_CLEANUP" = 1 ] || return 0
   HERDR_LABEL_ABORT_CLEANUP=0
   fm_backend_herdr_kill "$T" 2>/dev/null || true
-  token=$(cat "$STATE/$ID.grok-turnend-token" 2>/dev/null || true)
-  case "$token" in
+  case "$HERDR_LABEL_GROK_TOKEN_CREATED" in
     ''|*[!A-Za-z0-9._-]*) ;;
     *)
       hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-      rm -f "$hooks_dir/$token"
+      rm -f "$hooks_dir/$HERDR_LABEL_GROK_TOKEN_CREATED"
       ;;
   esac
   if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
@@ -833,14 +833,18 @@ case "$BACKEND" in
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
     HERDR_KNOWN_TAB_ID=
+    HERDR_KNOWN_LABEL=
+    HERDR_KNOWN_WORKTREE=
     HERDR_PRIOR_META="$STATE/$ID.meta"
     if [ -f "$HERDR_PRIOR_META" ] \
       && [ "$(fm_meta_get "$HERDR_PRIOR_META" backend)" = herdr ] \
       && [ "$(fm_meta_get "$HERDR_PRIOR_META" herdr_session)" = "$HERDR_SES" ] \
       && [ "$(fm_meta_get "$HERDR_PRIOR_META" herdr_workspace_id)" = "$HERDR_WORKSPACE_ID" ]; then
       HERDR_KNOWN_TAB_ID=$(fm_meta_get "$HERDR_PRIOR_META" herdr_tab_id)
+      HERDR_KNOWN_LABEL=$(fm_meta_get "$HERDR_PRIOR_META" label)
+      HERDR_KNOWN_WORKTREE=$(fm_meta_get "$HERDR_PRIOR_META" worktree)
     fi
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_KNOWN_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_KNOWN_TAB_ID" "$HERDR_KNOWN_LABEL" "$HERDR_KNOWN_WORKTREE") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -1060,6 +1064,7 @@ EOF
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      HERDR_LABEL_GROK_TOKEN_CREATED=${auth_file##*/}
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
