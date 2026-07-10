@@ -186,7 +186,18 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  # bin/fm-harness.sh checks verified env markers (CLAUDECODE, PI_CODING_AGENT,
+  # GROK_AGENT) before ever falling back to process-ancestry, where the
+  # make_fake_ps_harness/make_fake_ps_pi_holder mocks above take over. When
+  # this test suite itself runs inside a real harness session (e.g. a claude
+  # crewmate driving its own no-mistakes validation), that real marker is
+  # already set in the ambient environment and wins over the fake before the
+  # mock is ever consulted - silently detecting the WRONG harness regardless
+  # of FM_FAKE_HARNESS/the ps fake, and failing any test that expects a
+  # specific non-ambient harness. Clear all three so only the layer-2 mock
+  # this test controls can decide.
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
 }
 
 hash_file_for_test() {

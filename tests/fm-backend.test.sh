@@ -80,9 +80,20 @@ SH
 }
 
 # The commit this branch started from - the P1 "current main" baseline.
+# Prefers a remote-tracking ref over local `main`: this repo is a treehouse
+# pool of crewmate worktrees sharing one object store, and a crewmate's own
+# local `main` has no freshness guarantee (unlike PROJECT clones, it is not
+# kept current by fleet-sync) - it can drift dozens of commits behind
+# origin/main in a long-lived pool. A stale local `main` used as the baseline
+# here pins BASE_REF's fm-spawn.sh to a pre-refactor shape (raw tmux calls
+# instead of the backend abstraction), producing a false "tmux command log
+# differs old vs new" failure that has nothing to do with the branch under
+# test. origin/main is fetched and kept current, so it is the reliable
+# choice; local `main` is only the last-resort fallback for a repo with no
+# remote configured at all.
 resolve_base_ref() {
   local ref base
-  for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
+  for ref in origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD main refs/heads/main; do
     if git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null; then
       base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
       [ -n "$base" ] || continue
