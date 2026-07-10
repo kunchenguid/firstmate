@@ -230,7 +230,7 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
-POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
+POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate-crew") | .workspace_id')
 POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
 [ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
 [ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"

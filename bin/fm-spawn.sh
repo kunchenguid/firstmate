@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <text>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <text>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -27,6 +27,8 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --label <text> records a human-readable task label and, on herdr, names the
+#   tab "<project>: <text>"; without it the current fm-<id> tab label is kept.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -60,7 +62,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--label applies to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -123,6 +125,8 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+LABEL_ARG=
+LABEL_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -135,6 +139,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      label) LABEL_ARG=$a; LABEL_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -151,6 +156,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --label) want_value=label ;;
+    --label=*) LABEL_ARG=${a#--label=}; LABEL_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -159,6 +166,10 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$LABEL_SET" -eq 0 ] || [ -n "$LABEL_ARG" ] || { echo "error: --label requires a non-empty value" >&2; exit 1; }
+case "$LABEL_ARG" in
+  *$'\n'*|*$'\r'*) echo "error: --label cannot contain a newline" >&2; exit 1 ;;
+esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -232,6 +243,7 @@ orca_spawn_abort_cleanup() {
           echo "tasktmp=${TASK_TMP:-}"
           echo "model=${MODEL:-default}"
           echo "effort=${EFFORT:-default}"
+          [ "$LABEL_SET" -eq 0 ] || [ -z "${SPAWN_LABEL:-}" ] || echo "label=$SPAWN_LABEL"
           echo "backend=orca"
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -262,6 +274,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$LABEL_SET" -eq 0 ] || shared_args+=(--label "$LABEL_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -691,6 +704,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 W="fm-$ID"
+SPAWN_LABEL=$W
+if [ "$LABEL_SET" -eq 1 ]; then
+  PROJECT_LABEL=${PROJ_ABS##*/}
+  [ -n "$PROJECT_LABEL" ] || PROJECT_LABEL=project
+  SPAWN_LABEL="$PROJECT_LABEL: $LABEL_ARG"
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -731,7 +750,7 @@ case "$BACKEND" in
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$SPAWN_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -999,6 +1018,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$LABEL_SET" -eq 0 ] || echo "label=$SPAWN_LABEL"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

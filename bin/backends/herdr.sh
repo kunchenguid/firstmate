@@ -31,8 +31,8 @@
 #
 # Recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
-# stored pane id blindly: fm_backend_herdr_list_live.
+# verification doc) uses LABEL matching (fm-<id> or <project>: <phase> tab
+# labels), never trusts a stored pane id blindly: fm_backend_herdr_list_live.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -44,7 +44,7 @@
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
 # default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
+# fm_backend_herdr_workspace_label falls through to "firstmate-crew" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
@@ -86,8 +86,7 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
+# secondmate marker) resolves to the constant "firstmate-crew". A SECONDMATE
 # home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
 # workspace, obviously distinguishable from the primary's (and from every
 # other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
@@ -106,7 +105,7 @@ fm_backend_herdr_workspace_label() {
       return 0
     fi
   fi
-  printf 'firstmate'
+  printf 'firstmate-crew'
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -202,7 +201,7 @@ fm_backend_herdr_workspace_find() {  # <session>
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
   # compile error that `2>/dev/null` would silently swallow, making this find
-  # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
+  # ALWAYS return empty and every spawn mint a fresh "firstmate-crew" workspace
   # (the workspace leak).
   printf '%s' "$list" | jq -r --arg want "$label" \
     '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
@@ -223,7 +222,7 @@ fm_backend_herdr_workspace_find() {  # <session>
 # had just resolved. Herdr enforces no label uniqueness (docs/herdr-backend.md
 # "Label collisions") and derives an unlabeled workspace's DISPLAYED label from
 # its pane cwd's basename, so a captain launching herdr directly inside a
-# directory named "firstmate" produces a workspace that looks byte-identical,
+# directory named "firstmate-crew" produces a workspace that looks byte-identical,
 # by label alone, to firstmate's own auto-created container - one tab, label
 # "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
 # by the label match, the heuristic matched too, and the very next spawn
@@ -548,6 +547,21 @@ EOF
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_rename_task: rename the tab owning <target> to <label>.
+# The pane target is resolved first, then pane get supplies the current tab id
+# so this remains correct when herdr has restored a pane with a new id.
+fm_backend_herdr_rename_task() {  # <target> <label>
+  local target=$1 label=$2 pane_info tab_id
+  fm_backend_herdr_target_ready "$target" || return 1
+  pane_info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  [ -n "$tab_id" ] || {
+    echo "error: could not resolve the herdr tab for pane $FM_BACKEND_HERDR_PANE" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$label" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
@@ -1170,10 +1184,11 @@ EOF
 }
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
-# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
+# label looks like a firstmate task window (fm-<id> or <project>: <phase>) in
+# <session>'s, THIS HOME'S OWN workspace (fm_backend_herdr_workspace_label -
+# never another home's), by LABEL - never by trusting a stored pane id, since
+# ids are not guaranteed stable across every server lifecycle (see
+# herdr-verification-p2.md
 # "ID stability"). A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
 # workspace because FM_HOME already names it - no glue needed, unlike the
@@ -1190,7 +1205,7 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label | startswith("fm-")) or (.label | contains(": "))) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

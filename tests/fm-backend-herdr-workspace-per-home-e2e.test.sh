@@ -107,6 +107,7 @@ PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
   "$ROOT/bin/fm-spawn.sh" cm1 "$PROJ1" "sh -c 'echo primary-crew-ok'" --backend herdr \
+  --label building \
   >"$CM1_OUT" 2>"$CM1_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "primary-shaped crewmate spawn failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM1_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM1_ERR")"
@@ -114,6 +115,7 @@ rc=$?
 CM1_META="$PRIMARY_HOME/state/cm1.meta"
 [ -f "$CM1_META" ] || fail "no meta written for cm1"
 assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing backend=herdr"
+assert_contains_local "$(cat "$CM1_META")" "label=scratch-project-1: building" "cm1 meta missing its rendered human-readable label"
 WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
@@ -126,8 +128,18 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
-pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
+[ "$CM1_WS_LABEL" = "firstmate-crew" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate-crew' workspace, got '$CM1_WS_LABEL'"
+pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate-crew' workspace"
+CM1_TAB_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null | jq -r --arg tab "$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM1_TAB_LABEL" = "scratch-project-1: building" ] || fail "the labeled spawn should create a human-readable herdr tab, got '$CM1_TAB_LABEL'"
+pass "real herdr E2E: --label renders the project-prefixed herdr tab label"
+
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-label.sh" cm1 validating >/dev/null \
+  || fail "fm-label.sh could not update the live herdr tab"
+assert_contains_local "$(cat "$CM1_META")" "label=scratch-project-1: validating" "fm-label.sh did not update the rendered label in metadata"
+CM1_TAB_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null | jq -r --arg tab "$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM1_TAB_LABEL" = "scratch-project-1: validating" ] || fail "fm-label.sh did not update the live herdr tab, got '$CM1_TAB_LABEL'"
+pass "real herdr E2E: fm-label.sh updates the live tab and metadata"
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
@@ -186,7 +198,7 @@ pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands i
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
+assert_contains_local "$PRIMARY_LIVE" "scratch-project-1: validating" "the primary home's list_live did not see its labeled task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
