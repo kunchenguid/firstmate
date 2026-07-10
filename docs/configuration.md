@@ -86,6 +86,13 @@ Before changing it, inspect the current file and rewrite or prune the matching b
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed right after `data/captain.md` in the session-start context digest.
 The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: inspect the current file first, then rewrite or prune stale entries instead of appending forever.
 
+## Standing monitors (data/monitors.md)
+
+Standing daily monitors live locally in `data/monitors.md`; it is gitignored, absent until the home has a monitor to record, and printed right after `data/learnings.md` in the session-start context digest.
+Each monitor is a `## ` section carrying a `- **Schedule:**` cron expression and a `- **Cron prompt:**` prompt.
+The manifest is the source of truth for recovery: at every session start firstmate compares it to `CronList` and re-arms any listed monitor whose recorded cron expression and prompt are not currently scheduled with `CronCreate`.
+Bootstrap cannot call those tools, so it only prints a `MONITORS: N standing monitor(s) ...` reminder when the manifest exists with one or more `## ` sections, and the actual reconciliation happens during recovery.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
