@@ -284,7 +284,7 @@ fm_herdr_lab_teardown() { # <session>
 
 fm_herdr_lab_name() { # <label>
   local label=${1:-lab}
-  label=$(printf '%s' "$label" | tr -cd 'a-zA-Z0-9_-' | sed 's/^-*//; s/-*$//')
+  label=$(printf '%s' "$label" | tr -cd 'a-zA-Z0-9_-' | sed 's/^[^a-zA-Z0-9]*//; s/-*$//')
   [ -n "$label" ] || label=lab
   printf 'fm-lab-%s-%s-%s\n' "$label" "$$" "$RANDOM"
 }
