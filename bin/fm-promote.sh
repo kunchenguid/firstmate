@@ -13,9 +13,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 META="$STATE/$ID.meta"
+META_LOCK="$STATE/.$ID.meta.lock"
+TMP=
+promote_cleanup() {
+  local status=$?
+  set +e
+  [ -z "$TMP" ] || rm -f "$TMP"
+  [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"
+  return "$status"
+}
+trap promote_cleanup EXIT
+
+[ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
+fm_lock_acquire_wait "$META_LOCK"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
@@ -23,6 +38,9 @@ TMP="$META.tmp"
 grep -v '^kind=' "$META" > "$TMP"
 echo "kind=ship" >> "$TMP"
 mv "$TMP" "$META"
+TMP=
+fm_lock_release "$META_LOCK"
+META_LOCK=
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship (teardown protection restored)"

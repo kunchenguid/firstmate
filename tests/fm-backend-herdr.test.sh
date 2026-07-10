@@ -527,6 +527,125 @@ SH
   pass "fm-label.sh: restores the prior live label when the atomic metadata commit fails"
 }
 
+test_fm_promote_waits_for_metadata_lock_and_preserves_label() {
+  local dir state meta lock acquired release holder_pid promote_pid rc
+  dir="$TMP_ROOT/fm-promote-meta-lock"; state="$dir/home/state"; meta="$state/promote.meta"
+  mkdir -p "$state"
+  printf 'window=fmtest:w1:p2\nkind=scout\n' > "$meta"
+  lock="$state/.promote.meta.lock"
+  acquired="$dir/acquired"
+  release="$dir/release"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    printf "%s\n" "label=project: investigating" >> "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT" "$lock" "$acquired" "$release" "$meta" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$acquired" ] || break
+    sleep 0.02
+  done
+  [ -e "$acquired" ] || fail "fm-promote metadata lock holder did not acquire its lock"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-promote.sh" promote > "$dir/stdout" 2> "$dir/stderr" &
+  promote_pid=$!
+  sleep 0.3
+  if ! kill -0 "$promote_pid" 2>/dev/null; then
+    touch "$release"
+    wait "$holder_pid"
+    fail "fm-promote did not wait for the task metadata lock"
+  fi
+
+  touch "$release"
+  wait "$holder_pid"
+  wait "$promote_pid"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-promote failed after acquiring the task metadata lock"
+  grep -qx 'kind=ship' "$meta" || fail "fm-promote did not promote the re-read metadata"
+  grep -qx 'label=project: investigating' "$meta" || fail "fm-promote lost the label committed by the prior lock holder"
+  [ ! -e "$lock" ] || fail "fm-promote left the task metadata lock behind"
+  pass "fm-promote.sh: waits for the metadata lock and preserves a concurrent label update"
+}
+
+test_fm_pr_check_waits_for_metadata_lock_and_preserves_label() {
+  local dir state meta lock acquired release fakebin holder_pid check_pid rc head
+  dir="$TMP_ROOT/fm-pr-check-meta-lock"; state="$dir/home/state"; meta="$state/check.meta"
+  fakebin="$dir/fakebin"; head=deadbeefcafefeed0000000000000000deadbeef
+  mkdir -p "$state" "$dir/worktree" "$fakebin"
+  printf 'window=fmtest:w1:p2\nworktree=%s\nkind=ship\n' "$dir/worktree" > "$meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_PR_HEAD:?}"
+SH
+  chmod +x "$fakebin/gh"
+  lock="$state/.check.meta.lock"
+  acquired="$dir/acquired"
+  release="$dir/release"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    printf "%s\n" "label=project: validating" >> "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT" "$lock" "$acquired" "$release" "$meta" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$acquired" ] || break
+    sleep 0.02
+  done
+  [ -e "$acquired" ] || fail "fm-pr-check metadata lock holder did not acquire its lock"
+
+  PATH="$fakebin:$PATH" FM_FAKE_PR_HEAD="$head" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr" &
+  check_pid=$!
+  sleep 0.3
+  if ! kill -0 "$check_pid" 2>/dev/null; then
+    touch "$release"
+    wait "$holder_pid"
+    fail "fm-pr-check did not wait for the task metadata lock"
+  fi
+
+  touch "$release"
+  wait "$holder_pid"
+  wait "$check_pid"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-pr-check failed after acquiring the task metadata lock"
+  grep -qx 'label=project: validating' "$meta" || fail "fm-pr-check lost the label committed by the prior lock holder"
+  grep -qx 'pr=https://github.com/example/repo/pull/7' "$meta" || fail "fm-pr-check did not record the PR URL"
+  grep -qx "pr_head=$head" "$meta" || fail "fm-pr-check did not record the PR head"
+  [ ! -e "$lock" ] || fail "fm-pr-check left the task metadata lock behind"
+  pass "fm-pr-check.sh: waits for the metadata lock and preserves a concurrent label update"
+}
+
+test_metadata_writers_release_locks_on_errors() {
+  local dir state out status
+  dir="$TMP_ROOT/meta-writer-error-locks"; state="$dir/state"
+  mkdir -p "$state"
+
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-promote.sh" missing 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-promote should fail for missing metadata"
+  assert_contains "$out" "no meta for task missing" "fm-promote did not report missing metadata"
+  [ ! -e "$state/.missing.meta.lock" ] || fail "fm-promote left the metadata lock behind after a missing-meta error"
+
+  printf 'window=fmtest:w1:p2\nkind=ship\n' > "$state/check.meta"
+  mkdir "$state/check.check.sh"
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-pr-check should fail when its poll file cannot be written"
+  [ ! -e "$state/.check.meta.lock" ] || fail "fm-pr-check left the metadata lock behind after a poll-write error"
+  pass "metadata writers release task locks on error paths"
+}
+
 test_fm_label_nonherdr_is_clear_noop() {
   local dir home state out fallback_out
   dir="$TMP_ROOT/fm-label-tmux"; home="$dir/home"; state="$home/state"; mkdir -p "$state"
@@ -2787,6 +2906,9 @@ test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
 test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_rolls_back_live_label_when_metadata_commit_fails
+test_fm_promote_waits_for_metadata_lock_and_preserves_label
+test_fm_pr_check_waits_for_metadata_lock_and_preserves_label
+test_metadata_writers_release_locks_on_errors
 test_fm_label_nonherdr_is_clear_noop
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
