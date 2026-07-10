@@ -16,6 +16,7 @@ The default merge method remains `--squash`, and explicit GitHub merge-method fl
 Codebase behavior goes only through `bytedcli codebase`.
 MR state and head reads use `bytedcli --json codebase mr get <number> -R <repo-path>`.
 The head commit is read from the latest MR version's `SourceCommitId`, and teardown fetches that version's `SourceRef` when the commit object is not already available locally.
+That fetch only accepts a fully-qualified `refs/` name, passed after a `--` separator, so a provider-supplied ref can never reach `git fetch` as an option such as `--upload-pack=`.
 Branch discovery uses `bytedcli --json codebase mr list -R <repo-path> --state merged --head <branch> -L 1`.
 Merges use `bytedcli codebase mr merge <number> -R <repo-path>`.
 

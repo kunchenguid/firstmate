@@ -60,6 +60,20 @@ fm_scm_number_safe() {
   return 0
 }
 
+# A provider-supplied ref is only ever fetched when it is a fully-qualified
+# refs/ name, so git can never read it as an option such as --upload-pack=.
+fm_scm_ref_safe() {
+  local ref=$1
+  case "$ref" in
+    refs/*) ;;
+    *) return 1 ;;
+  esac
+  case "$ref" in
+    *..*|*//*|*/) return 1 ;;
+  esac
+  [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]]
+}
+
 # Echo provider<TAB>repo-path<TAB>number for supported full URLs.
 fm_scm_parse_pr_url() {
   local url=$1 rest repo number host
@@ -350,11 +364,11 @@ fm_scm_fetch_pr_head() {
   case "$provider" in
     github)
       n=$(fm_scm_target_number "$worktree" "$target") || return 1
-      git -C "$worktree" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+      git -C "$worktree" fetch --quiet origin -- "refs/pull/$n/head" >/dev/null 2>&1 || return 1
       ;;
     codebase)
-      [ -n "$source_ref" ] || return 1
-      git -C "$worktree" fetch --quiet origin "$source_ref" >/dev/null 2>&1 || return 1
+      fm_scm_ref_safe "$source_ref" || return 1
+      git -C "$worktree" fetch --quiet origin -- "$source_ref" >/dev/null 2>&1 || return 1
       ;;
     *) return 1 ;;
   esac
@@ -392,7 +406,7 @@ EOF
     github)
       number=$(fm_scm_target_number "$worktree" "$target") || return 1
       git -C "$worktree" remote get-url origin >/dev/null 2>&1 || return 1
-      git -C "$worktree" fetch --quiet origin "refs/pull/$number/head" >/dev/null 2>&1 || return 1
+      git -C "$worktree" fetch --quiet origin -- "refs/pull/$number/head" >/dev/null 2>&1 || return 1
       head=$(git -C "$worktree" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
       ;;
     codebase)
@@ -422,21 +436,17 @@ fm_scm_reject_url_override_args() {
   return 0
 }
 
-fm_scm_github_caller_has_merge_method() {
-  local arg
+# Does the caller already choose a merge method? --squash-commits is a modifier,
+# not a method, so it never counts here.
+fm_scm_caller_has_merge_method() {
+  local provider=$1 arg
+  shift
   for arg in "$@"; do
     case "$arg" in
       --squash|--merge|--rebase|--method|--method=*) return 0 ;;
     esac
-  done
-  return 1
-}
-
-fm_scm_codebase_caller_has_merge_method() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*|--merge-method|--merge-method=*) return 0 ;;
+    case "$provider:$arg" in
+      codebase:--merge-method|codebase:--merge-method=*) return 0 ;;
     esac
   done
   return 1
@@ -456,7 +466,7 @@ fm_scm_github_merge() {
   local number=$1 repo=$2
   shift 2
   local merge_args=()
-  if ! fm_scm_github_caller_has_merge_method "$@"; then
+  if ! fm_scm_caller_has_merge_method github "$@"; then
     merge_args=(--squash)
   fi
   gh-axi pr merge "$number" --repo "$repo" ${merge_args[@]+"${merge_args[@]}"} "$@"
@@ -482,7 +492,7 @@ fm_scm_codebase_merge() {
   fm_scm_require_bytedcli || return 1
 
   FM_SCM_CODEBASE_MERGE_ARGS=()
-  if ! fm_scm_codebase_caller_has_merge_method "$@"; then
+  if ! fm_scm_caller_has_merge_method codebase "$@"; then
     FM_SCM_CODEBASE_MERGE_ARGS+=(--merge-method merge_commit)
     if ! fm_scm_codebase_caller_has_squash_commits "$@"; then
       FM_SCM_CODEBASE_MERGE_ARGS+=(--squash-commits true)

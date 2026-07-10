@@ -205,15 +205,32 @@ EOF
 # merged, the current work is not contained in the provider head, no PR/MR is
 # found, or any provider error occurs - the caller then falls back to the content
 # check.
+#
+# Provider lookup diagnostics are buffered rather than printed as they happen: a
+# failed lookup is an expected step of that fallback, so it is only worth showing
+# when teardown ultimately refuses. flush_provider_diag prints it on that path.
+PROVIDER_DIAG=/dev/null
+open_provider_diag() {
+  [ "$PROVIDER_DIAG" = /dev/null ] || return 0
+  PROVIDER_DIAG=$(mktemp "${TMPDIR:-/tmp}/fm-teardown-diag.XXXXXX") || PROVIDER_DIAG=/dev/null
+  [ "$PROVIDER_DIAG" = /dev/null ] || trap 'rm -f "$PROVIDER_DIAG"' EXIT
+}
+
+flush_provider_diag() {
+  [ "$PROVIDER_DIAG" != /dev/null ] && [ -s "$PROVIDER_DIAG" ] || return 0
+  cat "$PROVIDER_DIAG" >&2
+}
+
 pr_is_merged() {
   local branch=$1 target info provider state head source_ref current
+  open_provider_diag
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(fm_scm_target_from_branch "$WT" "$branch") || return 1
+    target=$(fm_scm_target_from_branch "$WT" "$branch" 2>>"$PROVIDER_DIAG") || return 1
   fi
   [ -n "$target" ] || return 1
-  info=$(fm_scm_pr_info "$WT" "$target") || return 1
+  info=$(fm_scm_pr_info "$WT" "$target" 2>>"$PROVIDER_DIAG") || return 1
   IFS=$FM_SCM_FS read -r provider state head source_ref <<EOF
 $info
 EOF
@@ -583,6 +600,7 @@ validate_worktree_teardown_safety() {
     fi
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      flush_provider_diag
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
