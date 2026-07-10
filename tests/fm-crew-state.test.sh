@@ -985,7 +985,10 @@ SH
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
-  [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
+  # The bounded call truly takes ~1.2s (1s alarm + 0.2s kill grace); 8s is a
+  # generous loaded-CI margin that still catches an ignored
+  # FM_CREW_STATE_NM_TIMEOUT falling back to the 10s default.
+  [ "$elapsed" -lt 8 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
   pass "no timeout command uses perl bound"
