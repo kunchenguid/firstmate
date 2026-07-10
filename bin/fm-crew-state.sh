@@ -591,7 +591,7 @@ fi
 # keypress response, not a routine steer (task crew-rmrf-fix-q3;
 # stuck-crewmate-recovery skill).
 if [ "$KIND" != secondmate ] && crew_pane_shows_permission_dialog "$BACKEND_TARGET"; then
-  emit blocked pane "awaiting interactive permission confirmation - respond directly via fm-send.sh <window> --key <N>, do not interrupt or relaunch (see stuck-crewmate-recovery)"
+  emit blocked pane "awaiting interactive permission confirmation - respond directly via fm-send.sh <window> '<option number>' (literal text, not --key), do not interrupt or relaunch (see stuck-crewmate-recovery)"
 fi
 
 if [ -n "$LOG_VERB" ]; then
