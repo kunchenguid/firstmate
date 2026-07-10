@@ -128,6 +128,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Both task shapes receive the bounded stop conditions owned by `fm-brief.sh`, and an optional `--budget '<text>'` adds a task-specific hard cap for unattended or long-running work.
 
 ## Dispatch profiles
 
