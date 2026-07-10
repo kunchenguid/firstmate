@@ -9,7 +9,10 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
-mkdir -p "$STATE"
+# Best-effort at load time: a sourcing script running set -e (e.g. fm-spawn)
+# must not die here when the state path is unusable; the operation that
+# actually needs the dir fails loudly at its own meaningful point instead.
+mkdir -p "$STATE" 2>/dev/null || true
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"

@@ -205,11 +205,15 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
-  case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
-  esac
+  # Strip a leading prompt glyph, then re-judge the remainder. Remove the glyph
+  # as a literal prefix, never with `?`: under a non-UTF-8 locale `?` matches one
+  # BYTE, which would leave a stray tail byte of a multibyte glyph (❯ ›) behind.
+  local glyph
+  for glyph in '❯' '›' '>' '$' '%' '#'; do
+    case "$content" in
+      "$glyph"*) content=${content#"$glyph"}; break ;;
+    esac
+  done
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
   [ -n "$content" ] || { printf 'empty'; return 0; }
