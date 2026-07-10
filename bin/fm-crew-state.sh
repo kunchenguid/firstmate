@@ -111,12 +111,17 @@ log_note_of() {  # <line>
     *)   printf '%s' "$1" ;;
   esac
 }
-# Map a status-log verb onto a canonical state for the fallback path.
+# Map a status-log verb onto a canonical state for the fallback path. `paused` is
+# the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
+# a crew with no active run and an idle pane that declared a known external wait
+# reports `paused` distinctly, so a supervisor reading this sees a declared pause
+# and its reason rather than a wedge-suspect idle.
 map_log_state() {  # <verb>
   case "$1" in
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
+    paused)         echo paused ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;

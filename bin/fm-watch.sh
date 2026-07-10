@@ -136,6 +136,11 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
+# a known external wait, so its stale pane is absorbed rather than wedge-escalated;
+# it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
+# wedge threshold, but finite so a forgotten pause cannot rot invisibly.
+PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 
@@ -285,6 +290,37 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# Absorb a stale pane whose crew is in a DECLARED external-wait pause (paused:),
+# and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
+# invisibly. Called on any stale poll once the crew is known paused (first sight,
+# after crew_absorb_class; and repeat sights, gated by the .paused-<key> flag), so
+# it must be cheap: it NEVER re-reads the crew state. The re-surface age is anchored
+# on the pause's own STATUS-FILE mtime, not a per-hash marker, so a churny idle pane
+# (a ticking clock, a token counter) cannot keep resetting the cadence the way a
+# hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
+# re-surface epoch so, once past the window, it fires once per window rather than
+# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+handle_paused_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  : > "$STATE/.paused-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  statusf="$STATE/$task.status"
+  mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
+  rf="$STATE/.paused-resurfaced-$key"
+  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    date +%s > "$rf"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -491,6 +527,7 @@ EOF
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
+    pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -548,42 +585,59 @@ EOF
           # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Absorb-only-when-provably-working, decided once per distinct stale hash
-          # (the costly run-step read runs only on first sight, never every poll):
-          #   - provably working: an actively-running pipeline legitimately sits on a
-          #     static pane (e.g. waiting on CI), so absorb and start the wedge timer
-          #     so a genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - NOT provably working: no running pipeline, idle pane, no busy
-          #     signature - the crew has STOPPED. Surface immediately so firstmate
-          #     peeks (it may be done via an interactive menu that wrote no done:
-          #     status, waiting on a decision, or wedged) instead of leaving the
-          #     finish to wait out the timer.
+          # Decided once per distinct stale hash (the costly run-step read runs only
+          # on first sight, never every poll) via crew_absorb_class, which returns
+          # BOTH absorb reasons from one fm-crew-state.sh read:
+          #   - working: an actively-running pipeline legitimately sits on a static
+          #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
+          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #   - paused: the crew DECLARED an external wait (paused:), so absorb on the
+          #     long PAUSE_RESURFACE_SECS recheck cadence instead of wedge-escalating;
+          #   - none: no running pipeline, idle pane, no busy signature, no declared
+          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #     (it may be done via an interactive menu that wrote no done: status,
+          #     waiting on a decision, or wedged) instead of leaving the finish to
+          #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed non-terminal stale (provably working): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              wake "stale: $w"
-            fi
+            task=$(window_to_task "$w" "$STATE")
+            case "$(crew_absorb_class "$task")" in
+              working)
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                rm -f "$pf"
+                triage_log "absorbed non-terminal stale (provably working): $w"
+                ;;
+              paused)
+                handle_paused_stale "$w" "$task" "$h"
+                ;;
+              *)
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf" "$pf"
+                wake "stale: $w"
+                ;;
+            esac
+          elif [ -e "$pf" ]; then
+            # This hash was absorbed as a declared pause: re-check the long
+            # re-surface cadence (no crew re-read - handle_paused_stale is cheap).
+            handle_paused_stale "$w" "$(window_to_task "$w" "$STATE")" "$h"
           else
             wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
           fi
         fi
       else
         # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # stale escalation timer and the consecutive wedge-escalation count.
-        rm -f "$ssf" "$ewf"
+        # stale escalation timer, the consecutive wedge-escalation count, and the
+        # declared-pause flag (a new hash re-reads crew_absorb_class to reclassify;
+        # the .paused-resurfaced-<key> throttle is left, being age-gated).
+        rm -f "$ssf" "$ewf" "$pf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       # Pane content changed: the crew is active again, so reset the escalation
-      # timer and the consecutive wedge-escalation count.
-      rm -f "$ssf" "$ewf"
+      # timer, the consecutive wedge-escalation count, and the declared-pause flag.
+      rm -f "$ssf" "$ewf" "$pf"
     fi
   done < <(recorded_windows)
 

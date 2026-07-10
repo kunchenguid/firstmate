@@ -151,7 +151,8 @@ A message with NO marker is the captain typing directly into your pane: treat it
 Handle routine work yourself.
 Escalate only true captain-relevant outcomes by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-States: working, needs-decision, blocked, done, failed.
+States: working, needs-decision, blocked, paused, done, failed.
+Use \`paused: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -226,10 +227,14 @@ The report is the only thing that survives, so anything worth keeping must be in
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, done, failed.
+   States: working, needs-decision, blocked, paused, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on and the needs-decision/blocked/done/failed states. No step-by-step
+   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+   Use \`paused: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
+   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
+   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -324,11 +329,15 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, done, failed.
+   States: working, needs-decision, blocked, paused, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
+   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   Use \`paused: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
+   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
+   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

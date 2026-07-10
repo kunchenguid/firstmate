@@ -170,6 +170,50 @@ test_crew_is_provably_working_classifier() {
   pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
+# status_is_paused: the shared pause verb test both consumers read (so neither
+# hardcodes the literal). Matches only the verb before the first colon, so a reason
+# that merely mentions "paused" does not false-match, and a genuine blocker stays a
+# blocker.
+test_status_is_paused_classifier() {
+  status_is_paused 'paused: holding for the upstream release' || fail "paused verb not recognized"
+  status_is_paused '  paused:   waiting on a rate-limit reset' || fail "leading-space paused verb not recognized"
+  status_is_paused 'blocked: the build is paused upstream' && fail "a blocked line mentioning paused false-matched"
+  status_is_paused 'working: paused the animation loop' && fail "a working line mentioning paused false-matched"
+  status_is_paused 'done: shipped' && fail "done classified as paused"
+  status_is_paused '' && fail "empty line classified as paused"
+  # A pause is deliberately NOT captain-relevant: it is a stop-nagging signal, not
+  # work to keep surfacing.
+  status_is_captain_relevant 'paused: holding for the upstream release' && fail "paused is captain-relevant (should not be)"
+  pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
+}
+
+# crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
+# reasons - working (active run/busy pane), paused (declared external wait), or none
+# (surface it) - so the watcher's stale path gets both for one bounded call.
+# crew_is_paused delegates to it exactly as crew_is_provably_working does.
+test_crew_absorb_class_classifier() {
+  local dir fakebin
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
+  crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
+  ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
+  [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
+  ! crew_is_paused a || fail "unknown crew classed paused"
+  [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -470,6 +514,72 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
+#     cadence, never wedge-escalated ------------------------------------------
+# The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
+# release (paused: ...) whose idle pane tripped repeated possible-wedge escalations
+# all day. With the paused verb, its stale is absorbed like a working crew but never
+# uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
+# the pause's own status-file age, so a churny idle pane cannot reset the cadence)
+# for a recheck, so a forgotten pause cannot rot invisibly.
+test_nonterminal_stale_paused_absorbed_then_resurfaced() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  # A DECLARED pause (not captain-relevant), .seen-* primed so the signal scan does
+  # not pre-empt the stale path.
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # crew_absorb_class reads the declared pause from fm-crew-state.sh.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+
+  # Phase A: a fresh pause (status file just written) under a high re-surface
+  # threshold is absorbed - no wake, no wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
+  [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
+  reap "$pid"
+
+  # Phase B: age the pause past the (now normal) threshold by backdating its
+  # status file, re-prime .seen-* to the new signature so the signal scan stays
+  # quiet, and confirm it re-surfaces as a paused recheck - never a wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not re-surface a declared pause past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
+  pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -751,6 +861,8 @@ test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
+test_status_is_paused_classifier
+test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -763,6 +875,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed

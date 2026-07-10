@@ -382,6 +382,15 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
+  if [ -n "$last" ] && status_is_paused "$last"; then
+    # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
+    # so this is not a wedge. The caller records a pause marker (long re-surface
+    # cadence in housekeeping) rather than a wedge stale marker. Cheap: reuses the
+    # status line already read, no fm-crew-state.sh call, mirroring the daemon's
+    # existing status-log classification.
+    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
@@ -432,6 +441,24 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
+}
+
+# Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
+# first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
+# longer than a wedge) and re-surfaces the pause once per window. Recording is
+# create-if-absent so the timestamp is stable across a churny idle pane (many
+# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+pause_marker_record() {  # <window> <state>  — create if absent
+  local win=$1 state=$2 key marker
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  marker="$state/.subsuper-paused-$key"
+  [ -e "$marker" ] || _now > "$marker"
+}
+
+pause_marker_remove() {  # <window> <state>
+  local win=$1 state=$2 key
+  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  rm -f "$state/.subsuper-paused-$key"
 }
 
 # Record the seen-status marker for a captain-relevant status line so the
@@ -607,10 +634,13 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
+#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
+#     digest and reset the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
 
   # (1) batch flush
@@ -662,6 +692,39 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
+    esac
+  done
+
+  # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
+  # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
+  # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
+  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
+  # still declaring the pause -> escalate a recheck digest and reset the marker so
+  # the window repeats.
+  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  for marker in "$state"/.subsuper-paused-*; do
+    [ -e "$marker" ] || continue
+    key="${marker##*.subsuper-paused-}"
+    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    [ "$age" -ge "$pause_secs" ] || continue
+    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
+    if [ -z "$win" ]; then
+      rm -f "$marker"; continue
+    fi
+    task=$(window_to_task "$win" "$state")
+    stale_window_is_busy "$win" "$state"
+    case "$?" in
+      0) rm -f "$marker" ;;
+      2) rm -f "$marker" ;;
+      *)
+        last=$(last_status_line "$state/$task.status")
+        if [ -n "$last" ] && status_is_paused "$last"; then
+          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          _now > "$marker"
+        else
+          rm -f "$marker"
+        fi
+        ;;
     esac
   done
 
@@ -825,20 +888,39 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  if [ "$action" = "escalate" ]; then
-    log "escalate: $reason -> $distilled"
-    escalate_add "$state" "$distilled"
-    # A terminal-stale escalate must not leave a persistence marker behind, or
-    # housekeeping re-escalates the same pane as a false wedge later.
-    [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-    mark_escalated_seen "$kind" "$arg" "$state"
-    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
-  else
-    # Transient (non-terminal) stale: record/refresh the marker so housekeeping
-    # can age it; the persistence recheck, not this wake, escalates a wedge.
-    [ "$kind" = "stale" ] && stale_marker_record "$arg" "$state"
-    log "self-handle: $reason -> $distilled"
-  fi
+  case "$action" in
+    escalate)
+      log "escalate: $reason -> $distilled"
+      escalate_add "$state" "$distilled"
+      # A terminal-stale escalate must not leave a persistence marker behind, or
+      # housekeeping re-escalates the same pane as a false wedge later.
+      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+      mark_escalated_seen "$kind" "$arg" "$state"
+      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      ;;
+    pause)
+      # Declared external-wait pause: record a pause marker (long re-surface
+      # cadence in housekeeping) and drop any wedge stale marker, so a pane that
+      # transitioned working->paused is not still wedge-aged. Only stale produces
+      # this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_record "$arg" "$state"
+      fi
+      log "self-handle (paused): $reason -> $distilled"
+      ;;
+    *)
+      # Transient (non-terminal) stale: record/refresh the wedge marker so
+      # housekeeping can age it, and drop any pause marker (a crew that left its
+      # pause reverts to normal wedge aging). The persistence recheck, not this
+      # wake, escalates a wedge.
+      if [ "$kind" = "stale" ]; then
+        pause_marker_remove "$arg" "$state"
+        stale_marker_record "$arg" "$state"
+      fi
+      log "self-handle: $reason -> $distilled"
+      ;;
+  esac
 }
 
 # --- log --------------------------------------------------------------------
