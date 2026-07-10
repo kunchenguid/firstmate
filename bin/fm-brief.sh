@@ -223,9 +223,6 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
-Do scratch or verification work (reinstalling dependencies, initializing local Terraform state, throwaway trace or log output) inside this worktree rather than an external temp directory such as your own session's own scratchpad path.
-Firstmate pre-approves \`rm -rf\` scoped to this worktree's own absolute path, so cleanup runs without an interactive confirmation - but only when the command spells out this worktree's own absolute path (for example the output of \`pwd -P\`), not a bare relative path.
-If a cleanup command inside this worktree still prompts for confirmation, answer it if you can; if you hit the same obstacle twice, follow rule 5 below rather than retrying destructively or waiting indefinitely.
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -326,11 +323,6 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
-
-For scratch or verification work (reinstalling dependencies, initializing local Terraform state, throwaway trace or log output), work inside this worktree rather than an external temp directory such as your own session's own scratchpad path.
-Firstmate pre-approves \`rm -rf\` scoped to this worktree's own absolute path, so cleaning up scratch state from inside it runs without an interactive confirmation - but only when the command spells out this worktree's own absolute path (for example the output of \`pwd -P\`), not a bare relative path.
-A gitignored subdirectory is a good place for this kind of throwaway output; exclude it via \`git rev-parse --git-path info/exclude\` the same way firstmate excludes its own generated files, so it never blocks teardown's dirty check or leaks into a commit.
-If a cleanup command inside this worktree still prompts for confirmation, answer it if you can; if you hit the same obstacle twice, follow rule 5 below rather than retrying destructively or waiting indefinitely.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
