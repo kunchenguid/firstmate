@@ -3,12 +3,14 @@
 # to state/<id>.meta when available, then arms the watcher's merge poll by
 # writing state/<id>.check.sh, which prints one line iff the PR/MR is merged
 # (the watcher's check contract: output = wake firstmate, silence = keep sleeping).
-# GitHub PRs use gh. Codebase MRs use bytedcli; missing or unauthenticated
-# bytedcli makes the poll stay silent, while direct invocations print the helper
-# error if the initial head lookup fails.
-# The poll needs bin/fm-scm-lib.sh; if that path ever stops resolving the poll
-# wakes firstmate once with a diagnostic and records state/<id>.check.error
-# rather than going silently blind.
+# GitHub PRs use gh. Codebase MRs use bytedcli; direct invocations print the
+# helper error if the initial head lookup fails.
+# The poll never goes silently blind: an unloadable bin/fm-scm-lib.sh, or a
+# provider state lookup that keeps failing (missing bytedcli, expired PAT,
+# revoked gh auth), wakes firstmate once with a diagnostic and records
+# state/<id>.check.error. A lookup must fail FM_CHECK_FAIL_WAKE_AFTER times in a
+# row before it wakes, so a transient gh/bytedcli network error stays quiet, and
+# any single success resets the count.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -44,22 +46,42 @@ fi
 quoted_url=$(printf "%s\n" "$URL" | sed "s/'/'\\\\''/g")
 quoted_lib=$(printf "%s\n" "$FM_ROOT/bin/fm-scm-lib.sh" | sed "s/'/'\\\\''/g")
 quoted_marker=$(printf "%s\n" "$STATE/$ID.check.error" | sed "s/'/'\\\\''/g")
-rm -f "$STATE/$ID.check.error"
+quoted_fails=$(printf "%s\n" "$STATE/$ID.check.fails" | sed "s/'/'\\\\''/g")
+rm -f "$STATE/$ID.check.error" "$STATE/$ID.check.fails"
 cat > "$STATE/$ID.check.sh" <<EOF
 # shellcheck shell=bash
 fm_scm_lib='$quoted_lib'
 fm_scm_marker='$quoted_marker'
+fm_scm_fails='$quoted_fails'
+fm_scm_wake_after=\${FM_CHECK_FAIL_WAKE_AFTER:-3}
+case "\$fm_scm_wake_after" in ''|0|*[!0-9]*) fm_scm_wake_after=3 ;; esac
+
+fm_scm_report_broken() {
+  [ -e "\$fm_scm_marker" ] && return 0
+  : > "\$fm_scm_marker" 2>/dev/null || true
+  echo "poll broken: \$1; merge polling for '$quoted_url' is not running"
+}
+
 # shellcheck source=bin/fm-scm-lib.sh
 if [ ! -r "\$fm_scm_lib" ] || ! . "\$fm_scm_lib"; then
-  if [ ! -e "\$fm_scm_marker" ]; then
-    : > "\$fm_scm_marker" 2>/dev/null || true
-    echo "poll broken: cannot load \$fm_scm_lib; merge polling for '$quoted_url' is not running"
-  fi
+  fm_scm_report_broken "cannot load \$fm_scm_lib"
   exit 0
 fi
-state=\$(fm_scm_pr_state "" '$quoted_url' 2>/dev/null || true)
-case "\$state" in
-  MERGED|merged) echo "merged" ;;
-esac
+
+if state=\$(fm_scm_pr_state "" '$quoted_url' 2>/dev/null); then
+  rm -f "\$fm_scm_fails"
+  case "\$state" in
+    MERGED|merged) echo "merged" ;;
+  esac
+  exit 0
+fi
+
+fails=\$(cat "\$fm_scm_fails" 2>/dev/null || true)
+case "\$fails" in ''|*[!0-9]*) fails=0 ;; esac
+fails=\$((fails + 1))
+printf '%s\n' "\$fails" > "\$fm_scm_fails" 2>/dev/null || true
+if [ "\$fails" -ge "\$fm_scm_wake_after" ]; then
+  fm_scm_report_broken "cannot read PR/MR state after \$fails consecutive lookup failures (check gh/bytedcli auth)"
+fi
 EOF
 echo "armed: state/$ID.check.sh polls $URL"

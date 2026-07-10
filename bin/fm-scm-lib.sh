@@ -7,6 +7,12 @@
 # GitHub operations keep using gh/gh-axi.
 # Codebase operations use bytedcli only; lookup failures print an actionable
 # bytedcli/auth hint and return non-zero so callers fail closed.
+#
+# fm_scm_pr_info's record is unit-separated rather than tab-separated: tab is IFS
+# whitespace, so `IFS=$'\t' read` collapses runs of tabs and shifts every field
+# after an empty one left.
+
+FM_SCM_FS=$'\037'
 
 fm_scm_github_repo_path_safe() {
   local path=$1 owner repo
@@ -202,15 +208,19 @@ fm_scm_codebase_error_detail() {
   jq -r '(.error.hint // .error.message // .error // empty) | tostring' 2>/dev/null
 }
 
-fm_scm_codebase_mr_json() {
-  local number=$1 repo=$2 err_file out err detail
+# Run one bytedcli Codebase JSON lookup and echo its response on success.
+# Args: <action-label> <repo> <identifier> <bytedcli args...>
+fm_scm_codebase_json() {
+  local action=$1 repo=$2 identifier=$3
+  shift 3
+  local err_file out err detail
   fm_scm_require_jq || return 1
   fm_scm_require_bytedcli || return 1
-  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-codebase-mr.XXXXXX") || return 1
-  if ! out=$(bytedcli --json codebase mr get "$number" -R "$repo" 2>"$err_file"); then
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-codebase.XXXXXX") || return 1
+  if ! out=$(bytedcli "$@" 2>"$err_file"); then
     err=$(cat "$err_file" 2>/dev/null || true)
     rm -f "$err_file"
-    fm_scm_codebase_lookup_error "MR lookup" "$repo" "$number" "$err"
+    fm_scm_codebase_lookup_error "$action" "$repo" "$identifier" "$err"
     return 1
   fi
   err=$(cat "$err_file" 2>/dev/null || true)
@@ -218,35 +228,26 @@ fm_scm_codebase_mr_json() {
   if ! printf '%s\n' "$out" | fm_scm_codebase_json_status_ok; then
     detail=$(printf '%s\n' "$out" | fm_scm_codebase_error_detail)
     [ -n "$detail" ] || detail=$err
-    fm_scm_codebase_lookup_error "MR lookup" "$repo" "$number" "$detail"
+    fm_scm_codebase_lookup_error "$action" "$repo" "$identifier" "$detail"
     return 1
   fi
   printf '%s\n' "$out"
+}
+
+fm_scm_codebase_mr_json() {
+  local number=$1 repo=$2
+  fm_scm_codebase_json "MR lookup" "$repo" "$number" \
+    --json codebase mr get "$number" -R "$repo"
 }
 
 fm_scm_codebase_mr_list_json() {
-  local repo=$1 branch=$2 err_file out err detail
-  fm_scm_require_jq || return 1
-  fm_scm_require_bytedcli || return 1
-  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-codebase-list.XXXXXX") || return 1
-  if ! out=$(bytedcli --json codebase mr list -R "$repo" --state merged --head "$branch" -L 1 2>"$err_file"); then
-    err=$(cat "$err_file" 2>/dev/null || true)
-    rm -f "$err_file"
-    fm_scm_codebase_lookup_error "MR branch lookup" "$repo" "$branch" "$err"
-    return 1
-  fi
-  err=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
-  if ! printf '%s\n' "$out" | fm_scm_codebase_json_status_ok; then
-    detail=$(printf '%s\n' "$out" | fm_scm_codebase_error_detail)
-    [ -n "$detail" ] || detail=$err
-    fm_scm_codebase_lookup_error "MR branch lookup" "$repo" "$branch" "$detail"
-    return 1
-  fi
-  printf '%s\n' "$out"
+  local repo=$1 branch=$2
+  fm_scm_codebase_json "MR branch lookup" "$repo" "$branch" \
+    --json codebase mr list -R "$repo" --state merged --head "$branch" -L 1
 }
 
-# Echo provider<TAB>state<TAB>head-commit<TAB>source-ref.
+# Echo provider<US>state<US>head-commit<US>source-ref, unit-separated so an empty
+# field (a Codebase MR version with no SourceCommitId) cannot shift the rest left.
 fm_scm_pr_info() {
   local worktree=$1 target=$2 parsed provider repo number view state head json
   if parsed=$(fm_scm_parse_pr_url "$target" 2>/dev/null); then
@@ -275,7 +276,7 @@ EOF
       state=${view%%$'\t'*}
       head=${view#*$'\t'}
       [ "$state" != "$view" ] || return 1
-      printf 'github\t%s\t%s\t\n' "$state" "$head"
+      printf '%s\n' "github${FM_SCM_FS}${state}${FM_SCM_FS}${head}${FM_SCM_FS}"
       ;;
     codebase)
       json=$(fm_scm_codebase_mr_json "$number" "$repo") || return 1
@@ -288,7 +289,7 @@ EOF
             ($version.SourceCommitId // $mr.SourceCommitId // ""),
             ($version.SourceRef // $mr.SourceRef // "")
           ]
-        | @tsv
+        | join("\u001f")
       '
       ;;
     *) return 1 ;;
@@ -298,7 +299,7 @@ EOF
 fm_scm_pr_state() {
   local worktree=$1 target=$2 info provider state
   info=$(fm_scm_pr_info "$worktree" "$target") || return 1
-  IFS=$'\t' read -r provider state _ _ <<EOF
+  IFS=$FM_SCM_FS read -r provider state _ _ <<EOF
 $info
 EOF
   [ -n "$provider" ] || return 1
@@ -308,7 +309,7 @@ EOF
 fm_scm_pr_head() {
   local worktree=$1 target=$2 info provider state head
   info=$(fm_scm_pr_info "$worktree" "$target") || return 1
-  IFS=$'\t' read -r provider state head _ <<EOF
+  IFS=$FM_SCM_FS read -r provider state head _ <<EOF
 $info
 EOF
   [ -n "$provider" ] && [ -n "$state" ] && [ -n "$head" ] || return 1
@@ -393,7 +394,7 @@ EOF
       ;;
     codebase)
       info=$(fm_scm_pr_info "$worktree" "$target" 2>/dev/null) || return 1
-      IFS=$'\t' read -r _ _ head source_ref <<EOF
+      IFS=$FM_SCM_FS read -r _ _ head source_ref <<EOF
 $info
 EOF
       [ -n "$head" ] || return 1

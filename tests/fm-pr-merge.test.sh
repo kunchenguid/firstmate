@@ -19,6 +19,9 @@
 #   (k) a lone --squash-commits does not suppress the default Codebase method
 #   (l) flag-like, traversing, or single-segment Codebase repo paths fail fast
 #   (m) the armed merge poll wakes once, not silently, when fm-scm-lib.sh is gone
+#   (n) an MR version with no head commit does not shift its source ref left
+#   (o) the armed merge poll wakes once after repeated state-lookup failures
+#   (p) one successful lookup resets the poll's consecutive-failure count
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -445,6 +448,138 @@ test_merge_poll_reports_a_broken_scm_lib_once() {
   pass "the merge poll surfaces an unloadable fm-scm-lib.sh once instead of going blind"
 }
 
+# bytedcli mock for an MR whose latest version carries a SourceRef but no
+# SourceCommitId - the empty middle field of fm_scm_pr_info's record.
+add_bytedcli_mock_headless() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_BYTEDCLI_LOG"
+case "$*" in
+  "--json codebase mr get 24 -R platform/team/repo")
+    cat <<'JSON'
+{"status":"success","data":{"merge_request":{"Number":24,"Status":"opened"},"version":{"SourceCommitId":"","SourceRef":"refs/merge-requests/24/24/1"}},"error":null}
+JSON
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: $*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
+}
+
+test_codebase_empty_head_does_not_shift_source_ref() {
+  local case_dir info fields
+  case_dir=$(make_case codebase-empty-head)
+  mkdir -p "$case_dir/wt"
+  add_bytedcli_mock_headless "$case_dir"
+  : > "$case_dir/bytedcli.log"
+
+  info=$(
+    FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
+    PATH="$case_dir/fakebin:$PATH" \
+      bash -c '. "$1/bin/fm-scm-lib.sh"
+        fm_scm_pr_info "" "https://code.byted.org/platform/team/repo/merge_requests/24"' _ "$ROOT"
+  ) || fail "codebase-empty-head: fm_scm_pr_info failed"
+
+  IFS=$'\037' read -r _ _ head source_ref <<EOF
+$info
+EOF
+  [ -z "$head" ] \
+    || fail "codebase-empty-head: an absent SourceCommitId was read as head '$head'"
+  [ "$source_ref" = refs/merge-requests/24/24/1 ] \
+    || fail "codebase-empty-head: source ref was lost or shifted, got '$source_ref'"
+
+  fields=$(printf '%s' "$info" | tr -cd '\037' | wc -c | tr -d ' ')
+  [ "$fields" = 3 ] || fail "codebase-empty-head: expected 4 unit-separated fields, got $((fields + 1))"
+
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
+  FM_GUARD_GRACE=999999 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 \
+    >/dev/null 2>&1 || fail "codebase-empty-head: fm-pr-check failed to arm the poll"
+
+  assert_no_grep 'pr_head=refs/' "$case_dir/state/task-x1.meta" \
+    "codebase-empty-head: a source ref was recorded as the MR head commit"
+  pass "an MR version with no SourceCommitId keeps its source ref in the right field"
+}
+
+# gh mock whose `pr view` fails until $case_dir/gh-ok exists, so a poll can be
+# driven through consecutive failures and then a recovery.
+add_gh_mock_pr_view_fails() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ -e '$case_dir/gh-ok' ]; then
+  printf '%s\t%s\n' 'OPEN' '9999999999999999999999999999999999999999'
+  exit 0
+fi
+echo "gh: authentication failed" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+arm_failing_poll() {
+  local case_dir=$1
+  add_gh_mock_pr_view_fails "$case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_GUARD_GRACE=999999 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://github.com/example/repo/pull/31 >/dev/null 2>&1 \
+    || fail "fm-pr-check failed to arm the poll"
+}
+
+run_poll() {
+  local case_dir=$1
+  PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh" 2>/dev/null
+}
+
+test_merge_poll_wakes_after_repeated_lookup_failures() {
+  local case_dir first second third fourth
+  case_dir=$(make_case poll-lookup-failure)
+  arm_failing_poll "$case_dir"
+
+  first=$(run_poll "$case_dir")
+  second=$(run_poll "$case_dir")
+  third=$(run_poll "$case_dir")
+  fourth=$(run_poll "$case_dir")
+
+  [ -z "$first" ] || fail "poll-lookup-failure: a single transient lookup failure must stay quiet"
+  [ -z "$second" ] || fail "poll-lookup-failure: a second transient lookup failure must stay quiet"
+  assert_contains "$third" 'poll broken' \
+    "poll-lookup-failure: a persistent lookup failure must wake firstmate instead of polling silently"
+  [ -z "$fourth" ] || fail "poll-lookup-failure: the diagnostic must not repeat on every poll"
+  assert_present "$case_dir/state/task-x1.check.error" \
+    "poll-lookup-failure: no durable marker was left for the broken poll"
+  pass "the merge poll wakes once after repeated PR/MR state lookup failures"
+}
+
+test_merge_poll_failure_count_resets_on_success() {
+  local case_dir out
+  case_dir=$(make_case poll-failure-reset)
+  arm_failing_poll "$case_dir"
+
+  run_poll "$case_dir" >/dev/null
+  run_poll "$case_dir" >/dev/null
+  : > "$case_dir/gh-ok"
+  out=$(run_poll "$case_dir")
+  [ -z "$out" ] || fail "poll-failure-reset: an OPEN PR must not wake firstmate, got '$out'"
+  assert_absent "$case_dir/state/task-x1.check.fails" \
+    "poll-failure-reset: a successful lookup must clear the consecutive-failure count"
+
+  rm -f "$case_dir/gh-ok"
+  out=$(run_poll "$case_dir")
+  [ -z "$out" ] || fail "poll-failure-reset: failures before a success must not count toward the wake"
+  assert_absent "$case_dir/state/task-x1.check.error" \
+    "poll-failure-reset: a single failure after a success must not mark the poll broken"
+  pass "one successful lookup resets the merge poll's consecutive-failure count"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -460,3 +595,6 @@ test_codebase_merge_method_shims_map_to_bytedcli_flags
 test_codebase_squash_commits_keeps_default_merge_method
 test_rejects_unsafe_codebase_repo_paths
 test_merge_poll_reports_a_broken_scm_lib_once
+test_codebase_empty_head_does_not_shift_source_ref
+test_merge_poll_wakes_after_repeated_lookup_failures
+test_merge_poll_failure_count_resets_on_success
