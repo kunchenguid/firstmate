@@ -13,9 +13,9 @@
 # "already running" off the dying process. That exact mistake silently took
 # supervision down for ~30 minutes.
 # On a harness with a PreToolUse-equivalent hook, bin/fm-arm-pretool-check.sh
-# denies that anti-pattern (and piped/bundled/pkill variants of it) before the
-# command ever runs; see docs/arm-pretool-check.md. It is a seatbelt for known-
-# bad shapes, not a substitute for the verification this script performs.
+# applies the command-position policy before the command runs; see
+# docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
+# pre-execution seatbelt, not a substitute for the verification here.
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the

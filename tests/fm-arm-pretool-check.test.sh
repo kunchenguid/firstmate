@@ -1,83 +1,195 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1091,SC2016
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
-# bin/fm-arm-pretool-check.sh is the single owner of the anti-pattern
-# detection; this suite drives it through its CLI (--command) and stdin JSON
-# modes and asserts the per-harness wiring files invoke it, without spawning
-# any real harness (that empirical evidence lives in docs/arm-pretool-check.md).
+# bin/fm-arm-command-policy.mjs is the single owner of command classification.
+# This suite drives the stable shell transport through all five harness entry
+# forms and asserts the per-harness wiring contract without spawning a harness.
+# Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
+POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
-# --- CLI mode: table-driven allow/deny -------------------------------------
+# --- full cross-harness acceptance matrix ----------------------------------
 
-assert_allow() {
-  local desc=$1 cmd=$2 out rc
-  out=$("$CHECK" --command "$cmd" 2>&1)
-  rc=$?
-  [ "$rc" -eq 0 ] || fail "expected allow (exit 0) for [$cmd] ($desc), got exit $rc: $out"
-  pass "allow: $desc"
+MATRIX_IDS=()
+MATRIX_EXPECTED=()
+MATRIX_COMMANDS=()
+
+matrix_case() {
+  MATRIX_IDS+=("$1")
+  MATRIX_EXPECTED+=("$2")
+  MATRIX_COMMANDS+=("$3")
 }
 
-assert_deny() {
-  local desc=$1 cmd=$2 out rc
-  out=$("$CHECK" --command "$cmd" 2>&1)
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "expected deny (exit 2) for [$cmd] ($desc), got exit $rc: $out"
-  pass "deny: $desc"
+matrix_case A01 allow 'bin/fm-watch-arm.sh'
+matrix_case A02 allow './bin/fm-watch-arm.sh --restart'
+matrix_case A03 allow 'exec bin/fm-watch-arm.sh'
+matrix_case A04 allow 'bin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A05 allow 'exec bin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A06 allow "$ROOT/bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A07 allow "cd '$ROOT'; exec bin/fm-watch-arm.sh"
+matrix_case A08 allow "cd '../firstmate'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A09 allow "export FM_HOME='$ROOT'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A10 allow 'source config/x-mode.env; bin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A11 allow "source 'config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A12 allow "source './config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A13 allow "source '$ROOT/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env'; exec bin/fm-watch-arm.sh"
+matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
+matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+
+matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
+matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"
+matrix_case R03 allow "rg -n 'fm-watch-arm.sh &' docs tests"
+matrix_case R04 allow "rg -n 'bin/fm-watch-arm.sh; echo bad' docs"
+matrix_case R05 allow "git grep 'fm-watch-checkpoint.sh && echo bad'"
+matrix_case R06 allow "sed -n '/fm-watch-checkpoint.sh/p' docs/arm-pretool-check.md"
+matrix_case R07 allow 'assert_contains "$content" '\''fm-watch-arm.sh &'\'''
+matrix_case R08 allow "printf '%s\\n' 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'"
+matrix_case R09 allow "tmux send-keys -t isolated-pi-lab 'bin/fm-watch-arm.sh &' Enter"
+matrix_case R10 allow "tmux send-keys -t isolated-pi-lab \"printf '%s\\n' 'bin/fm-watch-arm.sh &'\"; tmux send-keys -t isolated-pi-lab Enter"
+matrix_case R11 allow "python3 -c 'print(\"bin/fm-watch-arm.sh; echo data\")'"
+matrix_case R12 allow "bash -lc \"rg -n 'fm-watch-arm.sh &' docs\""
+matrix_case R13 allow "echo 'pkill -f fm-watch'"
+matrix_case R14 allow "rg -n 'pkill -f fm-watch' docs tests"
+matrix_case R15 allow "echo ok # bin/fm-watch-arm.sh &"
+matrix_case R16 allow $'# bin/fm-watch-arm.sh &\necho ok'
+matrix_case R17 allow "printf '%s\\n' 'fm-watch.sh; a && b || c > out' | sed -n '1p'"
+matrix_case R18 allow "sh -c 'tmux send-keys -t lab \"bin/fm-watch-arm.sh &\" Enter'"
+matrix_case R19 allow "eval 'printf \"%s\\n\" \"bin/fm-watch-arm.sh &\"'"
+
+matrix_case D01 deny 'bin/fm-watch-arm.sh &'
+matrix_case D02 deny 'nohup bin/fm-watch-arm.sh'
+matrix_case D03 deny 'bin/fm-watch-arm.sh & disown'
+matrix_case D04 deny '(bin/fm-watch-arm.sh) &'
+matrix_case D05 deny "bash -lc 'bin/fm-watch-arm.sh &'"
+matrix_case D06 deny '$(bin/fm-watch-arm.sh)'
+matrix_case D07 deny 'echo "$(bin/fm-watch-checkpoint.sh --seconds 180)"'
+matrix_case D08 deny 'cat <(bin/fm-watch-arm.sh)'
+matrix_case D09 deny 'bin/fm-watch-arm.sh >/tmp/out'
+matrix_case D10 deny 'bin/fm-watch-checkpoint.sh --seconds 180 </dev/null'
+matrix_case D11 deny 'bin/fm-watch-arm.sh 2>&1 | head -2'
+matrix_case D12 deny 'bin/fm-watch-arm.sh | cat'
+matrix_case D13 deny 'bin/fm-watch-checkpoint.sh --seconds 180 | timeout 1 cat'
+matrix_case D14 deny 'echo before; bin/fm-watch-arm.sh'
+matrix_case D15 deny 'bin/fm-watch-checkpoint.sh --seconds 180; echo after'
+matrix_case D16 deny 'true && bin/fm-watch-arm.sh'
+matrix_case D17 deny 'bin/fm-watch-checkpoint.sh --seconds 180 || true'
+matrix_case D18 deny $'bin/fm-watch-arm.sh\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case D19 deny "pkill -f '/bin/fm-watch.sh'"
+matrix_case D20 deny "command pkill -f '/bin/fm-watch.sh'"
+matrix_case D21 deny "/usr/bin/pkill -f '/bin/fm-watch.sh'"
+matrix_case D22 deny "sudo pkill -f '/bin/fm-watch.sh'"
+matrix_case D23 deny 'kill "$(pgrep -f '\''/bin/fm-watch.sh'\'')"'
+
+matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
+matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
+matrix_case E03 allow 'bin/fm-watch-arm.sh # output > file &'
+matrix_case E04 allow $'# setup comment with fm-watch.sh; && >\nsource "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case E05 deny "FM_HOME=$ROOT bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case E06 deny "env FM_HOME=$ROOT bin/fm-watch-arm.sh"
+matrix_case E07 deny "source '/tmp/not-firstmate/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case E08 deny "bash -lc 'bin/fm-watch-checkpoint.sh --seconds 180'"
+matrix_case E09 deny '(bin/fm-watch-checkpoint.sh --seconds 180)'
+matrix_case E10 deny "eval 'bin/fm-watch-arm.sh &'"
+matrix_case E11 deny "exec bash -lc 'bin/fm-watch-arm.sh &'"
+matrix_case E12 allow 'bash -lc "$WATCHER_COMMAND" # fm-watch-arm.sh'
+matrix_case E13 allow "printf '%s\\n' 'argument has ; and fm-watch-arm.sh and &&'"
+
+MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
+FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
+trap fm_test_cleanup EXIT
+
+run_matrix_entry() {
+  local id=$1 expected=$2 entry=$3 cmd=$4 payload out_file err_file rc
+  out_file="$MATRIX_TMP/$id-$entry.out"
+  err_file="$MATRIX_TMP/$id-$entry.err"
+
+  case "$entry" in
+    codex)
+      payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
+    claude)
+      payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
+    grok)
+      payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
+    opencode|pi)
+      "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
+    *)
+      fail "unknown matrix entry form: $entry"
+      ;;
+  esac
+
+  if [ "$expected" = allow ]; then
+    [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
+    [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
+    [ ! -s "$err_file" ] || fail "$id via $entry allow must leave stderr empty: $(cat "$err_file")"
+    return
+  fi
+
+  [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+    || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
+  if [ "$entry" = claude ]; then
+    [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
+  elif [ "$entry" = grok ]; then
+    jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
+  fi
 }
 
-# DENY acceptance cases (task spec)
-assert_deny "trailing shell background operator" 'bin/fm-watch-arm.sh &'
-assert_deny "piped into head, then backgrounded" 'bin/fm-watch-arm.sh 2>&1 | head -2 &'
-assert_deny "bundled after another command, then backgrounded" 'tasks-axi done x --pr y; bin/fm-watch-arm.sh &'
-assert_deny "broad pkill against the watcher" 'pkill -f bin/fm-watch.sh'
-assert_deny "mid-command shell background before wait" 'bin/fm-watch-arm.sh & wait'
-assert_deny "mid-command shell background before follow-up work" 'bin/fm-watch-arm.sh & echo done'
-assert_deny "checkpoint && follow-up work is bundling" 'bin/fm-watch-checkpoint.sh --seconds 180 && echo done'
-assert_deny "checkpoint bare background before follow-up work" 'bin/fm-watch-checkpoint.sh --seconds 180 & echo done'
-assert_deny "export leading statement cannot hide bundled work" 'export FM_HOME=/tmp && tasks-axi done x; exec bin/fm-watch-arm.sh'
-assert_deny "arm output redirection hides status lines" 'exec bin/fm-watch-arm.sh >/dev/null'
-assert_deny "checkpoint output redirection hides status lines" 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'
-assert_deny "export command substitution cannot hide bundled work" "export X=\$(tasks-axi done x); exec bin/fm-watch-arm.sh"
-assert_deny "checkpoint command substitution cannot hide bundled work" "bin/fm-watch-checkpoint.sh --seconds \$(tasks-axi done x)"
-assert_deny "nested bash payload cannot background the arm" "bash -lc 'bin/fm-watch-arm.sh &'"
-assert_deny "absolute nested shell payload cannot background the arm" "/bin/sh -c 'bin/fm-watch-arm.sh &'"
-assert_deny "nested sh payload cannot redirect checkpoint output" "sh -c 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'"
-assert_deny "nested zsh payload cannot run checkpoint substitution" "zsh -c 'bin/fm-watch-checkpoint.sh --seconds \$(tasks-axi done x)'"
-assert_deny "eval payload cannot background the arm" "eval 'bin/fm-watch-arm.sh &'"
+test_full_acceptance_matrix() {
+  local i entry
+  for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
+    for entry in codex claude grok opencode pi; do
+      run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
+    done
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+  done
+}
 
-# ALLOW acceptance cases (task spec)
-assert_allow "bare blessed exec of the arm" 'exec bin/fm-watch-arm.sh'
-assert_allow "guarded x-mode source then exec arm" '[ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh'
-assert_allow "codex foreground checkpoint, no background" 'bin/fm-watch-checkpoint.sh --seconds 180'
-assert_allow "unrelated read of the lock file" 'ls state/.watch.lock'
-assert_allow "pure status check, no arm" 'bin/fm-guard.sh'
+assert_policy() {
+  local id=$1 expected=$2 command=$3 output
+  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$command") \
+    || fail "$id direct policy invocation failed"
+  case "$output" in
+    "$expected"|"$expected"$'\t'*) : ;;
+    *) fail "$id direct policy expected $expected, got: $output" ;;
+  esac
+  pass "direct policy $id: $expected"
+}
 
-# Additional coverage beyond the required table
-assert_deny "nohup on the arm" 'nohup bin/fm-watch-arm.sh'
-assert_deny "disown after the arm" 'bin/fm-watch-arm.sh; disown'
-assert_deny "piped into tail" 'bin/fm-watch-arm.sh | tail -f'
-assert_deny "arm && another command bundled" 'exec bin/fm-watch-arm.sh && echo done'
-assert_deny "checkpoint backgrounded" 'bin/fm-watch-checkpoint.sh --seconds 60 &'
-assert_deny "broad pkill without -f" 'pkill fm-watch.sh'
-assert_deny "arm stderr redirection is still redirection" 'exec bin/fm-watch-arm.sh 2>/tmp/err'
-assert_deny "checkpoint stderr/stdout merge is still redirection" 'bin/fm-watch-checkpoint.sh --seconds 180 2>&1'
-assert_deny "export backtick substitution cannot hide bundled work" "export X=\`tasks-axi done x\`; exec bin/fm-watch-arm.sh"
-assert_deny "export process substitution cannot hide bundled work" 'export X=<(tasks-axi done x); exec bin/fm-watch-arm.sh'
-assert_deny "checkpoint process substitution cannot hide bundled work" 'bin/fm-watch-checkpoint.sh --file <(echo x)'
-assert_allow "arm with --restart, blessed" 'exec bin/fm-watch-arm.sh --restart'
-# The blessed leading-statement separator is ';' (matching the documented
-# x-mode-guard recipe), not '&&' - a bare 'cd X && exec arm' is bundling by
-# design, covered by the deny case below.
-assert_allow "cd then exec arm, blessed leading statement" 'cd /home/fm; exec bin/fm-watch-arm.sh'
-assert_allow "export then exec arm, blessed leading statement" 'export FM_HOME=/home/fm; exec bin/fm-watch-arm.sh'
-assert_deny "cd && exec arm is bundling, not the blessed ';' shape" 'cd /home/fm && exec bin/fm-watch-arm.sh'
-assert_allow "totally unrelated command" 'git status'
-assert_allow "empty command" ''
+test_direct_policy_contract() {
+  local heredoc_data heredoc_watcher
+  assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
+  assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
+  assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
+  assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
+  assert_policy direct-unclassifiable $'deny\tunclassifiable-protected-command' "bin/fm-watch-arm.sh 'unterminated"
+  assert_policy direct-unsupported $'deny\tunclassifiable-protected-command' 'if true; then bin/fm-watch-arm.sh; fi'
+  assert_policy direct-constructed-payload $'deny\twatcher-nested' "WATCHER='bin/fm-watch-arm.sh &'; bash -lc \"\$WATCHER\""
+  assert_policy direct-parameter-export allow 'export FM_HOME=${HOME}; bin/fm-watch-checkpoint.sh --seconds 180'
+  heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
+  heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
+  assert_policy direct-heredoc-data allow "$heredoc_data"
+  assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+}
 
 # --- CLI parsing -------------------------------------------------------------
 
@@ -158,7 +270,7 @@ test_failopen_garbage_stdin() {
 }
 
 test_failopen_missing_jq() {
-  local dir fakebin rc
+  local dir fakebin rc real
   dir=$(fm_test_tmproot fm-arm-pretool-check)
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
@@ -171,6 +283,21 @@ test_failopen_missing_jq() {
   rc=$?
   [ "$rc" -eq 0 ] || fail "missing jq must fail open (exit 0) rather than crash-deny, got exit $rc"
   pass "fail-open: missing jq on stdin path"
+}
+
+test_failopen_missing_node() {
+  local dir fakebin rc real tool
+  dir=$(fm_test_tmproot fm-arm-pretool-node)
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  for tool in bash dirname; do
+    real=$(command -v "$tool")
+    ln -sf "$real" "$fakebin/$tool"
+  done
+  PATH="$fakebin" "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "missing node must fail open (exit 0), got exit $rc"
+  pass "fail-open: missing classifier runtime"
 }
 
 # --- --claude output shaping ---------------------------------------------------
@@ -217,6 +344,7 @@ test_grok_pretool_hook_wired() {
   [ -n "$command" ] || fail "PreToolUse hook command is missing from grok primary hook config"
   assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok pretool hook must anchor from GROK_WORKSPACE_ROOT"
   assert_contains "$command" 'fm-arm-pretool-check.sh' "grok pretool hook must invoke the shared checker"
+  assert_contains "$command" 'exec "${GROK_WORKSPACE_ROOT:-}/bin/fm-arm-pretool-check.sh"' "grok pretool hook must forward its stdin payload unchanged to the checker"
   # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok pretool hook must not assign a bare \$root var (breaks grok's own \${VAR} pre-substitution; see docs/arm-pretool-check.md)"
   local matcher
@@ -246,6 +374,8 @@ test_claude_settings_pretool_hook_wired() {
   assert_contains "$command" 'CLAUDE_PROJECT_DIR' "claude pretool hook must anchor via CLAUDE_PROJECT_DIR"
   assert_contains "$command" 'fm-arm-pretool-check.sh' "claude pretool hook must invoke the shared checker"
   assert_contains "$command" '--claude' "claude pretool hook must pass --claude so stdout stays empty on deny"
+  [ "$command" = '"$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude' ] \
+    || fail "claude pretool hook must forward stdin directly with only --claude, got: $command"
   local matcher
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"
@@ -260,6 +390,7 @@ test_codex_hooks_pretool_wired() {
   [ -n "$command" ] || fail "PreToolUse hook command is missing from codex primary hooks"
   assert_contains "$command" 'fm-arm-pretool-check.sh' "codex pretool hook must invoke the shared checker"
   assert_contains "$command" 'pwd -P' "codex pretool hook must anchor to the hook process root like the Stop hook does"
+  assert_contains "$command" 'printf "%s" "$payload" | "$root/bin/fm-arm-pretool-check.sh"' "codex pretool hook must forward the exact captured payload to the checker"
   local matcher
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "codex pretool hook must matcher-scope to Bash, got: $matcher"
@@ -273,6 +404,9 @@ test_opencode_pretool_plugin_wired() {
   content=$(cat "$plugin")
   assert_contains "$content" 'tool.execute.before' "opencode pretool plugin must hook tool.execute.before"
   assert_contains "$content" 'fm-arm-pretool-check.sh' "opencode pretool plugin must invoke the shared checker"
+  assert_contains "$content" 'const command = output?.args?.command;' "opencode must extract output.args.command exactly"
+  assert_contains "$content" '["--command", command]' "opencode must forward the exact command as one CLI argument"
+  assert_contains "$content" 'if (result.code !== 2) return;' "opencode must throw only for checker exit 2"
   assert_contains "$content" 'throw new Error' "opencode pretool plugin must throw to block the tool call"
   pass ".opencode primary plugin: tool.execute.before invokes the shared checker and blocks by throwing"
 }
@@ -284,6 +418,9 @@ test_pi_extension_carries_pretool_check() {
   content=$(cat "$ext")
   assert_contains "$content" 'tool_call' "pi extension must hook tool_call for the pretool seatbelt"
   assert_contains "$content" 'fm-arm-pretool-check.sh' "pi extension must invoke the shared checker"
+  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "pi must extract and string-coerce event.input.command exactly"
+  assert_contains "$content" 'const result = await runPretoolCheck(command);' "pi must forward the exact command to the checker"
+  assert_contains "$content" 'if (result.code !== 2) return {};' "pi must block only for checker exit 2"
   assert_contains "$content" 'block: true' "pi extension must return block:true to deny"
   pass ".pi primary extension: tool_call handler invokes the shared checker and can block"
 }
@@ -296,6 +433,8 @@ test_shellcheck_clean() {
   pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
 }
 
+test_full_acceptance_matrix
+test_direct_policy_contract
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors
@@ -306,6 +445,7 @@ test_stdin_unrelated_command_allowed
 test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
+test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
