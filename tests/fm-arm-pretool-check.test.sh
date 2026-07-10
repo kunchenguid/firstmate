@@ -115,6 +115,9 @@ matrix_case D48 deny '~/firstmate/bin/fm-watch-arm.sh &'
 matrix_case D49 deny 'bin/fm-watch.sh'
 matrix_case D50 deny '$FM_HOME/bin/fm-watch.sh'
 matrix_case D51 deny '~/firstmate/bin/fm-watch.sh --restart'
+matrix_case D52 deny "bin/fm-\$'\x77'atch-arm.sh &"
+matrix_case D53 deny 'bin/fm-$"watch"-arm.sh &'
+matrix_case D54 deny 'bin/fm-watch-$"arm".sh &'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -314,12 +317,30 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command 'bin/fm-"watch-arm.sh" &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a quote-split protected path, not fast-allow it, got exit $rc"
+  # A quoting-decoder marker ($' ANSI-C or $" locale) hides the fm-watch bytes
+  # from the cheap byte strip but the classifier reconstructs them, so the
+  # prefilter must delegate on the marker rather than fast-allow. Without this
+  # the byte strip loses the encoded character and slips the command through.
+  "$CHECK" --command "bin/fm-\$'\x77'atch-arm.sh &" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate an ANSI-C-encoded protected path, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'bin/fm-$"watch"-arm.sh &' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a locale-string-encoded protected path, not fast-allow it, got exit $rc"
+  # The marker is specifically $ followed by a quote, not any $ expansion: an
+  # ordinary $VAR that is not a watcher reference still takes the fast path.
+  "$CHECK" --command '$FM_HOME/bin/fm-teardown.sh &' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a benign \$VAR non-watcher command must still fast-allow, got exit $rc"
+  "$CHECK" --command 'echo "$HOME/scratch" && ls -la' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a benign \$HOME command must still fast-allow, got exit $rc"
   # A benign command that only mentions fm-watch as data still reaches the
   # classifier and is allowed there, proving the prefilter owns no verdict.
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch command reaches the classifier"
+  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------

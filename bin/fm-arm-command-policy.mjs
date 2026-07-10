@@ -327,6 +327,12 @@ class Lexer {
         this.index = ansi.next;
         continue;
       }
+      if (this.source.startsWith('$"', this.index)) {
+        word.quoted = true;
+        this.index += 1;
+        if (!this.readDoubleQuoted(word)) return null;
+        continue;
+      }
       if (this.source.startsWith("$(", this.index)) {
         const balanced = extractBalanced(this.source, this.index + 2, "(", ")");
         if (!balanced) {
