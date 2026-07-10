@@ -395,6 +395,77 @@ test_home_seed_refuses_empty_charter_fields() {
   pass "home seeding refuses empty normalized charter fields"
 }
 
+test_home_seed_no_projects_end_to_end() {
+  # A domain whose subject is the firstmate repo itself needs no project clones:
+  # the deliberate --no-projects signal scaffolds, seeds, registers, and spawns a
+  # project-less home end to end with no placeholder clone.
+  local home sub sub_abs fakebin log meta proj_val out
+  home="$TMP_ROOT/no-projects-seed-home"
+  sub="$TMP_ROOT/no-projects-seed-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/no-projects-fake")
+  log="$TMP_ROOT/no-projects-fake/tmux.log"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects) \
+    || fail "project-less seed failed"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$sub_abs" >/dev/null || fail "seed did not report the project-less subhome"
+
+  # Registered with an empty projects field, marked, charter copied, no clones.
+  assert_grep '- fdev - firstmate self-development' "$home/data/secondmates.md" "project-less registry line missing"
+  assert_grep 'scope: firstmate repo work' "$home/data/secondmates.md" "project-less registry scope missing"
+  assert_grep 'projects: ;' "$home/data/secondmates.md" "project-less registry did not render an empty projects field"
+  [ "$(cat "$sub/.fm-secondmate-home")" = fdev ] || fail "project-less seed did not mark the subhome"
+  assert_present "$sub/data/charter.md" "project-less seed did not copy the charter"
+  [ -z "$(ls -A "$sub/projects" 2>/dev/null)" ] || fail "project-less seed cloned a project"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after project-less seed"
+
+  # Spawn tolerates the empty projects field: the home resolves from the registry
+  # and the projects meta is recorded empty rather than breaking the launch.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/no-projects-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" fdev "$sub" codex --secondmate >/dev/null 2>&1 \
+    || fail "project-less secondmate spawn failed"
+  meta="$home/state/fdev.meta"
+  assert_grep 'kind=secondmate' "$meta" "project-less spawn meta lost kind=secondmate"
+  assert_grep "home=$sub_abs" "$meta" "project-less spawn meta lost the subhome"
+  proj_val=$(grep '^projects=' "$meta" | head -1 | cut -d= -f2-)
+  [ -z "$proj_val" ] || fail "project-less spawn recorded a non-empty projects meta: '$proj_val'"
+  pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
+}
+
+test_home_seed_refuses_missing_projects_without_signal() {
+  # Accidental omission of the project list, with no deliberate --no-projects
+  # signal, must fail loudly and leave nothing behind, so a forgotten argument is
+  # never mistaken for an intentional project-less seed.
+  local home sub err
+  home="$TMP_ROOT/missing-projects-home"
+  sub="$TMP_ROOT/missing-projects-subhome"
+  err="$TMP_ROOT/missing-projects.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='some scope' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" >/dev/null 2>"$err"; then
+    fail "seed accepted a project-less home without the deliberate --no-projects signal"
+  fi
+  assert_absent "$sub" "loud-failure seed created a subhome"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "loud-failure seed left a registry route"
+  fi
+
+  # The deliberate signal is mutually exclusive with a project list.
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='some scope' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects alpha >/dev/null 2>"$err"; then
+    fail "seed accepted --no-projects combined with a project list"
+  fi
+  grep -F 'cannot be combined with a project list' "$err" >/dev/null \
+    || fail "seed did not explain the --no-projects mutual-exclusion rejection"
+  pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
+}
+
 test_home_seed_refuses_local_only_project() {
   local home subhome err
   home="$TMP_ROOT/local-only-seed-home"
@@ -1826,6 +1897,8 @@ test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
+test_home_seed_no_projects_end_to_end
+test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root

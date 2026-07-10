@@ -2,14 +2,17 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> <project>...
+#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
-#       That project list is non-exclusive provisioning data. The charter brief
+#       That project list is non-exclusive provisioning data. Pass --no-projects
+#       instead of a project list to seed a project-less home for a domain whose
+#       subject is the firstmate repo itself; it is mutually exclusive with a
+#       project list, and omitting both still fails loudly. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, a .fm-secondmate-home marker is written, and
 #       data/secondmates.md is updated.
@@ -35,7 +38,7 @@ REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -802,8 +805,28 @@ write_registry() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local no_projects=0 arg
+  local filtered=()
   shift 2
-  [ $# -gt 0 ] || { echo "error: secondmate needs at least one project" >&2; return 1; }
+  # A deliberate --no-projects signal (anywhere in the project position) seeds a
+  # project-less home; an accidental omission with no signal still fails loudly.
+  for arg in "$@"; do
+    if [ "$arg" = "--no-projects" ]; then
+      no_projects=1
+    else
+      filtered+=("$arg")
+    fi
+  done
+  if [ "${#filtered[@]}" -gt 0 ]; then
+    set -- "${filtered[@]}"
+  else
+    set --
+  fi
+  if [ "$no_projects" -eq 1 ]; then
+    [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
+  else
+    [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  fi
 
   mkdir -p "$DATA"
   validate_registry
@@ -873,7 +896,11 @@ seed_home() {
       return 1
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    if [ "$no_projects" -eq 1 ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+    else
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    fi
     SEED_PARENT_BRIEF_CREATED=1
   fi
   if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then

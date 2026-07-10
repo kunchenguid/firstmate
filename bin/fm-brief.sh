@@ -7,7 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate <project>...
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -15,6 +15,10 @@
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
+#   --no-projects writes a project-less charter for a domain whose subject is the
+#   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
+#   worktrees of the same repo). It is mutually exclusive with a project list, and
+#   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -42,7 +46,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -57,12 +61,14 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
+NO_PROJECTS=0
 POS=()
 for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -70,6 +76,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
 
@@ -92,10 +103,20 @@ while [ "$idx" -lt "${#POS[@]}" ]; do
   SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
   idx=$((idx + 1))
 done
-[ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project" >&2; exit 1; }
+if [ "$NO_PROJECTS" -eq 1 ]; then
+  [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
+else
+  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
-PROJECT_LIST=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+if [ "$NO_PROJECTS" -eq 1 ]; then
+  PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
+  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
+else
+  PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+  PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
+fi
 cat > "$BRIEF" <<EOF
 You are a secondmate: a persistent domain supervisor managed by the main firstmate. Work on your own; do not wait for a human.
 
@@ -106,11 +127,11 @@ $SECONDMATE_CHARTER
 $SECONDMATE_SCOPE
 
 # Project clones
-$PROJECT_LIST
+$PROJECT_CLONES_BODY
 
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
-The projects above are local clones for work you supervise; they are not an exclusive ownership claim.
+$PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.

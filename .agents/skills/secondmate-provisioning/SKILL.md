@@ -31,12 +31,14 @@ The `projects:` field is a non-exclusive clone list, not ownership.
 Scaffold a secondmate charter with:
 
 ```sh
-bin/fm-brief.sh <id> --secondmate <project>...
+bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 ```
 
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
+Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
+`--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
 Keep the charter focused on the persistent responsibility, available project clones, escalation back to the main firstmate status file, and the requests-from-main-firstmate contract.
 The scaffold's definition of done encodes the idle-by-default contract: on startup the secondmate reconciles only its own in-flight work and then waits for routed tasks, never self-initiating a survey or audit.
 Preserve that wording when filling the charter, including the marker rule that marked supervisor requests return through status or a doc pointer while unmarked captain messages stay conversational.
@@ -44,9 +46,10 @@ Preserve that wording when filling the charter, including the marker rule that m
 Provision the persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> <project>...
+bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 ```
 
+Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
 `-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
