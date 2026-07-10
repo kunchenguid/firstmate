@@ -651,13 +651,18 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
+# spawn_worktree_ok: true when <path> is itself the top of a git worktree
+# distinct from PROJ_ABS_REAL. The one place that decides "is this an isolated
+# worktree", shared by the poll below (probing non-fatally while waiting for
+# the backend to actually move the pane there) and validate_spawn_worktree
+# (the fatal final check) - see that function for why a naive "differs from
+# PROJ_ABS_REAL" comparison alone is not sufficient.
+spawn_worktree_ok() {  # <path>
+  local p=$1 p_real top top_real
+  p_real=$(cd "$p" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$p_real" = "$top_real" ] && [ "$p_real" != "$PROJ_ABS_REAL" ]
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -669,18 +674,9 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  local source=$1 inspect_target=$2 wt_top
+  if ! spawn_worktree_ok "$WT"; then
+    wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -831,17 +827,22 @@ spawn_send_key() {  # <target> <key>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Wait for the treehouse subshell: the pane's cwd moves from the project to
+  # the worktree. Target the stable window id, not the name: if the name is
+  # ever lost (e.g. an automatic-rename slips through), display-message -t
+  # <bad-name> falls back to the active client's window, which would misread
+  # firstmate's OWN pane path as the worktree and tangle a hook into the
+  # primary checkout. The window id never lies. A brand-new pane can also
+  # report a transient pre-shell-init cwd (observed: the terminal
+  # multiplexer's own default directory) on its very first poll(s), before it
+  # actually lands in PROJ_ABS or the worktree; that transient also differs
+  # from PROJ_ABS_REAL, so a plain "differs from PROJ_ABS_REAL" check can
+  # latch onto it. Poll until the reported path itself resolves to a genuine,
+  # isolated git worktree (spawn_worktree_ok), not merely until it differs
+  # from the project path.
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+    if [ -n "$p" ] && spawn_worktree_ok "$p"; then
       WT="$p"
       break
     fi
