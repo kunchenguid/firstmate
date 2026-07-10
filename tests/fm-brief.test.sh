@@ -192,6 +192,24 @@ test_stop_conditions_budget_override_for_ship_and_scout() {
   pass "fm-brief.sh: --budget renders in ship and scout stop conditions"
 }
 
+test_budget_rejects_recognized_option_as_value() {
+  local home id brief option status output
+  home="$TMP_ROOT/budget-option-home"
+  mkdir -p "$home/data"
+
+  for option in -h --help --scout --secondmate --herdr-lab --no-projects --budget; do
+    id="brief-budget-option-${option//-/}"
+    status=0
+    output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget "$option" 2>&1) || status=$?
+    expect_code 1 "$status" "--budget must reject $option as a missing value"
+    assert_contains "$output" "error: --budget requires non-empty text" \
+      "--budget $option returned the wrong error"
+    brief="$home/data/$id/brief.md"
+    assert_absent "$brief" "--budget $option still scaffolded a brief"
+  done
+  pass "fm-brief.sh: --budget rejects recognized options as its value"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -405,6 +423,7 @@ test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_stop_conditions_default_for_ship_and_scout
 test_stop_conditions_budget_override_for_ship_and_scout
+test_budget_rejects_recognized_option_as_value
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

@@ -59,6 +59,13 @@ usage() {
   ' "$0"
 }
 
+is_option_token() {
+  case "${1:-}" in
+    -h|--help|--scout|--secondmate|--herdr-lab|--no-projects|--budget) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
@@ -84,7 +91,7 @@ while [ "$#" -gt 0 ]; do
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --budget)
-      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+      if [ "$#" -lt 2 ] || [ -z "$2" ] || is_option_token "$2"; then
         echo "error: --budget requires non-empty text" >&2
         exit 1
       fi
