@@ -10,10 +10,11 @@ FIXTURE_DIR="$ROOT/tests/watchdog/fixtures"
 CLAUDE_FIXTURE="$FIXTURE_DIR/token-optimizer-checkpoint.json"
 
 test_claude_checkpoint_metrics() {
-  local out context expected
+  local out context expected session
+  session=$(jq -r '.session_id' "$CLAUDE_FIXTURE")
   out=$(FM_STATE_OVERRIDE="$TMP_ROOT/state" \
     FM_WATCHDOG_CLAUDE_CHECKPOINT_DIR="$FIXTURE_DIR" \
-    bash -c '. "$1"; fm_watchdog_collect_metrics claude fixture-session' _ "$ROOT/bin/fm-watchdog-lib.sh")
+    bash -c '. "$1"; fm_watchdog_collect_metrics claude "$2"' _ "$ROOT/bin/fm-watchdog-lib.sh" "$session")
   jq -e '
     has("harness")
     and has("context_pct")
@@ -31,6 +32,43 @@ test_claude_checkpoint_metrics() {
   pass "claude checkpoint metrics are written from a real token-optimizer fixture"
 }
 
+test_claude_checkpoint_selection_matches_session() {
+  local dir out target other session
+  dir="$TMP_ROOT/claude-selection"
+  mkdir -p "$dir"
+  target="$dir/target.json"
+  other="$dir/other.json"
+  session='target-session'
+  jq --arg session "$session" '.session_id = $session | .fill_pct = 41 | .quality.tool_calls = 101' \
+    "$CLAUDE_FIXTURE" > "$target"
+  jq --arg session other-session '.session_id = $session | .fill_pct = 99 | .quality.tool_calls = 999' \
+    "$CLAUDE_FIXTURE" > "$other"
+  touch -t 202607080101 "$target"
+  touch -t 202607080202 "$other"
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT/claude-selection-state" \
+    FM_WATCHDOG_CLAUDE_CHECKPOINT_DIR="$dir" \
+    bash -c '. "$1"; fm_watchdog_collect_metrics claude "$2"' _ "$ROOT/bin/fm-watchdog-lib.sh" "$session")
+  [ "$(jq -r '.context_pct' "$out")" = 41 ] || fail "claude metrics should come from the requested session"
+  [ "$(jq -r '.tool_calls' "$out")" = 101 ] || fail "claude metrics should ignore newer checkpoints for other sessions"
+  pass "claude checkpoint selection is scoped to the requested session"
+}
+
+test_claude_checkpoint_missing_session_is_loud() {
+  local dir out err status
+  dir="$TMP_ROOT/claude-missing"
+  mkdir -p "$dir"
+  jq --arg session other-session '.session_id = $session' "$CLAUDE_FIXTURE" > "$dir/other.json"
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT/claude-missing-state" \
+    FM_WATCHDOG_CLAUDE_CHECKPOINT_DIR="$dir" \
+    bash -c '. "$1"; fm_watchdog_collect_metrics claude missing-session' _ "$ROOT/bin/fm-watchdog-lib.sh" 2>"$TMP_ROOT/claude-missing.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/claude-missing.err")
+  expect_code 3 "$status" "missing claude session should exit with parser mismatch code"
+  [ -z "$out" ] || fail "missing claude session should not print a metrics path"
+  assert_contains "$err" "missing-session" "missing claude session error should name the requested session"
+  pass "claude checkpoint selection fails loudly without a matching session"
+}
+
 test_corrupt_claude_checkpoint_is_loud() {
   local corrupt out err status
   corrupt="$TMP_ROOT/corrupt"
@@ -45,6 +83,46 @@ test_corrupt_claude_checkpoint_is_loud() {
   [ -z "$out" ] || fail "corrupt checkpoint should not print a metrics path"
   assert_contains "$err" "WATCHDOG_PARSER_MISMATCH" "corrupt checkpoint should fail loudly"
   pass "corrupt checkpoint cannot silently produce metrics"
+}
+
+write_codex_rollout() {
+  local file=$1 session=$2 total=$3 primary=$4 secondary=$5
+  printf '%s\n' \
+    "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"$session\",\"id\":\"$session\"}}" \
+    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":$total},\"model_context_window\":1000},\"rate_limits\":{\"primary\":{\"used_percent\":$primary},\"secondary\":{\"used_percent\":$secondary}}}}" \
+    > "$file"
+}
+
+test_codex_rollout_selection_matches_session() {
+  local dir out
+  dir="$TMP_ROOT/codex-selection"
+  mkdir -p "$dir"
+  write_codex_rollout "$dir/rollout-target.jsonl" codex-target 500 12 34
+  write_codex_rollout "$dir/rollout-other.jsonl" codex-other 900 56 78
+  touch -t 202607080101 "$dir/rollout-target.jsonl"
+  touch -t 202607080202 "$dir/rollout-other.jsonl"
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT/codex-selection-state" \
+    FM_WATCHDOG_CODEX_SESSION_DIR="$dir" \
+    bash -c '. "$1"; fm_watchdog_collect_metrics codex codex-target' _ "$ROOT/bin/fm-watchdog-lib.sh")
+  jq -e '.context_pct == 50 and .five_hr_pct == 12 and .seven_day_pct == 34' "$out" >/dev/null \
+    || fail "codex metrics should come from the requested session"
+  pass "codex rollout selection is scoped to the requested session"
+}
+
+test_codex_rollout_missing_session_is_loud() {
+  local dir out err status
+  dir="$TMP_ROOT/codex-missing"
+  mkdir -p "$dir"
+  write_codex_rollout "$dir/rollout-other.jsonl" codex-other 900 56 78
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT/codex-missing-state" \
+    FM_WATCHDOG_CODEX_SESSION_DIR="$dir" \
+    bash -c '. "$1"; fm_watchdog_collect_metrics codex missing-codex' _ "$ROOT/bin/fm-watchdog-lib.sh" 2>"$TMP_ROOT/codex-missing.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/codex-missing.err")
+  expect_code 3 "$status" "missing codex session should exit with parser mismatch code"
+  [ -z "$out" ] || fail "missing codex session should not print a metrics path"
+  assert_contains "$err" "missing-codex" "missing codex session error should name the requested session"
+  pass "codex rollout selection fails loudly without a matching session"
 }
 
 test_unknown_harness_is_observe_only_tolerant() {
@@ -79,7 +157,11 @@ test_threshold_config_override() {
 }
 
 test_claude_checkpoint_metrics
+test_claude_checkpoint_selection_matches_session
+test_claude_checkpoint_missing_session_is_loud
 test_corrupt_claude_checkpoint_is_loud
+test_codex_rollout_selection_matches_session
+test_codex_rollout_missing_session_is_loud
 test_unknown_harness_is_observe_only_tolerant
 test_threshold_defaults
 test_threshold_config_override

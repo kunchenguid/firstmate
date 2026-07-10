@@ -82,6 +82,59 @@ fm_watchdog_latest_codex_rollout() {
   fm_watchdog_latest_file "$dir" 'rollout-*.jsonl'
 }
 
+fm_watchdog_claude_checkpoint_matches_session() {
+  local file=$1 session_id=$2
+  jq -e --arg session_id "$session_id" '
+    (.session_id // .sessionId // "") == $session_id
+  ' "$file" >/dev/null 2>&1
+}
+
+fm_watchdog_codex_rollout_matches_session() {
+  local file=$1 session_id=$2
+  jq -e --arg session_id "$session_id" '
+    select(.type == "session_meta")
+    | ((.payload.session_id // .payload.id // .session_id // .sessionId // "") == $session_id)
+  ' "$file" >/dev/null 2>&1
+}
+
+fm_watchdog_latest_claude_checkpoint_for_session() {
+  local session_id=$1 dir=${FM_WATCHDOG_CLAUDE_CHECKPOINT_DIR:-$HOME/.claude/token-optimizer/checkpoints}
+  local file mtime best_file='' best_mtime=-1
+  [ -d "$dir" ] || return 1
+  while IFS= read -r -d '' file; do
+    fm_watchdog_claude_checkpoint_matches_session "$file" "$session_id" || continue
+    mtime=$(fm_path_mtime "$file") || continue
+    case "$mtime" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$mtime" -gt "$best_mtime" ]; then
+      best_mtime=$mtime
+      best_file=$file
+    fi
+  done < <(find "$dir" -type f -name '*.json' -print0 2>/dev/null)
+  [ -n "$best_file" ] || return 1
+  printf '%s\n' "$best_file"
+}
+
+fm_watchdog_latest_codex_rollout_for_session() {
+  local session_id=$1 dir=${FM_WATCHDOG_CODEX_SESSION_DIR:-$HOME/.codex/sessions}
+  local file mtime best_file='' best_mtime=-1
+  [ -d "$dir" ] || return 1
+  while IFS= read -r -d '' file; do
+    fm_watchdog_codex_rollout_matches_session "$file" "$session_id" || continue
+    mtime=$(fm_path_mtime "$file") || continue
+    case "$mtime" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$mtime" -gt "$best_mtime" ]; then
+      best_mtime=$mtime
+      best_file=$file
+    fi
+  done < <(find "$dir" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null)
+  [ -n "$best_file" ] || return 1
+  printf '%s\n' "$best_file"
+}
+
 fm_watchdog_write_metrics() {
   local path=$1 json=$2 tmp
   mkdir -p "$(dirname "$path")"
@@ -96,10 +149,12 @@ fm_watchdog_claude_metrics_json() {
   collected_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq -ce \
     --arg harness "$harness" \
+    --arg session_id "$session_id" \
     --arg collected_at "$collected_at" \
     --argjson parser_version "$FM_WATCHDOG_PARSER_VERSION" '
       def number_or_null: if type == "number" then . else null end;
       if (.version == 1)
+        and ((.session_id // .sessionId // "") == $session_id)
         and (.fill_pct | type == "number")
         and (.quality | type == "object")
         and (.quality.tool_calls | type == "number")
@@ -129,13 +184,18 @@ fm_watchdog_codex_metrics_json() {
     --argjson parser_version "$FM_WATCHDOG_PARSER_VERSION" '
       def token_events:
         map(select(.type == "event_msg" and .payload.type == "token_count"));
+      def session_matches:
+        map(select(.type == "session_meta")
+          | ((.payload.session_id // .payload.id // .session_id // .sessionId // "") == $session_id))
+        | any;
       def last_token_event: token_events | last;
       def pct($used; $limit):
         if ($used | type == "number") and ($limit | type == "number") and $limit > 0
         then (($used / $limit * 1000) | round / 10)
         else null
         end;
-      if (last_token_event | type == "object")
+      if session_matches
+        and (last_token_event | type == "object")
         and (last_token_event.payload.info.last_token_usage.total_tokens | type == "number")
         and (last_token_event.payload.info.model_context_window | type == "number")
         and (last_token_event.payload.rate_limits.primary.used_percent | type == "number")
@@ -180,13 +240,13 @@ fm_watchdog_collect_metrics() {
   path=$(fm_watchdog_metrics_path "$session_id")
   case "$harness" in
     claude)
-      source=$(fm_watchdog_latest_claude_checkpoint) \
-        || fm_watchdog_parser_mismatch "no claude token-optimizer checkpoint found"
+      source=$(fm_watchdog_latest_claude_checkpoint_for_session "$session_id") \
+        || fm_watchdog_parser_mismatch "no claude token-optimizer checkpoint found for session: $session_id"
       metrics=$(fm_watchdog_claude_metrics_json "$harness" "$session_id" "$source")
       ;;
     codex)
-      source=$(fm_watchdog_latest_codex_rollout) \
-        || fm_watchdog_parser_mismatch "no codex rollout file found"
+      source=$(fm_watchdog_latest_codex_rollout_for_session "$session_id") \
+        || fm_watchdog_parser_mismatch "no codex rollout file found for session: $session_id"
       metrics=$(fm_watchdog_codex_metrics_json "$harness" "$session_id" "$source")
       ;;
     *)
