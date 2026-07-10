@@ -28,16 +28,20 @@ LABEL_WORKTREE=
 LABEL_CURRENT=
 LABEL_NEW=
 fm_label_cleanup() {
+  local original_status=$1
+  trap - EXIT
+  set +e
   if [ "$LABEL_RENAME_PENDING" = 1 ]; then
     if ! fm_backend_herdr_rename_owned_task "$LABEL_TARGET" "$LABEL_WORKSPACE" "$LABEL_TAB" "$LABEL_NEW" "$LABEL_WORKTREE" "$LABEL_CURRENT"; then
       echo "warning: could not restore the prior herdr tab label after metadata update failure" >&2
     fi
   fi
-  [ -z "$META_TMP" ] || rm -f "$META_TMP"
-  [ -z "$META_SNAPSHOT" ] || rm -f "$META_SNAPSHOT"
-  [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"
+  [ -z "$META_TMP" ] || rm -f "$META_TMP" || :
+  [ -z "$META_SNAPSHOT" ] || rm -f "$META_SNAPSHOT" || :
+  [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK" || :
+  exit "$original_status"
 }
-trap fm_label_cleanup EXIT
+trap 'fm_label_cleanup "$?"' EXIT
 
 [ "$#" -eq 2 ] || { echo "usage: fm-label.sh <id|fm-id> <phase-text>" >&2; exit 2; }
 RAW_ID=$1

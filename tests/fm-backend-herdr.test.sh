@@ -282,19 +282,28 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
-test_rename_task_resolves_tab_from_pane_target() {
+test_rename_owned_task_requires_corroborated_identity() {
   local dir log resp fb out
-  dir="$TMP_ROOT/rename-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"pane":{"tab_id":"w1:t2"}}}\n' > "$resp/1.out"
+  dir="$TMP_ROOT/rename-owned-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-owned"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"/tmp/owned-worktree"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rename_task fmtest:w1:p2 "project: validating"' "$ROOT" )
-  [ -z "$out" ] || fail "rename_task should be silent on success, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rename_owned_task fmtest:w1:p2 w1 w1:t2 fm-owned /tmp/owned-worktree "project: validating"' "$ROOT" )
+  [ -z "$out" ] || fail "rename_owned_task should be silent on success, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list' \
+    "rename_owned_task did not verify the recorded workspace"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
+    "rename_owned_task did not verify the recorded tab and label"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
+    "rename_owned_task did not verify the recorded pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' \
-    "rename_task did not resolve the current tab through pane get"
+    "rename_owned_task did not verify the recorded worktree"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename'$'\x1f''w1:t2'$'\x1f''project: validating' \
-    "rename_task did not call tab rename with the resolved tab id and label"
-  pass "fm_backend_herdr_rename_task: resolves the current tab from the recorded pane target"
+    "rename_owned_task did not rename the corroborated tab"
+  pass "fm_backend_herdr_rename_owned_task: corroborates ownership before renaming"
 }
 
 test_close_owned_task_requires_confirmed_absence() {
@@ -360,6 +369,50 @@ EOF
   assert_contains "$(cat "$state/label-task.meta")" "label=project-name: validating" \
     "fm-label did not record the new label in task metadata"
   pass "fm-label.sh: updates a herdr tab label and records the rendered label in metadata"
+}
+
+test_fm_label_cleanup_releases_lock_when_temp_removal_fails() {
+  local dir log resp fb home state out status
+  dir="$TMP_ROOT/fm-label-cleanup-rm-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; state="$home/state"; mkdir -p "$state"
+  cat > "$state/cleanup.meta" <<EOF
+window=fmtest:w1:p2
+worktree=$dir/worktree
+project=$dir/project-name
+kind=ship
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
+EOF
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-cleanup"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"%s"}}}\n' "$dir/worktree" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  cat > "$fb/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  case "$arg" in
+    *.meta.snapshot.*)
+      printf '%s\n' "$arg" >> "${FM_FAKE_RM_LOG:?}"
+      exit 1
+      ;;
+  esac
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fb/rm"
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_FAKE_RM_LOG="$dir/rm.log" \
+    "$ROOT/bin/fm-label.sh" cleanup validating 2>&1 )
+  status=$?
+  expect_code 0 "$status" "fm-label should preserve success when best-effort snapshot cleanup fails"
+  [ "$out" = "fm-label: cleanup -> project-name: validating" ] || fail "fm-label returned unexpected output after cleanup failure: $out"
+  [ -s "$dir/rm.log" ] || fail "fm-label cleanup test did not inject the snapshot removal failure"
+  [ ! -e "$state/.cleanup.meta.lock" ] || fail "fm-label left its metadata update lock behind after snapshot removal failed"
+  pass "fm-label.sh: cleanup failure preserves status and releases the metadata lock"
 }
 
 test_fm_label_refuses_uncorroborated_recycled_target() {
@@ -2898,10 +2951,11 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
-test_rename_task_resolves_tab_from_pane_target
+test_rename_owned_task_requires_corroborated_identity
 test_close_owned_task_requires_confirmed_absence
 test_task_ownership_uses_exact_recorded_workspace_id
 test_fm_label_updates_herdr_tab_and_meta
+test_fm_label_cleanup_releases_lock_when_temp_removal_fails
 test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
 test_fm_label_does_not_recreate_removed_metadata

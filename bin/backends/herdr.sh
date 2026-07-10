@@ -568,21 +568,6 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
-# fm_backend_herdr_rename_task: rename the tab owning <target> to <label>.
-# The pane target is resolved first, then pane get supplies the current tab id
-# so this remains correct when herdr has restored a pane with a new id.
-fm_backend_herdr_rename_task() {  # <target> <label>
-  local target=$1 label=$2 pane_info tab_id
-  fm_backend_herdr_target_ready "$target" || return 1
-  pane_info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
-  tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
-  [ -n "$tab_id" ] || {
-    echo "error: could not resolve the herdr tab for pane $FM_BACKEND_HERDR_PANE" >&2
-    return 1
-  }
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$label" >/dev/null 2>&1
-}
-
 fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
   local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 workspaces workspace_label expected_workspace_label tabs live_label pane_id live_path
   [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
