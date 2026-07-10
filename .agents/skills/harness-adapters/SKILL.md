@@ -43,6 +43,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
 When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+The `omp` (Oh My Pi) adapter's env marker is `OMPCODE=1`, set by omp for its child/tool processes; `bin/fm-harness.sh` checks it BEFORE the claude `CLAUDECODE=1` marker because omp sets BOTH, so omp is never misdetected as claude. Ancestry fallback also matches an `omp` command name or a `bun`/`node`/`python` process whose args reference omp.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
@@ -51,7 +52,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
-`opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+`opencode`, `pi`, `grok`, and `omp` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
@@ -59,7 +60,7 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
-`opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+`opencode`, `pi`, and `omp` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any primary PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 
@@ -71,6 +72,7 @@ Claude and Grok use tracked background-notify cycles around `bin/fm-watch-arm.sh
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi uses the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions Pi auto-discovers once trusted.
+omp (a Pi fork) uses the tracked `.omp/extensions/fm-primary-turnend-guard.ts` plus the tracked `.omp/extensions/fm-primary-omp-watch.ts`, both project-local extensions omp auto-discovers once trusted (omp scans `.omp/extensions/`, never `.pi/`).
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -86,6 +88,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Adapter added; profile flags read from `omp --help` (omp v16.3.15), full supervised loop PENDING live verification. omp is a Pi fork: `--thinking` also accepts `off\|minimal\|auto` but not `max` (omit it), `--auto-approve` grants autonomy, `-e/--extension` loads the turn-end/watch supervisors. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -99,6 +102,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- omp: `/no-mistakes` (omp supports slash-command skills, like claude); no separate verified invocation quirk, use natural language if uncertain. The skill must be discoverable by omp (a scope omp reads, e.g. `~/.omp/agent/skills/` or the project `.claude/skills/`).
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 
 ## claude (VERIFIED)
@@ -264,3 +268,24 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## omp (ADAPTER ADDED - PENDING LIVE VERIFICATION)
+
+omp (Oh My Pi, https://omp.sh) is a Pi fork with a Pi-compatible extension API (`turn_end` / `tool_call` events, `{block:true}` from `tool_call`, `pi.sendUserMessage(..., { deliverAs: "followUp" })`). This adapter was ported from the pi adapter; the facts below are derived from omp source and `omp --help` (omp v16.3.15) plus the shared Pi mechanism, but the end-to-end supervised loop has NOT yet been validated on a live omp session. Verify per the "verify a new adapter" protocol above before trusting it as a co-primary, then promote this heading to VERIFIED with a date.
+
+| Fact | Value |
+|---|---|
+| Env marker | `OMPCODE=1` (omp also sets `CLAUDECODE=1`; `fm-harness.sh` checks `OMPCODE` first) |
+| Busy-pane signature | `Working...`/`Working…` loader and/or claude-style `esc to interrupt` - PENDING live capture; override with `FM_BUSY_REGEX` / `FM_COMPOSER_IDLE_RE` |
+| Exit command | `/quit` (inherited from pi; VERIFY) |
+| Interrupt | single Escape (inherited from pi; VERIFY) |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Autonomy | `--auto-approve` (omp HAS an approval system, unlike pi; fm-spawn passes it for crewmates) |
+
+omp is claude-compatible (sets `CLAUDECODE=1`) but does NOT implement Claude Code's `.claude/settings.json` `Stop`/`PreToolUse` event-hook contract - it uses its own `.omp/extensions/` runtime instead. That is exactly why detection must resolve `omp`, not `claude`: a claude-detected omp session would install `.claude/settings.json` Stop/PreToolUse hooks that omp never fires, silently disabling supervision.
+
+**Primary-session guard (ported from the Pi guard, kept in lockstep; PENDING live verification).**
+The primary's turn-end guard AND PreToolUse seatbelt both live in `.omp/extensions/fm-primary-turnend-guard.ts`. It listens for `turn_end` because OMP has no `agent_settled` event (Pi 0.80.5-only); the `guardFollowupActive` one-shot skip gives the same "guard once per run" behavior. On block it `await`s `pi.sendUserMessage(..., { deliverAs: "followUp" })` when `bin/fm-turnend-guard.sh` returns 2. The seatbelt returns `{ block: true }` from the `tool_call` handler when `bin/fm-arm-pretool-check.sh` denies a bash command.
+
+**Primary watcher (ported from the Pi watcher, kept in lockstep; PENDING live verification).**
+`.omp/extensions/fm-primary-omp-watch.ts` registers the `fm_watch_arm_omp` tool (primary path, called instead of a foreground bash arm) plus the `/fm-watch-arm-omp` command as a human fallback (the command notifies via `ctx.ui.notify`). Arming spawns `bin/fm-watch-arm.sh --restart` attached to the live omp process and sends a follow-up wake when the child exits with an actionable reason; a one-shot `process.once("exit")` listener (mirroring Pi #397) plus `session_shutdown` stop the arm child on exit. `bin/fm-session-start.sh` reports when the running omp session has not loaded both extensions (markers `state/.omp-turnend-extension-loaded` and `state/.omp-watch-extension-loaded`). Both are project-local `.omp/extensions/*.ts` files omp auto-discovers once the project is trusted (approve trust once per clone, or launch with `-e` as the trust-free fallback). The tool schema uses `pi.zod.object({})` (OMP-canonical) rather than Pi's typebox `Type.Object({})`, and OMP's ToolDefinition has no `promptSnippet`/`promptGuidelines` fields.
