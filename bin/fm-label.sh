@@ -6,10 +6,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
-  echo "error: FM_HOME is not set; fm-label refuses to resolve targets without an explicit firstmate home" >&2
-  exit 1
-fi
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 [ -d "$FM_HOME" ] || { echo "error: FM_HOME '$FM_HOME' is not a directory" >&2; exit 1; }
 [ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing" >&2; exit 1; }

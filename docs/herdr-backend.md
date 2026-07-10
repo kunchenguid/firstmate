@@ -30,7 +30,8 @@ For `--secondmate` launches, secondmate home sync and inherited local-material p
 No first-run provisioning is needed beyond having `herdr` and `jq` on `PATH`; firstmate creates the workspace and tab it needs on first spawn.
 
 Watching and attaching: each firstmate home gets its own herdr workspace (the primary uses `firstmate-crew`; each secondmate uses `2ndmate-<secondmate-id>`), with one tab per task inside it.
-Tabs keep the `fm-<id>` label by default, while `fm-spawn.sh --label <text>` renders the tab as `<project>: <text>` and records the rendered value as `label=` in task metadata.
+Tabs keep the `fm-<id>` label by default, while a crewmate or scout `fm-spawn.sh --label <text>` renders the tab as `<project>: <text>` and records the rendered value as `label=` in task metadata.
+`--label` is rejected for `--secondmate` spawns because secondmate workspace labels already provide durable visibility and their recovery metadata belongs to the primary home.
 `bin/fm-label.sh <id> <phase-text>` updates a live herdr tab to `<project>: <phase-text>` and updates the same metadata field.
 Attach to the selected `HERDR_SESSION` and switch to the workspace for the home you want to watch to see every one of that home's tasks as tabs in one tab bar.
 You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home.

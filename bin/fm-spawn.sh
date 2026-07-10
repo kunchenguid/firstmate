@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <text>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <text>] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -27,8 +27,8 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   --label <text> records a human-readable task label and, on herdr, names the
-#   tab "<project>: <text>"; without it the current fm-<id> tab label is kept.
+#   --label <text> records a human-readable crewmate/scout label and, on herdr,
+#   names the tab "<project>: <text>"; without it the current fm-<id> tab label is kept.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -174,6 +174,11 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+[ "$KIND" != secondmate ] || [ "$LABEL_SET" -eq 0 ] || { echo "error: --label is supported only for crewmate and scout spawns, not --secondmate" >&2; exit 1; }
+
+# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
+# set by the batch loop below), so the guard runs once for the batch, not once per pair.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -203,6 +208,10 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+HERDR_LABEL_ABORT_CLEANUP=0
+HERDR_LABEL_ROLLBACK_DIR=
+HERDR_LABEL_TASK_TMP_PREEXISTED=0
+HERDR_LABEL_GOTMP_PREEXISTED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -222,8 +231,7 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
+  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
@@ -251,9 +259,83 @@ orca_spawn_abort_cleanup() {
       fi
     fi
   fi
+}
+
+herdr_labeled_spawn_abort_cleanup() {
+  local token hooks_dir suffix worktree_returned=1
+  [ "$HERDR_LABEL_ABORT_CLEANUP" = 1 ] || return 0
+  HERDR_LABEL_ABORT_CLEANUP=0
+  fm_backend_herdr_kill "$T" 2>/dev/null || true
+  token=$(cat "$STATE/$ID.grok-turnend-token" 2>/dev/null || true)
+  case "$token" in
+    ''|*[!A-Za-z0-9._-]*) ;;
+    *)
+      hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
+      rm -f "$hooks_dir/$token"
+      ;;
+  esac
+  if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" ]; then
+      mkdir -p "$WT/.claude"
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" "$WT/.claude/settings.local.json"
+    else
+      rm -f "$WT/.claude/settings.local.json"
+    fi
+    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin" ]; then
+      mkdir -p "$WT/.opencode/plugins"
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin" "$WT/.opencode/plugins/fm-turn-end.js"
+    else
+      rm -f "$WT/.opencode/plugins/fm-turn-end.js"
+    fi
+    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer" ]; then
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer" "$WT/.fm-grok-turnend"
+    else
+      rm -f "$WT/.fm-grok-turnend"
+    fi
+    rmdir "$WT/.opencode/plugins" "$WT/.opencode" "$WT/.claude" 2>/dev/null || true
+    if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null ); then
+      sleep 1
+      if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null ); then
+        worktree_returned=0
+        echo "warning: failed to return worktree $WT while rolling back labeled herdr spawn $ID; current attempt metadata remains in $STATE/$ID.meta" >&2
+      fi
+    fi
+  fi
+  if [ -n "${TASK_TMP:-}" ]; then
+    if [ "$HERDR_LABEL_TASK_TMP_PREEXISTED" = 0 ]; then
+      rm -rf "$TASK_TMP"
+    elif [ "$HERDR_LABEL_GOTMP_PREEXISTED" = 0 ]; then
+      rmdir "$TASK_TMP/gotmp" 2>/dev/null || true
+    fi
+  fi
+  for suffix in pi-ext.ts grok-turnend-token; do
+    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" ]; then
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" "$STATE/$ID.$suffix"
+    else
+      rm -f "$STATE/$ID.$suffix"
+    fi
+  done
+  if [ "$worktree_returned" = 1 ]; then
+    if [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/meta" "$STATE/$ID.meta"
+    else
+      rm -f "$STATE/$ID.meta"
+    fi
+    rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
+  elif [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
+    echo "warning: prior metadata for $ID remains at $HERDR_LABEL_ROLLBACK_DIR/meta" >&2
+  else
+    rmdir "$HERDR_LABEL_ROLLBACK_DIR" 2>/dev/null || true
+  fi
+}
+
+spawn_abort_cleanup() {
+  local status=$?
+  herdr_labeled_spawn_abort_cleanup
+  orca_spawn_abort_cleanup
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+trap spawn_abort_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -892,12 +974,24 @@ fi
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
+[ ! -d "$TASK_TMP" ] || HERDR_LABEL_TASK_TMP_PREEXISTED=1
+[ ! -d "$TASK_TMP/gotmp" ] || HERDR_LABEL_GOTMP_PREEXISTED=1
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
 mkdir -p "$STATE"
+if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ]; then
+  HERDR_LABEL_ROLLBACK_DIR=$(mktemp -d "$STATE/.fm-spawn-$ID.XXXXXX")
+  for suffix in meta pi-ext.ts grok-turnend-token; do
+    [ ! -f "$STATE/$ID.$suffix" ] || cp -p "$STATE/$ID.$suffix" "$HERDR_LABEL_ROLLBACK_DIR/$suffix"
+  done
+  [ ! -f "$WT/.claude/settings.local.json" ] || cp -p "$WT/.claude/settings.local.json" "$HERDR_LABEL_ROLLBACK_DIR/claude-settings"
+  [ ! -f "$WT/.opencode/plugins/fm-turn-end.js" ] || cp -p "$WT/.opencode/plugins/fm-turn-end.js" "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin"
+  [ ! -f "$WT/.fm-grok-turnend" ] || cp -p "$WT/.fm-grok-turnend" "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer"
+  HERDR_LABEL_ABORT_CLEANUP=1
+fi
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
@@ -1057,10 +1151,12 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ] && ! fm_backend_herdr_rename_task "$T" "$SPAWN_LABEL"; then
-  rm -f "$STATE/$ID.meta"
-  fm_backend_herdr_kill "$T"
   echo "error: could not apply herdr display label for $W" >&2
   exit 1
+fi
+if [ "$HERDR_LABEL_ABORT_CLEANUP" = 1 ]; then
+  HERDR_LABEL_ABORT_CLEANUP=0
+  rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
 fi
 
 sq_brief=$(shell_quote "$BRIEF")

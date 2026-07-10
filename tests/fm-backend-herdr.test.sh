@@ -319,7 +319,7 @@ EOF
 }
 
 test_fm_label_nonherdr_is_clear_noop() {
-  local dir home state out
+  local dir home state out fallback_out
   dir="$TMP_ROOT/fm-label-tmux"; home="$dir/home"; state="$home/state"; mkdir -p "$state"
   cat > "$state/noop-task.meta" <<EOF
 window=firstmate:fm-noop-task
@@ -328,7 +328,9 @@ EOF
   out=$( FM_HOME="$home" "$ROOT/bin/fm-label.sh" noop-task building )
   [ "$out" = "fm-label: backend=tmux does not support live labels; no-op for noop-task" ] \
     || fail "fm-label did not clearly report the non-herdr no-op: $out"
-  pass "fm-label.sh: non-herdr backends are clear no-ops"
+  fallback_out=$( env -u FM_HOME FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-label.sh" noop-task building )
+  [ "$fallback_out" = "$out" ] || fail "fm-label without FM_HOME did not use the repo-root fallback: $fallback_out"
+  pass "fm-label.sh: non-herdr backends are clear no-ops and bare invocation uses the repo-root home"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -784,16 +786,112 @@ EOF
   pass "fm_backend_herdr_list_live: metadata maps human labels to stable identities and excludes manual colon tabs"
 }
 
-test_fm_spawn_writes_meta_before_human_label_rename() {
-  local meta_line rename_line cleanup_line kill_line
-  meta_line=$(grep -nF "} > \"\$STATE/\$ID.meta\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  rename_line=$(grep -nF "if [ \"\$BACKEND\" = herdr ] && [ \"\$LABEL_SET\" -eq 1 ] && ! fm_backend_herdr_rename_task" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
-  cleanup_line=$(grep -nF "rm -f \"\$STATE/\$ID.meta\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  kill_line=$(grep -nF "fm_backend_herdr_kill \"\$T\"" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$meta_line" ] && [ -n "$rename_line" ] || fail "fm-spawn is missing the metadata-write or display-rename step"
-  [ "$meta_line" -lt "$rename_line" ] || fail "fm-spawn must keep the stable fm-<id> label until metadata is durable"
-  [ "$rename_line" -lt "$cleanup_line" ] && [ "$cleanup_line" -lt "$kill_line" ] || fail "fm-spawn must remove metadata and kill the tab when the display rename fails"
-  pass "fm-spawn: human display rename follows durable metadata and cleans up atomically on failure"
+test_fm_spawn_rejects_secondmate_label_before_guard() {
+  local dir fake_root guard_marker out status
+  dir="$TMP_ROOT/spawn-secondmate-label"; fake_root="$dir/root"; guard_marker="$dir/guard-ran"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-guard.sh" <<EOF
+#!/usr/bin/env bash
+touch '$guard_marker'
+EOF
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  out=$( FM_ROOT_OVERRIDE="$fake_root" "$ROOT/bin/fm-spawn.sh" label-sm --secondmate --label building 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn should reject --label with --secondmate"
+  assert_contains "$out" "supported only for crewmate and scout spawns" "fm-spawn did not clearly reject the secondmate label"
+  [ ! -e "$guard_marker" ] || fail "fm-spawn ran the watcher guard before rejecting the secondmate label"
+  pass "fm-spawn: rejects --label with --secondmate before mutable spawn checks"
+}
+
+test_fm_spawn_rolls_back_failed_human_label_rename() {
+  local mode dir home state project wt fakebin log treehouse_log id out status prior rollback treehouse_fail
+  for mode in success failure; do
+    dir="$TMP_ROOT/spawn-label-rollback-$mode"; home="$dir/home"; state="$home/state"; project="$dir/project"; wt="$dir/worktree"
+    fakebin="$dir/fakebin"; log="$dir/herdr.log"; treehouse_log="$dir/treehouse.log"; id="label-rollback-$mode"
+    mkdir -p "$home/data/$id" "$state" "$fakebin"
+    fm_git_init_commit "$project"
+    git -C "$project" worktree add -q -b "$id" "$wt"
+    mkdir -p "$wt/.claude"
+    printf '{"prior":true}\n' > "$wt/.claude/settings.local.json"
+    printf 'rollback test\n' > "$home/data/$id/brief.md"
+    cat > "$state/$id.meta" <<EOF
+window=fmtest:w1:p-old
+worktree=$wt
+project=$project
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t-old
+herdr_pane_id=w1:p-old
+EOF
+    prior="$dir/prior.meta"
+    cp "$state/$id.meta" "$prior"
+    if [ "$mode" = failure ]; then
+      mkdir -p "/tmp/fm-$id"
+      printf 'prior temp\n' > "/tmp/fm-$id/prior"
+    fi
+    cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
+  "tab list") printf '{"result":{"tabs":[]}}\n' ;;
+  "tab create") printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
+  "tab rename") exit 1 ;;
+esac
+exit 0
+SH
+    cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "${FM_TREEHOUSE_LOG:?}"
+[ "${1:-}" = return ] && [ "${2:-}" = --force ]
+[ "$(cat "$3/.claude/settings.local.json")" = '{"prior":true}' ]
+[ "${FM_TREEHOUSE_FAIL:-0}" = 0 ] || exit 1
+git -C "$PWD" worktree remove --force "$3"
+SH
+    chmod +x "$fakebin/herdr" "$fakebin/treehouse"
+    treehouse_fail=0
+    [ "$mode" != failure ] || treehouse_fail=1
+    out=$( PATH="$fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$home" HERDR_SESSION=fmtest \
+      FM_HERDR_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_WORKTREE="$wt" \
+      FM_TREEHOUSE_FAIL="$treehouse_fail" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "fm-spawn should fail when the herdr display rename fails"
+    assert_contains "$out" "could not apply herdr display label" "fm-spawn did not report the failed display rename"
+    assert_contains "$(cat "$log")" "pane close w1:p-new" "fm-spawn did not close the failed herdr endpoint"
+    [ ! -e "$state/$id.pi-ext.ts" ] && [ ! -e "$state/$id.grok-turnend-token" ] \
+      || fail "fm-spawn left per-task hook state after rename failure"
+    if [ "$mode" = success ]; then
+      cmp -s "$prior" "$state/$id.meta" || fail "fm-spawn did not restore the prior recovery metadata"
+      [ ! -d "$wt" ] || fail "fm-spawn left the acquired treehouse worktree after rename failure"
+      [ ! -d "/tmp/fm-$id" ] || fail "fm-spawn left the newly created per-task temp root after rename failure"
+      [ -z "$(find "$state" -maxdepth 1 -name ".fm-spawn-$id.*" -print -quit)" ] \
+        || fail "fm-spawn left its rollback snapshot after successful cleanup"
+    else
+      assert_contains "$out" "current attempt metadata remains in $state/$id.meta" "fm-spawn did not report the recovery trail after treehouse rollback failed"
+      assert_contains "$(cat "$state/$id.meta")" "window=fmtest:w1:p-new" "fm-spawn did not retain current cleanup metadata after treehouse rollback failed"
+      rollback=$(find "$state" -maxdepth 1 -type d -name ".fm-spawn-$id.*" -print -quit)
+      if [ -z "$rollback" ] || ! cmp -s "$prior" "$rollback/meta"; then
+        fail "fm-spawn did not preserve prior metadata after treehouse rollback failed"
+      fi
+      [ -f "$wt/.claude/settings.local.json" ] && [ "$(cat "$wt/.claude/settings.local.json")" = '{"prior":true}' ] \
+        || fail "fm-spawn did not restore the pre-existing worktree hook after rollback failed"
+      [ -f "/tmp/fm-$id/prior" ] || fail "fm-spawn deleted pre-existing task temp state during rollback"
+      [ "$(wc -l < "$treehouse_log" | tr -d ' ')" = 2 ] || fail "fm-spawn did not retry treehouse return once"
+      git -C "$project" worktree remove --force "$wt"
+      rm -rf "/tmp/fm-$id"
+    fi
+  done
+  pass "fm-spawn: failed herdr display rename rolls back fully or retains both recovery trails"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -2218,7 +2316,8 @@ test_create_task_creates_with_no_focus_flag
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_list_live_maps_recorded_human_label_and_excludes_manual_colon_tab
-test_fm_spawn_writes_meta_before_human_label_rename
+test_fm_spawn_rejects_secondmate_label_before_guard
+test_fm_spawn_rolls_back_failed_human_label_rename
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read
