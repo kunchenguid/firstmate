@@ -210,6 +210,28 @@ test_budget_rejects_recognized_option_as_value() {
   pass "fm-brief.sh: --budget rejects recognized options as its value"
 }
 
+test_ship_and_scout_reject_excess_positionals() {
+  local home id brief kind status output
+  home="$TMP_ROOT/excess-positionals-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-excess-positionals-$kind"
+    status=0
+    if [ "$kind" = scout ]; then
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --budget hard stop at 30 minutes 2>&1) || status=$?
+    else
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget hard stop at 30 minutes 2>&1) || status=$?
+    fi
+    expect_code 1 "$status" "$kind brief must reject excess positional arguments"
+    assert_contains "$output" "error: ship and scout briefs accept only <task-id> and <repo-name> as positional arguments" \
+      "$kind brief returned the wrong excess-positionals error"
+    brief="$home/data/$id/brief.md"
+    assert_absent "$brief" "$kind brief silently scaffolded with a truncated unquoted budget"
+  done
+  pass "fm-brief.sh: ship and scout briefs reject excess positional arguments"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -424,6 +446,7 @@ test_ship_project_memory_wording
 test_stop_conditions_default_for_ship_and_scout
 test_stop_conditions_budget_override_for_ship_and_scout
 test_budget_rejects_recognized_option_as_value
+test_ship_and_scout_reject_excess_positionals
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

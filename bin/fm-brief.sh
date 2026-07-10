@@ -102,6 +102,12 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$KIND" != secondmate ] && [ "${#POS[@]}" -gt 2 ]; then
+  echo "error: ship and scout briefs accept only <task-id> and <repo-name> as positional arguments" >&2
+  exit 1
+fi
+
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
