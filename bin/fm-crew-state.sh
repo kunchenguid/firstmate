@@ -51,6 +51,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -116,12 +118,15 @@ log_note_of() {  # <line>
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
-map_log_state() {  # <verb>
-  case "$1" in
+map_log_state() {  # <line>
+  if status_is_paused "$1"; then
+    echo paused
+    return
+  fi
+  case "$(log_verb_of "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    paused)         echo paused ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
@@ -562,7 +567,7 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
 fi
 
 if [ -n "$LOG_VERB" ]; then
-  emit "$(map_log_state "$LOG_VERB")" status-log "$(log_note_of "$LOG_LINE")"
+  emit "$(map_log_state "$LOG_LINE")" status-log "$(log_note_of "$LOG_LINE")"
 fi
 
 emit unknown none "no current-state source available"

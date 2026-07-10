@@ -242,6 +242,38 @@ test_housekeeping_paused_unpaused_cleared() {
   pass "housekeeping clears a paused marker once the crew is no longer declaring the pause"
 }
 
+test_housekeeping_stale_marker_transitions_to_pause() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-to-paused)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w14"; pane="$dir/pane.txt"
+  printf 'paused: awaiting the upstream tool release\n' > "$state/held-w14.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w14" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "existing stale marker did not move to paused state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "existing stale marker remained wedge-aged after pause"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a newly declared pause was escalated as a possible wedge"
+  pass "housekeeping moves an existing stale marker to pause before wedge escalation"
+}
+
+test_housekeeping_pause_marker_transitions_to_stale() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase paused-to-stale)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w15"; pane="$dir/pane.txt"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w15.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w15" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "pause marker remained after the crew resumed"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "resume did not restart normal stale tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "resuming from pause escalated immediately"
+  pass "housekeeping restarts normal stale tracking when a crew leaves pause"
+}
+
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -1204,6 +1236,8 @@ test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
+test_housekeeping_stale_marker_transitions_to_pause
+test_housekeeping_pause_marker_transitions_to_stale
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_footer_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared

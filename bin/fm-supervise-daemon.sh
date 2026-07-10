@@ -448,7 +448,7 @@ stale_marker_remove() {  # <window> <state>
 # longer than a wedge) and re-surfaces the pause once per window. Recording is
 # create-if-absent so the timestamp is stable across a churny idle pane (many
 # distinct stale hashes map to one marker), keeping the cadence hash-immune.
-pause_marker_record() {  # <window> <state>  — create if absent
+pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-paused-$key"
@@ -677,8 +677,6 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     # Reconstruct the backend target from metadata, with the live tmux list as the
     # legacy fallback for old markers that predate meta lookup.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
@@ -686,6 +684,15 @@ housekeeping() {  # <state>
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
+    task=$(window_to_task "$win" "$state")
+    last=$(last_status_line "$state/$task.status")
+    if [ -n "$last" ] && status_is_paused "$last"; then
+      rm -f "$marker"
+      pause_marker_record "$win" "$state"
+      continue
+    fi
+    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -705,13 +712,19 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "$pause_secs" ] || continue
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
+    last=$(last_status_line "$state/$task.status")
+    if [ -z "$last" ] || ! status_is_paused "$last"; then
+      rm -f "$marker"
+      stale_marker_record "$win" "$state"
+      continue
+    fi
+    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;

@@ -323,6 +323,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+surface_nonterminal_stale() {  # <window> <hash>
+  local win=$1 h=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key"
+  wake "stale: $win"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -611,18 +620,31 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                fm_wake_append stale "$w" "stale: $w" || exit 1
-                printf '%s' "$h" > "$sf"
-                rm -f "$ssf" "$pf"
-                wake "stale: $w"
+                surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
-          elif [ -e "$pf" ]; then
-            # This hash was absorbed as a declared pause: re-check the long
-            # re-surface cadence (no crew re-read - handle_paused_stale is cheap).
-            handle_paused_stale "$w" "$(window_to_task "$w" "$STATE")" "$h"
           else
-            wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+            task=$(window_to_task "$w" "$STATE")
+            if [ -e "$pf" ]; then
+              if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+                handle_paused_stale "$w" "$task" "$h"
+              else
+                rm -f "$pf"
+                case "$(crew_absorb_class "$task")" in
+                  working) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                  paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                  *)       surface_nonterminal_stale "$w" "$h" ;;
+                esac
+              fi
+            elif status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+              case "$(crew_absorb_class "$task")" in
+                paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                working) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                *)       surface_nonterminal_stale "$w" "$h" ;;
+              esac
+            else
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+            fi
           fi
         fi
       else
