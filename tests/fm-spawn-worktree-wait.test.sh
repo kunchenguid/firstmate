@@ -69,12 +69,16 @@ make_case() {
 run_spawn() {
   local home=$1 fakebin=$2 seqfile=$3
   shift 3
+  # Pin the harness explicitly: this loop is harness-agnostic, but with no
+  # --harness fm-spawn resolves one via detection, which returns "unknown" in a
+  # harness-less environment (a bare CI runner) and fails at the launch-template
+  # lookup before the loop under test ever runs. claude is arbitrary here.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_SEQ="$seqfile" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" --harness claude "$@" 2>&1
 }
 
 # A transient FM_ROOT pane read (the pane's parent, before the shell finishes
