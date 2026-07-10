@@ -8,13 +8,15 @@
 # Scope-matching is firstmate's JUDGMENT: you pass the task-id keys you have
 # already judged in-scope for the secondmate. This script performs only the
 # mechanical move - it removes each matched item BLOCK (the `- [ ] <id> ...`
-# header line plus every following indented body line up to the next item line
-# or section heading) from data/backlog.md under the active firstmate home and
-# appends that full block, under the same section heading, to the secondmate
-# home's data/backlog.md (home resolved from data/secondmates.md). Body
-# membership is indentation, not content: indented lines that look like
-# markdown headings (e.g. `  ## Intent`) stay in the item and are not treated
-# as section boundaries. It never changes a line's text, never writes into a
+# header line plus every following body line - indented lines and blank
+# separators between paragraphs - up to the next item line or column-0 section
+# heading) from data/backlog.md under the active firstmate home and appends
+# that full block, under the same section heading, to the secondmate home's
+# data/backlog.md (home resolved from data/secondmates.md). Body membership is
+# by position, not content: an indented line or a blank line continues the
+# block, and indented lines that look like markdown headings (e.g.
+# `  ## Intent`) stay in the item and are not treated as section boundaries.
+# It never changes a line's text, never writes into a
 # project (it refuses a home that is not a firstmate home), and is idempotent:
 # a key already present in the secondmate backlog is reported and skipped (no
 # duplicate header or body), so re-running converges. If any key matches neither
@@ -262,9 +264,11 @@ if [ "$SUB_EXISTED" -eq 1 ]; then
 fi
 
 # Pass 1: drop each matched item block from the main backlog, capturing every
-# removed line (header + indented body) tagged with the "## " section heading
-# it lived under. Body membership is indentation only: a line starting with
-# whitespace continues the block even when its content looks like a heading.
+# removed line (header + body) tagged with the "## " section heading it lived
+# under. Body membership is position, not content: an indented line or a blank
+# line continues the block (blank separators between paragraphs stay with the
+# item), even when an indented line's content looks like a heading. Only a next
+# item header or a column-0 "## " heading ends the block.
 : > "$MOVED_FILE"
 MAIN_FINAL_LF=0
 if file_ends_with_lf "$MAIN_BACKLOG"; then
@@ -313,7 +317,7 @@ awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" -v keptfile="$KEPT_FILE"
     last_source_moved = 0
     next
   }
-  moving && /^[ \t]/ {
+  moving && /^([ \t].*)?$/ {
     emit_moved(section "\t" $0)
     last_source_kept = 0
     last_source_moved = 1

@@ -21,8 +21,9 @@ setup_homes() {
     "$id" "$sub_abs" > "$home/data/secondmates.md"
 }
 
-# Exact multi-line block extract: header matching key plus following indented lines,
-# stopping at the next item header or unindented section heading (column-0 ##).
+# Exact multi-line block extract: header matching key plus following body lines
+# (indented lines and blank separators between paragraphs), stopping at the next
+# item header or unindented section heading (column-0 ##).
 extract_item_block() {
   local file=$1 key=$2
   awk -v key="$key" '
@@ -37,7 +38,7 @@ extract_item_block() {
     }
     capturing && /^## / { exit }
     capturing && /^- \[[ x]\] / { exit }
-    capturing && /^[ \t]/ { print; next }
+    capturing && /^([ \t].*)?$/ { print; next }
     capturing { exit }
   ' "$file"
 }
@@ -334,8 +335,85 @@ EOF
   pass "indented ## Intent / ## Acceptance are body, not section boundaries"
 }
 
+test_multi_paragraph_body_with_internal_blanks_moves_whole() {
+  # The live re-orphan risk: a blank line inside a multi-paragraph body must not
+  # terminate the block and strand the paragraphs after it. Blank lines are body
+  # content and move with the item; only the next item header or a column-0
+  # section heading ends the block. Includes an indented ## after a blank.
+  local home="$TMP_ROOT/multi-para-main"
+  local sub="$TMP_ROOT/multi-para-sub"
+  setup_homes "$home" "$sub"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] before-multi - stays put (repo: alpha)
+  before body
+- [ ] multi-para - multi-paragraph body (repo: alpha)
+  First paragraph line.
+
+  Second paragraph after a blank.
+  ## Intent
+
+  Indented heading then blank then more.
+  final line
+- [ ] after-multi - subsequent item (repo: alpha)
+  after body
+
+## Done
+EOF
+
+  local expected_block
+  expected_block=$(extract_item_block "$home/data/backlog.md" multi-para)
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design multi-para >/dev/null \
+    || fail "handoff of multi-paragraph body failed"
+
+  local dest_block
+  dest_block=$(extract_item_block "$sub/data/backlog.md" multi-para)
+  assert_block_equals "multi-paragraph body with internal blanks must move whole" \
+    "$expected_block" "$dest_block"
+
+  # Every body line, including the ones after each internal blank, must leave the source.
+  assert_no_grep 'multi-para' "$home/data/backlog.md" "multi-para header still in source"
+  assert_no_grep 'First paragraph line' "$home/data/backlog.md" "first paragraph orphaned in source"
+  assert_no_grep 'Second paragraph after a blank' "$home/data/backlog.md" "post-blank paragraph orphaned in source"
+  assert_no_grep 'Indented heading then blank then more' "$home/data/backlog.md" "post-blank body orphaned in source"
+  assert_no_grep 'final line' "$home/data/backlog.md" "trailing body orphaned in source"
+  assert_no_grep '## Intent' "$home/data/backlog.md" "indented ## Intent left in source as if a section"
+
+  # The post-blank paragraphs must actually arrive at the destination.
+  assert_grep '  Second paragraph after a blank.' "$sub/data/backlog.md" "post-blank paragraph did not arrive"
+  assert_grep '  Indented heading then blank then more.' "$sub/data/backlog.md" "post-blank body did not arrive"
+  assert_grep '  ## Intent' "$sub/data/backlog.md" "indented ## Intent did not arrive at destination"
+
+  # Neighbors on both sides stay intact.
+  assert_grep 'before-multi' "$home/data/backlog.md" "before-multi was wrongly removed"
+  assert_grep '  before body' "$home/data/backlog.md" "before-multi body was disturbed"
+  assert_grep 'after-multi' "$home/data/backlog.md" "after-multi was wrongly removed"
+  assert_grep '  after body' "$home/data/backlog.md" "after-multi body was disturbed"
+
+  # Idempotent re-run: already present, no duplication, no mutation.
+  local main_after dest_after
+  main_after=$(cat "$home/data/backlog.md")
+  dest_after=$(cat "$sub/data/backlog.md")
+  local out
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design multi-para 2>&1) \
+    || fail "idempotent re-run of multi-paragraph body failed"
+  assert_contains "$out" "already present" "re-run did not report skip of already-present key"
+  [ "$main_after" = "$(cat "$home/data/backlog.md")" ] \
+    || fail "idempotent re-run mutated the main backlog"
+  [ "$dest_after" = "$(cat "$sub/data/backlog.md")" ] \
+    || fail "idempotent re-run mutated the secondmate backlog"
+  local count
+  count=$(grep -cF -- '  Second paragraph after a blank.' "$sub/data/backlog.md")
+  [ "$count" -eq 1 ] || fail "idempotent re-run duplicated a post-blank paragraph (count=$count)"
+
+  pass "multi-paragraph body with internal blank lines moves whole and is idempotent"
+}
+
 test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
+test_multi_paragraph_body_with_internal_blanks_moves_whole
 test_body_moves_when_last_lines_of_file
 test_eof_body_before_seeded_destination_section_keeps_boundary
 test_untouched_eof_line_preserves_terminator
