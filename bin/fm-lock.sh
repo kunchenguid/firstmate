@@ -60,7 +60,10 @@ harness_pid() {
       return 1
     fi
     pid=$(printf '%s' "$ppid" | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || { HARNESS_FAIL_REASON=harness-detect-failed; return 1; }
+    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
+      HARNESS_FAIL_REASON=harness-detect-failed
+      return 1
+    fi
   done
   HARNESS_FAIL_REASON=harness-detect-failed
   return 1
