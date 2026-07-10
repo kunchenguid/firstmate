@@ -199,6 +199,54 @@ test_handle_wake_paused_signal_records_pause_marker() {
   pass "handle_wake records a declared pause from a routine signal for long-cadence rechecks"
 }
 
+test_handle_wake_unpaused_signal_restores_stale_marker() {
+  local dir state key win
+  dir=$(make_supercase handle-unpaused-signal)
+  state="$dir/state"
+  win="sess:fm-held-w10-unpaused"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-unpaused.meta"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w10-unpaused.status"
+  key=$(printf '%s' "held-w10-unpaused" | tr '.:/' '___')
+  date +%s > "$state/.subsuper-paused-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-unpaused.status" "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused signal retained the pause marker"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "unpaused signal did not restart normal stale tracking"
+  pass "an unpaused signal moves a daemon pause marker back to normal stale tracking"
+}
+
+test_housekeeping_migrates_watcher_pause_marker() {
+  local dir state key win
+  dir=$(make_supercase migrate-watcher-pause)
+  state="$dir/state"
+  win="sess:fm-held-w10-migrate"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-w10-migrate.status"
+  key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$key"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  key=$(printf '%s' "held-w10-migrate" | tr '.:/' '___')
+  [ -e "$state/.subsuper-paused-$key" ] || fail "watcher pause marker was not migrated into daemon tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "watcher pause migration left a wedge marker behind"
+  pass "housekeeping migrates a normal-watcher's declared pause into daemon tracking"
+}
+
+test_housekeeping_migrates_watcher_unpaused_marker_to_stale() {
+  local dir state key watcher_key win
+  dir=$(make_supercase migrate-watcher-unpaused)
+  state="$dir/state"
+  win="sess:fm-held-w10-migrate-unpaused"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate-unpaused.meta"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "stale watcher pause marker was not cleared after resume"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused watcher handoff created a daemon pause marker"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "unpaused watcher handoff did not restore normal stale tracking"
+  pass "housekeeping converts an already-resumed watcher pause into normal daemon stale tracking"
+}
+
 # housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
 # as an awaiting-external recheck (never a wedge), and RESETS the marker so the
 # window repeats rather than firing once.
@@ -1248,6 +1296,9 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
+test_handle_wake_unpaused_signal_restores_stale_marker
+test_housekeeping_migrates_watcher_pause_marker
+test_housekeeping_migrates_watcher_unpaused_marker_to_stale
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets

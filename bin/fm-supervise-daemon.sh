@@ -461,6 +461,38 @@ pause_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-paused-$key"
 }
 
+reconcile_pause_tracking() {  # <window> <state> <last-status-line>
+  local win=$1 state=$2 last=$3 task key marker
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  marker="$state/.subsuper-paused-$key"
+  if status_is_paused "$last"; then
+    stale_marker_remove "$win" "$state"
+    pause_marker_record "$win" "$state"
+  elif [ -e "$marker" ]; then
+    pause_marker_remove "$win" "$state"
+    stale_marker_record "$win" "$state"
+  fi
+}
+
+migrate_watcher_pause_markers() {  # <state>
+  local state=$1 meta win task key last
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    win=$(fm_backend_target_of_meta "$meta")
+    [ -n "$win" ] || continue
+    key=$(_stale_key "$win")
+    [ -e "$state/.paused-$key" ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    last=$(last_status_line "$state/$task.status")
+    reconcile_pause_tracking "$win" "$state" "$last"
+    if ! status_is_paused "$last"; then
+      rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key"
+      stale_marker_record "$win" "$state"
+    fi
+  done
+}
+
 sync_pause_markers_from_signal() {  # <state> <signal files>
   local state=$1 paths=$2 f last task win
   local -a files
@@ -472,12 +504,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
-    if status_is_paused "$last"; then
-      stale_marker_remove "$win" "$state"
-      pause_marker_record "$win" "$state"
-    else
-      pause_marker_remove "$win" "$state"
-    fi
+    reconcile_pause_tracking "$win" "$state" "$last"
   done
 }
 
@@ -662,6 +689,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
+  migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -707,8 +735,7 @@ housekeeping() {  # <state>
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused "$last"; then
-      rm -f "$marker"
-      pause_marker_record "$win" "$state"
+      reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
@@ -739,8 +766,7 @@ housekeeping() {  # <state>
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused "$last"; then
-      rm -f "$marker"
-      stale_marker_record "$win" "$state"
+      reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
@@ -1088,6 +1114,7 @@ fm_super_main() {
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
