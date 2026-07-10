@@ -96,6 +96,19 @@ matrix_case D29 deny "WATCHER='bin/fm-watch-arm.sh &' bash -c 'eval \"\$WATCHER\
 matrix_case D30 deny "p=\$(pgrep -f '/bin/fm-watch.sh'); kill \"\$p\""
 matrix_case D31 deny "env -S 'bin/fm-watch-arm.sh &'"
 matrix_case D32 deny "env --split-string='$ROOT/bin/fm-watch-arm.sh &'"
+matrix_case D33 deny 'bin/fm-"watch-arm.sh" &'
+matrix_case D34 deny "WATCHER='bin/fm-watch-arm.sh'; \"\$WATCHER\" &"
+matrix_case D35 deny "bash -c -- 'bin/fm-watch-arm.sh &'"
+matrix_case D36 deny 'bash bin/fm-watch-arm.sh &'
+matrix_case D37 deny '. bin/fm-watch-arm.sh &'
+matrix_case D38 deny "bash <<< 'bin/fm-watch-arm.sh &'"
+matrix_case D39 deny "eval 'true;' 'bin/fm-watch-arm.sh &'"
+matrix_case D40 deny 'timeout 30 bin/fm-watch-arm.sh &'
+matrix_case D41 deny 'gtimeout 30 bin/fm-watch-arm.sh &'
+matrix_case D42 deny 'bin/fm-watch-{arm,checkpoint}.sh &'
+matrix_case D43 deny 'bin/fm-watch-arm.sh* &'
+matrix_case D44 deny "pattern='fm-watch'; pkill -f \"\$pattern\""
+matrix_case D45 deny "p=\$(pgrep -f '/bin/fm-watch.sh'); q=\$p; kill \$q"
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"

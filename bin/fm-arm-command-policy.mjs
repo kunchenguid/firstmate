@@ -36,10 +36,6 @@ function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch-(?:arm|checkpoint)\.sh\b/.test(normalizeLineContinuations(command));
 }
 
-function rawMentionsWatcher(command) {
-  return /fm-watch/.test(normalizeLineContinuations(command));
-}
-
 function normalizeLineContinuations(source) {
   return source.replace(/\\\r?\n/g, "");
 }
@@ -283,7 +279,7 @@ class Lexer {
   }
 
   readWord() {
-    const word = { type: "word", value: "", literal: true, subs: [], quoted: false };
+    const word = { type: "word", value: "", literal: true, subs: [], quoted: false, unquotedExpansion: false };
     let consumed = false;
     while (this.index < this.source.length) {
       const char = this.source[this.index];
@@ -364,6 +360,7 @@ class Lexer {
         continue;
       }
       if (char === "$") word.literal = false;
+      if ("*?[]{}".includes(char)) word.unquotedExpansion = true;
       word.value += char;
       this.index += 1;
     }
@@ -462,6 +459,7 @@ const WRAPPER_OPTIONS = {
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
   sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
+  timeout: { noArgument: new Set(["f", "p", "v"]), takesArgument: new Set(["k", "s"]) },
 };
 
 const WRAPPER_LONG_OPTIONS = {
@@ -470,11 +468,13 @@ const WRAPPER_LONG_OPTIONS = {
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
   sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },
+  timeout: { noArgument: new Set(["foreground", "preserve-status", "verbose", "help", "version"]), takesArgument: new Set(["kill-after", "signal"]) },
 };
 
 function consumeWrapperOptions(name, words, index) {
-  const short = WRAPPER_OPTIONS[name];
-  const long = WRAPPER_LONG_OPTIONS[name];
+  const optionOwner = name === "gtimeout" ? "timeout" : name;
+  const short = WRAPPER_OPTIONS[optionOwner];
+  const long = WRAPPER_LONG_OPTIONS[optionOwner];
   const embeddedPayloads = [];
   let next = index;
   while (words[next]) {
@@ -550,6 +550,24 @@ function commandPosition(tokens) {
       command = words[index];
       continue;
     }
+    if (name === "timeout" || name === "gtimeout") {
+      wrappers.push(name);
+      const options = consumeWrapperOptions(name, words, index + 1);
+      unresolvedWrapperOption ||= options.unresolved;
+      index = options.index;
+      if (!words[index]) {
+        unresolvedWrapperOption = true;
+        command = undefined;
+        break;
+      }
+      index += 1;
+      command = words[index];
+      if (!command) {
+        unresolvedWrapperOption = true;
+        break;
+      }
+      continue;
+    }
     break;
   }
   return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads };
@@ -564,35 +582,61 @@ function protectedIdentity(value, root) {
   return "";
 }
 
-function nestedShellPayload(position) {
+function hasUnclassifiableProtectedExpansion(word, root) {
+  if (!word?.unquotedExpansion || protectedIdentity(word.value, root)) return false;
+  return /(?:^|\/)fm-watch-/.test(word.value);
+}
+
+function shellInvocation(position) {
   if (!position.command) return null;
   const name = basename(position.command.value);
   if (!["sh", "bash", "zsh"].includes(name)) return null;
-  for (let i = position.index + 1; i < position.words.length; i += 1) {
-    const option = position.words[i];
+  const words = position.words;
+  for (let i = position.index + 1; i < words.length; i += 1) {
+    const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
-      const payload = position.words[i + 1];
-      if (!payload || !payload.literal || payload.subs.length > 0) return null;
-      return payload.value;
+      let payloadIndex = i + 1;
+      if (words[payloadIndex]?.value === "--") payloadIndex += 1;
+      return { kind: "command", payload: words[payloadIndex] || null };
     }
+    if (/^[-+]O$/.test(option.value)) {
+      i += 1;
+      continue;
+    }
+    if (option.value === "--" || /^[-+]/.test(option.value)) continue;
+    return { kind: "script", payload: option };
   }
-  return null;
+  return { kind: "stdin", payload: null };
 }
 
 function shellHeredocPayloads(tokens, position) {
-  if (!position.command || !["sh", "bash", "zsh"].includes(basename(position.command.value))) return [];
-  for (let i = position.index + 1; i < position.words.length; i += 1) {
-    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(position.words[i].value)) return [];
-  }
+  if (shellInvocation(position)?.kind !== "stdin") return [];
   const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
+function shellHereStringPayloads(tokens, position) {
+  if (shellInvocation(position)?.kind !== "stdin") return [];
+  const payloads = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.type !== "redir" || token.value !== "<<<" || token.fd !== 0) continue;
+    const payload = tokens[i + 1];
+    if (payload?.type === "word" && payload.literal && payload.subs.length === 0) payloads.push(payload.value);
+  }
+  return payloads;
+}
+
+function sourcedScript(position) {
+  if (!position.command || ![".", "source"].includes(position.command.value)) return null;
+  return position.words[position.index + 1] || null;
+}
+
 function evalPayload(position) {
   if (!position.command || basename(position.command.value) !== "eval") return null;
-  const payload = position.words[position.index + 1];
-  if (!payload || !payload.literal || payload.subs.length > 0) return null;
-  return payload.value;
+  const payloads = position.words.slice(position.index + 1);
+  if (payloads.length === 0 || payloads.some((payload) => !payload.literal || payload.subs.length > 0)) return null;
+  return payloads.map((payload) => payload.value).join(" ");
 }
 
 function wordReferencesAny(word, names) {
@@ -614,8 +658,7 @@ function hasDynamicExecutionPayload(position, context) {
     }
   }
   if (name === "eval") {
-    const payload = position.words[position.index + 1];
-    return Boolean(payload && (!payload.literal || payload.subs.length > 0) && wordReferencesAny(payload, context.protectedVariables));
+    return position.words.slice(position.index + 1).some((payload) => (!payload.literal || payload.subs.length > 0) && wordReferencesAny(payload, context.protectedVariables));
   }
   return false;
 }
@@ -627,13 +670,20 @@ function assignmentName(word) {
 
 function contextWithAssignments(context, words) {
   const protectedVariables = new Set(context.protectedVariables || []);
+  const watcherPatterns = new Set(context.watcherPatterns || []);
+  const watcherPids = new Set(context.watcherPids || []);
   for (const word of words) {
     const name = assignmentName(word);
     if (!name) continue;
-    if (rawMentionsProtected(word.value.slice(word.value.indexOf("=") + 1))) protectedVariables.add(name);
+    const value = word.value.slice(word.value.indexOf("=") + 1);
+    if (rawMentionsProtected(value) || wordReferencesAny(word, protectedVariables)) protectedVariables.add(name);
     else protectedVariables.delete(name);
+    if (/fm-watch/.test(value) || wordReferencesAny(word, watcherPatterns)) watcherPatterns.add(name);
+    else watcherPatterns.delete(name);
+    if (wordReferencesAny(word, watcherPids)) watcherPids.add(name);
+    else watcherPids.delete(name);
   }
-  return { ...context, protectedVariables };
+  return { ...context, protectedVariables, watcherPatterns, watcherPids };
 }
 
 function nodeHasRedirection(tokens) {
@@ -644,9 +694,9 @@ function nodeHasUnsafeSubstitution(tokens) {
   return tokens.some((token) => token.type === "word" && token.subs.length > 0);
 }
 
-function isWatcherPgrep(position) {
+function isWatcherPgrep(position, context) {
   if (!position.command || basename(position.command.value) !== "pgrep") return false;
-  return position.words.slice(position.index + 1).some((word) => /(?:^|\/)fm-watch(?:\.sh)?\b/.test(word.value));
+  return position.words.slice(position.index + 1).some((word) => /(?:^|\/)fm-watch(?:\.sh)?\b/.test(word.value) || wordReferencesAny(word, context.watcherPatterns));
 }
 
 function analyzeProgram(command, context, depth = 0) {
@@ -663,8 +713,13 @@ function analyzeProgram(command, context, depth = 0) {
   let broadKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
-  let activeContext = { ...context, protectedVariables: new Set(context.protectedVariables || []) };
-  const watcherPids = new Set(context.watcherPids || []);
+  let activeContext = {
+    ...context,
+    protectedVariables: new Set(context.protectedVariables || []),
+    watcherPatterns: new Set(context.watcherPatterns || []),
+    watcherPids: new Set(context.watcherPids || []),
+  };
+  let unclassifiableProtected = false;
 
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
@@ -704,10 +759,28 @@ function analyzeProgram(command, context, depth = 0) {
       }
     }
 
-    const shellPayload = nestedShellPayload(position);
+    const shell = shellInvocation(position);
+    const shellPayload = shell?.kind === "command" ? shell.payload : null;
+    const shellScript = shell?.kind === "script" ? shell.payload : null;
+    const sourceScript = sourcedScript(position);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);
-    for (const payload of [shellPayload, literalEvalPayload, ...heredocPayloads]) {
+    const hereStringPayloads = shellHereStringPayloads(tokens, position);
+    for (const script of [shellScript, sourceScript]) {
+      if (!script) continue;
+      nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
+      unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
+    }
+    if (shellPayload && (!shellPayload.literal || shellPayload.subs.length > 0)) {
+      if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
+    } else if (shellPayload) {
+      const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
+      nodeNestedProtected ||= nested.protectedFound;
+      broadKill ||= nested.broadKill;
+      nodePgrepWatcher ||= nested.pgrepWatcher;
+      if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
+    }
+    for (const payload of [literalEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
@@ -718,17 +791,17 @@ function analyzeProgram(command, context, depth = 0) {
 
     const executable = position.command?.value || "";
     const protectedKind = protectedIdentity(executable, context.root);
+    if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
-    if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value))) broadKill = true;
-    if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, watcherPids)))) broadKill = true;
-    if (isWatcherPgrep(position)) pgrepWatcher = true;
-    if (hasDynamicExecutionPayload(position, nodeContext)) nodeNestedProtected = true;
+    if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
+    if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
+    if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
+    if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
     for (const word of position.words) {
       const name = assignmentName(word);
       if (!name) continue;
-      if (word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepWatcher)) watcherPids.add(name);
-      else watcherPids.delete(name);
+      if (word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepWatcher)) nodeContext.watcherPids.add(name);
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
@@ -745,11 +818,12 @@ function analyzeProgram(command, context, depth = 0) {
   }
 
   const directProtected = nodeInfos.some((info) => Boolean(info.protectedKind));
-  const protectedFound = directProtected || nestedProtected;
+  const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
+  if (unclassifiableProtected) unsupported = true;
   if (unsupported && (protectedFound || rawMentionsProtected(command))) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill, pgrepWatcher, watcherPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill, pgrepWatcher, watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -798,10 +872,10 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPids: new Set() };
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
-  if (analysis.error && rawMentionsProtected(command)) return deny("unclassifiable-protected-command");
+  if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
   if (analysis.nestedProtected) return deny("watcher-nested");
 
@@ -826,7 +900,7 @@ function deny(code) {
 try {
   const args = parseArguments(process.argv.slice(2));
   if (!args.root || !args.home) throw new Error("--root and --home are required");
-  if (!args.command || !rawMentionsWatcher(args.command)) {
+  if (!args.command) {
     process.stdout.write("allow\n");
   } else {
     const result = decision(args.command, args.root, args.home);
