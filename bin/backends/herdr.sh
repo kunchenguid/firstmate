@@ -825,22 +825,28 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict raw_baseline confirm_sleep
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  baseline=$(fm_backend_herdr_classify_submit_agent_status \
-    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  raw_baseline=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
-    if [ "$baseline" = idle ]; then
-      verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
-    else
-      sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
-    fi
+    case "$raw_baseline" in
+      idle|done)
+        verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+          "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS") ;;
+      blocked)
+        # A blocked baseline already reads submit-active, so only a
+        # blocked->working transition proves this Enter started a turn; confirm
+        # on working only, never composer content - 2026-07-08 incident (docs).
+        verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+          "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" 1) ;;
+      *)
+        sleep "$sleep_s"
+        verdict=$(fm_backend_herdr_composer_state "$target") ;;
+    esac
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
@@ -963,8 +969,8 @@ fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   }' 2>/dev/null || printf '%s' "${1:-0}"
 }
 
-fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
-  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0
+fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls> [working-only]
+  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} working_only=${5:-0} i interval raw bs saw_idle=0
   case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
   interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
@@ -973,7 +979,13 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
       sleep "$interval"
     fi
     raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
+    # working-only maps blocked->idle so only a real working turn confirms;
+    # default maps blocked->busy (see the two classifiers).
+    if [ "$working_only" = 1 ]; then
+      bs=$(fm_backend_herdr_classify_agent_status "$raw")
+    else
+      bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
+    fi
     case "$bs" in
       busy) printf 'busy'; return 0 ;;
       idle) saw_idle=1 ;;

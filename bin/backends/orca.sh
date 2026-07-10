@@ -51,7 +51,12 @@ fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path term
   node -e '
 const fs = require("fs");
 const field = process.argv[1];
-const data = JSON.parse(fs.readFileSync(0, "utf8"));
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
 if (data.ok === false) {
   const msg = data.error && (data.error.message || data.error.code);
   if (msg) console.error(msg);

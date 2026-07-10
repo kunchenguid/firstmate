@@ -185,7 +185,7 @@ test_version_check_refuses_missing_zellij() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
   out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT" 2>&1 )
+    "$BASH" -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when zellij is not installed"
   assert_contains "$out" "not installed" "version_check did not report zellij as missing"

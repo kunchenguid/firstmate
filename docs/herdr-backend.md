@@ -575,6 +575,48 @@ The composer-guard regression for the 2026-07-08 AFK delivery bug lives in `test
 The fix: the fixture now registers itself as a real herdr agent via `herdr pane report-agent <pane> --source <id> --agent <label> --state idle|working|blocked|unknown` (herdr's own documented integration-protocol primitive for a non-built-in-harness process to report its own agent state, verified empirically here) and reports an idle->working->idle cycle around each submission, exactly as a real harness would.
 With that fix, all four scenarios (A: partial-input deferral, B: swallowed-Enter retry, C: normal digest, D: max-defer wedge alarm) pass against the real binary.
 
+## Incident (2026-07-08): blocked-baseline submit fell to the composer fallback, redelivery loop returned
+
+The 2026-07-07 native agent-state confirmation above only covers an idle/done pre-Enter baseline.
+A `blocked` baseline still fell through to the composer-clear fallback (line 463 above says so explicitly: "A pre-Enter `working` or `blocked` status now falls back to composer-clear confirmation"), and that reopened the exact redelivery loop the 2026-07-07 fix was meant to close, for a different pre-Enter state.
+
+Observed live on 2026-07-08 (herdr 0.7.1, supervisor pane running claude 2.1.201, away mode set): `bin/fm-supervise-daemon.sh` re-injected one fully-handled escalation three times.
+Daemon log, repeating each housekeeping cycle:
+
+```
+inject failed: submit unconfirmed after 3 retries (verdict=unknown)
+inject deferred: supervisor pane busy (agent mid-turn)
+ERROR away-mode escalation undelivered 311s
+```
+
+The escalation text DID land in the pane each cycle (a turn started), so the Enter submitted - but the daemon read `verdict=unknown`, never cleared `state/.subsuper-escalations`, and retyped the same buffer on the next tick.
+
+Root cause: `blocked` is uniquely the pre-Enter status that both (a) clears the daemon's pre-type busy guard - `fm_backend_herdr_classify_agent_status` maps `blocked -> idle`, so `pane_is_busy` reads not-busy and the daemon injects - AND (b) reads submit-active for confirmation - `fm_backend_herdr_classify_submit_agent_status` maps `blocked -> busy`, so `fm_backend_herdr_send_text_submit` treated the baseline as already-active and routed confirmation to the composer-clear fallback.
+An away-mode supervisor pane parked on a tool/permission prompt (the daemon's normal inject target) reads exactly `blocked`.
+On that screen there is no composer row at all, so `fm_backend_herdr_composer_state` returns `unknown`, and a genuinely landed submit reads as unconfirmed forever.
+
+**Fix:** `fm_backend_herdr_send_text_submit` now branches on the raw pre-Enter status instead of only distinguishing idle/done from everything-else.
+A `blocked` baseline confirms via native agent-state on a `blocked -> working` transition ONLY (a still-`blocked` reading proves nothing, since the pane already read submit-active before the Enter), never composer content - consistent with the 2026-07-07 philosophy of not asking the composer.
+This is the new `working-only` mode of `fm_backend_herdr_wait_for_working`, which classifies through `fm_backend_herdr_classify_agent_status` (`blocked -> idle`) so only a real `working` turn counts.
+The idle/done baseline path is unchanged (any `working`/`blocked` confirms); a `working` or unreadable baseline still uses the composer fallback, because those cannot prove this Enter landed and there is no cleaner native signal for them.
+
+Reproduced end to end against the fake-herdr harness before touching the fix, driving the daemon's real submit-verification call with a `blocked` baseline that transitions to `working`:
+
+```
+$ git stash push -- bin/backends/herdr.sh   # revert the fix
+$ bash tests/fm-backend-herdr.test.sh
+not ok - a blocked baseline that transitions to working after Enter is a confirmed submit, got 'unknown' (before the fix a blocked baseline fell to composer_state, which returns 'unknown' on a claude dialog screen and drove the redelivery loop)
+$ git stash pop                             # restore the fix
+$ bash tests/fm-backend-herdr.test.sh
+ok - fm_backend_herdr_send_text_submit: a blocked baseline confirms on a blocked->working transition via native agent-state, never composer content (2026-07-08 redelivery-loop regression)
+ok - fm_backend_herdr_send_text_submit: a blocked baseline that stays blocked reads pending (buffer preserved), never a false confirm that would drop the escalation
+```
+
+Recovery for a live loop (while the buffer is still redelivering): clear the stale buffer once the content is actioned - `rm -f state/.subsuper-escalations state/.subsuper-inject-wedged` - and do not re-process the already-handled tasks.
+
+**Regression coverage:** `tests/fm-backend-herdr.test.sh`'s "send_text_submit" section adds `test_send_text_submit_blocked_baseline_confirms_on_working_transition` (a blocked->working baseline confirms `empty` via native agent-state and never calls `pane read`) and `test_send_text_submit_blocked_baseline_stays_blocked_is_pending_not_false_confirm` (a baseline that stays blocked reports `pending` so the buffer is preserved, never a false confirm that would silently drop the escalation).
+See `fm_backend_herdr_send_text_submit` and `fm_backend_herdr_wait_for_working` in `bin/backends/herdr.sh` for the implementation.
+
 ## Known gaps and follow-up notes
 
 - **No `events.subscribe` native push.** The busy-state semantic read (`agent.get`) is consumed through the EXISTING `fm-watch.sh` poll loop (same 15-second cadence as every other window), not a persistent async subscriber pushing events directly into the wake queue.
