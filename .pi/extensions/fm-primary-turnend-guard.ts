@@ -74,7 +74,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 // Piggybacks on this same extension file rather than a separate one so no
 // second Pi -e flag is needed at launch - the primary already loads this
 // file for the turn-end guard, and pi.on("tool_call", ...) can block
-// (verified 2026-07-09 against pi 0.80.2: returning {block: true} prevents
+// (verified 2026-07-09 against pi 0.80.5: returning {block: true} prevents
 // the bash command from running).
 function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
