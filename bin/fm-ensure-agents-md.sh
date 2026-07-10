@@ -52,7 +52,8 @@ EOF
 MAINT_INJECTED=0
 ensure_maintenance_section() {
   MAINT_INJECTED=0
-  if grep -Fqx '## Maintaining this file' "$AGENTS"; then
+  if grep -Fqx '## Maintaining this file' "$AGENTS" ||
+    grep -Fqx $'## Maintaining this file\r' "$AGENTS"; then
     return 0
   fi
   sep=''

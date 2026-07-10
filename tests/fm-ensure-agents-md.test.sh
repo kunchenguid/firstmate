@@ -124,6 +124,32 @@ test_existing_agents_md_with_section_reports_unchanged() {
   pass "fm-ensure-agents-md.sh: AGENTS.md that already has the section stays unchanged"
 }
 
+test_existing_crlf_agents_md_with_section_stays_unchanged() {
+  local repo agents out count
+  repo="$TMP_ROOT/crlf-formed-project"
+  mkdir -p "$repo"
+  printf '%s\r\n' \
+    '# Existing agent memory' \
+    '' \
+    '## Maintaining this file' \
+    '' \
+    'Keep this file for knowledge useful to almost every future agent session in this project.' \
+    'Do not repeat what the codebase already shows; point to the authoritative file or command instead.' \
+    'Prefer rewriting or pruning existing entries over appending new ones.' \
+    'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/AGENTS.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on CRLF AGENTS.md with the section"
+  assert_contains "$out" "unchanged:" "complete CRLF AGENTS.md was not reported unchanged"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "complete CRLF AGENTS.md was modified"
+  count=$(LC_ALL=C grep -a -c '## Maintaining this file' "$agents")
+  [ "$count" -eq 1 ] || fail "complete CRLF AGENTS.md has $count self-governance sections"
+  pass "fm-ensure-agents-md.sh: CRLF AGENTS.md with the section stays unchanged"
+}
+
 test_lowercase_agents_md_refuses_case_fragile_symlink() {
   local repo out rc
   repo="$TMP_ROOT/lowercase-project"
@@ -145,4 +171,5 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
 test_existing_agents_md_without_claude_gains_section_and_symlink
 test_existing_agents_md_with_section_reports_unchanged
+test_existing_crlf_agents_md_with_section_stays_unchanged
 test_lowercase_agents_md_refuses_case_fragile_symlink
