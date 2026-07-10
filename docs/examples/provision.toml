@@ -1,0 +1,37 @@
+# Example per-project worktree-provisioning config for firstmate.
+#
+# Copy this to config/provision/<project>.toml (where <project> is the registered
+# project name - the projects/<name> basename) to make every freshly-spawned
+# crewmate/scout worktree for that project run-ready automatically: firstmate
+# copies the canonical env and credential files (gitignored, so they never arrive
+# from GitHub) and installs dependencies right after the worktree is cut, before
+# the agent starts.
+#
+# config/provision/ is fleet-LOCAL and gitignored: it is personal to your fleet and
+# holds pointers to your machine's canonical env, so it is never committed. Only this
+# example template lives in the repo. Provisioning is opt-in per project: a project
+# with no config file here is left exactly as before (a silent no-op).
+#
+# bin/fm-provision-worktree.sh reads this file. Set FM_SPAWN_NO_PROVISION=1 to skip
+# provisioning for a single spawn.
+
+# Absolute directory holding this project's canonical env files. A leading ~ or ~/
+# expands to your $HOME. This is typically your own personal clone of the project,
+# which is separate from firstmate's clone under projects/.
+env_source_dir = "~/Documents/Code/question-wheel"
+
+# A general "files to copy" list: repo-relative paths copied from env_source_dir into
+# each new worktree, each preserving its relative path (parent dirs are created). This
+# is NOT limited to .env files - list ANY file a backend needs at runtime, including
+# credential/key files that a .env references by relative path. A common trap: a .env
+# sets GOOGLE_APPLICATION_CREDENTIALS=backend/service-account.json (or a Firebase admin
+# key), and without that JSON copied alongside, the worktree's backend fails to start.
+# So copy the keys too, not just the .env. A file missing at the source is skipped with
+# a warning, not an error. File CONTENTS are never read or printed - only copied. Must
+# be a single-line array.
+env_files = [".env", ".env.local", "backend/.env", "backend/service-account.json"]
+
+# Shell command run in the worktree root to install dependencies. Configure it for
+# your stack (npm / pnpm / yarn / uv / etc.). A non-zero exit is reported as a
+# provisioning failure (which warns but never blocks the spawn).
+setup_cmd = "npm install && (cd backend && npm install)"

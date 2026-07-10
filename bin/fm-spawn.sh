@@ -966,6 +966,23 @@ EOF
   esac
 fi
 
+# Worktree provisioning (AGENTS.md "Worktree provisioning"): make the freshly-cut,
+# isolation-verified ship/scout worktree run-ready by copying the project's canonical
+# (gitignored) env files and installing its deps, driven by a per-project LOCAL config
+# under config/provision/<project>.toml. Runs AFTER the isolation guard passed and
+# BEFORE the agent launches, so the crewmate can run the full app immediately.
+# Strictly best-effort: a project with no config is a silent no-op, and a provisioning
+# FAILURE must warn but NOT abort the spawn (the crewmate can still work; only running
+# the full app is lost). Skippable via FM_SPAWN_NO_PROVISION=1 for callers/tests that
+# do not want it. Never runs for secondmate homes (a persistent home is not a
+# throwaway project worktree).
+if [ "$KIND" != secondmate ] && [ -z "${FM_SPAWN_NO_PROVISION:-}" ]; then
+  PROVISION_PROJECT=$(basename "$PROJ_ABS")
+  if ! "$FM_ROOT/bin/fm-provision-worktree.sh" "$PROVISION_PROJECT" "$WT"; then
+    echo "PROVISION: warning: provisioning of $PROVISION_PROJECT worktree at $WT failed; the crewmate can still work but may not be able to run the full app. See config/provision/$PROVISION_PROJECT.toml." >&2
+  fi
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
