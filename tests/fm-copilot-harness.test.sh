@@ -66,13 +66,51 @@ EOF
   expect_code 0 "$status" "copilot spawn should succeed"
   assert_contains "$out" "spawned $id harness=copilot" "copilot spawn did not report success"
 
-  hook="$wt/.github/hooks/fm-turn-end.json"
+  hook="$wt/.github/hooks/fm-turn-end.$id.json"
   assert_present "$hook" "copilot turn-end hook was not installed in the worktree"
   assert_grep 'agentStop' "$hook" "copilot hook did not register the agentStop event"
   assert_grep "$home/state/$id.turn-ended" "$hook" "copilot hook did not point at this task's turn-ended marker"
   excl=$(git -C "$wt" rev-parse --git-path info/exclude)
-  assert_grep '.github/hooks/fm-turn-end.json' "$excl" "copilot hook path was not gitignored"
+  assert_grep ".github/hooks/fm-turn-end.$id.json" "$excl" "copilot hook path was not gitignored"
   pass "copilot spawn installs a worktree-resident agentStop hook"
+}
+
+test_copilot_spawn_does_not_clobber_existing_hook_file() {
+  local rec case_dir home proj wt fakebin id out status existing
+  rec=$(make_spawn_case preserve-existing)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.github/hooks"
+  existing="$wt/.github/hooks/fm-turn-end.json"
+  printf '%s\n' '{"version":1,"hooks":{"agentStop":[{"type":"command","command":"echo project-hook"}]}}' > "$existing"
+
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" copilot)
+  status=$?
+  expect_code 0 "$status" "copilot spawn should succeed with an existing hook file"
+  assert_contains "$out" "spawned $id harness=copilot" "copilot spawn did not report success"
+  assert_grep 'echo project-hook' "$existing" "copilot spawn clobbered a pre-existing hook file"
+  pass "copilot spawn preserves existing hook files in the worktree"
+}
+
+test_copilot_spawn_hook_command_handles_single_quote_paths() {
+  local rec case_dir home proj wt fakebin id out status hook cmd_json cmd
+  rec=$(make_spawn_case "quote-'path")
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" copilot)
+  status=$?
+  expect_code 0 "$status" "copilot spawn in a quote-containing path should succeed"
+  hook="$wt/.github/hooks/fm-turn-end.$id.json"
+  assert_present "$hook" "copilot hook was not installed for quote-path case"
+  cmd_json=$(sed -n 's/.*"command":"\([^"]*\)".*/\1/p' "$hook")
+  [ -n "$cmd_json" ] || fail "copilot hook command was not extracted"
+  cmd=$(printf '%s' "$cmd_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
+  rm -f "$home/state/$id.turn-ended"
+  bash -c "$cmd"
+  assert_present "$home/state/$id.turn-ended" "copilot hook command failed for single-quote path"
+  pass "copilot hook command remains executable in single-quote paths"
 }
 
 test_copilot_spawn_threads_model_and_effort() {
@@ -146,6 +184,8 @@ SH
 }
 
 test_copilot_spawn_installs_worktree_hook
+test_copilot_spawn_does_not_clobber_existing_hook_file
+test_copilot_spawn_hook_command_handles_single_quote_paths
 test_copilot_spawn_threads_model_and_effort
 test_fm_harness_detects_copilot_env_marker
 test_fm_lock_recognizes_copilot_mainthread_holder

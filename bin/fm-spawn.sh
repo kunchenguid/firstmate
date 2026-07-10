@@ -76,7 +76,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# copilot uses a gitignored worktree-resident .github/hooks/fm-turn-end.json
+# copilot uses a gitignored worktree-resident .github/hooks/fm-turn-end.<task-id>.json
 # (agentStop hook), the same shape as claude's .claude/settings.local.json Stop hook.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
@@ -975,11 +975,11 @@ EOF
       # the worktree) load with no separate hook-trust gate beyond the normal
       # one-time folder-trust dialog every harness already needs, so the hook
       # lives worktree-resident exactly like claude's, with no global registry.
+      local_hook_rel=".github/hooks/fm-turn-end.$ID.json"
+      hook_command=$(json_escape "touch $(shell_quote "$TURNEND")")
       mkdir -p "$WT/.github/hooks"
-      cat > "$WT/.github/hooks/fm-turn-end.json" <<EOF
-{"version":1,"hooks":{"agentStop":[{"type":"command","command":"touch '$TURNEND'"}]}}
-EOF
-      exclude_path '.github/hooks/fm-turn-end.json'
+      printf '{"version":1,"hooks":{"agentStop":[{"type":"command","command":"%s"}]}}\n' "$hook_command" > "$WT/$local_hook_rel"
+      exclude_path "$local_hook_rel"
       ;;
   esac
 fi
