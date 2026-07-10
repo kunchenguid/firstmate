@@ -807,6 +807,14 @@ refuse_populated_projectless_home() {
   local home=$1 project_path project registry_entries
   local clones=()
   local registry_projects=()
+  if [ -L "$home/projects" ]; then
+    echo "error: cannot inspect existing projects directory at $home/projects because it is a symlink; resolve the symlink or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
+  if [ -e "$home/projects" ] && [ ! -d "$home/projects" ]; then
+    echo "error: cannot inspect existing projects directory at $home/projects because it is not a directory; resolve its path or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
   if [ -d "$home/projects" ] && ! find -P "$home/projects" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1; then
     echo "error: cannot inspect existing projects directory at $home/projects; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
     return 1

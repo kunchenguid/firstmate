@@ -544,6 +544,72 @@ test_home_seed_refuses_projectless_home_with_uninspectable_projects() {
   pass "home seeding refuses project-less homes whose projects directory cannot be inspected"
 }
 
+test_home_seed_refuses_projectless_home_with_symlinked_projects() {
+  local home sub target err
+  home="$TMP_ROOT/no-projects-symlinked-projects-home"
+  sub="$TMP_ROOT/no-projects-symlinked-projects-subhome"
+  target="$sub/retained-projects"
+  err="$TMP_ROOT/no-projects-symlinked-projects.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$target/hidden-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$target/hidden-clone"
+  ln -s "$target" "$sub/projects"
+  chmod 311 "$target"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 700 "$target"
+    fail "project-less seed accepted a home whose projects directory is a symlink"
+  fi
+  chmod 700 "$target"
+  grep -F 'projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not identify the symlinked projects directory"
+  grep -F 'it is a symlink' "$err" >/dev/null \
+    || fail "project-less seed did not explain the symlinked projects directory refusal"
+  assert_present "$target/hidden-clone/.git" "project-less symlink refusal removed the target clone"
+  [ -L "$sub/projects" ] || fail "project-less symlink refusal changed the projects symlink"
+  [ "$(readlink "$sub/projects")" = "$target" ] \
+    || fail "project-less symlink refusal retargeted the projects symlink"
+  assert_absent "$sub/.fm-secondmate-home" "project-less symlink refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less symlink refusal copied a charter"
+  assert_absent "$sub/state" "project-less symlink refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less symlink refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes with symlinked projects directories"
+}
+
+test_home_seed_refuses_projectless_home_with_non_directory_projects() {
+  local home sub err projects_before
+  home="$TMP_ROOT/no-projects-nondirectory-projects-home"
+  sub="$TMP_ROOT/no-projects-nondirectory-projects-subhome"
+  err="$TMP_ROOT/no-projects-nondirectory-projects.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data"
+  mark_firstmate_home "$sub"
+  printf '%s\n' 'retained project path' > "$sub/projects"
+  projects_before=$(cat "$sub/projects")
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed accepted a home whose projects path is not a directory"
+  fi
+  grep -F 'projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not identify the non-directory projects path"
+  grep -F 'it is not a directory' "$err" >/dev/null \
+    || fail "project-less seed did not explain the non-directory projects path refusal"
+  [ "$projects_before" = "$(cat "$sub/projects")" ] \
+    || fail "project-less non-directory refusal changed the projects path"
+  assert_absent "$sub/.fm-secondmate-home" "project-less non-directory refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less non-directory refusal copied a charter"
+  assert_absent "$sub/state" "project-less non-directory refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less non-directory refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes with non-directory projects paths"
+}
+
 test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
   local home sub err registry_before
   home="$TMP_ROOT/no-projects-uninspectable-registry-home"
@@ -2042,6 +2108,8 @@ test_home_seed_no_projects_end_to_end
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects
+test_home_seed_refuses_projectless_home_with_symlinked_projects
+test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
