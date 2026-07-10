@@ -323,12 +323,36 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+pause_state_class() {  # <window> <task>
+  local win=$1 task=$2 key last recheck_file class
+  key=${win//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  last=$(last_status_line "$STATE/$task.status")
+  recheck_file="$STATE/.paused-rechecked-$key"
+  if ! status_is_paused "$last"; then
+    rm -f "$recheck_file"
+    crew_absorb_class "$task"
+    return
+  fi
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    printf 'paused'
+    return
+  fi
+  class=$(crew_absorb_class "$task")
+  case "$class" in
+    paused) date +%s > "$recheck_file" ;;
+    *) rm -f "$recheck_file" ;;
+  esac
+  printf '%s' "$class"
+}
+
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
   wake "stale: $win"
 }
 
@@ -537,6 +561,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
+    prf="$STATE/.paused-rechecked-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -613,7 +638,7 @@ EOF
               working)
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
-                rm -f "$pf"
+                rm -f "$pf" "$prf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -625,21 +650,11 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ]; then
-              if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-                handle_paused_stale "$w" "$task" "$h"
-              else
-                rm -f "$pf"
-                case "$(crew_absorb_class "$task")" in
-                  working) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
-                  paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                  *)       surface_nonterminal_stale "$w" "$h" ;;
-                esac
-              fi
-            elif status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-              case "$(crew_absorb_class "$task")" in
+            if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+              case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                working) rm -f "$pf" "$prf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
@@ -648,18 +663,25 @@ EOF
           fi
         fi
       else
-        # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # stale escalation timer, the consecutive wedge-escalation count, and the
-        # declared-pause flag (a new hash re-reads crew_absorb_class to reclassify;
-        # the .paused-resurfaced-<key> throttle is left, being age-gated).
-        rm -f "$ssf" "$ewf" "$pf"
+        # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
+        rm -f "$ssf" "$ewf"
+        if [ "$n" -ge 2 ] || ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; then
+          rm -f "$pf" "$prf"
+        fi
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation
-      # timer, the consecutive wedge-escalation count, and the declared-pause flag.
-      rm -f "$ssf" "$ewf" "$pf"
+      rm -f "$ssf" "$ewf"
+      task=$(window_to_task "$w" "$STATE")
+      if status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
+        case "$(pause_state_class "$w" "$task")" in
+          paused) handle_paused_stale "$w" "$task" "$h" ;;
+          *)      rm -f "$pf" "$prf" ;;
+        esac
+      else
+        rm -f "$pf" "$prf"
+      fi
     fi
   done < <(recorded_windows)
 

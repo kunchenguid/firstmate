@@ -183,6 +183,22 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+test_handle_wake_paused_signal_records_pause_marker() {
+  local dir state key win
+  dir=$(make_supercase handle-paused-signal)
+  state="$dir/state"
+  win="sess:fm-held-w10-signal"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
+  key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
+  pass "handle_wake records a declared pause from a routine signal for long-cadence rechecks"
+}
+
 # housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
 # as an awaiting-external recheck (never a wedge), and RESETS the marker so the
 # window repeats rather than firing once.
@@ -1231,6 +1247,7 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_paused_signal_records_pause_marker
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets

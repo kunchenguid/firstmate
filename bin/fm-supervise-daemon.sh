@@ -461,6 +461,26 @@ pause_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-paused-$key"
 }
 
+sync_pause_markers_from_signal() {  # <state> <signal files>
+  local state=$1 paths=$2 f last task win
+  local -a files
+  read -r -a files <<<"$paths"
+  for f in "${files[@]}"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    last=$(last_status_line "$f")
+    task=$(basename "$f"); task=${task%.status}
+    win=$(window_for_task "$task" "$state" 2>/dev/null || true)
+    [ -n "$win" ] || continue
+    if status_is_paused "$last"; then
+      stale_marker_remove "$win" "$state"
+      pause_marker_record "$win" "$state"
+    else
+      pause_marker_remove "$win" "$state"
+    fi
+  done
+}
+
 # Record the seen-status marker for a captain-relevant status line so the
 # heartbeat catch-all scan does not re-fire it. The single source of truth for
 # the .subsuper-seen-status-<task> dedup state: called from both the per-wake
@@ -901,6 +921,7 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
+  [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
