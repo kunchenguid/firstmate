@@ -159,7 +159,9 @@ fm_herdr_lab_cancel_provision() { # <pid>
       sleep 0.1
       attempt=$((attempt + 1))
     done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
   fi
   wait "$pid" 2>/dev/null || true
 }

@@ -143,8 +143,9 @@ test_provision_run_and_guarded_teardown() {
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')
   stop_line=$(grep -n "^session stop $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
   delete_line=$(grep -n "^session delete $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
-  [ -n "$stop_line" ] && [ -n "$delete_line" ] && [ "$line_count" -gt "$delete_line" ] \
-    || fail "teardown did not emit explicit stop/delete followed by the after tripwire"
+  if [ -z "$stop_line" ] || [ -z "$delete_line" ] || [ "$line_count" -le "$delete_line" ]; then
+    fail "teardown did not emit explicit stop/delete followed by the after tripwire"
+  fi
   sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "stop was not immediately preceded by a fresh refuse-default session list"
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
