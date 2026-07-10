@@ -26,7 +26,7 @@
 # what is actually a tmux pane on the private socket.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
-# appearance — terminal line-wrapping looks like newlines but isn't.
+# appearance - terminal line-wrapping looks like newlines but isn't.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -152,7 +152,7 @@ SHIM
 chmod +x "$TMUX_SHIM_DIR/tmux"
 
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
-# detection). The pane is an inert shell — it just needs to exist.
+# detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
@@ -218,9 +218,8 @@ reset_state() {
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
-  sleep 0.5
-  if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
-    # Detected — clean up the text and proceed.
+  if wait_for_pane_input_pending; then
+    # Detected - clean up the text and proceed.
     "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
     sleep 0.3
     return 0
@@ -238,6 +237,18 @@ selfcheck_pane_input_pending() {
   fail "pane_input_pending self-check failed"
 }
 
+wait_for_pane_input_pending() {
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 selfcheck_pane_input_pending
 
 # --- Scenario A: human-partial-input ----------------------------------------
@@ -250,7 +261,8 @@ test_scenario_a() {
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
-  sleep 0.5
+  wait_for_pane_input_pending \
+    || fail "Scenario A: human draft text did not become detectable as pending input"
 
   # Write a captain-relevant status to trigger a real escalation through the
   # real watcher child.

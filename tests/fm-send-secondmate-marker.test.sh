@@ -4,11 +4,11 @@
 # A secondmate is itself a firstmate, so a request relayed to it lands in its own
 # chat - which the main firstmate never reads (the only channel back is the terse
 # status file). fm-send therefore prepends a from-firstmate marker
-# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a bare
-# `fm-<id>` whose meta records kind=secondmate, so the secondmate can recognize
+# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
+# selector whose meta records kind=secondmate, so the secondmate can recognize
 # the request and route its reply via the status path. These tests pin that
 # behavior hermetically (stubbed tmux, no real agent):
-#   1. A send to a kind=secondmate target prepends the marker to the literal text.
+#   1. A send to a kind=secondmate task selector prepends the marker to the text.
 #   2. A send to a crewmate (kind=ship) target sends the bare text, no marker.
 #   3. An explicit session:window target (no meta) is never marked.
 #   4. The --key path never carries the marker.
@@ -106,6 +106,22 @@ test_secondmate_target_is_marked() {
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker prepended"
 }
 
+test_exact_secondmate_task_id_is_marked() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/sm-exact"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-exact)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  run_send "$fb" "$home" "$log" "domain" "audit the build"; rc=$?
+  expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"audit\ the\ build) : ;;
+    *) fail "exact secondmate send: literal text should be marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+  esac
+  pass "fm-send: an exact kind=secondmate task id gets the from-firstmate marker prepended"
+}
+
 test_crewmate_target_is_not_marked() {
   local dir fb log home rc got
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
@@ -174,6 +190,7 @@ test_marker_is_label_plus_unit_separator() {
 }
 
 test_secondmate_target_is_marked
+test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked

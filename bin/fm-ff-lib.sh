@@ -372,8 +372,9 @@ ff_target() {
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 
-# Validate and fast-forward one secondmate home, accumulating its window into
-# FF_NUDGE_WINDOWS when it should be live-converged. Args:
+# Validate and fast-forward one secondmate home, accumulating its stable
+# fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
+# Args:
 #   id home window base_mode nudge_requires_instr
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
@@ -403,7 +404,7 @@ process_secondmate() {
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
     fi
-    FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
+    FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
   fi
 }
 

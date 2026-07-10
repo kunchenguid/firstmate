@@ -514,12 +514,30 @@ test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
   fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
+  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
+  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
 
   [ "$(fm_backend_resolve_selector 'sess:win' "$state")" = "sess:win" ] \
     || fail "explicit session:window should be used as-is"
 
+  [ "$(fm_backend_resolve_selector 'dotfiles-d6' "$state")" = "default:wA:p2" ] \
+    || fail "bare non-fm task id should resolve through exact metadata"
+  [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
+    || fail "bare non-fm task id should use its recorded backend"
+  [ "$(fm_backend_expected_label_of_selector 'dotfiles-d6' "$state")" = "fm-dotfiles-d6" ] \
+    || fail "bare non-fm task id should report the spawned fm-<id> label"
+
+  [ "$(fm_backend_resolve_selector 'fm-turnend-all-harnesses-v9' "$state")" = "default:wB:p3" ] \
+    || fail "exact fm-* task id should resolve through its exact metadata"
+  [ "$(fm_backend_of_selector 'fm-turnend-all-harnesses-v9' 'default:wB:p3' "$state")" = herdr ] \
+    || fail "exact fm-* task id should use exact metadata without stripping fm-"
+  [ "$(fm_backend_expected_label_of_selector 'fm-turnend-all-harnesses-v9' "$state")" = "fm-fm-turnend-all-harnesses-v9" ] \
+    || fail "exact fm-* task id should report the spawned fm-<id> label"
+
   [ "$(fm_backend_resolve_selector 'fm-task1' "$state")" = "firstmate:fm-task1" ] \
-    || fail "fm-<id> should resolve through meta's window="
+    || fail "legacy fm-<id> label should resolve through <id>.meta's window="
+  [ "$(fm_backend_expected_label_of_selector 'fm-task1' "$state")" = "fm-task1" ] \
+    || fail "legacy fm-<id> label should preserve its backend label"
 
   out=$(fm_backend_resolve_selector 'fm-missing' "$state" 2>&1) && fail "fm-<id> with no meta should fail"
   assert_contains "$out" "no metadata for fm-missing" "missing-meta error text changed"
@@ -535,26 +553,33 @@ SH
   chmod +x "$fakebin/tmux"
   out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'fm-adhoc' "$state" 2>&1) || true
   # fm-adhoc carries no meta file, so it is NOT the bare-name fallback path - it
-  # is the fm-* meta-miss error path (a bare fm-* selector always routes through
-  # meta; only a NON fm-* bare name falls through to the live-window search).
+  # is the fm-* meta-miss error path after exact-id and legacy-label metadata
+  # lookup both miss.
+  # Only a NON fm-* bare name falls through to the live-window search.
   assert_contains "$out" "no metadata for fm-adhoc" "an fm-* selector must always require meta, not silently fall back to a live search"
 
   out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")
   [ "$out" = "firstmate:adhoc" ] || fail "an ad hoc bare name should resolve via the tmux live-window fallback, got '$out'"
 
-  pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via tmux list-windows"
+  pass "fm_backend_resolve_selector: session:window literal, exact task id first, legacy fm-<id> label fallback, ad hoc bare name via tmux list-windows"
 }
 
 test_backend_of_selector_matches_explicit_target_meta() {
   local state=$TMP_ROOT/backend-selector-state
   mkdir -p "$state"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
+  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
+  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
   fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
   fm_write_meta "$state/custom-window-task.meta" "window=custom-window"
   fm_write_meta "$state/orca-task.meta" "window=fm-orca-task" "terminal=term-orca-task" "backend=orca"
 
+  [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
+    || fail "bare non-fm task id selector should use its recorded backend"
+  [ "$(fm_backend_of_selector 'fm-turnend-all-harnesses-v9' 'default:wB:p3' "$state")" = herdr ] \
+    || fail "exact fm-* task id selector should use exact metadata before legacy stripping"
   [ "$(fm_backend_of_selector 'fm-herdr-task' 'default:w1:p2' "$state")" = herdr ] \
-    || fail "bare fm-<id> selector should use its recorded backend"
+    || fail "legacy fm-<id> selector should use its recorded backend"
   [ "$(fm_backend_resolve_selector 'fm-orca-task' "$state")" = term-orca-task ] \
     || fail "Orca fm-<id> selector should resolve to terminal=, not window="
   [ "$(fm_backend_resolve_selector 'term-orca-task' "$state")" = term-orca-task ] \
@@ -570,7 +595,7 @@ test_backend_of_selector_matches_explicit_target_meta() {
   [ "$(fm_backend_of_selector 'manual:outside' 'manual:outside' "$state")" = tmux ] \
     || fail "explicit target with no matching metadata should keep the tmux compatibility default"
 
-  pass "fm_backend_of_selector: fm-<id> and matching explicit targets inherit metadata backend"
+  pass "fm_backend_of_selector: exact task ids, legacy fm-<id> labels, and matching explicit targets inherit metadata backend"
 }
 
 # --- old vs new: fm-send.sh --------------------------------------------------
@@ -605,12 +630,19 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+strip_send_preflight() {  # <log>
+  local preflight
+  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+}
+
 test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_old rc_new
+  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
   old_bin=$(build_old_bin send-old)
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
   log_old="$TMP_ROOT/send-old.log"; log_new="$TMP_ROOT/send-new.log"
+  filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
 
   # Case 1: --key path.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
@@ -618,7 +650,11 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
+  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+    "fm-send --key did not verify the explicit tmux target before sending"
+  strip_send_preflight "$log_old" > "$filtered_old"
+  strip_send_preflight "$log_new" > "$filtered_new"
+  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
     || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''Escape' "fm-send --key did not send the named key"
 
@@ -628,7 +664,9 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
+  strip_send_preflight "$log_old" > "$filtered_old"
+  strip_send_preflight "$log_new" > "$filtered_new"
+  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
     || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
@@ -642,10 +680,12 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
+  strip_send_preflight "$log_old" > "$filtered_old"
+  strip_send_preflight "$log_new" > "$filtered_new"
+  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
     || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
 
-  pass "fm-send.sh: --key, plain text, and /skill tmux command logs are byte-identical old vs new (send-keys -l, Enter submission preserved)"
+  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------

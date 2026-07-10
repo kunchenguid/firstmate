@@ -7,14 +7,20 @@
 #
 # Scope-matching is firstmate's JUDGMENT: you pass the task-id keys you have
 # already judged in-scope for the secondmate. This script performs only the
-# mechanical move - it removes each matched line from data/backlog.md under the
-# active firstmate home and appends it, under the same section heading, to the
-# secondmate home's data/backlog.md (home resolved from data/secondmates.md). It
-# never changes a line's text, never writes into a project (it refuses a home
-# that is not a firstmate home), and is idempotent: a key already present in the
-# secondmate backlog is reported and skipped, so re-running converges. If any key
-# matches neither backlog, nothing is moved. See AGENTS.md project management
-# and task lifecycle.
+# mechanical move - it removes each matched item BLOCK (the `- [ ] <id> ...`
+# header line plus every following body line - indented lines and blank
+# separators between paragraphs - up to the next item line or column-0 section
+# heading) from data/backlog.md under the active firstmate home and appends
+# that full block, under the same section heading, to the secondmate home's
+# data/backlog.md (home resolved from data/secondmates.md). Body membership is
+# by position, not content: an indented line or a blank line continues the
+# block, and indented lines that look like markdown headings (e.g.
+# `  ## Intent`) stay in the item and are not treated as section boundaries.
+# It never changes a line's text, never writes into a
+# project (it refuses a home that is not a firstmate home), and is idempotent:
+# a key already present in the secondmate backlog is reported and skipped (no
+# duplicate header or body), so re-running converges. If any key matches neither
+# backlog, nothing is moved. See AGENTS.md project management and task lifecycle.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 set -eu
 
@@ -151,6 +157,13 @@ validate_backlog_file() {
   fi
 }
 
+file_ends_with_lf() {
+  local path=$1 last_byte
+  [ -s "$path" ] || return 1
+  last_byte=$(tail -c 1 "$path" | od -An -tx1 | tr -d '[:space:]')
+  [ "$last_byte" = "0a" ]
+}
+
 backlog_key_section() {
   local file=$1 key=$2
   [ -f "$file" ] || return 1
@@ -250,50 +263,132 @@ if [ "$SUB_EXISTED" -eq 1 ]; then
   cp "$SUB_BACKLOG" "$SUB_BAK"
 fi
 
-# Pass 1: drop the matched lines from the main backlog, capturing each removed
-# line tagged with the "## " section heading it lived under.
+# Pass 1: drop each matched item block from the main backlog, capturing every
+# removed line (header + body) tagged with the "## " section heading it lived
+# under. Body membership is position, not content: an indented line or a blank
+# line continues the block (blank separators between paragraphs stay with the
+# item), even when an indented line's content looks like a heading. Only a next
+# item header or a column-0 "## " heading ends the block.
 : > "$MOVED_FILE"
-awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
+MAIN_FINAL_LF=0
+if file_ends_with_lf "$MAIN_BACKLOG"; then
+  MAIN_FINAL_LF=1
+fi
+awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" -v keptfile="$KEPT_FILE" \
+  -v final_lf="$MAIN_FINAL_LF" '
+  function emit_kept(rec) {
+    if (have_kept) print pending_kept > keptfile
+    pending_kept = rec
+    have_kept = 1
+  }
+  function emit_moved(rec) {
+    if (have_moved) print pending_moved > movedfile
+    pending_moved = rec
+    have_moved = 1
+  }
   BEGIN {
     while ((getline k < keysfile) > 0) { if (k != "") want[k] = 1 }
     section = "## Queued"
+    moving = 0
   }
-  /^## / { section = $0; print; next }
+  /^## / {
+    moving = 0
+    section = $0
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
+    next
+  }
   /^- \[[ x]\] / {
     rest = $0
     sub(/^- \[[ x]\] +/, "", rest)
     id = rest
     sub(/[ \t].*/, "", id)
-    if (id in want) { print section "\t" $0 > movedfile; next }
+    if (id in want) {
+      emit_moved(section "\t" $0)
+      moving = 1
+      last_source_kept = 0
+      last_source_moved = 1
+      next
+    }
+    moving = 0
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
+    next
   }
-  { print }
-' "$MAIN_BACKLOG" > "$KEPT_FILE"
+  moving && /^([ \t].*)?$/ {
+    emit_moved(section "\t" $0)
+    last_source_kept = 0
+    last_source_moved = 1
+    next
+  }
+  {
+    moving = 0
+    emit_kept($0)
+    last_source_kept = 1
+    last_source_moved = 0
+  }
+  END {
+    if (have_kept) {
+      if (last_source_kept && !final_lf) printf "%s", pending_kept > keptfile
+      else print pending_kept > keptfile
+    }
+    if (have_moved) {
+      if (last_source_moved && !final_lf) printf "%s", pending_moved > movedfile
+      else print pending_moved > movedfile
+    }
+  }
+' "$MAIN_BACKLOG"
 
-# Pass 2: insert each moved line at the end of its section in the sub backlog,
-# creating the section heading if the sub backlog lacks it.
-awk -v movedfile="$MOVED_FILE" '
-  function flush(sec) {
+# Pass 2: insert each moved block at the end of its section in the sub backlog,
+# creating the section heading if the sub backlog lacks it. Records are one
+# physical line each (section TAB line); multi-line bodies are consecutive
+# records under the same section and reassemble in order.
+MOVED_FINAL_LF=0
+if file_ends_with_lf "$MOVED_FILE"; then
+  MOVED_FINAL_LF=1
+fi
+awk -v movedfile="$MOVED_FILE" -v moved_final_lf="$MOVED_FINAL_LF" '
+  function add_record(rec, eol,    tab, sec, line) {
+    tab = index(rec, "\t")
+    if (tab == 0) return
+    sec = substr(rec, 1, tab - 1)
+    line = substr(rec, tab + 1)
+    if (!(sec in items)) { order[++nsec] = sec }
+    items[sec] = items[sec] line eol
+  }
+  function flush(sec, needs_separator) {
     if (sec != "" && (sec in items) && !(sec in flushed)) {
       printf "%s", items[sec]
+      if (needs_separator && items[sec] !~ /\n$/) printf "\n"
       flushed[sec] = 1
     }
   }
   BEGIN {
     nsec = 0
+    have_pending = 0
     while ((getline rec < movedfile) > 0) {
-      tab = index(rec, "\t")
-      if (tab == 0) continue
-      sec = substr(rec, 1, tab - 1)
-      line = substr(rec, tab + 1)
-      if (!(sec in items)) { order[++nsec] = sec }
-      items[sec] = items[sec] line "\n"
+      if (have_pending) add_record(pending, "\n")
+      pending = rec
+      have_pending = 1
+    }
+    if (have_pending) {
+      add_record(pending, moved_final_lf ? "\n" : "")
     }
     cur = ""
   }
-  /^## / { flush(cur); cur = $0; print; next }
+  /^## / { flush(cur, 1); cur = $0; print; next }
   { print }
   END {
-    flush(cur)
+    needs_separator = 0
+    for (i = 1; i <= nsec; i++) {
+      if (!(order[i] in flushed) && order[i] != cur) {
+        needs_separator = 1
+        break
+      }
+    }
+    flush(cur, needs_separator)
     for (i = 1; i <= nsec; i++) {
       s = order[i]
       if (!(s in flushed)) {

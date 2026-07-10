@@ -11,6 +11,9 @@
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
+#   fmx_request_inbox_context <state> <request_id> - infer reply platform/limit
+#                                from a stashed mention payload
+#   fmx_reply_limit_for_platform <platform> <explicit-limit> - pick split budget
 #   fmx_split_thread <max> <cap> - split a reply (stdin) into a numbered thread
 #   fmx_image_payload_file <path> <client> <payload-file> - encode one image
 #                                attachment to a JSON file and print preview JSON
@@ -21,8 +24,9 @@
 #   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
 #                                printing HTTP code and writing response body
 #   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
-#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] - (re)write the
-#                                X-request link, defaulting followups to 0
+#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]
+#                                - (re)write the X-request link, defaulting
+#                                followups to 0
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
@@ -46,11 +50,11 @@ fmx_env_get() {
   printf '%s' "$val"
 }
 
-# Resolve the X-mode settings into FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX, and
-# FMX_THREAD_MAX. An explicit environment variable always wins over the .env
-# file; the relay URL defaults to the production host so a normal user configures
-# only the token. FMX_RELAY has any trailing slash trimmed so callers can append
-# "/connector/..." cleanly.
+# Resolve the X-mode settings into FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
+# FMX_DISCORD_MAX, and FMX_THREAD_MAX. An explicit environment variable always
+# wins over the .env file; the relay URL defaults to the production host so a
+# normal user configures only the token. FMX_RELAY has any trailing slash trimmed
+# so callers can append "/connector/..." cleanly.
 # FMX_DRY is set to "1" when FMX_DRY_RUN is a truthy value (anything other than
 # unset/empty/0/false/no/off), and "" otherwise: preview mode, where the client
 # composes a reply but records it instead of posting (see fm-x-reply.sh).
@@ -79,14 +83,20 @@ fmx_load_config() {
     *) FMX_DRY=1 ;;
   esac
 
-  # Per-tweet character budget for thread-splitting (default 280, X non-premium),
-  # and the maximum number of tweets in one auto-split thread (anti-spam cap).
-  local maxraw threadraw
+  # Per-message character budgets for thread-splitting, and the maximum number
+  # of messages in one auto-split thread (anti-spam cap).
+  local maxraw discordraw threadraw
   if [ -n "${FMX_X_REPLY_MAX_CHARS+x}" ]; then maxraw=${FMX_X_REPLY_MAX_CHARS-}; else maxraw=$(fmx_env_get FMX_X_REPLY_MAX_CHARS "$env_file"); fi
   case "$maxraw" in ''|*[!0-9]*) maxraw=280 ;; esac
   [ "$maxraw" -ge 50 ] 2>/dev/null || maxraw=50
   # shellcheck disable=SC2034 # FMX_MAX is read by callers (fm-x-reply.sh) after sourcing.
   FMX_MAX=$maxraw
+  if [ -n "${FMX_DISCORD_REPLY_MAX_CHARS+x}" ]; then discordraw=${FMX_DISCORD_REPLY_MAX_CHARS-}; else discordraw=$(fmx_env_get FMX_DISCORD_REPLY_MAX_CHARS "$env_file"); fi
+  case "$discordraw" in ''|*[!0-9]*) discordraw=1900 ;; esac
+  [ "$discordraw" -ge 50 ] 2>/dev/null || discordraw=50
+  [ "$discordraw" -le 2000 ] 2>/dev/null || discordraw=1900
+  # shellcheck disable=SC2034 # FMX_DISCORD_MAX is read by callers (fm-x-reply.sh) after sourcing.
+  FMX_DISCORD_MAX=$discordraw
   if [ -n "${FMX_X_THREAD_MAX+x}" ]; then threadraw=${FMX_X_THREAD_MAX-}; else threadraw=$(fmx_env_get FMX_X_THREAD_MAX "$env_file"); fi
   case "$threadraw" in ''|*[!0-9]*) threadraw=25 ;; esac
   [ "$threadraw" -ge 1 ] 2>/dev/null || threadraw=25
@@ -94,36 +104,138 @@ fmx_load_config() {
   FMX_THREAD_MAX=$threadraw
 }
 
-# Split a reply into a numbered thread of <=<max>-codepoint chunks, packing on
-# word boundaries and hard-splitting any single over-long word. A reply that
-# already fits in one tweet is returned as a single UNNUMBERED chunk; longer
-# replies get " (k/n)" suffixes. At most <cap> tweets are produced; if the reply
-# would need more, the last kept tweet is marked with an ellipsis. Reads the
-# reply text on stdin and prints a compact JSON array of chunks. Length is
-# codepoint-based (via jq); the relay remains the final authority and trims.
+# fmx_request_inbox_context <state> <request_id>: inspect a stashed mention
+# payload and print {"platform": "...", "reply_max_chars": "..."}.
+# Explicit relay-provided platform/limit fields win. When absent, the legacy
+# tweet_id shape is used: "discord:<channel>:<message>" means Discord, while a
+# numeric id means X. Empty fields mean unknown, and callers must default safely.
+fmx_request_inbox_context() {
+  local state=$1 rid=$2 inbox
+  inbox="$state/x-inbox/$rid.json"
+  if [ ! -f "$inbox" ]; then
+    printf '{"platform":"","reply_max_chars":""}\n'
+    return 0
+  fi
+  jq -c '
+    def norm_platform:
+      tostring | ascii_downcase
+      | if . == "discord" or . == "discordapp" then "discord"
+        elif . == "x" or . == "twitter" then "x"
+        else "" end;
+    def first_string($items):
+      [$items[] | select(type == "string" and length > 0)][0] // "";
+    def first_limit($items):
+      [$items[]
+        | select(type == "number" or type == "string")
+        | tostring
+        | select(test("^[0-9]+$"))][0] // "";
+    (first_string([.reply_platform, .platform, .target_platform, .source_platform, .provider]) | norm_platform) as $explicit_platform
+    | ((.tweet_id // "") | tostring) as $tweet_id
+    | {
+        platform: (if $explicit_platform != "" then $explicit_platform
+          elif ($tweet_id | startswith("discord:")) then "discord"
+          elif ($tweet_id | test("^[0-9]+$")) then "x"
+          else "" end),
+        reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
+      }
+  ' "$inbox"
+}
+
+# fmx_reply_limit_for_platform <platform> <explicit-limit>: choose the split
+# budget for one outbound message. X keeps the existing FMX_X_REPLY_MAX_CHARS
+# default of 280. Discord uses 1900 by default, below Discord's 2000-character
+# message limit so relay/client metadata or small counting differences have
+# headroom. A relay-provided explicit limit is honored when present.
+fmx_reply_limit_for_platform() {
+  local platform=${1:-} explicit=${2:-}
+  case "$explicit" in
+    ''|*[!0-9]*) ;;
+    *) [ "$explicit" -ge 50 ] 2>/dev/null && { printf '%s\n' "$explicit"; return 0; } ;;
+  esac
+  case "$platform" in
+    discord) printf '%s\n' "${FMX_DISCORD_MAX:-1900}" ;;
+    *) printf '%s\n' "${FMX_MAX:-280}" ;;
+  esac
+}
+
+# Split a reply into a numbered thread of <=<max>-codepoint chunks, packing first
+# on fenced-code, paragraph, and line boundaries, then on word boundaries, and
+# hard-splitting only a single over-long unit. A reply that already fits in one
+# message is returned as a single UNNUMBERED chunk; longer replies get " (k/n)"
+# suffixes. At most <cap> messages are produced; if the reply would need more,
+# the last kept message is marked with an ellipsis. Reads the reply text on stdin
+# and prints a compact JSON array of chunks. Length is codepoint-based (via jq);
+# the relay remains the final authority and trims.
 fmx_split_thread() {
   jq -Rsc --argjson limit "$1" --argjson cap "$2" '
+    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def fence_marker: test("^[[:space:]]*```");
+    def fence_count: ((split("```") | length) - 1);
+    def numbered($i; $n):
+      "(\($i + 1)/\($n))" as $mark
+      | if ((fence_count % 2) == 0) and (split("\n")[-1] | fence_marker)
+        then . + "\n" + $mark
+        else . + " " + $mark
+        end;
     def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
+    def wordsplit($b):
+      (gsub("[[:space:]]+"; " ") | trim) as $norm
+      | if ($norm | length) == 0 then []
+        else
+          [ $norm | split(" ")[] | if (length > $b) then hardsplit($b)[] else . end ] as $words
+          | (reduce $words[] as $w ({chunks: [], cur: ""};
+              (if .cur == "" then $w else .cur + " " + $w end) as $cand
+              | if ($cand | length) <= $b then .cur = $cand
+                else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $w end
+            )) as $st
+          | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
+        end;
+    def split_units:
+      split("\n") as $lines
+      | (reduce $lines[] as $line ({units: [], cur: "", fence: false};
+          if .fence then
+            .cur = (if .cur == "" then $line else .cur + "\n" + $line end)
+            | if ($line | fence_marker) then .units += [.cur] | .cur = "" | .fence = false else . end
+          elif ($line | fence_marker) then
+            (if .cur != "" then .units += [.cur] | .cur = "" else . end)
+            | .cur = $line
+            | .fence = true
+          elif ($line | test("^[[:space:]]*$")) then
+            if .cur != "" then .units += [.cur] | .cur = "" else . end
+          else
+            ($line | trim) as $clean
+            | .cur = (if .cur == "" then $clean else .cur + " " + $clean end)
+          end
+        )) as $st
+      | ($st.units + (if $st.cur != "" then [$st.cur] else [] end))
+      | map(select((trim | length) > 0));
+    def pack_units($units; $b):
+      (reduce $units[] as $u ({chunks: [], cur: ""};
+        if ($u | length) > $b then
+          (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
+          | .chunks += ($u | wordsplit($b))
+        else
+          (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
+          | if ($cand | length) <= $b then .cur = $cand
+            else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $u end
+        end
+      )) as $st
+      | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end);
     def split_thread($limit; $cap):
-      (gsub("[[:space:]]+"; " ") | gsub("^ +| +$"; "")) as $norm
+      trim as $norm
       | if ($norm | length) == 0 then []
         elif ($norm | length) <= $limit then [$norm]
         else
           ($cap | tostring | length) as $digits
           | (4 + 2 * $digits) as $suffixw
           | (if ($limit - $suffixw - 1) < 1 then 1 else ($limit - $suffixw - 1) end) as $budget
-          | [ $norm | split(" ")[] | if (length > $budget) then hardsplit($budget)[] else . end ] as $words
-          | (reduce $words[] as $w ({chunks: [], cur: ""};
-              (if .cur == "" then $w else .cur + " " + $w end) as $cand
-              | if ($cand | length) <= $budget then .cur = $cand
-                else .chunks += [.cur] | .cur = $w end
-            )) as $st
-          | ($st.chunks + (if $st.cur != "" then [$st.cur] else [] end)) as $raw
+          | ($norm | split_units) as $units
+          | pack_units($units; $budget) as $raw
           | (if ($raw | length) > $cap
               then ($raw[0:$cap] | (.[($cap - 1)] += "…"))
               else $raw end) as $kept
           | ($kept | length) as $n
-          | [ range(0; $n) as $i | $kept[$i] + " (\($i + 1)/\($n))" ]
+          | [ range(0; $n) as $i | $kept[$i] | numbered($i; $n) ]
         end;
     split_thread($limit; $cap)
   '
@@ -295,11 +407,13 @@ fmx_post_json() (
 
 # --- task <-> X-request link (state/<id>.meta backed) -----------------------
 #
-# When an X mention spawns real work, the task is linked to its originating
-# mention by three lines in state/<id>.meta:
+# When an X/Discord mention spawns real work, the task is linked to its
+# originating mention by state/<id>.meta lines:
 #   x_request=<request_id>     the relay-issued id the follow-up posts against
 #   x_request_ts=<epoch>       when the link was made, for the 7-day follow-up window
 #   x_followups=<n>            follow-ups already posted against this binding (0..3)
+#   x_platform=<platform>      optional reply platform for follow-up split budget
+#   x_reply_max_chars=<n>      optional recorded per-message split budget
 # fm-x-followup.sh posts against that link (within the window, up to the cap),
 # then either records the incremented count or clears the link. These helpers
 # own the read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit
@@ -325,27 +439,35 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch> [followups]: atomically (re)write
-# the x_request/x_request_ts/x_followups lines, dropping any prior link and
-# preserving every other meta line. <followups> defaults to 0 (a fresh link);
-# pass the prior task's count to carry it forward onto a successor task instead
-# of granting a fresh follow-up budget against a binding the relay already knows
-# about. Returns non-zero if <meta> is missing or the rewrite fails.
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
+# atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
+# reply-platform context, dropping any prior link and preserving every other meta
+# line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
+# carry it forward onto a successor task instead of granting a fresh follow-up
+# budget against a binding the relay already knows about. Returns non-zero if
+# <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} tmp
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp
   [ -f "$meta" ] || return 1
   tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
   printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
   printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
   printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -n "$platform" ]; then
+    printf 'x_platform=%s\n' "$platform" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  case "$reply_max" in
+    ''|*[!0-9]*) ;;
+    *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+  esac
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
 # fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
-# line, preserving every other meta line including x_request/x_request_ts.
+# line, preserving every other meta line including link and reply context.
 # Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_followups_set() {
   local meta=$1 n=$2 tmp
@@ -359,14 +481,14 @@ fmx_meta_followups_set() {
 }
 
 # fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
-# x_followups lines while preserving every other meta line. Idempotent:
+# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
 # succeeds whether or not a link is present, and is a no-op when <meta> is
 # missing.
 fmx_meta_link_clear() {
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
   tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }

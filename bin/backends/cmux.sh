@@ -521,16 +521,17 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 }
 
 # fm_backend_cmux_composer_state: classify the composer's own row as
-# empty|pending|unknown. Adapted directly from herdr's structural border-row
-# classifier (fm_backend_herdr_composer_state, bin/backends/herdr.sh:598-665)
-# per the build task's explicit direction - this is the highest-risk piece of
-# a new backend's send-and-verify logic, and cmux's `read-screen` gives the
-# same kind of plain-text capture with no cursor-row primitive that herdr's
-# `pane read` does, so the same structural approach applies unchanged: locate
-# the composer row as the only captured line whose TRIMMED content both
-# STARTS and ENDS with the same border glyph (│, ┃, or a plain ASCII |),
-# scanning forward and keeping the LAST match so an earlier border-shaped line
-# (scrollback, a popup) never outranks the real bottom-anchored composer row.
+# empty|pending|unknown. Adapted from the bordered-row branch of herdr's
+# structural classifier (fm_backend_herdr_composer_state) per the build task's
+# explicit direction - this is the highest-risk piece of a new backend's
+# send-and-verify logic, and cmux's `read-screen` gives plain-text capture
+# with no cursor-row primitive and no ANSI style channel like herdr's newer
+# `pane read --format ansi` path. The cmux classifier intentionally remains
+# border-row based: locate the
+# composer row as the only captured line whose TRIMMED content both STARTS and
+# ENDS with the same border glyph (│, ┃, or a plain ASCII |), scanning forward
+# and keeping the LAST match so an earlier border-shaped line (scrollback, a
+# popup) never outranks the real bottom-anchored composer row.
 FM_BACKEND_CMUX_COMPOSER_LINES=${FM_BACKEND_CMUX_COMPOSER_LINES:-20}
 FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-'^Type a message\.\.\.$'}
 
@@ -573,12 +574,16 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until the composer's own row reads empty.
-# Mirrors fm_backend_herdr_send_text_submit's verification strategy exactly:
-# a slash-command popup's first Enter can close the popup and fill an
-# argument-hint placeholder into the composer rather than submitting, which a
-# raw-diff check would misread as "submitted" - classifying the composer row
-# specifically avoids that false positive, so the retry loop correctly sends
-# a second Enter when needed. Echoes empty|pending|unknown|send-failed, the
+# Mirrors fm_backend_herdr_send_text_submit's ORIGINAL (composer-row)
+# verification strategy: a slash-command popup's first Enter can close the
+# popup and fill an argument-hint placeholder into the composer rather than
+# submitting, which a raw-diff check would misread as "submitted" -
+# classifying the composer row specifically avoids that false positive, so
+# the retry loop correctly sends a second Enter when needed. Herdr's adapter
+# has since moved its own confirmation to a native agent-state read instead
+# (docs/herdr-backend.md "Native agent-state submit confirmation"); cmux has
+# no analogous native primitive, so this composer-row approach remains
+# cmux's own confirmation strategy. Echoes empty|pending|unknown|send-failed, the
 # SAME vocabulary every existing backend already speaks.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} i=0 state
