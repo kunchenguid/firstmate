@@ -196,6 +196,7 @@ Project trust dialog can appear on the first pi run in any not-yet-trusted direc
 Accept with Enter.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
 
+Pi does not auto-discover a project's own skills (verified: it ignores `.claude/skills` and `.pi/skills` at the project root) but accepts `--skill <dir>`, so `fm-spawn` passes `--skill <worktree>/.claude/skills` on crewmate and scout launches whose worktree has that directory; non-pi harnesses, skill-less worktrees, and pi secondmates get nothing.
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.

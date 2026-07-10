@@ -143,6 +143,7 @@ The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For Pi crewmate and scout launches, `fm-spawn.sh` also passes `--skill <worktree>/.claude/skills` when that directory exists, because Pi does not auto-discover a project's own skills; non-pi harnesses, skill-less worktrees, and pi secondmates get no such flag.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
