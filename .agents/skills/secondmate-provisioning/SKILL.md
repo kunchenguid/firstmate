@@ -83,6 +83,7 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 
 ## Backlog handoff
 
+Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
 When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the new scope, and move them with:

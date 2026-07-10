@@ -544,7 +544,8 @@ No nudge is needed at spawn because the agent reads `AGENTS.md` fresh on launch.
 For already-live secondmates, use `bin/fm-config-push.sh` when only this inherited config needs to be pushed.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the endpoint to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
-Add the task to `data/backlog.md` under In flight.
+For a ship or scout task, add the task to `data/backlog.md` under In flight.
+A secondmate spawn adds no backlog row: its identity and scope live in `data/secondmates.md`, its runtime lives in `state/<id>.meta`, and section 10 owns the backlog contract.
 
 ### Supervise
 
@@ -811,7 +812,10 @@ As a courtesy, mention cost when unusually much work is running (more than ~8 co
 ## 10. Backlog format
 
 `data/backlog.md` is the durable queue.
-Update it on every dispatch, completion, and decision.
+It tracks work items only, never agents; persistent secondmates never appear as backlog items.
+Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
+When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `tasks-axi hold <id> --kind captain` for a captain-gated thread.
+Update the backlog on every dispatch, completion, and decision for a work item.
 
 ```markdown
 ## In flight
