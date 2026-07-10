@@ -803,6 +803,32 @@ write_registry() {
   mv "$tmp" "$REG"
 }
 
+refuse_populated_projectless_home() {
+  local home=$1 project_path project
+  local clones=()
+  local registry_projects=()
+  for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
+    [ -e "$project_path" ] || [ -L "$project_path" ] || continue
+    clones+=("$(basename "$project_path")")
+  done
+  if [ -f "$home/data/projects.md" ]; then
+    while IFS= read -r project; do
+      [ -n "$project" ] && registry_projects+=("$project")
+    done < <(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md")
+  fi
+  [ "${#clones[@]}" -eq 0 ] && [ "${#registry_projects[@]}" -eq 0 ] && return 0
+
+  echo "error: cannot seed project-less secondmate home $home because it contains project data" >&2
+  if [ "${#clones[@]}" -gt 0 ]; then
+    printf 'error: projects/ entries: %s\n' "$(join_projects "${clones[@]}")" >&2
+  fi
+  if [ "${#registry_projects[@]}" -gt 0 ]; then
+    printf 'error: data/projects.md entries: %s\n' "$(join_projects "${registry_projects[@]}")" >&2
+  fi
+  echo "error: retire or clean this home first before seeding with --no-projects" >&2
+  return 1
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   local no_projects=0 arg
@@ -828,7 +854,6 @@ seed_home() {
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
   fi
 
-  mkdir -p "$DATA"
   validate_registry
   for project in "$@"; do
     validate_seed_project "$project"
@@ -873,9 +898,12 @@ seed_home() {
   SEED_HOME="$home"
   validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  if [ "$no_projects" -eq 1 ]; then
+    refuse_populated_projectless_home "$home" || return 1
+  fi
+  mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"

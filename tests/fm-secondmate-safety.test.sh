@@ -437,6 +437,42 @@ test_home_seed_no_projects_end_to_end() {
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
 }
 
+test_home_seed_refuses_projectless_conversion_of_populated_home() {
+  local home sub err registry_before
+  home="$TMP_ROOT/no-projects-conversion-home"
+  sub="$TMP_ROOT/no-projects-conversion-subhome"
+  err="$TMP_ROOT/no-projects-conversion.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/existing-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$sub/projects/existing-clone"
+  cat > "$sub/data/projects.md" <<EOF
+- registry-only [direct-PR] - retained project entry (added 2026-06-22)
+EOF
+  registry_before=$(cat "$sub/data/projects.md")
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed converted a populated secondmate home"
+  fi
+  grep -F 'existing-clone' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not name the existing clone"
+  grep -F 'registry-only' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not name the registry entry"
+  grep -F 'retire or clean this home first' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not explain the required cleanup"
+  assert_present "$sub/projects/existing-clone/.git" "project-less conversion refusal removed the existing clone"
+  [ "$registry_before" = "$(cat "$sub/data/projects.md")" ] \
+    || fail "project-less conversion refusal changed the project registry"
+  assert_absent "$sub/.fm-secondmate-home" "project-less conversion refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less conversion refusal copied a charter"
+  assert_absent "$sub/state" "project-less conversion refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less conversion refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less conversion of a populated home"
+}
+
 test_home_seed_refuses_missing_projects_without_signal() {
   # Accidental omission of the project list, with no deliberate --no-projects
   # signal, must fail loudly and leave nothing behind, so a forgotten argument is
@@ -1898,6 +1934,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_registry_delimiter_home
