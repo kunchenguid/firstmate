@@ -115,7 +115,7 @@ function statusWaitBudgetMs(opts) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["wait-status-polls"],
     "--wait-status-polls",
-    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "720",
   )));
   const sleepMs = Math.round(numericOption(
     opts["wait-status-sleep"],
@@ -132,7 +132,7 @@ async function waitForStatusFile(threadId, opts, startOffset = 0) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["wait-status-polls"],
     "--wait-status-polls",
-    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "240",
+    process.env.FM_CODEX_APP_RETURN_CHANNEL_POLLS || "720",
   )));
   const sleepMs = Math.round(numericOption(
     opts["wait-status-sleep"],
@@ -147,26 +147,53 @@ async function waitForStatusFile(threadId, opts, startOffset = 0) {
 }
 
 function isActiveStatus(status) {
-  return status === "active" || status === "inProgress" || status === "running" || status === "unknown";
+  return status === "active" || status === "inProgress" || status === "running" || status === "unknown" || status === "notLoaded";
 }
 
-async function holdTurnLifecycle(server, threadId, opts) {
+function turnIdFromStartResult(turn) {
+  if (!turn || typeof turn !== "object") return "";
+  if (typeof turn.id === "string") return turn.id;
+  if (turn.turn && typeof turn.turn.id === "string") return turn.turn.id;
+  return "";
+}
+
+async function readTurnStatus(server, threadId, turnId, previousTurnIds) {
+  const result = await server.request("thread/turns/list", {
+    threadId,
+    limit: 20,
+    itemsView: "summary",
+    sortDirection: "desc",
+  });
+  const turns = result.data || [];
+  const turn = turns.find(item => item && item.id === turnId) ||
+    (previousTurnIds && turns.find(item => item && !previousTurnIds.has(item.id)));
+  if (!turn) return "unknown";
+  return statusType(turn.status);
+}
+
+async function holdTurnLifecycle(server, threadId, opts, turnId = "", previousTurnIds = null) {
   const polls = Math.max(1, Math.floor(numericOption(
     opts["turn-lifecycle-polls"],
     "--turn-lifecycle-polls",
-    process.env.FM_CODEX_APP_TURN_LIFECYCLE_POLLS || "4320",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_POLLS || "360",
   )));
   const sleepMs = Math.round(numericOption(
     opts["turn-lifecycle-sleep"],
     "--turn-lifecycle-sleep",
-    process.env.FM_CODEX_APP_TURN_LIFECYCLE_SLEEP || "5",
+    process.env.FM_CODEX_APP_TURN_LIFECYCLE_SLEEP || "60",
   ) * 1000);
   for (let i = 0; i < polls; i += 1) {
-    if (sleepMs > 0) await delay(sleepMs);
+    if (turnId && await server.waitForTurnCompletion(threadId, turnId, sleepMs)) return;
+    if (!turnId && sleepMs > 0) await delay(sleepMs);
     try {
-      const result = await server.request("thread/read", { threadId, includeTurns: false });
-      const normalized = normalizeThread(result, "");
-      if (!isActiveStatus(normalized.status)) return;
+      let status;
+      if (turnId) {
+        status = await readTurnStatus(server, threadId, turnId, previousTurnIds);
+      } else {
+        const result = await server.request("thread/read", { threadId, includeTurns: false });
+        status = normalizeThread(result, "").status;
+      }
+      if (!isActiveStatus(status)) return;
     } catch (_) {
       // Keep the app-server alive through transient status-read failures.
     }
@@ -237,6 +264,8 @@ class AppServer {
     });
     this.nextId = 1;
     this.pending = new Map();
+    this.completedTurns = new Set();
+    this.turnCompletionWaiters = new Map();
     this.stderr = "";
     this.stdoutBuffer = "";
     this.child.stdout.setEncoding("utf8");
@@ -275,7 +304,10 @@ class AppServer {
       this.rejectAll(new Error(`invalid JSON from codex app-server: ${trimmed.slice(0, 200)}`));
       return;
     }
-    if (msg.id == null) return;
+    if (msg.id == null) {
+      this.onNotification(msg);
+      return;
+    }
     const pending = this.pending.get(msg.id);
     if (!pending) return;
     clearTimeout(pending.timer);
@@ -286,6 +318,41 @@ class AppServer {
     } else {
       pending.resolve(msg.result);
     }
+  }
+
+  onNotification(msg) {
+    if (msg.method !== "turn/completed") return;
+    const params = msg.params;
+    const threadId = params && params.threadId;
+    const turnId = params && params.turn && params.turn.id;
+    if (typeof threadId !== "string" || typeof turnId !== "string") return;
+    const key = JSON.stringify([threadId, turnId]);
+    const waiters = this.turnCompletionWaiters.get(key);
+    if (!waiters) {
+      this.completedTurns.add(key);
+      return;
+    }
+    this.turnCompletionWaiters.delete(key);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(true);
+    }
+  }
+
+  waitForTurnCompletion(threadId, turnId, timeoutMs) {
+    const key = JSON.stringify([threadId, turnId]);
+    if (this.completedTurns.delete(key)) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const waiters = this.turnCompletionWaiters.get(key) || new Set();
+      const waiter = { resolve, timer: null };
+      waiter.timer = setTimeout(() => {
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.turnCompletionWaiters.delete(key);
+        resolve(false);
+      }, timeoutMs);
+      waiters.add(waiter);
+      this.turnCompletionWaiters.set(key, waiters);
+    });
   }
 
   rejectAll(err) {
@@ -416,7 +483,7 @@ async function sendTurnDetached(opts) {
     detached: true,
     stdio: "ignore",
   });
-  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 3) + statusWaitBudgetMs(opts) + 5000;
+  const readyTimeoutMs = (DEFAULT_TIMEOUT_MS * 4) + statusWaitBudgetMs(opts) + 5000;
   let ready;
   try {
     ready = await waitForReadyFile(readyFile, child, readyTimeoutMs);
@@ -512,12 +579,24 @@ async function sendTurnWorker(opts, readyFile) {
     try {
       const statusStartOffset = statusFileOffset(opts["wait-status-file"]);
       await server.request("thread/resume", threadResumeParams(threadId, opts));
+      let previousTurnIds = null;
+      try {
+        const previous = await server.request("thread/turns/list", {
+          threadId,
+          limit: 20,
+          itemsView: "summary",
+          sortDirection: "desc",
+        });
+        previousTurnIds = new Set((previous.data || []).map(item => item && item.id).filter(Boolean));
+      } catch (_) {
+        // Exact turn-id tracking still works when history is temporarily unavailable.
+      }
       const turn = await server.request("turn/start", turnParams(threadId, prompt, opts));
       await waitForStatusFile(threadId, opts, statusStartOffset);
       const ready = { ok: true, thread_id: threadId, turn, worker_pid: process.pid };
       writeJsonFile(readyFile, ready);
       reportedReady = true;
-      await holdTurnLifecycle(server, threadId, opts);
+      await holdTurnLifecycle(server, threadId, opts, turnIdFromStartResult(turn), previousTurnIds);
       return ready;
     } catch (err) {
       if (!reportedReady) writeJsonFile(readyFile, { ok: false, error: err.message });

@@ -17,6 +17,8 @@ const readline = require("node:readline");
 const log = process.env.FM_FAKE_CODEX_LOG;
 const threadId = process.env.FM_FAKE_CODEX_THREAD_ID || "thread-123";
 const turnId = process.env.FM_FAKE_CODEX_TURN_ID || "turn-456";
+const listedTurnId = process.env.FM_FAKE_CODEX_LISTED_TURN_ID || turnId;
+const listedTurnDelayMs = Number(process.env.FM_FAKE_CODEX_LISTED_TURN_DELAY_MS || "0");
 const forcedCwd = process.env.FM_FAKE_CODEX_CWD || "";
 const omitCwd = process.env.FM_FAKE_CODEX_OMIT_CWD === "1";
 const statusFile = process.env.FM_FAKE_CODEX_STATUS_FILE || "";
@@ -25,10 +27,16 @@ const initializeDelayMs = Number(process.env.FM_FAKE_CODEX_INITIALIZE_DELAY_MS |
 const resumeDelayMs = Number(process.env.FM_FAKE_CODEX_RESUME_DELAY_MS || "0");
 const turnStartDelayMs = Number(process.env.FM_FAKE_CODEX_TURN_START_DELAY_MS || "0");
 const substantiveFile = process.env.FM_FAKE_CODEX_SUBSTANTIVE_FILE || "";
+const exitFile = process.env.FM_FAKE_CODEX_EXIT_FILE || "";
 const substantiveDelayMs = Number(process.env.FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS || "0");
 const holdActiveUntilSubstantive = process.env.FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE === "1";
+const notifyTurnCompleted = process.env.FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED === "1";
+const notifyTurnCompletedDelayMs = Number(process.env.FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED_DELAY_MS || "0");
+const notifyWrongCompletionFirst = process.env.FM_FAKE_CODEX_NOTIFY_WRONG_COMPLETION_FIRST === "1";
 const metadataFail = process.env.FM_FAKE_CODEX_METADATA_FAIL === "1";
 let substantiveDone = false;
+let turnStarted = false;
+let turnStartedAt = 0;
 function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -65,7 +73,14 @@ function hasSchemaNativeTextInput(params) {
     item && item.type === "text" && typeof item.text === "string" && Array.isArray(item.text_elements)
   );
 }
+function currentTurnStatus() {
+  if (holdActiveUntilSubstantive && !substantiveDone) return "inProgress";
+  return process.env.FM_FAKE_CODEX_TURN_STATUS || "completed";
+}
 const rl = readline.createInterface({ input: process.stdin });
+rl.on("close", () => {
+  if (exitFile) fs.appendFileSync(exitFile, "exited\n");
+});
 rl.on("line", line => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
@@ -93,6 +108,8 @@ rl.on("line", line => {
       write({ id, error: { code: -32602, message: "turn/start text input missing text_elements" } });
       return;
     }
+    turnStarted = true;
+    turnStartedAt = Date.now();
     respond({ id, result: { turn: { id: turnId, status: "inProgress", input: params.input || [] } } }, turnStartDelayMs, () => {
       if (statusFile) {
         setTimeout(() => {
@@ -105,6 +122,15 @@ rl.on("line", line => {
           substantiveDone = true;
         }, substantiveDelayMs);
       }
+      if (notifyWrongCompletionFirst) {
+        write({ method: "turn/completed", params: { threadId: "thread-unrelated", turn: { id: turnId, status: "completed" } } });
+        write({ method: "turn/completed", params: { threadId, turn: { id: "turn-unrelated", status: "completed" } } });
+      }
+      if (notifyTurnCompleted) {
+        setTimeout(() => {
+          write({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        }, notifyTurnCompletedDelayMs);
+      }
     });
   } else if (msg.method === "thread/read") {
     const status = holdActiveUntilSubstantive && !substantiveDone ? "active" : (process.env.FM_FAKE_CODEX_STATUS || "idle");
@@ -116,7 +142,10 @@ rl.on("line", line => {
         { id: "turn-old", status: "completed", items: [{ type: "agentMessage", text: "older line" }] }
       ], nextCursor: null, backwardsCursor: null } });
     } else {
-      write({ id, result: { data: [{ id: turnId, status: "completed", items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] }], nextCursor: null, backwardsCursor: null } });
+      const turns = [];
+      if (turnStarted && Date.now() - turnStartedAt >= listedTurnDelayMs) turns.push({ id: listedTurnId, status: currentTurnStatus(), items: [{ type: "userMessage", content: [{ type: "text", text: "hello captain" }] }, { type: "agentMessage", text: "aye captain" }] });
+      if (process.env.FM_FAKE_CODEX_PRIOR_TURN === "1") turns.push({ id: "turn-prior", status: "completed", items: [] });
+      write({ id, result: { data: turns, nextCursor: null, backwardsCursor: null } });
     }
   } else if (msg.method === "thread/list") {
     write({ id, result: { data: [thread(cwd, process.env.FM_FAKE_CODEX_STATUS || "idle")], nextCursor: null } });
@@ -285,6 +314,77 @@ test_bridge_send_turn_keeps_app_server_alive_until_return_channel() {
   assert_contains "$(cat "$log")" $'request\tturn/start\t' "bridge did not start the turn"
   assert_contains "$(cat "$log")" '"text_elements":[]' "bridge should send schema-native text input while waiting for handshake"
   pass "fm-codex-bridge: send-turn keeps app-server alive through startup return-channel verification"
+}
+
+test_bridge_send_turn_uses_exact_completion_notification_without_polling() {
+  local dir fb log prompt substantive_file out status i
+  dir="$TMP_ROOT/bridge-turn-notification"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  substantive_file="$dir/substantive.log"
+  printf 'Wait for this exact turn notification, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=50 FM_FAKE_CODEX_NOTIFY_WRONG_COMPLETION_FIRST=1 FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED=1 FM_FAKE_CODEX_NOTIFY_TURN_COMPLETED_DELAY_MS=100 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=3 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.25 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should accept the exact turn completion notification: $out"
+  for ((i = 0; i < 40; i += 1)); do
+    [ -f "$substantive_file" ] && break
+    sleep 0.01
+  done
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should ignore completion notifications for other thread and turn ids"
+  sleep 0.3
+  [ "$(grep -c $'request\tthread/turns/list\t' "$log")" -eq 1 ] || fail "bridge should only snapshot turn history before an exact completion notification"
+  pass "fm-codex-bridge: send-turn uses the exact completion notification without polling"
+}
+
+test_bridge_send_turn_falls_back_to_turn_status_polling() {
+  local dir fb log prompt substantive_file out status i
+  dir="$TMP_ROOT/bridge-turn-not-loaded"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  substantive_file="$dir/substantive.log"
+  printf 'Keep the turn alive even when the shell thread status is notLoaded, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_STATUS=notLoaded FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=350 FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE=1 FM_CODEX_APP_TURN_LIFECYCLE_POLLS=40 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.02 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should accept a turn whose thread shell status is notLoaded: $out"
+  for ((i = 0; i < 40; i += 1)); do
+    [ -f "$substantive_file" ] && break
+    sleep 0.02
+  done
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should keep the app-server alive until the turn reports completed"
+  assert_contains "$(cat "$log")" $'request\tthread/turns/list\t' "bridge should poll the turn lifecycle instead of treating thread notLoaded as completion"
+  pass "fm-codex-bridge: send-turn falls back to turn status polling without a completion notification"
+}
+
+test_bridge_send_turn_correlates_rewritten_turn_id() {
+  local dir fb log prompt substantive_file exit_file out status i
+  dir="$TMP_ROOT/bridge-turn-id-rewrite"
+  mkdir -p "$dir/wt"
+  log="$dir/codex.log"
+  prompt="$dir/prompt.txt"
+  substantive_file="$dir/substantive.log"
+  exit_file="$dir/exited.log"
+  printf 'Track the rewritten persisted turn id, captain.\n' > "$prompt"
+  fb=$(make_fake_codex_bin "$dir")
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_CODEX_LOG="$log" FM_FAKE_CODEX_LISTED_TURN_ID=turn-persisted FM_FAKE_CODEX_LISTED_TURN_DELAY_MS=50 FM_FAKE_CODEX_PRIOR_TURN=1 FM_FAKE_CODEX_SUBSTANTIVE_FILE="$substantive_file" FM_FAKE_CODEX_SUBSTANTIVE_DELAY_MS=120 FM_FAKE_CODEX_HOLD_ACTIVE_UNTIL_SUBSTANTIVE=1 FM_FAKE_CODEX_EXIT_FILE="$exit_file" FM_CODEX_APP_TURN_LIFECYCLE_POLLS=100 FM_CODEX_APP_TURN_LIFECYCLE_SLEEP=0.02 \
+    "$ROOT/bin/fm-codex-bridge" send-turn --thread-id thread-123 --prompt-file "$prompt" --cwd "$dir/wt" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "bridge send-turn should accept a rewritten listed turn id: $out"
+  for ((i = 0; i < 50; i += 1)); do
+    [ -f "$exit_file" ] && break
+    sleep 0.02
+  done
+  assert_grep "exited" "$exit_file" "bridge should stop polling after the rewritten listed turn completes"
+  assert_grep "substantive: bridge still alive" "$substantive_file" "bridge should not confuse the prior completed turn with the rewritten current turn"
+  pass "fm-codex-bridge: send-turn correlates a rewritten listed turn id"
 }
 
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests() {
@@ -471,6 +571,9 @@ test_backend_capture_returns_empty_parsed_text() {
 
 test_bridge_start_thread_uses_app_server_stdio
 test_bridge_send_turn_keeps_app_server_alive_until_return_channel
+test_bridge_send_turn_uses_exact_completion_notification_without_polling
+test_bridge_send_turn_falls_back_to_turn_status_polling
+test_bridge_send_turn_correlates_rewritten_turn_id
 test_bridge_send_turn_ready_timeout_covers_slow_pre_ready_requests
 test_bridge_send_turn_rejects_stale_status_line
 test_bridge_start_thread_requires_reported_cwd
