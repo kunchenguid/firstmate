@@ -19,8 +19,9 @@
 #   - proving the destination is a genuine seeded secondmate home
 #     (.fm-secondmate-home marker, AGENTS.md + bin/), never a project clone, the
 #     active home, or the firstmate repo;
-#   - refusing to hand off `## In flight` items - a fleet policy tasks-axi mv
-#     does not know, complementary to (not the same as) its dependency guard;
+#   - moving only `## Queued` items, refusing `## In flight` and historical
+#     `## Done` records, which must stay with their home for pruning or
+#     archiving;
 #   - the multi-key classification and idempotent per-key reporting: a key
 #     already present in the secondmate backlog is reported and skipped, and if
 #     any key matches neither backlog nothing is moved.
@@ -232,15 +233,18 @@ TO_MOVE=()
 ALREADY=()
 MISSING=()
 IN_FLIGHT=()
+DONE=()
+NOT_QUEUED=()
 for key in "$@"; do
   if backlog_key_section "$SUB_BACKLOG" "$key" >/dev/null; then
     ALREADY+=("$key")
   elif section=$(backlog_key_section "$MAIN_BACKLOG" "$key"); then
-    if [ "$section" = "## In flight" ]; then
-      IN_FLIGHT+=("$key")
-    else
-      TO_MOVE+=("$key")
-    fi
+    case "$section" in
+      "## Queued") TO_MOVE+=("$key") ;;
+      "## In flight") IN_FLIGHT+=("$key") ;;
+      "## Done") DONE+=("$key") ;;
+      *) NOT_QUEUED+=("$key") ;;
+    esac
   else
     MISSING+=("$key")
   fi
@@ -249,6 +253,14 @@ done
 FAILED=0
 if [ "${#IN_FLIGHT[@]}" -gt 0 ]; then
   echo "error: refusing to hand off in-flight backlog items: ${IN_FLIGHT[*]}" >&2
+  FAILED=1
+fi
+if [ "${#DONE[@]}" -gt 0 ]; then
+  echo "error: refusing to hand off Done (historical) backlog items: ${DONE[*]}; handoffs move in-scope queued work only - Done records stay with their home and are pruned/archived." >&2
+  FAILED=1
+fi
+if [ "${#NOT_QUEUED[@]}" -gt 0 ]; then
+  echo "error: refusing to hand off non-queued backlog items: ${NOT_QUEUED[*]}; handoffs move in-scope queued work only." >&2
   FAILED=1
 fi
 if [ "${#MISSING[@]}" -gt 0 ]; then

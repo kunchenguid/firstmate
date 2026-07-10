@@ -377,7 +377,8 @@ When a secondmate is created for a domain, the existing main-backlog items that 
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the scope, and move them with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
 Do not hand off `local-only` items; that work stays with the main firstmate (section 7).
-For idempotence, destination validation, and refusal of `## In flight` entries, load `secondmate-provisioning`.
+For idempotence, destination validation, and the queued-only handoff contract that refuses `## In flight` and historical `## Done` entries, load `secondmate-provisioning`.
+Done records stay with their home for pruning or archiving.
 
 ### Project memory ownership
 
