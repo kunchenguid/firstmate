@@ -634,6 +634,32 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   pass "a non-paused secondmate retains normal stale suppression"
 }
 
+test_secondmate_unpause_clears_pause_tracking() {
+  local dir state fakebin out statusf window key pid
+  dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/secondmate-resumed.status"; window="test:fm-secondmate-resumed"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
+  printf 'working: upstream landed\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-resumed_status"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  : > "$state/.paused-resurfaced-$key"
+  : > "$state/.stale-$key"
+  : > "$state/.stale-since-$key"
+  : > "$state/.wedge-escalations-$key"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 20 || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed secondmate retained the pause marker"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "resumed secondmate retained stale tracking"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "resumed secondmate retained wedge tracking"; }
+  reap "$pid"
+  pass "a resumed secondmate clears pause and stale tracking before stale exemption"
+}
+
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1007,6 +1033,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_nonterminal_stale_repairs_missing_or_corrupt_timer

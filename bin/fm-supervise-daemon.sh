@@ -461,34 +461,42 @@ pause_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-paused-$key"
 }
 
+clear_pause_tracking() {  # <window> <state>
+  local win=$1 state=$2 task key watcher_key
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  watcher_key=$(_stale_key "$win")
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+}
+
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task key marker
+  local win=$1 state=$2 last=$3 task key marker watcher_key
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
+  watcher_key=$(_stale_key "$win")
   if status_is_paused "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
-  elif [ -e "$marker" ]; then
-    pause_marker_remove "$win" "$state"
-    stale_marker_record "$win" "$state"
+  elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    clear_pause_tracking "$win" "$state"
   fi
 }
 
 migrate_watcher_pause_markers() {  # <state>
-  local state=$1 meta win task key last
+  local state=$1 meta win task key last watcher_key
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     win=$(fm_backend_target_of_meta "$meta")
     [ -n "$win" ] || continue
-    key=$(_stale_key "$win")
-    [ -e "$state/.paused-$key" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
+    key=$(_stale_key "$task")
+    watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
-    reconcile_pause_tracking "$win" "$state" "$last"
-    if ! status_is_paused "$last"; then
-      rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key"
-      stale_marker_record "$win" "$state"
+    if status_is_paused "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+      reconcile_pause_tracking "$win" "$state" "$last"
     fi
   done
 }
@@ -930,7 +938,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled
+  local reason=$1 state=$2 decision action distilled task last
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -975,8 +983,14 @@ handle_wake() {  # <reason> <state>
       # pause reverts to normal wedge aging). The persistence recheck, not this
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then
-        pause_marker_remove "$arg" "$state"
-        stale_marker_record "$arg" "$state"
+        task=$(window_to_task "$arg" "$state")
+        last=$(last_status_line "$state/$task.status")
+        if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+          stale_marker_remove "$arg" "$state"
+        else
+          pause_marker_remove "$arg" "$state"
+          stale_marker_record "$arg" "$state"
+        fi
       fi
       log "self-handle: $reason -> $distilled"
       ;;

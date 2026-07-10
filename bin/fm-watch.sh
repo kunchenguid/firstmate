@@ -323,6 +323,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+clear_pause_tracking() {  # <window>
+  local win=$1 key
+  key=${win//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class
   key=${win//:/_}
@@ -352,7 +361,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   wake "stale: $win"
 }
 
@@ -551,7 +560,14 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    if [ "$kind" = secondmate ] && ! status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+    key=${w//:/_}
+    key=${key//\//_}
+    key=${key//./_}
+    last=$(last_status_line "$STATE/$task.status")
+    if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
+      clear_pause_tracking "$w"
+    fi
+    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
@@ -563,7 +579,6 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
-    prf="$STATE/.paused-rechecked-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -578,7 +593,7 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      rm -f "$pf" "$prf" ;;
+            *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
@@ -643,9 +658,9 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(crew_absorb_class "$task")" in
               working)
+                clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
-                rm -f "$pf" "$prf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -660,8 +675,10 @@ EOF
             if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) rm -f "$pf" "$prf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                working) clear_pause_tracking "$w"
+                         printf '%s' "$h" > "$sf"
+                         date +%s > "$ssf"
+                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
@@ -672,8 +689,8 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
         rm -f "$ssf" "$ewf"
-        if [ "$n" -ge 2 ] || ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; then
-          rm -f "$pf" "$prf"
+        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+          clear_pause_tracking "$w"
         fi
       fi
     else
@@ -684,10 +701,10 @@ EOF
       if status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      rm -f "$pf" "$prf" ;;
+          *)      clear_pause_tracking "$w" ;;
         esac
       else
-        rm -f "$pf" "$prf"
+        [ -e "$pf" ] && clear_pause_tracking "$w"
       fi
     fi
   done < <(recorded_windows)
