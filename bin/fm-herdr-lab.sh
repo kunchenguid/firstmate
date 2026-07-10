@@ -12,8 +12,9 @@
 #
 # Session names must begin with "fm-lab-" and can never be "default".
 # Every Herdr call made here carries a trailing --session <session>.
-# The run command rejects caller-supplied --session flags, all session
-# lifecycle operations, and every server operation.
+# The run command rejects caller-supplied --session flags, any leading option
+# before the subcommand, all session lifecycle operations, and every server
+# operation.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -122,6 +123,12 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   shift
   fm_herdr_lab_validate_name "$name" || return 1
   [ "$#" -gt 0 ] || { fm_herdr_lab_error "run requires Herdr arguments"; return 1; }
+  case "$1" in
+    -*)
+      fm_herdr_lab_error "run forbids a leading option before the Herdr subcommand; it could shift a server or session lifecycle operation past the guard or subvert session isolation"
+      return 1
+      ;;
+  esac
   for arg in "$@"; do
     case "$arg" in
       --session|--session=*)

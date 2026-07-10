@@ -120,6 +120,15 @@ test_provision_run_and_guarded_teardown() {
   status=0
   run_with_fake fm_herdr_lab_cli "$name" status --session=default >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "caller-supplied equals-form session flag must be refused"
+  status=0
+  run_with_fake fm_herdr_lab_cli "$name" --handoff server stop >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a leading option shifting server stop past the guard must be refused"
+  status=0
+  run_with_fake fm_herdr_lab_cli "$name" --no-session session delete "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a leading option shifting session delete past the guard must be refused"
+  status=0
+  run_with_fake fm_herdr_lab_cli "$name" --remote host workspace list >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a leading option subverting session isolation must be refused"
 
   run_with_fake fm_herdr_lab_teardown "$name" || fail "guarded teardown failed"
   [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "teardown did not delete the lab session"
