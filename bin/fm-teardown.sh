@@ -298,14 +298,12 @@ work_is_landed() {
 
 backlog_refresh_reminder() {
   local pr done_cmd report_path
+  [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
         done_cmd="tasks-axi done $ID --report $report_path"
-        ;;
-      secondmate)
-        done_cmd="tasks-axi done $ID --note \"retired\""
         ;;
       *)
         if [ "$MODE" = local-only ]; then
