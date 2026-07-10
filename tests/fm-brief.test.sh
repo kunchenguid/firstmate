@@ -93,7 +93,75 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_herdr_lab_contract_is_explicit_and_complete() {
+  local home id brief
+  home="$TMP_ROOT/herdr-lab-home"
+  mkdir -p "$home/data"
+  id="brief-herdr-lab-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "Herdr lab brief was not scaffolded"
+  assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
+    "Herdr lab brief missing its hard safety contract"
+  assert_grep "HERDR_LAB_SESSION=\$(bin/fm-herdr-lab.sh name $id)" "$brief" \
+    "Herdr lab brief missing helper-owned session naming"
+  assert_grep "bin/fm-herdr-lab.sh provision" "$brief" \
+    "Herdr lab brief missing helper-owned provisioning"
+  assert_grep "bin/fm-herdr-lab.sh teardown" "$brief" \
+    "Herdr lab brief missing helper-owned teardown"
+  assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
+    "Herdr lab brief missing the per-call trailing session contract"
+  assert_grep "direct \`herdr server stop\`" "$brief" \
+    "Herdr lab brief missing the forbidden server-global command list"
+  assert_grep "records the live default session before provisioning" "$brief" \
+    "Herdr lab brief missing the before tripwire"
+  assert_grep "verifies the identical fleet state after teardown" "$brief" \
+    "Herdr lab brief missing the after tripwire"
+  assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+    "Herdr lab brief retained the unguarded declaration"
+  pass "fm-brief.sh: --herdr-lab emits the complete hard safety contract"
+}
+
+test_herdr_lab_omission_is_loud_for_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/herdr-gate-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-herdr-gate-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+      "$kind brief silently omitted the Herdr declaration"
+    assert_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
+      "$kind brief missing the fail-visible regeneration instruction"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
+}
+
+test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
+  local home brief status=0
+  home="$TMP_ROOT/herdr-kind-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab >/dev/null 2>&1
+  brief="$home/data/herdr-scout/brief.md"
+  assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
+    "scout --herdr-lab brief missing the contract"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops "$ROOT/bin/fm-brief.sh" herdr-secondmate --secondmate firstmate --herdr-lab >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "secondmate --herdr-lab must be rejected"
+  assert_absent "$home/data/herdr-secondmate/brief.md" \
+    "rejected secondmate --herdr-lab still wrote a brief"
+  pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_herdr_lab_contract_is_explicit_and_complete
+test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
