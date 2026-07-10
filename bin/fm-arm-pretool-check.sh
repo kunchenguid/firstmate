@@ -103,13 +103,6 @@ fi
 
 [ -n "$CMD" ] || exit 0
 
-# This is a strict superset prefilter only.
-# Every protected command and broad watcher kill contains this byte sequence.
-case "$CMD" in
-  *fm-watch*) ;;
-  *) exit 0 ;;
-esac
-
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}

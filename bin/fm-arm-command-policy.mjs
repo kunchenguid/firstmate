@@ -33,11 +33,15 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch-(?:arm|checkpoint)\.sh\b/.test(command);
+  return /(?:^|[/\s'"`(])fm-watch-(?:arm|checkpoint)\.sh\b/.test(normalizeLineContinuations(command));
 }
 
 function rawMentionsWatcher(command) {
-  return /fm-watch/.test(command);
+  return /fm-watch/.test(normalizeLineContinuations(command));
+}
+
+function normalizeLineContinuations(source) {
+  return source.replace(/\\\r?\n/g, "");
 }
 
 function basename(value) {
@@ -100,6 +104,67 @@ function extractBackticks(source, start) {
   return null;
 }
 
+function decodeAnsiCQuoted(source, start) {
+  let index = start + 2;
+  let value = "";
+  while (index < source.length) {
+    const char = source[index];
+    if (char === "'") return { value, next: index + 1 };
+    if (char !== "\\") {
+      value += char;
+      index += 1;
+      continue;
+    }
+    if (index + 1 >= source.length) return null;
+    const escape = source[index + 1];
+    index += 2;
+    const simple = { a: "\u0007", b: "\b", e: "\u001b", E: "\u001b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+    if (Object.hasOwn(simple, escape)) {
+      value += simple[escape];
+      continue;
+    }
+    if (/[0-7]/.test(escape)) {
+      let digits = escape;
+      while (digits.length < 3 && /[0-7]/.test(source[index] || "")) {
+        digits += source[index];
+        index += 1;
+      }
+      value += String.fromCodePoint(Number.parseInt(digits, 8));
+      continue;
+    }
+    if (escape === "x") {
+      let digits = "";
+      while (digits.length < 2 && /[0-9A-Fa-f]/.test(source[index] || "")) {
+        digits += source[index];
+        index += 1;
+      }
+      value += digits ? String.fromCodePoint(Number.parseInt(digits, 16)) : "\\x";
+      continue;
+    }
+    if (escape === "u" || escape === "U") {
+      const length = escape === "u" ? 4 : 8;
+      const digits = source.slice(index, index + length);
+      if (digits.length === length && /^[0-9A-Fa-f]+$/.test(digits)) {
+        const codePoint = Number.parseInt(digits, 16);
+        try {
+          value += String.fromCodePoint(codePoint);
+          index += length;
+          continue;
+        } catch {}
+      }
+      value += `\\${escape}`;
+      continue;
+    }
+    if (escape === "c" && index < source.length) {
+      value += String.fromCodePoint(source.codePointAt(index) & 31);
+      index += 1;
+      continue;
+    }
+    value += `\\${escape}`;
+  }
+  return null;
+}
+
 class Lexer {
   constructor(source) {
     this.source = source;
@@ -134,8 +199,9 @@ class Lexer {
       }
       const redirection = this.readRedirection();
       if (redirection) {
-        this.tokens.push({ type: "redir", value: redirection.value, inlineTarget: redirection.inlineTarget });
-        if (redirection.value === "<<" || redirection.value === "<<-") this.expectHeredoc = redirection.value;
+        const token = { type: "redir", value: redirection.value, inlineTarget: redirection.inlineTarget, fd: redirection.fd };
+        this.tokens.push(token);
+        if (redirection.value === "<<" || redirection.value === "<<-") this.expectHeredoc = { token, stripTabs: redirection.value === "<<-" };
         continue;
       }
       if (char === "(" || char === "{") {
@@ -156,7 +222,7 @@ class Lexer {
       }
       this.tokens.push(word);
       if (this.expectHeredoc) {
-        this.pendingHeredocs.push({ delimiter: word.value, stripTabs: this.expectHeredoc === "<<-" });
+        this.pendingHeredocs.push({ delimiter: word.value, stripTabs: this.expectHeredoc.stripTabs, token: this.expectHeredoc.token });
         this.expectHeredoc = null;
       }
     }
@@ -171,6 +237,7 @@ class Lexer {
   skipHeredocBodies() {
     for (const heredoc of this.pendingHeredocs) {
       let found = false;
+      let body = "";
       while (this.index < this.source.length) {
         const end = this.source.indexOf("\n", this.index);
         const lineEnd = end === -1 ? this.source.length : end;
@@ -181,11 +248,14 @@ class Lexer {
           found = true;
           break;
         }
+        body += comparable;
+        if (end !== -1) body += "\n";
       }
       if (!found) {
         this.error = "unclosed heredoc";
         break;
       }
+      heredoc.token.heredoc = body;
     }
     this.pendingHeredocs = [];
   }
@@ -202,13 +272,14 @@ class Lexer {
 
   readRedirection() {
     const remaining = this.source.slice(this.index);
-    const match = remaining.match(/^(?:\d+)?(?:<<<|<<-|<<|>>|<>|>&|<&|>|<)(?:&?[0-9-]+)?/);
+    const match = remaining.match(/^(\d+)?(<<<|<<-|<<|>>|<>|>&|<&|>|<)(?:&?[0-9-]+)?/);
     if (!match) return "";
     this.index += match[0].length;
     const inlineTarget = /(?:>&|<&)[0-9-]+$/.test(match[0]);
     let normalized = match[0].replace(/^\d+/, "");
     if (inlineTarget) normalized = normalized.replace(/[0-9-]+$/, "");
-    return { value: normalized, inlineTarget };
+    const fd = match[1] === undefined ? (match[2].startsWith("<") ? 0 : 1) : Number(match[1]);
+    return { value: normalized, inlineTarget, fd };
   }
 
   readWord() {
@@ -240,8 +311,23 @@ class Lexer {
           this.error = "trailing escape";
           return null;
         }
+        if (this.source[this.index + 1] === "\n") {
+          this.index += 2;
+          continue;
+        }
         word.value += this.source[this.index + 1];
         this.index += 2;
+        continue;
+      }
+      if (this.source.startsWith("$'", this.index)) {
+        const ansi = decodeAnsiCQuoted(this.source, this.index);
+        if (!ansi) {
+          this.error = "unclosed ANSI-C quote";
+          return null;
+        }
+        word.quoted = true;
+        word.value += ansi.value;
+        this.index = ansi.next;
         continue;
       }
       if (this.source.startsWith("$(", this.index)) {
@@ -294,6 +380,10 @@ class Lexer {
       }
       if (char === "\\") {
         if (this.index + 1 >= this.source.length) break;
+        if (this.source[this.index + 1] === "\n") {
+          this.index += 2;
+          continue;
+        }
         word.value += this.source[this.index + 1];
         this.index += 2;
         continue;
@@ -366,32 +456,103 @@ function wordsInNode(tokens) {
   return words;
 }
 
+const WRAPPER_OPTIONS = {
+  command: { noArgument: new Set(["p", "v", "V"]), takesArgument: new Set() },
+  env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
+  exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
+  nohup: { noArgument: new Set(), takesArgument: new Set() },
+  sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
+};
+
+const WRAPPER_LONG_OPTIONS = {
+  command: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
+  env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
+  exec: { noArgument: new Set(), takesArgument: new Set() },
+  nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
+  sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },
+};
+
+function consumeWrapperOptions(name, words, index) {
+  const short = WRAPPER_OPTIONS[name];
+  const long = WRAPPER_LONG_OPTIONS[name];
+  const embeddedPayloads = [];
+  let next = index;
+  while (words[next]) {
+    const value = words[next].value;
+    if (value === "--") return { index: next + 1, unresolved: false, embeddedPayloads };
+    if (!value.startsWith("-") || value === "-") return { index: next, unresolved: false, embeddedPayloads };
+    if (value.startsWith("--")) {
+      const equals = value.indexOf("=");
+      const option = value.slice(2, equals === -1 ? undefined : equals);
+      if (long.noArgument.has(option)) {
+        next += 1;
+        continue;
+      }
+      if (!long.takesArgument.has(option)) return { index: next, unresolved: true, embeddedPayloads };
+      if (equals !== -1) {
+        if (name === "env" && option === "split-string") embeddedPayloads.push(value.slice(equals + 1));
+        next += 1;
+        continue;
+      }
+      if (!words[next + 1]) return { index: next, unresolved: true, embeddedPayloads };
+      if (name === "env" && option === "split-string") embeddedPayloads.push(words[next + 1].value);
+      next += 2;
+      continue;
+    }
+    let consumedArgument = false;
+    for (let offset = 1; offset < value.length; offset += 1) {
+      const option = value[offset];
+      if (short.noArgument.has(option)) continue;
+      if (!short.takesArgument.has(option)) return { index: next, unresolved: true, embeddedPayloads };
+      if (offset + 1 === value.length) {
+        if (!words[next + 1]) return { index: next, unresolved: true, embeddedPayloads };
+        if (name === "env" && option === "S") embeddedPayloads.push(words[next + 1].value);
+        next += 2;
+      } else {
+        if (name === "env" && option === "S") embeddedPayloads.push(value.slice(offset + 1));
+        next += 1;
+      }
+      consumedArgument = true;
+      break;
+    }
+    if (!consumedArgument) next += 1;
+  }
+  return { index: next, unresolved: false, embeddedPayloads };
+}
+
 function commandPosition(tokens) {
   const words = wordsInNode(tokens);
   let index = 0;
   while (index < words.length && isAssignment(words[index].value)) index += 1;
   const prefixAssignments = index;
   const wrappers = [];
+  let unresolvedWrapperOption = false;
+  const wrapperPayloads = [];
   let command = words[index];
   while (command) {
     const name = basename(command.value);
     if (name === "exec" || name === "command" || name === "sudo" || name === "nohup") {
       wrappers.push(name);
-      index += 1;
-      while (words[index] && words[index].value.startsWith("-")) index += 1;
+      const options = consumeWrapperOptions(name, words, index + 1);
+      unresolvedWrapperOption ||= options.unresolved;
+      wrapperPayloads.push(...options.embeddedPayloads);
+      index = options.index;
       command = words[index];
       continue;
     }
     if (name === "env") {
       wrappers.push(name);
-      index += 1;
+      const options = consumeWrapperOptions(name, words, index + 1);
+      unresolvedWrapperOption ||= options.unresolved;
+      wrapperPayloads.push(...options.embeddedPayloads);
+      index = options.index;
       while (words[index] && (words[index].value.startsWith("-") || isAssignment(words[index].value))) index += 1;
       command = words[index];
       continue;
     }
     break;
   }
-  return { words, index, command, wrappers, prefixAssignments };
+  return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads };
 }
 
 function protectedIdentity(value, root) {
@@ -418,6 +579,15 @@ function nestedShellPayload(position) {
   return null;
 }
 
+function shellHeredocPayloads(tokens, position) {
+  if (!position.command || !["sh", "bash", "zsh"].includes(basename(position.command.value))) return [];
+  for (let i = position.index + 1; i < position.words.length; i += 1) {
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(position.words[i].value)) return [];
+  }
+  const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
+  return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
+}
+
 function evalPayload(position) {
   if (!position.command || basename(position.command.value) !== "eval") return null;
   const payload = position.words[position.index + 1];
@@ -425,21 +595,45 @@ function evalPayload(position) {
   return payload.value;
 }
 
-function hasDynamicExecutionPayload(position) {
+function wordReferencesAny(word, names) {
+  if (!word || names.size === 0) return false;
+  for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
+    if (names.has(match[1] || match[2])) return true;
+  }
+  return false;
+}
+
+function hasDynamicExecutionPayload(position, context) {
   if (!position.command) return false;
   const name = basename(position.command.value);
   if (["sh", "bash", "zsh"].includes(name)) {
     for (let i = position.index + 1; i < position.words.length; i += 1) {
       if (!/^-[A-Za-z]*c[A-Za-z]*$/.test(position.words[i].value)) continue;
       const payload = position.words[i + 1];
-      return Boolean(payload && (!payload.literal || payload.subs.length > 0));
+      return Boolean(payload && (!payload.literal || payload.subs.length > 0) && wordReferencesAny(payload, context.protectedVariables));
     }
   }
   if (name === "eval") {
     const payload = position.words[position.index + 1];
-    return Boolean(payload && (!payload.literal || payload.subs.length > 0));
+    return Boolean(payload && (!payload.literal || payload.subs.length > 0) && wordReferencesAny(payload, context.protectedVariables));
   }
   return false;
+}
+
+function assignmentName(word) {
+  const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+  return match ? match[1] : "";
+}
+
+function contextWithAssignments(context, words) {
+  const protectedVariables = new Set(context.protectedVariables || []);
+  for (const word of words) {
+    const name = assignmentName(word);
+    if (!name) continue;
+    if (rawMentionsProtected(word.value.slice(word.value.indexOf("=") + 1))) protectedVariables.add(name);
+    else protectedVariables.delete(name);
+  }
+  return { ...context, protectedVariables };
 }
 
 function nodeHasRedirection(tokens) {
@@ -457,11 +651,11 @@ function isWatcherPgrep(position) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: false, pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
@@ -469,10 +663,12 @@ function analyzeProgram(command, context, depth = 0) {
   let broadKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
-  let constructedProtectedPayload = false;
+  let activeContext = { ...context, protectedVariables: new Set(context.protectedVariables || []) };
+  const watcherPids = new Set(context.watcherPids || []);
 
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
+    const nodeContext = contextWithAssignments(activeContext, position.words);
     const firstName = basename(position.words[0]?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
       unsupported = true;
@@ -480,9 +676,17 @@ function analyzeProgram(command, context, depth = 0) {
 
     let nodeNestedProtected = false;
     let nodePgrepWatcher = false;
+    const substitutionResults = new Map();
+    for (const payload of position.wrapperPayloads) {
+      const nested = analyzeProgram(payload, nodeContext, depth + 1);
+      nodeNestedProtected ||= nested.protectedFound;
+      broadKill ||= nested.broadKill;
+      nodePgrepWatcher ||= nested.pgrepWatcher;
+      if (nested.error && rawMentionsProtected(payload)) unsupported = true;
+    }
     for (const token of tokens) {
       if (token.type === "group") {
-        const nested = analyzeProgram(token.content, context, depth + 1);
+        const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
         nodePgrepWatcher ||= nested.pgrepWatcher;
@@ -490,7 +694,8 @@ function analyzeProgram(command, context, depth = 0) {
       }
       if (token.type === "word") {
         for (const substitution of token.subs) {
-          const nested = analyzeProgram(substitution.content, context, depth + 1);
+          const nested = analyzeProgram(substitution.content, nodeContext, depth + 1);
+          substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
           nodePgrepWatcher ||= nested.pgrepWatcher;
@@ -501,9 +706,10 @@ function analyzeProgram(command, context, depth = 0) {
 
     const shellPayload = nestedShellPayload(position);
     const literalEvalPayload = evalPayload(position);
-    for (const payload of [shellPayload, literalEvalPayload]) {
+    const heredocPayloads = shellHeredocPayloads(tokens, position);
+    for (const payload of [shellPayload, literalEvalPayload, ...heredocPayloads]) {
       if (payload === null) continue;
-      const nested = analyzeProgram(payload, context, depth + 1);
+      const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
@@ -515,14 +721,19 @@ function analyzeProgram(command, context, depth = 0) {
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value))) broadKill = true;
-    if (commandName === "kill" && nodePgrepWatcher) broadKill = true;
+    if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position)) pgrepWatcher = true;
-    if (constructedProtectedPayload && hasDynamicExecutionPayload(position)) nodeNestedProtected = true;
-    if (position.words.some((word) => isAssignment(word.value) && rawMentionsProtected(word.value.slice(word.value.indexOf("=") + 1)))) {
-      constructedProtectedPayload = true;
+    if (hasDynamicExecutionPayload(position, nodeContext)) nodeNestedProtected = true;
+    for (const word of position.words) {
+      const name = assignmentName(word);
+      if (!name) continue;
+      if (word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepWatcher)) watcherPids.add(name);
+      else watcherPids.delete(name);
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
+    activeContext = nodeContext;
+    if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({
       tokens,
       position,
@@ -536,9 +747,9 @@ function analyzeProgram(command, context, depth = 0) {
   const directProtected = nodeInfos.some((info) => Boolean(info.protectedKind));
   const protectedFound = directProtected || nestedProtected;
   if (unsupported && (protectedFound || rawMentionsProtected(command))) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill, pgrepWatcher, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill, pgrepWatcher, watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill, pgrepWatcher, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill, pgrepWatcher, watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -587,7 +798,7 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home) };
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && rawMentionsProtected(command)) return deny("unclassifiable-protected-command");

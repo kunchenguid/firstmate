@@ -87,6 +87,15 @@ matrix_case D20 deny "command pkill -f '/bin/fm-watch.sh'"
 matrix_case D21 deny "/usr/bin/pkill -f '/bin/fm-watch.sh'"
 matrix_case D22 deny "sudo pkill -f '/bin/fm-watch.sh'"
 matrix_case D23 deny 'kill "$(pgrep -f '\''/bin/fm-watch.sh'\'')"'
+matrix_case D24 deny $'bin/fm-watc\\\nh-arm.sh &'
+matrix_case D25 deny 'sudo -u root bin/fm-watch-arm.sh &'
+matrix_case D26 deny 'env -u PATH bin/fm-watch-arm.sh &'
+matrix_case D27 deny "bash -c \$'bin/fm-watch-arm.sh &'"
+matrix_case D28 deny $'bash <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
+matrix_case D29 deny "WATCHER='bin/fm-watch-arm.sh &' bash -c 'eval \"\$WATCHER\"'"
+matrix_case D30 deny "p=\$(pgrep -f '/bin/fm-watch.sh'); kill \"\$p\""
+matrix_case D31 deny "env -S 'bin/fm-watch-arm.sh &'"
+matrix_case D32 deny "env --split-string='$ROOT/bin/fm-watch-arm.sh &'"
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
