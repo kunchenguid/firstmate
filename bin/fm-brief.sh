@@ -154,6 +154,7 @@ REPO=${POS[1]}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
+# shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
 HERDR_SECTION=$(printf '%s\n' \
 '# Herdr isolation - HARD SAFETY CONTRACT' \
 'This brief was explicitly scaffolded with `--herdr-lab` because the task will drive Herdr lifecycle behavior.' \
