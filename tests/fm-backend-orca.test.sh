@@ -15,7 +15,7 @@ make_orca_fakebin() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --help ]; then
-  printf '%s\n' 'Commands: status repo worktree terminal'
+  printf '%s\n' "${FM_ORCA_HELP:-Commands: status repo worktree terminal}"
   exit 0
 fi
 LOG="${FM_ORCA_LOG:?}"
@@ -135,6 +135,22 @@ test_runtime_check_refuses_unready_orca_status() {
   [ "$status" -ne 0 ] || fail "runtime_check should fail when Orca runtime is not ready"
   assert_contains "$out" "requires a ready Orca runtime" "runtime_check should explain the readiness requirement"
   pass "fm_backend_orca_runtime_check: fails closed when runtime is not ready"
+}
+
+test_tool_check_requires_all_orca_commands() {
+  local out status
+  orca_case tool-check-partial
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_HELP='Commands: status only' \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_tool_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tool_check should reject an orca executable with only one expected command"
+  assert_contains "$out" "not the expected Orca CLI" "tool_check should explain a partial Orca command surface"
+
+  orca_case tool-check-complete
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_tool_check' "$ROOT" )
+  [ -z "$out" ] || fail "tool_check should be quiet when all Orca commands are present, got '$out'"
+  pass "fm_backend_orca_tool_check: requires the full Orca command surface"
 }
 
 test_send_text_submit_verifies_empty_composer_after_enter() {
@@ -1281,6 +1297,7 @@ test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
+test_tool_check_requires_all_orca_commands
 test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending

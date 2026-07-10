@@ -13,11 +13,15 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 
 fm_backend_orca_tool_check() {
+  local help word
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
-  orca --help 2>&1 | grep -Eq '(^|[[:space:]])(status|repo|worktree|terminal)([[:space:]]|$)' || {
-    echo "error: backend=orca selected but 'orca' is not the expected Orca CLI" >&2
-    return 1
-  }
+  help=$(orca --help 2>&1) || return 1
+  for word in status repo worktree terminal; do
+    printf '%s\n' "$help" | grep -Eq "(^|[[:space:]])$word([[:space:]]|$)" || {
+      echo "error: backend=orca selected but 'orca' is not the expected Orca CLI" >&2
+      return 1
+    }
+  done
 }
 
 fm_backend_orca_runtime_check() {

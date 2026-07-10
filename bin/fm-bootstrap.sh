@@ -286,7 +286,7 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
     case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
+      claude|codex|opencode|pi|grok|cursor|hermes) ;;
       *) [ "$verdict" = dead ] && verdict=unknown ;;
     esac
     case "$verdict" in
@@ -353,8 +353,12 @@ no_mistakes_compatible() {
 }
 
 orca_cli_available() {
+  local help word
   command -v orca >/dev/null 2>&1 || return 1
-  orca --help 2>&1 | grep -Eq '(^|[[:space:]])(status|repo|worktree|terminal)([[:space:]]|$)'
+  help=$(orca --help 2>&1) || return 1
+  for word in status repo worktree terminal; do
+    printf '%s\n' "$help" | grep -Eq "(^|[[:space:]])$word([[:space:]]|$)" || return 1
+  done
 }
 
 # Write CONTENT to DEST only when it differs, so re-running bootstrap does not

@@ -297,6 +297,30 @@ test_sweep_leaves_alive_secondmate_untouched() {
   pass "sweep: an already-live secondmate is left untouched (no kill, no respawn)"
 }
 
+test_sweep_handles_cursor_and_hermes_secondmates() {
+  local harness live_cmd w fb tmuxfb log out
+  for harness in cursor hermes; do
+    [ "$harness" = cursor ] && live_cmd=cursor-agent || live_cmd=hermes
+    w=$(new_world "sweep-$harness")
+    add_sm_home "$w" sm1 firstmate:fm-sm1 "$harness"
+    fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+    log="$w/calls.log"; : > "$log"
+
+    out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+      "$harness should allow a confirmed-dead endpoint to respawn"
+    assert_contains "$(cat "$log")" "new-window" \
+      "$harness should be relaunched after a confirmed-dead endpoint"
+
+    : > "$log"
+    out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" "$live_cmd" "$log")
+    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
+      "$harness should classify its live tmux process as already-live"
+    [ ! -s "$log" ] || fail "$harness already-live sweep must not touch the endpoint: $(cat "$log")"
+  done
+  pass "sweep: cursor and hermes secondmates participate in tmux liveness"
+}
+
 test_sweep_never_acts_on_inconclusive_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unknown)
@@ -391,6 +415,7 @@ test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
+test_sweep_handles_cursor_and_hermes_secondmates
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive

@@ -338,6 +338,31 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_orca_backend_rejects_partial_orca_cli() {
+  local case_dir fakebin out missing_orca
+  missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
+
+  case_dir="$TMP_ROOT/orca-backend-partial-cli"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Commands: status only'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_orca" ] || fail "backend=orca should reject a partial Orca command surface, got: $out"
+  pass "bootstrap: backend=orca requires every expected Orca CLI command"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out expected
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -483,6 +508,7 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
+test_orca_backend_rejects_partial_orca_cli
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
