@@ -110,7 +110,7 @@ If Grok declines to load project hooks, this primary guard fails open and `fm-gu
 
 **2026-07-09 update:** grok 0.2.93 broke the `.grok/hooks/fm-primary-turnend-guard.json` Stop hook with `hook not executed: required env var(s) not set: ${root}`, because grok's own `${VAR}` expansion over the raw `command` string does not tolerate a bare local variable assigned earlier in the same `bash -lc` script.
 The hook command was fixed to reference `${GROK_WORKSPACE_ROOT:-}` directly everywhere instead of assigning it to `$root` first, and re-validated against grok 0.2.93 to fire and complete cleanly.
-See `docs/arm-pretool-check.md`'s "Grok `${VAR}` regression" section for the full root cause, the fix, and the re-validation evidence; that document's Grok hook shares the same fix.
+See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok expansion requirement; that document's Grok hook shares the same fix.
 
 ## Tests
 
