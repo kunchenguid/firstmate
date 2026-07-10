@@ -12,6 +12,13 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-wait)
 
+# fm-spawn compares each pane read against physically-resolved paths
+# (FM_ROOT_REAL/PROJ_ABS_REAL via `pwd -P`), and its real_path_or_raw falls
+# back to the raw value when a `cd` cannot resolve it. Feed the poll sequence
+# and assertions already-physical paths so a runner whose checkout or temp
+# root has a symlink component still matches byte-for-byte.
+ROOT_REAL=$(cd "$ROOT" && pwd -P)
+
 make_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -51,6 +58,8 @@ make_case() {
   wt="$case_dir/wt"
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  proj=$(cd "$proj" && pwd -P)
+  wt=$(cd "$wt" && pwd -P)
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$name"
   printf 'brief for %s\n' "$name" > "$home/data/$name/brief.md"
@@ -82,7 +91,7 @@ test_transient_fm_root_read_is_skipped() {
 $rec
 EOF
   seqfile="$case_dir/pane.seq"
-  printf '%s\n' "$ROOT" "$proj" "$wt" > "$seqfile"
+  printf '%s\n' "$ROOT_REAL" "$proj" "$wt" > "$seqfile"
   out=$(run_spawn "$home" "$(make_fakebin "$case_dir/fake")" "$seqfile" "$id" "$proj")
   status=$?
   expect_code 0 "$status" "spawn should succeed once the pane is actually seen at the project"
@@ -120,7 +129,7 @@ test_fm_root_rejected_after_project_seen() {
 $rec
 EOF
   seqfile="$case_dir/pane.seq"
-  printf '%s\n' "$proj" "$ROOT" "$wt" > "$seqfile"
+  printf '%s\n' "$proj" "$ROOT_REAL" "$wt" > "$seqfile"
   out=$(run_spawn "$home" "$(make_fakebin "$case_dir/fake")" "$seqfile" "$id" "$proj")
   status=$?
   expect_code 0 "$status" "spawn should skip the post-project FM_ROOT read and accept the real worktree"
