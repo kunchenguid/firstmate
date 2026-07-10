@@ -78,7 +78,7 @@ This is accepted, exactly as it is for cmux: a task's own recorded worktree path
 A zellij task's `window=` meta field holds `<zellij-session>:<pane-id>`, for example `firstmate:7`.
 The pane id is a bare non-negative integer with no embedded colon (simpler than herdr's own pane-id shape, which itself contains a colon), so splitting on the first colon is trivially correct.
 This mirrors tmux's `session:window` and herdr's `session:pane` target shapes closely enough that `fm_backend_resolve_selector` (`bin/fm-backend.sh`) needed no zellij-specific logic at all.
-When a caller reaches a zellij endpoint through firstmate metadata (an exact task id, a legacy `fm-<id>` selector, or a meta scan), it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
+When the shared selector contract routes a zellij caller through firstmate metadata, it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
 That label check prevents a stale numeric pane id from being trusted after an external session deletion/recreation, or from being trusted for a different firstmate home's same-named tab; explicit raw `session:pane` targets remain a pane-existence-only escape hatch because there is no metadata label to verify.
 
 Zellij tasks additionally record:

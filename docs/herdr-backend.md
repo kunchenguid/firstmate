@@ -163,9 +163,8 @@ A workspace whose label this adapter did not derive (see "Label derivation" abov
 A herdr task's `window=` meta field holds `<herdr-session>:<pane-id>`, for example `default:w1:p2`.
 The pane id itself contains a colon, so the adapter splits on the FIRST colon only, never on every colon.
 This mirrors tmux's `session:window` target shape closely enough that `fm_backend_resolve_selector` (in `bin/fm-backend.sh`) needed no backend-specific logic at all - it already just returns a task's recorded `window=` value verbatim.
-Operational commands should prefer the exact task id or stable `fm-<id>` label, both of which resolve through this home's metadata.
-Exact task ids win first, so ids beginning with `fm-` are not stripped as legacy labels.
-An explicit herdr target also works when it exactly matches recorded metadata, but ad hoc bare-name lookup with no metadata remains the legacy tmux live-window fallback for non-`fm-` names.
+Task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
+For a bare unknown non-`fm-` name, Herdr retains the legacy tmux live-window fallback.
 
 Herdr tasks additionally record:
 
