@@ -36,12 +36,19 @@ test_bare_shell_glyphs_are_unknown() {
   pass "fm_composer_classify_content: a bare shell prompt glyph (>/\$/%/#) reads unknown, never empty"
 }
 
-test_stripped_shell_glyph_uses_plain_content() {
-  local out
-  out=$(classify 0 '' '' sensitive '$')
-  [ "$out" = unknown ] \
-    || fail "a stripped bare shell glyph must retain its unknown safety verdict, got '$out'"
-  pass "fm_composer_classify_content: stripped content preserves bare-shell safety from plain content"
+test_stripped_unbordered_content_uses_plain_content() {
+  local plain out
+  for plain in '$' 'user@host $'; do
+    out=$(classify 0 '' '' sensitive "$plain")
+    [ "$out" = unknown ] \
+      || fail "stripped unbordered content '$plain' must retain its unknown safety verdict, got '$out'"
+  done
+  for plain in '❯' '›'; do
+    out=$(classify 0 '' '' sensitive "$plain")
+    [ "$out" = empty ] \
+      || fail "a stripped agent glyph '$plain' must remain empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: stripped unbordered content is unknown except verified agent glyphs"
 }
 
 test_bare_shell_prompt_with_command_is_not_empty() {
@@ -119,7 +126,7 @@ test_real_text_is_pending() {
 }
 
 test_bare_shell_glyphs_are_unknown
-test_stripped_shell_glyph_uses_plain_content
+test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
