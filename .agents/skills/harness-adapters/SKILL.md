@@ -88,7 +88,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
-| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Adapter added; profile flags read from `omp --help` (omp v16.3.15), full supervised loop PENDING live verification. omp is a Pi fork: `--thinking` also accepts `off\|minimal\|auto` but not `max` (omit it), `--auto-approve` grants autonomy, `-e/--extension` loads the turn-end/watch supervisors. |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified live 2026-07-10 (omp v16.3.15). omp is a Pi fork: `--thinking` also accepts `off\|minimal\|auto` but not `max` (omit it), `--auto-approve` grants autonomy, `-e/--extension` loads the turn-end/watch supervisors. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -269,23 +269,26 @@ It does not pass `--permission-mode`, so the passive hook cannot escalate the pr
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
 
-## omp (ADAPTER ADDED - PENDING LIVE VERIFICATION)
+## omp (VERIFIED 2026-07-10, omp v16.3.15)
 
-omp (Oh My Pi, https://omp.sh) is a Pi fork with a Pi-compatible extension API (`turn_end` / `tool_call` events, `{block:true}` from `tool_call`, `pi.sendUserMessage(..., { deliverAs: "followUp" })`). This adapter was ported from the pi adapter; the facts below are derived from omp source and `omp --help` (omp v16.3.15) plus the shared Pi mechanism, but the end-to-end supervised loop has NOT yet been validated on a live omp session. Verify per the "verify a new adapter" protocol above before trusting it as a co-primary, then promote this heading to VERIFIED with a date.
+omp (Oh My Pi, https://omp.sh) is a Pi fork with a Pi-compatible extension API (`turn_end` / `tool_call` events, `{block:true}` from `tool_call`, `pi.sendUserMessage(..., { deliverAs: "followUp" })`). Ported from the pi adapter and live-verified 2026-07-10 (see the validation record below): detection, extension load, the turn-end guard + watcher re-arm loop, and crew dispatch on omp are all confirmed on a real session. A few narrow items remain unexercised and are flagged inline (seatbelt deny, tmux-backend busy signature, exit/interrupt keys).
 
 | Fact | Value |
 |---|---|
 | Env marker | `OMPCODE=1` (omp also sets `CLAUDECODE=1`; `fm-harness.sh` checks `OMPCODE` first) |
-| Busy-pane signature | `Working...`/`Working…` loader and/or claude-style `esc to interrupt` - PENDING live capture; override with `FM_BUSY_REGEX` / `FM_COMPOSER_IDLE_RE` |
+| Busy-pane signature | herdr backend: native busy-state verified working 2026-07-10. tmux backend: `Working...`/`Working…` / `esc to interrupt` regex still PENDING a tmux-backend run; override with `FM_BUSY_REGEX` / `FM_COMPOSER_IDLE_RE` |
 | Exit command | `/quit` (inherited from pi; VERIFY) |
 | Interrupt | single Escape (inherited from pi; VERIFY) |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
-| Autonomy | `--auto-approve` (omp HAS an approval system, unlike pi; fm-spawn passes it for crewmates) |
+| Autonomy | `--auto-approve` (omp HAS an approval system, unlike pi; fm-spawn passes it for crewmates - verified live 2026-07-10: two crewmates ran unattended and shipped PRs) |
 
 omp is claude-compatible (sets `CLAUDECODE=1`) but does NOT implement Claude Code's `.claude/settings.json` `Stop`/`PreToolUse` event-hook contract - it uses its own `.omp/extensions/` runtime instead. That is exactly why detection must resolve `omp`, not `claude`: a claude-detected omp session would install `.claude/settings.json` Stop/PreToolUse hooks that omp never fires, silently disabling supervision.
 
-**Primary-session guard (ported from the Pi guard, kept in lockstep; PENDING live verification).**
+**Primary-session guard (VERIFIED live 2026-07-10).**
 The primary's turn-end guard AND PreToolUse seatbelt both live in `.omp/extensions/fm-primary-turnend-guard.ts`. It listens for `turn_end` because OMP has no `agent_settled` event (Pi 0.80.5-only); the `guardFollowupActive` one-shot skip gives the same "guard once per run" behavior. On block it `await`s `pi.sendUserMessage(..., { deliverAs: "followUp" })` when `bin/fm-turnend-guard.sh` returns 2. The seatbelt returns `{ block: true }` from the `tool_call` handler when `bin/fm-arm-pretool-check.sh` denies a bash command.
 
-**Primary watcher (ported from the Pi watcher, kept in lockstep; PENDING live verification).**
+**Primary watcher (VERIFIED live 2026-07-10).**
 `.omp/extensions/fm-primary-omp-watch.ts` registers the `fm_watch_arm_omp` tool (primary path, called instead of a foreground bash arm) plus the `/fm-watch-arm-omp` command as a human fallback (the command notifies via `ctx.ui.notify`). Arming spawns `bin/fm-watch-arm.sh --restart` attached to the live omp process and sends a follow-up wake when the child exits with an actionable reason; a one-shot `process.once("exit")` listener (mirroring Pi #397) plus `session_shutdown` stop the arm child on exit. `bin/fm-session-start.sh` reports when the running omp session has not loaded both extensions (markers `state/.omp-turnend-extension-loaded` and `state/.omp-watch-extension-loaded`). Both are project-local `.omp/extensions/*.ts` files omp auto-discovers once the project is trusted (approve trust once per clone, or launch with `-e` as the trust-free fallback). The tool schema uses `pi.zod.object({})` (OMP-canonical) rather than Pi's typebox `Type.Object({})`, and OMP's ToolDefinition has no `promptSnippet`/`promptGuidelines` fields.
+
+**Live validation record, 2026-07-10 (omp v16.3.15, herdr backend).**
+A fresh `omp` in the firstmate home became the first mate (root `AGENTS.md` loaded via the `agents-md` provider), `bin/fm-harness.sh` and `bin/fm-lock.sh` both detected `omp`, and both `.omp/extensions/` loaded (markers written). It dispatched two crewmates (`fm-webull-broker-w7`, `fm-finnhub-free-f3`) - each a real omp session in its own treehouse worktree, running autonomously under `--auto-approve` - which shipped two green PRs. The turn-end guard fired on a real multi-turn primary ("TURN WOULD END BLIND ... 2 task(s) in flight, but no live watcher holds this home lock") and the primary re-armed the watcher (alive) instead of ending blind. Not yet exercised: a seatbelt `{block:true}` deny of an arm anti-pattern, the tmux-backend busy signature (this run used herdr's native busy-state), and the exit/interrupt keys.
