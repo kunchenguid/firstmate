@@ -108,7 +108,7 @@ abs_skills() {
 # `--skill <abs>/.claude/skills` into the launch, with correct spacing so the
 # following `-e` flag stays separated.
 test_pi_crewmate_gets_skill_when_dir_present() {
-  local rec id out status launch meta expected_skill
+  local rec id out status launch meta
   id=piskill-on-z1
   rec=$(make_spawn_case piskill-on pi "$id")
   read_case_record "$rec"
