@@ -46,6 +46,13 @@ When updating this file, preserve this bar for all agents and keep entries conci
 EOF
 }
 
+write_maintenance_section_with_eol() {
+  local eol=$1 line
+  while IFS= read -r line; do
+    printf '%s%s' "$line" "$eol"
+  done < <(write_maintenance_section)
+}
+
 # Idempotently append the canonical self-governance section to AGENTS.md when it
 # is absent. Sets MAINT_INJECTED=1 when it appends and 0 when the section is
 # already present, so callers can report whether the file changed.
@@ -56,17 +63,20 @@ ensure_maintenance_section() {
     grep -Fqx $'## Maintaining this file\r' "$AGENTS"; then
     return 0
   fi
-  sep=''
+  local eol=$'\n' sep=''
+  if LC_ALL=C grep -q $'\r$' "$AGENTS"; then
+    eol=$'\r\n'
+  fi
   if [ -s "$AGENTS" ]; then
     if [ -n "$(tail -c 1 "$AGENTS")" ]; then
-      sep=$'\n\n'
+      sep="${eol}${eol}"
     else
-      sep=$'\n'
+      sep=$eol
     fi
   fi
   {
     printf '%s' "$sep"
-    write_maintenance_section
+    write_maintenance_section_with_eol "$eol"
   } >> "$AGENTS"
   MAINT_INJECTED=1
 }

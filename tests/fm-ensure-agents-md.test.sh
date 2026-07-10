@@ -150,6 +150,40 @@ test_existing_crlf_agents_md_with_section_stays_unchanged() {
   pass "fm-ensure-agents-md.sh: CRLF AGENTS.md with the section stays unchanged"
 }
 
+test_existing_crlf_agents_md_without_section_preserves_crlf() {
+  local repo agents out
+  repo="$TMP_ROOT/crlf-injected-project"
+  mkdir -p "$repo"
+  printf '%s\r\n' \
+    '# Existing agent memory' \
+    '' \
+    'Run tests with make test.' > "$repo/AGENTS.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  agents="$repo/AGENTS.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed injecting into CRLF AGENTS.md"
+  assert_contains "$out" "updated:" "CRLF AGENTS.md injection did not report an update"
+  printf '%s\r\n' \
+    '# Existing agent memory' \
+    '' \
+    'Run tests with make test.' \
+    '' \
+    '## Maintaining this file' \
+    '' \
+    'Keep this file for knowledge useful to almost every future agent session in this project.' \
+    'Do not repeat what the codebase already shows; point to the authoritative file or command instead.' \
+    'Prefer rewriting or pruning existing entries over appending new ones.' \
+    'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/.expected"
+  cmp -s "$repo/.expected" "$agents" \
+    || fail "CRLF AGENTS.md injection did not preserve CRLF line endings"
+  cp "$agents" "$repo/.after-first"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed on idempotent CRLF re-run"
+  cmp -s "$repo/.after-first" "$agents" \
+    || fail "idempotent CRLF re-run modified AGENTS.md"
+  pass "fm-ensure-agents-md.sh: CRLF injection preserves line endings idempotently"
+}
+
 test_lowercase_agents_md_refuses_case_fragile_symlink() {
   local repo out rc
   repo="$TMP_ROOT/lowercase-project"
@@ -172,4 +206,5 @@ test_existing_agents_md_with_symlink_gains_self_governance
 test_existing_agents_md_without_claude_gains_section_and_symlink
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
+test_existing_crlf_agents_md_without_section_preserves_crlf
 test_lowercase_agents_md_refuses_case_fragile_symlink
