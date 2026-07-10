@@ -303,10 +303,19 @@ test_fm_label_updates_herdr_tab_and_meta() {
   home="$dir/home"; state="$home/state"; mkdir -p "$state"
   cat > "$state/label-task.meta" <<EOF
 window=fmtest:w1:p2
+worktree=$dir/worktree
 project=$dir/project-name
+kind=ship
 backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
 EOF
-  printf '{"result":{"pane":{"tab_id":"w1:t2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-label-task"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"%s"}}}\n' "$dir/worktree" > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     "$ROOT/bin/fm-label.sh" label-task validating )
@@ -316,6 +325,49 @@ EOF
   assert_contains "$(cat "$state/label-task.meta")" "label=project-name: validating" \
     "fm-label did not record the new label in task metadata"
   pass "fm-label.sh: updates a herdr tab label and records the rendered label in metadata"
+}
+
+test_fm_label_refuses_uncorroborated_recycled_target() {
+  local mode dir log resp fb home state meta prior out status workspace_label tab_label live_worktree
+  for mode in workspace label worktree; do
+    dir="$TMP_ROOT/fm-label-recycled-$mode"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    home="$dir/home"; state="$home/state"; meta="$state/recycled.meta"; mkdir -p "$state"
+    cat > "$meta" <<EOF
+window=fmtest:w1:p2
+worktree=$dir/recorded-worktree
+project=$dir/project-name
+kind=ship
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
+label=project-name: building
+EOF
+    prior="$dir/prior.meta"
+    cp "$meta" "$prior"
+    workspace_label=firstmate-crew
+    tab_label='project-name: building'
+    live_worktree="$dir/recorded-worktree"
+    case "$mode" in
+      workspace) workspace_label=manual-workspace ;;
+      label) tab_label='manual: notes' ;;
+      worktree) live_worktree="$dir/manual-worktree" ;;
+    esac
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"%s"},{"workspace_id":"w9","label":"firstmate-crew"}]}}\n' "$workspace_label" > "$resp/1.out"
+    printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s"}]}}\n' "$tab_label" > "$resp/2.out"
+    printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+    printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"%s"}}}\n' "$live_worktree" > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      "$ROOT/bin/fm-label.sh" recycled validating 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "fm-label should refuse a recycled target whose $mode identity does not match metadata"
+    assert_contains "$out" "could not corroborate ownership" "fm-label did not report its fail-closed $mode ownership refusal"
+    assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' "fm-label renamed a recycled target with mismatched $mode ownership"
+    cmp -s "$prior" "$meta" || fail "fm-label changed metadata after refusing mismatched $mode ownership"
+  done
+  pass "fm-label.sh: refuses to rename a recycled target without matching workspace, tab, label, pane, and worktree ownership"
 }
 
 test_fm_label_rejects_secondmate_before_rename() {
@@ -344,9 +396,14 @@ test_fm_label_does_not_recreate_removed_metadata() {
   mkdir -p "$fakebin" "$state"; : > "$log"
   cat > "$meta" <<EOF
 window=fmtest:w1:p2
+worktree=$dir/worktree
 project=$dir/project-name
 kind=ship
 backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
 EOF
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -354,7 +411,10 @@ set -eu
 printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
-  "pane get") printf '{"result":{"pane":{"tab_id":"w1:t2"}}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
+  "tab list") printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-removed"}]}}\n' ;;
+  "pane list") printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
   "tab rename")
     [ -L "${FM_FAKE_META_LOCK:?}" ]
     rm -f "${FM_FAKE_META:?}"
@@ -362,7 +422,7 @@ case "${1:-} ${2:-}" in
 esac
 SH
   chmod +x "$fakebin/herdr"
-  out=$( PATH="$fakebin:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_META="$meta" \
+  out=$( PATH="$fakebin:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_META="$meta" FM_FAKE_WORKTREE="$dir/worktree" \
     FM_FAKE_META_LOCK="$state/.removed.meta.lock" "$ROOT/bin/fm-label.sh" removed validating 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "fm-label should fail when metadata disappears during the rename"
@@ -923,9 +983,17 @@ case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
   "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
   "tab list") printf '{"result":{"tabs":[]}}\n' ;;
-  "tab create") printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n' ;;
+  "tab create")
+    [ -L "${FM_FAKE_META_LOCK:?}" ] || exit 9
+    printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n'
+    ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
-  "tab rename") exit 1 ;;
+  "tab rename")
+    [ -L "${FM_FAKE_META_LOCK:?}" ] || exit 9
+    grep -qx 'window=fmtest:w1:p-new' "${FM_FAKE_META:?}" || exit 9
+    printf 'rename-locked\n' >> "${FM_LOCK_PROOF:?}"
+    exit 1
+    ;;
 esac
 exit 0
 SH
@@ -934,6 +1002,8 @@ SH
 set -eu
 printf '%s\n' "$*" >> "${FM_TREEHOUSE_LOG:?}"
 [ "${1:-}" = return ] && [ "${2:-}" = --force ]
+[ -L "${FM_FAKE_META_LOCK:?}" ]
+printf 'rollback-locked\n' >> "${FM_LOCK_PROOF:?}"
 [ "$(cat "$3/.claude/settings.local.json")" = '{"prior":true}' ]
 [ "${FM_TREEHOUSE_FAIL:-0}" = 0 ] || exit 1
 git -C "$PWD" worktree remove --force "$3"
@@ -941,14 +1011,19 @@ SH
     chmod +x "$fakebin/herdr" "$fakebin/treehouse"
     treehouse_fail=0
     [ "$mode" != failure ] || treehouse_fail=1
+    : > "$dir/lock-proof"
     out=$( PATH="$fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$home" HERDR_SESSION=fmtest \
       FM_HERDR_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_WORKTREE="$wt" \
-      FM_TREEHOUSE_FAIL="$treehouse_fail" GROK_HOME="$grok_home" \
+      FM_TREEHOUSE_FAIL="$treehouse_fail" GROK_HOME="$grok_home" FM_FAKE_META="$state/$id.meta" \
+      FM_FAKE_META_LOCK="$state/.$id.meta.lock" FM_LOCK_PROOF="$dir/lock-proof" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
     status=$?
     [ "$status" -ne 0 ] || fail "fm-spawn should fail when the herdr display rename fails"
     assert_contains "$out" "could not apply herdr display label" "fm-spawn did not report the failed display rename"
     assert_contains "$(cat "$log")" "pane close w1:p-new" "fm-spawn did not close the failed herdr endpoint"
+    assert_contains "$(cat "$dir/lock-proof")" "rename-locked" "fm-spawn did not hold the task metadata lock through its final metadata write and label rename"
+    assert_contains "$(cat "$dir/lock-proof")" "rollback-locked" "fm-spawn did not hold the task metadata lock through labeled-herdr rollback"
+    [ ! -e "$state/.$id.meta.lock" ] || fail "fm-spawn left the task metadata lock behind after rollback"
     [ ! -e "$state/$id.pi-ext.ts" ] || fail "fm-spawn left current-attempt hook state after rename failure"
     [ "$(cat "$state/$id.grok-turnend-token")" = "$prior_token" ] \
       || fail "fm-spawn did not restore the prior Grok token record"
@@ -2372,6 +2447,7 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_rename_task_resolves_tab_from_pane_target
 test_fm_label_updates_herdr_tab_and_meta
+test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
 test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_nonherdr_is_clear_noop

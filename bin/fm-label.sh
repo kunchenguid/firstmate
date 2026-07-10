@@ -64,10 +64,20 @@ case "$BACKEND" in
     PROJECT_LABEL=${PROJECT##*/}
     [ -n "$PROJECT_LABEL" ] || PROJECT_LABEL=project
     NEW_LABEL="$PROJECT_LABEL: $PHASE"
-    fm_backend_herdr_rename_task "$TARGET" "$NEW_LABEL" || {
-      echo "error: could not rename herdr tab for $TASK_ID" >&2
+    RECORDED_SESSION=$(fm_meta_get "$META_SNAPSHOT" herdr_session)
+    RECORDED_WORKSPACE=$(fm_meta_get "$META_SNAPSHOT" herdr_workspace_id)
+    RECORDED_TAB=$(fm_meta_get "$META_SNAPSHOT" herdr_tab_id)
+    RECORDED_PANE=$(fm_meta_get "$META_SNAPSHOT" herdr_pane_id)
+    RECORDED_WORKTREE=$(fm_meta_get "$META_SNAPSHOT" worktree)
+    CURRENT_LABEL=$(fm_meta_get "$META_SNAPSHOT" label)
+    [ -n "$CURRENT_LABEL" ] || CURRENT_LABEL="fm-$TASK_ID"
+    if ! fm_backend_herdr_parse_target "$TARGET" \
+      || [ "$FM_BACKEND_HERDR_SESSION" != "$RECORDED_SESSION" ] \
+      || [ "$FM_BACKEND_HERDR_PANE" != "$RECORDED_PANE" ] \
+      || ! fm_backend_herdr_rename_owned_task "$TARGET" "$RECORDED_WORKSPACE" "$RECORDED_TAB" "$CURRENT_LABEL" "$RECORDED_WORKTREE" "$NEW_LABEL"; then
+      echo "error: could not corroborate ownership of the live herdr tab for $TASK_ID; refusing to rename" >&2
       exit 1
-    }
+    fi
     META_TMP=$(mktemp "$STATE/.$TASK_ID.meta.update.XXXXXX")
     if ! { sed '/^label=/d' "$META_SNAPSHOT" && printf 'label=%s\n' "$NEW_LABEL"; } > "$META_TMP"; then
       echo "error: herdr tab renamed but could not update $META" >&2

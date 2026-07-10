@@ -116,6 +116,8 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 KIND=ship
 HARNESS_ARG=
 MODEL=
@@ -213,6 +215,7 @@ HERDR_LABEL_ROLLBACK_DIR=
 HERDR_LABEL_TASK_TMP_PREEXISTED=0
 HERDR_LABEL_GOTMP_PREEXISTED=0
 HERDR_LABEL_GROK_TOKEN_CREATED=
+SPAWN_META_LOCK=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -333,6 +336,7 @@ spawn_abort_cleanup() {
   local status=$?
   herdr_labeled_spawn_abort_cleanup
   orca_spawn_abort_cleanup
+  [ -z "$SPAWN_META_LOCK" ] || fm_lock_release "$SPAWN_META_LOCK"
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -376,6 +380,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_META_LOCK="$STATE/.$ID.meta.lock"
+fm_lock_acquire_wait "$SPAWN_META_LOCK"
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

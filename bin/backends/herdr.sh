@@ -581,6 +581,22 @@ fm_backend_herdr_rename_task() {  # <target> <label>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$label" >/dev/null 2>&1
 }
 
+fm_backend_herdr_rename_owned_task() {  # <target> <workspace_id> <tab_id> <current_label> <worktree> <new_label>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 new_label=$6 live_workspace tabs live_label pane_id live_path
+  [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
+  fm_backend_herdr_target_ready "$target" || return 1
+  live_workspace=$(fm_backend_herdr_workspace_find "$FM_BACKEND_HERDR_SESSION") || return 1
+  [ "$live_workspace" = "$workspace_id" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
+  live_label=$(printf '%s' "$tabs" | jq -er --arg tab "$tab_id" '.result.tabs[] | select(.tab_id == $tab) | .label' 2>/dev/null | head -1) || return 1
+  [ "$live_label" = "$current_label" ] || return 1
+  pane_id=$(fm_backend_herdr_pane_for_tab "$FM_BACKEND_HERDR_SESSION" "$workspace_id" "$tab_id" 2>/dev/null) || return 1
+  [ "$pane_id" = "$FM_BACKEND_HERDR_PANE" ] || return 1
+  live_path=$(fm_backend_herdr_current_path "$target") || return 1
+  [ "$live_path" = "$worktree" ] || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$new_label" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
