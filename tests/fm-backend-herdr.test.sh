@@ -569,11 +569,12 @@ test_legacy_workspace_preference_requires_owned_live_task() {
   local dir log resp fb out status
   dir="$TMP_ROOT/legacy-owned-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/3.out"
-  printf '{"result":{"panes":[{"pane_id":"w0:p2","tab_id":"w0:t2"}]}}\n' > "$resp/4.out"
-  printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/5.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"panes":[{"pane_id":"w0:p2","tab_id":"w0:t2"}]}}\n' > "$resp/5.out"
+  printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" \
@@ -585,13 +586,32 @@ test_legacy_workspace_preference_requires_owned_live_task() {
 
   dir="$TMP_ROOT/legacy-recycled-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"manual"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"manual"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"manual"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -eq 2 ] || fail "uncorroborated recycled legacy workspace should fail closed with status 2, got $status: $out"
+
+  dir="$TMP_ROOT/legacy-missing-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 1 ] || fail "confirmed absent legacy tab should allow normal respawn with status 1, got $status: $out"
+
+  dir="$TMP_ROOT/legacy-malformed-tab-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":"unreadable"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 2 ] || fail "malformed legacy tab inventory should fail closed with status 2, got $status: $out"
 
   dir="$TMP_ROOT/legacy-malformed-workspace-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":"unreadable"}}\n' > "$resp/1.out"
@@ -600,7 +620,7 @@ test_legacy_workspace_preference_requires_owned_live_task() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -eq 2 ] || fail "malformed legacy workspace inventory should fail closed with status 2, got $status: $out"
-  pass "legacy workspace compatibility: reuse requires session, workspace, tab, label, pane, and worktree ownership"
+  pass "legacy workspace compatibility: confirmed absent tabs respawn normally while unreadable or uncorroborated live state fails closed"
 }
 
 test_create_task_refuses_duplicate_label() {

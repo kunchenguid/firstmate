@@ -599,7 +599,7 @@ fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_
 }
 
 fm_backend_herdr_legacy_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
-  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 session list workspace_label
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 session list workspace_label tabs tab_present
   fm_backend_herdr_parse_target "$target" || return 2
   session=$(fm_backend_herdr_session)
   [ "$FM_BACKEND_HERDR_SESSION" = "$session" ] || return 1
@@ -610,6 +610,10 @@ fm_backend_herdr_legacy_task_is_owned() {  # <target> <workspace_id> <tab_id> <c
     'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // "") else error("missing result.workspaces") end' 2>/dev/null) || return 2
   [ -n "$workspace_label" ] || return 1
   [ "$workspace_label" = firstmate ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || return 2
+  tab_present=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
+    'if (.result.tabs | type) == "array" then ([.result.tabs[] | select(.tab_id == $tab)] | length) else error("missing result.tabs") end' 2>/dev/null) || return 2
+  [ "$tab_present" -gt 0 ] || return 1
   fm_backend_herdr_task_is_owned "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" || return 2
 }
 
