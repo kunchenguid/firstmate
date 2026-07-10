@@ -437,6 +437,46 @@ test_home_seed_no_projects_end_to_end() {
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
 }
 
+test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
+  local home reusable_sub stale_sub stale_brief stale_brief_before err
+  home="$TMP_ROOT/no-projects-reused-charter-home"
+  reusable_sub="$TMP_ROOT/no-projects-reused-charter-valid-subhome"
+  stale_sub="$TMP_ROOT/no-projects-reused-charter-stale-subhome"
+  stale_brief="$home/data/stale/brief.md"
+  stale_brief_before="$TMP_ROOT/no-projects-reused-charter.before"
+  err="$TMP_ROOT/no-projects-reused-charter.err"
+  mkdir -p "$home/data" "$home/state" "$reusable_sub/data" "$stale_sub/data"
+  mark_firstmate_home "$reusable_sub"
+  mark_firstmate_home "$stale_sub"
+
+  scaffold_secondmate_charter "$home" reusable 'firstmate self-development' --no-projects \
+    || fail "project-less charter scaffold failed"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" reusable "$reusable_sub" --no-projects >/dev/null \
+    || fail "project-less seed rejected a reused project-less charter"
+  assert_grep 'None. This is a project-less domain' "$reusable_sub/data/charter.md" \
+    "reused project-less charter was not copied"
+
+  scaffold_secondmate_charter "$home" stale 'firstmate self-development' alpha \
+    || fail "projectful charter scaffold failed"
+  cp "$stale_brief" "$stale_brief_before"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" stale "$stale_sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed accepted a reused charter with project clones"
+  fi
+  grep -F 'existing charter brief' "$err" >/dev/null \
+    || fail "project-less charter refusal did not name the stale charter conflict"
+  grep -F 'fm-brief.sh stale --secondmate --no-projects' "$err" >/dev/null \
+    || fail "project-less charter refusal did not explain how to re-scaffold"
+  cmp -s "$stale_brief_before" "$stale_brief" \
+    || fail "project-less charter refusal changed the reused charter"
+  assert_absent "$stale_sub/.fm-secondmate-home" "project-less charter refusal wrote a home marker"
+  assert_absent "$stale_sub/data/charter.md" "project-less charter refusal copied a charter"
+  assert_absent "$stale_sub/projects" "project-less charter refusal created a projects directory"
+  if grep -F -- '- stale ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less charter refusal wrote a parent registry route"
+  fi
+  pass "home seeding validates reused project-less charters before mutation"
+}
+
 test_home_seed_refuses_projectless_conversion_of_populated_home() {
   local home sub err registry_before
   home="$TMP_ROOT/no-projects-conversion-home"
@@ -1999,6 +2039,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry

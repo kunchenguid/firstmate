@@ -837,6 +837,17 @@ refuse_populated_projectless_home() {
   return 1
 }
 
+refuse_projectful_projectless_charter() {
+  local id=$1 brief=$2
+  if grep -F 'None. This is a project-less domain' "$brief" >/dev/null 2>&1 \
+    && ! grep -F 'The projects above are local clones for work you supervise' "$brief" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf 'error: cannot seed project-less secondmate home because existing charter brief at %s conflicts with --no-projects\n' "$brief" >&2
+  printf 'error: re-scaffold it with fm-brief.sh %s --secondmate --no-projects or remove the stale brief before seeding\n' "$id" >&2
+  return 1
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   local no_projects=0 arg
@@ -910,6 +921,9 @@ seed_home() {
   validate_seed_leaf_files "$home" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
+    if [ -f "$SEED_PARENT_BRIEF" ]; then
+      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+    fi
   fi
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
