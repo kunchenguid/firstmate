@@ -46,6 +46,10 @@ trap 'fm_label_cleanup "$?"' EXIT
 [ "$#" -eq 2 ] || { echo "usage: fm-label.sh <id|fm-id> <phase-text>" >&2; exit 2; }
 RAW_ID=$1
 PHASE=$2
+[ -n "$RAW_ID" ] || { echo "error: task selector must not be empty" >&2; exit 2; }
+case "$RAW_ID" in
+  [!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) echo "error: invalid task selector: $RAW_ID" >&2; exit 2 ;;
+esac
 [ -n "$PHASE" ] || { echo "error: phase text must not be empty" >&2; exit 2; }
 case "$PHASE" in
   *$'\n'*|*$'\r'*) echo "error: phase text cannot contain a newline" >&2; exit 2 ;;

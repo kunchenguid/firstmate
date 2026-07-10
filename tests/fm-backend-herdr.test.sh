@@ -371,6 +371,23 @@ EOF
   pass "fm-label.sh: updates a herdr tab label and records the rendered label in metadata"
 }
 
+test_fm_label_rejects_unsafe_selector_before_metadata_lookup() {
+  local dir home state meta prior out status
+  dir="$TMP_ROOT/fm-label-unsafe-selector"; home="$dir/home"; state="$home/state"; meta="$home/outside.meta"
+  mkdir -p "$state"
+  printf 'window=external:target\nproject=external\n' > "$meta"
+  prior="$dir/prior.meta"
+  cp "$meta" "$prior"
+
+  out=$( FM_HOME="$home" "$ROOT/bin/fm-label.sh" ../outside validating 2>&1 )
+  status=$?
+  expect_code 2 "$status" "fm-label should reject a selector that can escape the state directory"
+  assert_contains "$out" "invalid task selector" "fm-label did not report the unsafe selector"
+  cmp -s "$prior" "$meta" || fail "fm-label changed metadata outside the state directory"
+  [ ! -e "$home/.outside.meta.lock" ] || fail "fm-label created a lock outside the state directory"
+  pass "fm-label.sh: rejects unsafe selectors before metadata lookup"
+}
+
 test_fm_label_cleanup_releases_lock_when_temp_removal_fails() {
   local dir log resp fb home state out status
   dir="$TMP_ROOT/fm-label-cleanup-rm-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -625,56 +642,72 @@ test_fm_promote_waits_for_metadata_lock_and_preserves_label() {
   pass "fm-promote.sh: waits for the metadata lock and preserves a concurrent label update"
 }
 
-test_fm_pr_check_waits_for_metadata_lock_and_preserves_label() {
-  local dir state meta lock acquired release fakebin holder_pid check_pid rc head
+test_fm_pr_check_queries_without_lock_and_preserves_concurrent_metadata() {
+  local dir state meta lock fakebin rc head
   dir="$TMP_ROOT/fm-pr-check-meta-lock"; state="$dir/home/state"; meta="$state/check.meta"
   fakebin="$dir/fakebin"; head=deadbeefcafefeed0000000000000000deadbeef
   mkdir -p "$state" "$dir/worktree" "$fakebin"
   printf 'window=fmtest:w1:p2\nworktree=%s\nkind=ship\n' "$dir/worktree" > "$meta"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+set -eu
+. "${FM_FAKE_ROOT:?}/bin/fm-wake-lib.sh"
+if ! fm_lock_try_acquire "${FM_FAKE_META_LOCK:?}"; then
+  touch "${FM_FAKE_GH_BLOCKED:?}"
+  exit 1
+fi
+printf '%s\n' 'label=project: validating' >> "${FM_FAKE_META:?}"
+fm_lock_release "${FM_FAKE_META_LOCK:?}"
 printf '%s\n' "${FM_FAKE_PR_HEAD:?}"
 SH
   chmod +x "$fakebin/gh"
   lock="$state/.check.meta.lock"
-  acquired="$dir/acquired"
-  release="$dir/release"
-
-  FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1/bin/fm-wake-lib.sh"
-    fm_lock_acquire_wait "$2"
-    touch "$3"
-    while [ ! -e "$4" ]; do sleep 0.05; done
-    printf "%s\n" "label=project: validating" >> "$5"
-    fm_lock_release "$2"
-  ' _ "$ROOT" "$lock" "$acquired" "$release" "$meta" &
-  holder_pid=$!
-  for _ in $(seq 1 100); do
-    [ ! -e "$acquired" ] || break
-    sleep 0.02
-  done
-  [ -e "$acquired" ] || fail "fm-pr-check metadata lock holder did not acquire its lock"
-
-  PATH="$fakebin:$PATH" FM_FAKE_PR_HEAD="$head" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
-    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr" &
-  check_pid=$!
-  sleep 0.3
-  if ! kill -0 "$check_pid" 2>/dev/null; then
-    touch "$release"
-    wait "$holder_pid"
-    fail "fm-pr-check did not wait for the task metadata lock"
-  fi
-
-  touch "$release"
-  wait "$holder_pid"
-  wait "$check_pid"
+  PATH="$fakebin:$PATH" FM_FAKE_ROOT="$ROOT" FM_FAKE_META_LOCK="$lock" FM_FAKE_META="$meta" \
+    FM_FAKE_GH_BLOCKED="$dir/gh-blocked" FM_FAKE_PR_HEAD="$head" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
-  [ "$rc" -eq 0 ] || fail "fm-pr-check failed after acquiring the task metadata lock"
+  [ "$rc" -eq 0 ] || fail "fm-pr-check failed after its unlocked PR lookup"
+  [ ! -e "$dir/gh-blocked" ] || fail "fm-pr-check held the task metadata lock during gh pr view"
   grep -qx 'label=project: validating' "$meta" || fail "fm-pr-check lost the label committed by the prior lock holder"
   grep -qx 'pr=https://github.com/example/repo/pull/7' "$meta" || fail "fm-pr-check did not record the PR URL"
   grep -qx "pr_head=$head" "$meta" || fail "fm-pr-check did not record the PR head"
   [ ! -e "$lock" ] || fail "fm-pr-check left the task metadata lock behind"
-  pass "fm-pr-check.sh: waits for the metadata lock and preserves a concurrent label update"
+  pass "fm-pr-check.sh: queries without the metadata lock and preserves concurrent metadata"
+}
+
+test_fm_pr_check_discards_head_after_worktree_generation_changes() {
+  local dir state meta lock fakebin head out status
+  dir="$TMP_ROOT/fm-pr-check-generation-change"; state="$dir/home/state"; meta="$state/check.meta"
+  fakebin="$dir/fakebin"; head=deadbeefcafefeed0000000000000000deadbeef
+  mkdir -p "$state" "$dir/old-worktree" "$dir/new-worktree" "$fakebin"
+  printf 'window=fmtest:w1:p2\nworktree=%s\nkind=ship\n' "$dir/old-worktree" > "$meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "${FM_FAKE_ROOT:?}/bin/fm-wake-lib.sh"
+fm_lock_acquire_wait "${FM_FAKE_META_LOCK:?}"
+sed "s|^worktree=.*|worktree=${FM_FAKE_NEW_WT:?}|" "${FM_FAKE_META:?}" > "${FM_FAKE_META:?}.next"
+printf '%s\n' 'label=project: respawned' >> "${FM_FAKE_META:?}.next"
+mv "${FM_FAKE_META:?}.next" "${FM_FAKE_META:?}"
+fm_lock_release "${FM_FAKE_META_LOCK:?}"
+printf '%s\n' "${FM_FAKE_PR_HEAD:?}"
+SH
+  chmod +x "$fakebin/gh"
+  lock="$state/.check.meta.lock"
+
+  out=$( PATH="$fakebin:$PATH" FM_FAKE_ROOT="$ROOT" FM_FAKE_META_LOCK="$lock" FM_FAKE_META="$meta" \
+    FM_FAKE_NEW_WT="$dir/new-worktree" FM_FAKE_PR_HEAD="$head" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" check https://github.com/example/repo/pull/7 2>&1 )
+  status=$?
+  expect_code 0 "$status" "fm-pr-check should tolerate a worktree generation change during PR lookup: $out"
+  grep -qx "worktree=$dir/new-worktree" "$meta" || fail "fm-pr-check overwrote the replacement worktree metadata"
+  grep -qx 'label=project: respawned' "$meta" || fail "fm-pr-check lost metadata committed by the replacement generation"
+  ! grep -q '^pr=' "$meta" || fail "fm-pr-check applied a PR URL to the replacement worktree generation"
+  ! grep -q '^pr_head=' "$meta" || fail "fm-pr-check applied a PR head fetched for the prior worktree generation"
+  [ ! -e "$lock" ] || fail "fm-pr-check left the task metadata lock behind after a generation change"
+  pass "fm-pr-check.sh: discards PR head fetched for a replaced worktree generation"
 }
 
 test_metadata_writers_release_locks_on_errors() {
@@ -700,7 +733,7 @@ test_metadata_writers_release_locks_on_errors() {
 }
 
 test_fm_label_nonherdr_is_clear_noop() {
-  local dir home state out fallback_out
+  local dir home state out alias_out fallback_out
   dir="$TMP_ROOT/fm-label-tmux"; home="$dir/home"; state="$home/state"; mkdir -p "$state"
   cat > "$state/noop-task.meta" <<EOF
 window=firstmate:fm-noop-task
@@ -709,9 +742,19 @@ EOF
   out=$( FM_HOME="$home" "$ROOT/bin/fm-label.sh" noop-task building )
   [ "$out" = "fm-label: backend=tmux does not support live labels; no-op for noop-task" ] \
     || fail "fm-label did not clearly report the non-herdr no-op: $out"
+  alias_out=$( FM_HOME="$home" "$ROOT/bin/fm-label.sh" fm-noop-task building )
+  [ "$alias_out" = "$out" ] || fail "fm-label no longer accepts the supported fm-id selector: $alias_out"
   fallback_out=$( env -u FM_HOME FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-label.sh" noop-task building )
   [ "$fallback_out" = "$out" ] || fail "fm-label without FM_HOME did not use the repo-root fallback: $fallback_out"
   pass "fm-label.sh: non-herdr backends are clear no-ops and bare invocation uses the repo-root home"
+}
+
+test_fm_spawn_help_includes_complete_header() {
+  local out
+  out=$("$ROOT/bin/fm-spawn.sh" --help)
+  assert_contains "$out" "grok uses a firstmate-owned global hook" "fm-spawn help omitted the Grok hook note"
+  assert_contains "$out" "On success prints: spawned <id>" "fm-spawn help omitted the success-output contract"
+  pass "fm-spawn.sh: help includes the complete contiguous header"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -2955,15 +2998,18 @@ test_rename_owned_task_requires_corroborated_identity
 test_close_owned_task_requires_confirmed_absence
 test_task_ownership_uses_exact_recorded_workspace_id
 test_fm_label_updates_herdr_tab_and_meta
+test_fm_label_rejects_unsafe_selector_before_metadata_lookup
 test_fm_label_cleanup_releases_lock_when_temp_removal_fails
 test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
 test_fm_label_does_not_recreate_removed_metadata
 test_fm_label_rolls_back_live_label_when_metadata_commit_fails
 test_fm_promote_waits_for_metadata_lock_and_preserves_label
-test_fm_pr_check_waits_for_metadata_lock_and_preserves_label
+test_fm_pr_check_queries_without_lock_and_preserves_concurrent_metadata
+test_fm_pr_check_discards_head_after_worktree_generation_changes
 test_metadata_writers_release_locks_on_errors
 test_fm_label_nonherdr_is_clear_noop
+test_fm_spawn_help_includes_complete_header
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_legacy_workspace_preference_requires_owned_live_task

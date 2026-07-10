@@ -35,6 +35,9 @@ NUMBER=$FM_PR_NUMBER
 META="$STATE/$ID.meta"
 META_LOCK="$STATE/.$ID.meta.lock"
 META_TMP=
+LOOKUP_WT=
+LOOKUP_WINDOW=
+LOOKUP_TERMINAL=
 pr_check_cleanup() {
   local status=$?
   set +e
@@ -47,11 +50,13 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
-fm_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+LOOKUP_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+LOOKUP_WINDOW=$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)
+LOOKUP_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -59,13 +64,26 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+if [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ] && command -v gh >/dev/null 2>&1; then
+  if REMOTE_HEAD=$(cd "$LOOKUP_WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+
+fm_lock_acquire_wait "$META_LOCK"
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+  echo "error: task metadata changed during PR lookup" >&2
+  exit 1
+fi
+LOCKED_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+LOCKED_WINDOW=$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)
+LOCKED_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$LOCKED_WT" != "$LOOKUP_WT" ] || [ "$LOCKED_WINDOW" != "$LOOKUP_WINDOW" ] \
+  || [ "$LOCKED_TERMINAL" != "$LOOKUP_TERMINAL" ]; then
+  echo "error: task metadata changed during PR lookup" >&2
+  exit 1
 fi
 
 fm_pr_poll_prepare "$STATE" "$ID" "$URL" "$OWNER" "$REPO" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
