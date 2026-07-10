@@ -73,6 +73,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PISKILL__  '--skill <abs-worktree>/.claude/skills ' for pi crewmate/scout
+#                  spawns whose worktree has a .claude/skills directory; empty otherwise
+#                  (non-pi harnesses, skill-less projects, and pi secondmates get nothing).
+#                  pi does not auto-discover project skills, so the flag loads them explicitly.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -329,7 +333,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi __MODELFLAG____EFFORTFLAG____PISKILL__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1015,8 +1019,18 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+# pi crewmate/scout only: load the project's own .claude/skills at launch. pi does
+# not auto-discover project skills (verified: it ignores .claude/skills and
+# .pi/skills at the project root) but accepts --skill <dir>. Empty for non-pi
+# harnesses, skill-less worktrees, and pi secondmates; the secondmate template
+# carries no __PISKILL__ token, so the substitution below is a no-op for it.
+sq_piskill=
+if [ "$HARNESS" = pi ] && [ "$KIND" != secondmate ] && [ -d "$WT/.claude/skills" ]; then
+  sq_piskill="--skill $(shell_quote "$(cd "$WT/.claude/skills" && pwd -P)") "
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__PISKILL__/$sq_piskill}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
