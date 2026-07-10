@@ -186,7 +186,11 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  # Clear the ambient harness env markers (fm-harness.sh detect_own layer 1) so
+  # detection falls through to the fake ps chain regardless of which harness is
+  # running this suite.
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' "$SESSION_START"
 }
 
 hash_file_for_test() {
