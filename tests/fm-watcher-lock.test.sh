@@ -630,10 +630,17 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
     touch "$state/.last-watcher-beat"
   ) &
   beater=$!
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=4 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  # The beater's 1s beacon delay can overshoot to ~4s on a loaded WSL2 host, so
+  # the confirm window must comfortably outlast it or the arm honestly reports
+  # FAILED before the beacon ever lands; 20s keeps the startup-race scenario
+  # (arm starts with no fresh beacon, child stands down, arm waits) intact.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=20 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
-  while [ "$i" -lt 80 ]; do
+  # Poll past the widened confirm window (250 x 0.1s > 20s) so a late-but-valid
+  # attach is still observed on success; the loop exits early the moment the
+  # attached line appears.
+  while [ "$i" -lt 250 ]; do
     grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
