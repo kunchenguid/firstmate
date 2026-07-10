@@ -23,17 +23,75 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Recycled-pid guard identity. On procfs platforms the identity is
+# "procfs:<starttime>:<command>", where starttime is /proc/<pid>/stat field 22
+# in clock ticks since boot: constant for the life of a process and immune to
+# wall-clock slew. ps's lstart is re-rendered from the current clock on every
+# read, so on hosts whose clock drifts (WSL2 after host sleep/resume) it changes
+# for the SAME live process and a healthy watcher reads as a recycled pid.
+# Platforms without procfs (macOS) fall back to the lstart form, which remains
+# drift-sensitive there. Compare recorded identities with
+# fm_pid_identity_matches, never with raw string equality, so locks recorded in
+# the old lstart-only format keep matching a live watcher (compat path).
 fm_pid_identity() {
-  local pid=$1 out
+  local pid=$1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if [ -r "/proc/$pid/stat" ]; then
+    fm_pid_identity_procfs "$pid"
+  else
+    fm_pid_identity_lstart "$pid"
+  fi
+}
+
+fm_pid_identity_procfs() {
+  local pid=$1 stat rest starttime cmd
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  case "$stat" in
+    *')'*) ;;
+    *) return 1 ;;
+  esac
+  # Field 2 is "(comm)" and comm may itself contain spaces or parens, so split
+  # only after the LAST ')' - the remainder holds fields 3 onward at fixed
+  # positions, putting starttime (overall field 22) at position 20.
+  rest=${stat##*)}
+  starttime=$(printf '%s\n' "$rest" | awk '{ print $20 }')
+  case "$starttime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  cmd=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+  [ -n "$cmd" ] || return 1
+  printf 'procfs:%s:%s\n' "$starttime" "$cmd"
+}
+
+fm_pid_identity_lstart() {
+  local pid=$1 out
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
+# fm_pid_identity_matches <pid> <recorded>: compare a recorded lock identity
+# against the live process. A "procfs:" recording compares against the current
+# clock-independent form. Anything else was recorded before the procfs format
+# landed (or on a procfs-less platform), so compare with the lstart read - a
+# live watcher must not be treated as recycled by a mid-flight upgrade. The
+# lock converges to the new format on its next natural re-acquisition.
+fm_pid_identity_matches() {
+  local pid=$1 recorded=$2 current
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -n "$recorded" ] || return 1
+  case "$recorded" in
+    procfs:*) current=$(fm_pid_identity "$pid") || return 1 ;;
+    *) current=$(fm_pid_identity_lstart "$pid") || return 1 ;;
+  esac
+  [ "$current" = "$recorded" ]
 }
 
 fm_path_mtime() {
@@ -51,16 +109,14 @@ fm_path_age() {
 }
 
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  fm_pid_identity_matches "$pid" "$lock_identity"
 }
 
 FM_WATCHER_HEALTHY_PID=
