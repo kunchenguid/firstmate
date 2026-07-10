@@ -680,6 +680,50 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_watcher_lock_matches_case_or_symlink_alias() {
+  # Regression for the case-insensitive-filesystem false positive: a lock written
+  # under one spelling of the home/watcher-path (e.g. macOS's /Users/x/work vs
+  # /Users/x/Work) must still be recognized as healthy when the caller computes
+  # that same path under a different spelling. A symlink alias gives the same
+  # device+inode identity portably, so this also exercises the bug on a
+  # case-sensitive filesystem (Linux CI), not just macOS.
+  local dir home_dir home_alias watch_real watch_alias other_dir state identity match_out mismatch_out
+  dir=$(make_case case-alias)
+  home_dir="$dir/home-real"
+  mkdir -p "$home_dir/state"
+  home_alias="$dir/home-alias"
+  ln -s "$home_dir" "$home_alias"
+  watch_real="$dir/watch-real.sh"
+  : > "$watch_real"
+  watch_alias="$dir/watch-alias.sh"
+  ln -s "$watch_real" "$watch_alias"
+  other_dir="$dir/unrelated-home"
+  mkdir -p "$other_dir"
+
+  state="$home_dir/state"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home_dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch_real" > "$state/.watch.lock/watcher-path"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$$") || fail "could not compute identity for the test's own live pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  match_out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"; then echo match; else echo nomatch; fi
+  ' _ "$LIB" "$state" "$watch_alias" "$$" "$home_alias")
+  [ "$match_out" = "match" ] || fail "lock recorded under one alias of home/watcher-path was not recognized when checked under a different alias (got '$match_out')"
+
+  mismatch_out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"; then echo match; else echo nomatch; fi
+  ' _ "$LIB" "$state" "$watch_alias" "$$" "$other_dir")
+  [ "$mismatch_out" = "nomatch" ] || fail "an unrelated home directory falsely matched the recorded lock home"
+
+  pass "watcher lock matches across a case/symlink alias of home and watcher path, and still rejects an unrelated directory"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The watcher records its process identity under one locale; arm/guard/turn-end
   # re-read it under the machine's ambient locale. ps's lstart date format follows
@@ -704,6 +748,7 @@ test_pid_identity_is_locale_invariant() {
 }
 
 test_singleton_start
+test_watcher_lock_matches_case_or_symlink_alias
 test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
