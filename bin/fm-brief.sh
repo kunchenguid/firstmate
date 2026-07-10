@@ -42,7 +42,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in

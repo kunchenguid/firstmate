@@ -57,14 +57,13 @@ SESSION="fm-lab-autodetect-smoke-$$"
 export HERDR_SESSION="$SESSION"
 ID="autodetectsmoke1"
 WT=
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
-
 cleanup_all() {
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
+trap cleanup_all EXIT
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 
