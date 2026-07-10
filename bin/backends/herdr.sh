@@ -677,10 +677,10 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder), or bare-prompt tail text rendered faint in the ANSI
-#             capture (verified Codex idle suggestions such as "Run /review on
-#             my current changes" and "Find and fix a bug in @filename").
-#             Safe to treat as submitted.
+#             placeholder), or only de-emphasised ANSI ghost/placeholder text
+#             recognized by the shared fm_composer_strip_ghost extractor
+#             (dim/faint or dark-TRUECOLOR foreground). Safe to treat as
+#             submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the

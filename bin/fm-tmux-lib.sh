@@ -62,7 +62,7 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
 #   empty   - no pending input (blank, a busy footer, an empty agent composer, or
-#             only dim ghost/placeholder text). Safe to inject; also the positive
+#             only de-emphasised ghost/placeholder text). Safe to inject; also the positive
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
