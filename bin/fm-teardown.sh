@@ -167,12 +167,6 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-ensure_commit_object() {
-  local provider=$1 target=$2 commit=$3 source_ref=${4:-}
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  fm_scm_fetch_pr_head "$WT" "$provider" "$target" "$commit" "$source_ref"
-}
-
 patch_id_for_commit() {
   local commit=$1
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
@@ -229,7 +223,7 @@ EOF
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  ensure_commit_object "$provider" "$target" "$head" "$source_ref" || return 1
+  fm_scm_fetch_pr_head "$WT" "$provider" "$target" "$head" "$source_ref" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
   unpushed_patches_are_in_pr_head "$head"

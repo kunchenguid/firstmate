@@ -101,33 +101,36 @@ fm_scm_parse_pr_url() {
 }
 
 fm_scm_remote_path_after_host() {
-  local remote=$1 host=$2 rest prefix
-  for prefix in "http://$host/" "https://$host/" "ssh://$host/"; do
-    case "$remote" in
-      "$prefix"*)
-        printf '%s\n' "${remote#"$prefix"}"
-        return 0
-        ;;
-    esac
-  done
-  for prefix in "http://" "https://" "ssh://"; do
-    case "$remote" in
-      "$prefix"*"@$host/"*)
-        rest=${remote#"$prefix"}
-        rest=${rest#*@"$host"/}
-        printf '%s\n' "$rest"
-        return 0
-        ;;
-    esac
-  done
+  local remote=$1 host=$2 rest port
   case "$remote" in
+    *://*)
+      rest=${remote#*://}
+      case "${rest%%/*}" in
+        *@*) rest=${rest#*@} ;;
+      esac
+      case "$rest" in
+        "$host"/*) rest=${rest#"$host"/} ;;
+        "$host":*/*)
+          rest=${rest#"$host":}
+          port=${rest%%/*}
+          case "$port" in
+            ''|*[!0-9]*) return 1 ;;
+          esac
+          rest=${rest#*/}
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
     *"@$host":*)
       rest=${remote#*@"$host":}
-      printf '%s\n' "$rest"
-      return 0
       ;;
+    *) return 1 ;;
   esac
-  return 1
+  while [ "${rest%/}" != "$rest" ]; do
+    rest=${rest%/}
+  done
+  [ -n "$rest" ] || return 1
+  printf '%s\n' "$rest"
 }
 
 # Echo provider<TAB>repo-path for supported git remote URLs.
@@ -302,7 +305,7 @@ fm_scm_pr_state() {
   IFS=$FM_SCM_FS read -r provider state _ _ <<EOF
 $info
 EOF
-  [ -n "$provider" ] || return 1
+  [ -n "$provider" ] && [ -n "$state" ] || return 1
   printf '%s\n' "$state"
 }
 
