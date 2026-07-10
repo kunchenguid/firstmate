@@ -775,6 +775,44 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
 }
 
+
+test_nonterminal_stale_permission_dialog_tagged() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid dialog_text
+  dir=$(make_case nonterminal-stale-permission-dialog); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-dialog"
+  dialog_text="Bash command
+
+  rm -rf scratch/todelete
+
+Permission rule Bash(rm -rf *) requires confirmation for this command.
+
+Do you want to proceed?
+1. Yes
+2. No"
+  printf '%s' "$dialog_text" > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/dialog.meta"
+  printf 'working: cleaning up scratch state\n' > "$state/dialog.status"
+  sig=$(seen_sig "$state/dialog.status"); printf '%s' "$sig" > "$state/.seen-dialog_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$dialog_text")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No running pipeline; the pane shows the dialog, not a busy footer. NOT
+  # provably working, same as any other stopped crew.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a permission-dialog stale at once"
+  grep -F "stale: $window (permission-dialog:" "$out" >/dev/null || fail "wake reason was not tagged permission-dialog: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the permission-dialog stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "permission-dialog" >/dev/null || fail "permission-dialog tag was not queued in the wake payload"
+  pass "a crewmate parked at a permission-confirmation dialog surfaces with a distinct permission-dialog wake tag"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -1113,6 +1151,7 @@ test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
+test_nonterminal_stale_permission_dialog_tagged
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed

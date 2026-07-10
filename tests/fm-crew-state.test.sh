@@ -86,6 +86,8 @@ case "${1:-}" in
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+    elif [ "${FM_FAKE_PERMISSION_DIALOG:-0}" = 1 ]; then
+      printf 'Bash command\n\n  rm -rf scratch/todelete\n\nPermission rule Bash(rm -rf *) requires confirmation for this command.\n\nDo you want to proceed?\n1. Yes\n2. No\n'
     else printf 'all quiet\n> \n'; fi ;;
 esac
 exit 0
@@ -154,12 +156,13 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
+  FM_FAKE_PERMISSION_DIALOG=0
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_PERMISSION_DIALOG FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -785,6 +788,30 @@ test_no_run_busy_pane() {
   pass "no run + busy pane reads working from the pane"
 }
 
+# Regression (task crew-rmrf-fix-q3): a crewmate parked at an interactive
+# permission-confirmation dialog is not busy (no busy footer renders), so
+# without this check it would fall through to a possibly-stale status-log
+# line or "unknown" - neither tells firstmate this needs a direct keypress
+# response rather than a routine steer. Checked ahead of the status-log
+# fallback so it wins over any leftover log line.
+test_no_run_permission_dialog_pane() {
+  reset_fakes
+  local d; d=$(new_case permission-dialog)
+  make_repo_on_branch "$d/wt" fm/feat-dialog
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dialog.meta" "window=fm:fm-feat-dialog" "worktree=$d/wt" "kind=ship"
+  # No matching run anywhere, and a stale status-log line that must NOT win.
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_PERMISSION_DIALOG=1
+  echo "working: doing setup" >> "$d/state/feat-dialog.status"
+  local out; out=$(run_crew_state "$d" feat-dialog)
+  assert_contains "$out" "state: blocked" "permission dialog -> blocked"
+  assert_contains "$out" "source: pane" "permission dialog -> pane source"
+  assert_contains "$out" "permission confirmation" "permission dialog detail names the dialog"
+  pass "no run + permission-confirmation dialog reads blocked from the pane, ahead of the status log"
+}
+
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -1111,6 +1138,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_permission_dialog_pane
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle

@@ -133,6 +133,27 @@ fm_pane_is_busy() {  # <target>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
+# Interactive Claude Code permission-confirmation dialog footer (task
+# crew-rmrf-fix-q3). A crewmate parked here is NOT busy (no busy footer
+# renders - see fm-crew-state.sh's crew_pane_is_busy note) and needs a direct
+# keypress response, never an interrupt or relaunch (stuck-crewmate-recovery
+# skill's dedicated step). "Do you want to proceed?" was observed verbatim
+# across every variant of this dialog (different tools, different option
+# wording, different risk levels) in Claude Code 2.1.205, and does not appear
+# in the separate one-time folder-trust dialog ("Quick safety check..."),
+# which spawn already peeks and accepts at launch (harness-adapters skill).
+FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT='Do you want to proceed\?'
+
+# fm_pane_shows_permission_dialog: 0 if the pane's tail shows an interactive
+# permission-confirmation dialog. Scans a wider window than fm_pane_is_busy's
+# busy-footer check (the dialog box spans several lines, not just a footer).
+fm_pane_shows_permission_dialog() {  # <target>
+  local win=$1 tail40
+  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' \
+    | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}"
+}
+
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate

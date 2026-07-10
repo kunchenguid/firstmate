@@ -33,7 +33,10 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line.
+#      recorded backend's pane busy state, then whether the pane shows an
+#      interactive permission-confirmation dialog (blocked · pane; task
+#      crew-rmrf-fix-q3 - a crewmate parked here needs a direct keypress
+#      response, not a routine steer), then the status log's last line.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -189,6 +192,22 @@ crew_pane_is_busy() {  # <target>
             | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
           ;;
       esac
+      ;;
+  esac
+}
+
+# crew_pane_shows_permission_dialog: 0 if the pane shows an interactive
+# permission-confirmation dialog (task crew-rmrf-fix-q3) - a crewmate parked
+# here needs a direct keypress response, not a routine steer. Backend-aware
+# the same way as crew_pane_is_busy.
+crew_pane_shows_permission_dialog() {  # <target>
+  case "$TASK_BACKEND" in
+    tmux) fm_pane_shows_permission_dialog "$1" ;;
+    *)
+      local tail40
+      tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' \
+        | grep -qiE "${FM_PERMISSION_DIALOG_REGEX:-$FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT}"
       ;;
   esac
 }
@@ -564,6 +583,15 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
+fi
+
+# A crewmate parked at an interactive permission-confirmation dialog is not
+# busy (no busy footer renders) and would otherwise fall through to a stale
+# status-log line or "unknown" - neither tells firstmate this needs a direct
+# keypress response, not a routine steer (task crew-rmrf-fix-q3;
+# stuck-crewmate-recovery skill).
+if [ "$KIND" != secondmate ] && crew_pane_shows_permission_dialog "$BACKEND_TARGET"; then
+  emit blocked pane "awaiting interactive permission confirmation - respond directly via fm-send.sh <window> --key <N>, do not interrupt or relaunch (see stuck-crewmate-recovery)"
 fi
 
 if [ -n "$LOG_VERB" ]; then

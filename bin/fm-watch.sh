@@ -122,6 +122,12 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
 # locale fragility of matching grok's braille spinner glyph directly).
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# Interactive permission-confirmation dialog footer (task crew-rmrf-fix-q3);
+# see fm-tmux-lib.sh's FM_TMUX_PERMISSION_DIALOG_REGEX_DEFAULT for the full
+# rationale. A stale pane matching this is flagged distinctly in the wake
+# reason so the recovery path answers it directly instead of interrupting or
+# relaunching (stuck-crewmate-recovery skill).
+PERMISSION_DIALOG_REGEX=${FM_PERMISSION_DIALOG_REGEX:-'Do you want to proceed\?'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -191,6 +197,29 @@ window_is_busy() {  # <window> <tail40>
       printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
       ;;
   esac
+}
+
+# window_shows_permission_dialog: 0 iff <tail40> shows an interactive
+# permission-confirmation dialog (task crew-rmrf-fix-q3). Reuses the same
+# bounded capture already read for hashing, so this adds no extra backend
+# calls. Scans the whole tail, not just the footer lines: the dialog box spans
+# several lines, unlike the busy footer.
+window_shows_permission_dialog() {  # <tail40>
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' | grep -qiE "$PERMISSION_DIALOG_REGEX"
+}
+
+# stale_reason_for: compose the wake reason for a surfaced stale window,
+# tagging a permission-confirmation dialog distinctly (task crew-rmrf-fix-q3)
+# so the recovery path answers it directly instead of interrupting or
+# relaunching (stuck-crewmate-recovery skill) - this is the one case where
+# that generic escalation ladder is the wrong tool.
+stale_reason_for() {  # <window> <tail40>
+  local w=$1 tail40=$2
+  if window_shows_permission_dialog "$tail40"; then
+    printf 'stale: %s (permission-dialog: crewmate is parked at an interactive confirmation - respond directly via fm-send.sh, do not interrupt or relaunch; see stuck-crewmate-recovery)' "$w"
+  else
+    printf 'stale: %s' "$w"
+  fi
 }
 
 window_kind() {
@@ -369,13 +398,14 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
-surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+surface_nonterminal_stale() {  # <window> <hash> <tail40>
+  local win=$1 h=$2 tail40=$3 key reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason=$(stale_reason_for "$win" "$tail40")
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -611,9 +641,10 @@ EOF
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            reason=$(stale_reason_for "$w" "$tail40")
+            fm_wake_append stale "$w" "$reason" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "$reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -636,11 +667,12 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              reason=$(stale_reason_for "$w" "$tail40")
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -680,7 +712,7 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                surface_nonterminal_stale "$w" "$h" "$tail40"
                 ;;
             esac
           else
@@ -692,7 +724,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       surface_nonterminal_stale "$w" "$h" ;;
+                *)       surface_nonterminal_stale "$w" "$h" "$tail40" ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
