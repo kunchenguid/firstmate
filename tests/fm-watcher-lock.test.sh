@@ -703,8 +703,104 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_clock_independent() {
+  # The identity is the recycled-pid guard: fm-watch/fm-supervise-daemon record
+  # it at lock acquisition and every later health check re-reads it live. ps's
+  # lstart is re-rendered from the current wall clock on each read, so on hosts
+  # whose clock slews (WSL2 after host sleep/resume) the SAME live process
+  # yields a different identity over time and a healthy watcher reads as a
+  # recycled pid. The procfs form must therefore contain no wall-clock-rendered
+  # component: assert the procfs:<ticks>:<command> format and that the bytes are
+  # invariant under a timezone change, which shifts any rendered wall-clock time
+  # but can never move clock-ticks-since-boot. POSIX TZ strings keep this
+  # deterministic without tzdata. Skipped where procfs is absent (macOS keeps
+  # the documented drift-sensitive lstart fallback).
+  local live utc jst
+  if [ ! -r /proc/self/stat ]; then
+    pass "pid identity clock-independence skipped: no procfs on this platform"
+    return 0
+  fi
+  sleep 300 &
+  live=$!
+  utc=$(TZ=UTC0 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  jst=$(TZ=JST-9 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  printf '%s\n' "$utc" | grep -Eq '^procfs:[0-9]+:.' \
+    || fail "pid identity is not procfs:<ticks>:<command> on a procfs platform (got '$utc')"
+  [ "$jst" = "$utc" ] || fail "pid identity varied with TZ, so it still renders wall-clock time (TZ=UTC0 '$utc' vs TZ=JST-9 '$jst')"
+  pass "fm_pid_identity is clock-independent on procfs platforms"
+}
+
+test_pid_identity_distinguishes_recycled_pid() {
+  # Two different processes must never share an identity even when the command
+  # line is identical: a recycled pid is a NEW process, so its start tick
+  # differs. Start two same-command sleepers a few clock ticks apart (USER_HZ is
+  # 100, so 0.3s is ~30 ticks) and require distinct identities, then require the
+  # comparator to reject one process's recorded identity against the other.
+  local p1 p2 id1 id2 status
+  if [ ! -r /proc/self/stat ]; then
+    pass "recycled-pid identity distinction skipped: no procfs on this platform"
+    return 0
+  fi
+  sleep 300 &
+  p1=$!
+  sleep 0.3
+  sleep 300 &
+  p2=$!
+  id1=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$p1" 2>/dev/null)
+  id2=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$p2" 2>/dev/null)
+  status=0
+  bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$p1" "$id2" || status=$?
+  kill "$p1" "$p2" 2>/dev/null || true
+  wait "$p1" 2>/dev/null || true
+  wait "$p2" 2>/dev/null || true
+  [ -n "$id1" ] || fail "no identity for first process"
+  [ -n "$id2" ] || fail "no identity for second process"
+  [ "$id1" != "$id2" ] || fail "two distinct same-command processes share an identity ('$id1')"
+  [ "$status" -ne 0 ] || fail "comparator accepted a different process's identity"
+  pass "distinct processes with identical commands yield distinct identities"
+}
+
+test_pid_identity_matches_accepts_old_format_lock() {
+  # A lock recorded before the procfs identity format landed holds
+  # "<lstart> <command>". A mid-flight upgrade must not turn that live watcher
+  # into a "recycled pid": fm_pid_identity_matches routes non-procfs recordings
+  # through the old lstart comparison. The lstart read is shimmed here because
+  # on clock-drift hosts (the WSL2 bug this all guards) two REAL lstart reads of
+  # the same pid can disagree, which would make this test flaky - the routing is
+  # what is under test, not lstart stability.
+  local dir state fakebin live old_identity status
+  dir=$(make_case old-identity-compat)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  old_identity='Fri Jul 10 11:54:03 2026 sleep 300'
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$old_identity'
+SH
+  chmod +x "$fakebin/ps"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$old_identity" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$WATCH" "$live" "$dir" || status=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$status" -eq 0 ] || fail "old-format recorded identity made a live matching watcher read as dead (status $status)"
+  pass "old lstart-format lock identity still matches its live watcher"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_clock_independent
+test_pid_identity_distinguishes_recycled_pid
+test_pid_identity_matches_accepts_old_format_lock
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
