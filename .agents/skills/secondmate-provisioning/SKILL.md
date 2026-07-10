@@ -93,7 +93,7 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
 The helper resolves the secondmate home from `data/secondmates.md` and mechanically moves each named item from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
-It preserves the line and its section, so the item is neither duplicated nor lost.
+It moves each item's whole block - the `- [ ] <id> ...` header plus every following indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
 It refuses `## In flight` entries because active task ownership also lives in tmux and `state/`.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
