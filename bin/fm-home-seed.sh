@@ -12,7 +12,9 @@
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
-#       project list, and omitting both still fails loudly. The charter brief
+#       project list, and omitting both still fails loudly. A project-less seed
+#       refuses a home with project clones or project-registry entries, so it
+#       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, a .fm-secondmate-home marker is written, and
 #       data/secondmates.md is updated.

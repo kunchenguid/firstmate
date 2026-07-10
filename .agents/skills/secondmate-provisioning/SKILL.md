@@ -39,6 +39,8 @@ Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDM
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
 Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
+Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
+Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
 Keep the charter focused on the persistent responsibility, available project clones, escalation back to the main firstmate status file, and the requests-from-main-firstmate contract.
 The scaffold's definition of done encodes the idle-by-default contract: on startup the secondmate reconciles only its own in-flight work and then waits for routed tasks, never self-initiating a survey or audit.
 Preserve that wording when filling the charter, including the marker rule that marked supervisor requests return through status or a doc pointer while unmarked captain messages stay conversational.
@@ -50,6 +52,7 @@ bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 ```
 
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
+It may only seed a home with no project clones or project-registry entries, and refuses conversion of populated homes without changing them.
 `-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
