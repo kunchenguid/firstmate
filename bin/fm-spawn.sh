@@ -766,6 +766,17 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+# The live pane's current working directory (empty on any error). Used only to
+# VERIFY the post-lease `cd` landed the pane in the worktree; orca has no pane
+# to read (it owns its own worktree), so this is not on the orca path.
+spawn_current_path() {  # <target>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" ;;
+    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
+    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  esac
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -804,9 +815,28 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get --lease" "$T"
 
   # Move the task pane into the leased worktree so the harness launches there
-  # and every worktree-resident turn-end hook lands in $WT. The window was
-  # created in $PROJ_ABS; a plain cd is enough because the lease already exists.
-  spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
+  # and every worktree-resident turn-end hook lands in $WT. VERIFY the cd landed
+  # rather than fire-and-forget: a freshly created pane's shell may not be ready
+  # for the very first keystroke, dropping the leading character (observed:
+  # `cd <wt>` arriving as `d <wt>`, leaving the pane in the primary checkout and
+  # tripping the crewmate's own isolation guard). Re-send until the pane's cwd is
+  # the worktree, comparing physically-resolved paths so a symlinked prefix does
+  # not cause a false mismatch.
+  WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL="$WT"
+  cd_landed=
+  for _ in $(seq 1 30); do
+    p=$(spawn_current_path "$T" 2>/dev/null || true)
+    if [ -n "$p" ]; then
+      p_real=$(cd "$p" 2>/dev/null && pwd -P) || p_real="$p"
+      if [ "$p_real" = "$WT_REAL" ]; then cd_landed=1; break; fi
+    fi
+    spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
+    sleep 0.5
+  done
+  if [ -z "$cd_landed" ]; then
+    echo "error: task pane for $ID did not enter the leased worktree $WT after repeated cd; inspect window $T" >&2
+    exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

@@ -699,15 +699,25 @@ test_peek_conformance_old_vs_new() {
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
-  local dir=$1 wt=$2 fb="$1/fakebin"
+  local dir=$1 wt=$2 fb="$1/fakebin" cwdfile="$1/pane-cwd"
   mkdir -p "$fb"
+  # pane-cwd starts as the project (empty marker) and flips to the worktree once
+  # a `cd <wt>` send-keys is seen, mirroring the real pane: fm-spawn's verify
+  # loop reads project first, sends cd, then reads the worktree and proceeds.
+  : > "$cwdfile"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\$*" in
+  *pane_current_path*) cat "$cwdfile"; printf '\\n'; exit 0 ;;
+esac
 case "\${1:-}" in
   display-message) printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in "cd '$wt'"|"cd $wt") printf '%s' "$wt" > "$cwdfile" ;; esac; done
+    exit 0 ;;
 esac
 exit 0
 SH

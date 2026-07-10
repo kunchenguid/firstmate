@@ -19,6 +19,12 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# A pane_current_path query returns FM_FAKE_WORKTREE so fm-spawn's post-lease
+# cd-verification loop sees the pane "land" in the worktree immediately; a bare
+# display-message (session name) returns 'firstmate'.
+case "$*" in
+  *pane_current_path*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
+esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -358,8 +364,9 @@ test_scout_worktree_comes_from_lease() {
   # Regression: treehouse v2.0.0's interactive `get` opens a subshell whose cwd
   # the multiplexer does not report, so the old pane_current_path poll timed out
   # at 60s. fm-spawn now leases the worktree via `treehouse get --lease` and
-  # reads the path from stdout. The fakebin tmux stub answers no pane-cwd probe
-  # at all, so this spawn succeeds only via the lease path.
+  # reads the path from stdout, then cds the pane into it. The fakebin's tmux
+  # stub reports the worktree as the pane cwd, so the post-lease cd-verify loop
+  # passes on its first read.
   local rec id out status
   id=lease-worktree-z17
   rec=$(make_spawn_case lease-worktree claude "$id")
@@ -371,6 +378,55 @@ test_scout_worktree_comes_from_lease() {
   assert_contains "$out" "spawned $id" "lease-based spawn did not report success"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "meta did not record the leased worktree from stdout"
   pass "scout worktree is acquired via treehouse --lease, independent of pane-cwd polling"
+}
+
+test_cd_into_worktree_is_verified_and_retried() {
+  # Regression: a freshly created pane's shell can drop the first keystroke, so
+  # `cd <wt>` arrives as `d <wt>` and the pane never leaves the primary checkout
+  # (observed live: the crewmate then tripped its own isolation guard). fm-spawn
+  # must VERIFY the cd landed by reading the pane cwd and re-send until it does.
+  # This stub reports the pane still in the project until it has seen TWO cd
+  # sends (simulating the first one being dropped), proving the retry works.
+  local rec id out status fakebin cwdstate
+  id=cd-retry-z18
+  rec=$(make_spawn_case cd-retry claude "$id")
+  read_case_record "$rec"
+  fakebin="$FAKEBIN_DIR"
+  cwdstate="$CASE_DIR/cd-count"
+  : > "$cwdstate"
+  # Overwrite the tmux stub with a drop-the-first-cd variant.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *pane_current_path*)
+    # Report the worktree only after at least 2 cd sends have been seen.
+    if [ "\$(wc -c < "$cwdstate" | tr -d ' ')" -ge 2 ]; then
+      printf '%s\\n' "$WT_DIR"
+    else
+      printf '%s\\n' "$PROJ_DIR"
+    fi
+    exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in "cd '$WT_DIR'") printf 'x' >> "$cwdstate" ;; esac; done
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$fakebin" "$LAUNCH_LOG" --scout "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should re-send cd until the pane enters the worktree"
+  assert_contains "$out" "spawned $id" "spawn did not succeed after cd retry"
+  # At least 2 cd sends means the verify loop re-sent after the dropped first cd.
+  [ "$(wc -c < "$cwdstate" | tr -d ' ')" -ge 2 ] || fail "cd was not re-sent after the pane failed to enter the worktree"
+  pass "post-lease cd into the worktree is verified and retried until it lands"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
@@ -406,6 +462,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
 test_scout_worktree_comes_from_lease
+test_cd_into_worktree_is_verified_and_retried
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
