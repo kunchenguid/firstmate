@@ -1303,6 +1303,55 @@ test_teardown_waits_for_metadata_update_lock() {
   pass "teardown serializes metadata removal with live label updates"
 }
 
+test_teardown_holds_metadata_lock_through_cleanup() {
+  local case_dir reached release writer_done teardown_pid writer_pid rc
+  case_dir=$(make_case metadata-lock-through-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "discarded under force"
+  reached="$case_dir/treehouse-reached"
+  release="$case_dir/release-treehouse"
+  writer_done="$case_dir/writer-done"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -eu
+touch "${FM_TREEHOUSE_REACHED:?}"
+while [ ! -e "${FM_TREEHOUSE_RELEASE:?}" ]; do sleep 0.05; done
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_TREEHOUSE_REACHED="$reached" FM_TREEHOUSE_RELEASE="$release" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$reached" ] || break
+    sleep 0.02
+  done
+  [ -e "$reached" ] || fail "teardown did not reach worktree cleanup"
+
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock="$2/.task-x1.meta.lock"
+    fm_lock_acquire_wait "$lock"
+    printf "%s\n" "generation=replacement" > "$2/task-x1.meta"
+    fm_lock_release "$lock"
+    touch "$3"
+  ' _ "$ROOT" "$case_dir/state" "$writer_done" &
+  writer_pid=$!
+  sleep 0.3
+  [ ! -e "$writer_done" ] || fail "same-id replacement acquired the metadata lock before teardown cleanup finished"
+
+  touch "$release"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  wait "$writer_pid"
+  expect_code 0 "$rc" "metadata-lock-through-cleanup: teardown should complete"
+  grep -qx 'generation=replacement' "$case_dir/state/task-x1.meta" \
+    || fail "teardown deleted the same-id replacement metadata published after cleanup"
+  pass "teardown holds the task metadata lock from initial read through endpoint, worktree, and state cleanup"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1313,6 +1362,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_teardown_waits_for_metadata_update_lock
+test_teardown_holds_metadata_lock_through_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

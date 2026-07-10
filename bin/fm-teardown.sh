@@ -111,6 +111,18 @@ FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 META="$STATE/$ID.meta"
+TEARDOWN_META_LOCK="$STATE/.$ID.meta.lock"
+teardown_release_meta_lock() {
+  local status=$?
+  set +e
+  if [ -n "$TEARDOWN_META_LOCK" ]; then
+    fm_lock_release "$TEARDOWN_META_LOCK"
+    TEARDOWN_META_LOCK=
+  fi
+  return "$status"
+}
+trap teardown_release_meta_lock EXIT
+fm_lock_acquire_wait "$TEARDOWN_META_LOCK"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
@@ -157,13 +169,17 @@ meta_value() {
 remove_task_state_files() {
   local state=$1 id=$2 lock status=0
   lock="$state/.$id.meta.lock"
-  fm_lock_acquire_wait "$lock"
+  if [ "$lock" != "$TEARDOWN_META_LOCK" ]; then
+    fm_lock_acquire_wait "$lock"
+  fi
   if remove_pr_poll_artifacts "$state" "$id"; then
     rm -f "$state/$id.status" "$state/$id.turn-ended" "$state/$id.meta" "$state/$id.pi-ext.ts" "$state/$id.grok-turnend-token" || status=$?
   else
     status=$?
   fi
-  fm_lock_release "$lock"
+  if [ "$lock" != "$TEARDOWN_META_LOCK" ]; then
+    fm_lock_release "$lock"
+  fi
   return "$status"
 }
 
@@ -1148,6 +1164,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_task_state_files "$STATE" "$ID" || exit 1
+fm_lock_release "$TEARDOWN_META_LOCK"
+TEARDOWN_META_LOCK=
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

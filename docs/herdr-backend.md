@@ -118,7 +118,8 @@ This is a pre-existing characteristic of the adapter's find-before-create patter
 
 Existing live tasks are unaffected by this change: a task's meta already records its own `window=`/`herdr_pane_id=` target, which every backend-scoped operation (send/capture/kill/busy-state) resolves directly and never re-derives from a workspace label.
 So a task spawned before this pass keeps working exactly as before, from whatever workspace it already lives in (the old shared `firstmate` workspace, or a pre-rename `firstmate-<secondmate-id>` workspace if that is where its home's tasks previously landed).
-New primary spawns use `firstmate-crew` and do not automatically adopt or rename an older workspace labeled `firstmate`.
+New primary tasks use `firstmate-crew`; the one compatibility exception is a same-id recovery whose prior metadata still corroborates a live tab in the older `firstmate` workspace by session, workspace, tab, label, pane, and worktree.
+That recovery reuses the legacy workspace so it refuses or replaces the existing task there instead of creating a duplicate in `firstmate-crew`; stale or uncorroborated metadata never selects a legacy workspace, and no workspace is renamed or migrated.
 New workspace lookup does not adopt old secondmate labels: for new spawns, recovery, and list-live, the adapter exact-matches the current label derived from `FM_HOME` (`2ndmate-<secondmate-id>`).
 If an older live workspace is still labeled `firstmate-<secondmate-id>`, rename it with `herdr workspace rename <workspace_id> 2ndmate-<secondmate-id>` before expecting new tasks or recovery/list-live to use that workspace.
 
@@ -160,7 +161,7 @@ The fix is structural, not another heuristic, and is unit- and E2E-tested: see `
 
 Because closing a workspace's last tab deletes it, a home's workspace does not outlive a fully idle fleet (zero live tasks for that home) - the next spawn's `workspace_find` simply finds nothing and recreates it. Reuse holds across concurrent and sequential tasks; it is not a guarantee that the workspace itself survives the whole session unconditionally.
 
-A workspace whose label this adapter did not derive (see "Label derivation" above) is never adopted, reused, or torn down by firstmate - `fm_backend_herdr_workspace_find` and `fm_backend_herdr_list_live` only ever match a home's own derived label.
+Apart from the corroborated primary legacy-recovery exception above, a workspace whose label this adapter did not derive (see "Label derivation" above) is never adopted, reused, or torn down by firstmate - `fm_backend_herdr_workspace_find` and `fm_backend_herdr_list_live` only ever match a home's own derived label.
 
 ## Target string and meta fields
 

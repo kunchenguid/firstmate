@@ -194,8 +194,8 @@ fm_backend_herdr_server_ensure() {  # <session>
 # uniqueness at all, so this adopts the FIRST matching workspace `jq` returns
 # (list order, normally creation order/oldest) rather than disambiguating -
 # identical in spirit to the pre-existing tab duplicate-label check below.
-fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 label list
+fm_backend_herdr_workspace_find() {  # <session> [preferred_legacy_workspace_id]
+  local session=$1 preferred_legacy_workspace_id=${2:-} label list
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
@@ -203,8 +203,9 @@ fm_backend_herdr_workspace_find() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate-crew" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+  printf '%s' "$list" | jq -r --arg want "$label" --arg legacy "$preferred_legacy_workspace_id" \
+    '([.result.workspaces[]? | select($legacy != "" and .workspace_id == $legacy and .label == "firstmate")][0].workspace_id //
+      [.result.workspaces[]? | select(.label == $want)][0].workspace_id // empty)' 2>/dev/null
 }
 
 # fm_backend_herdr_workspace_prune_seeded_default_tab: close EXACTLY
@@ -302,11 +303,11 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # focuses regardless of --no-focus (herdr always needs something focused to
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
-fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
-  local session=$1 cwd=$2 wsid out label
+fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [preferred_legacy_workspace_id]
+  local session=$1 cwd=$2 preferred_legacy_workspace_id=${3:-} wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  wsid=$(fm_backend_herdr_workspace_find "$session")
+  wsid=$(fm_backend_herdr_workspace_find "$session" "$preferred_legacy_workspace_id")
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
@@ -336,12 +337,13 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
 # CONTAINER=${RAW%%$'\t'*}; SEEDED_TAB_ID=${RAW#*$'\t'}. The seeded tab id
 # must be threaded through to fm_backend_herdr_create_task, which is the only
 # function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
-fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
-  local cwd=${1:-$PWD} session label
+fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [prior_session] [prior_workspace_id]
+  local cwd=${1:-$PWD} prior_session=${2:-} prior_workspace_id=${3:-} preferred_legacy_workspace_id='' session label
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
-  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
+  [ "$prior_session" != "$session" ] || preferred_legacy_workspace_id=$prior_workspace_id
+  fm_backend_herdr_workspace_ensure "$session" "$cwd" "$preferred_legacy_workspace_id" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
   if [ -z "$FM_BACKEND_HERDR_WS_ID" ]; then
     label=$(fm_backend_herdr_workspace_label)
     echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2
@@ -581,11 +583,11 @@ fm_backend_herdr_rename_task() {  # <target> <label>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$label" >/dev/null 2>&1
 }
 
-fm_backend_herdr_rename_owned_task() {  # <target> <workspace_id> <tab_id> <current_label> <worktree> <new_label>
-  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 new_label=$6 live_workspace tabs live_label pane_id live_path
+fm_backend_herdr_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 live_workspace tabs live_label pane_id live_path
   [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$current_label" ] && [ -n "$worktree" ] || return 1
   fm_backend_herdr_target_ready "$target" || return 1
-  live_workspace=$(fm_backend_herdr_workspace_find "$FM_BACKEND_HERDR_SESSION") || return 1
+  live_workspace=$(fm_backend_herdr_workspace_find "$FM_BACKEND_HERDR_SESSION" "$workspace_id") || return 1
   [ "$live_workspace" = "$workspace_id" ] || return 1
   tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
   live_label=$(printf '%s' "$tabs" | jq -er --arg tab "$tab_id" '.result.tabs[] | select(.tab_id == $tab) | .label' 2>/dev/null | head -1) || return 1
@@ -594,7 +596,36 @@ fm_backend_herdr_rename_owned_task() {  # <target> <workspace_id> <tab_id> <curr
   [ "$pane_id" = "$FM_BACKEND_HERDR_PANE" ] || return 1
   live_path=$(fm_backend_herdr_current_path "$target") || return 1
   [ "$live_path" = "$worktree" ] || return 1
+}
+
+fm_backend_herdr_legacy_task_is_owned() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 session list workspace_label
+  fm_backend_herdr_parse_target "$target" || return 2
+  session=$(fm_backend_herdr_session)
+  [ "$FM_BACKEND_HERDR_SESSION" = "$session" ] || return 1
+  fm_backend_herdr_version_check || return 2
+  fm_backend_herdr_server_ensure "$session" || return 2
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2
+  workspace_label=$(printf '%s' "$list" | jq -r --arg ws "$workspace_id" \
+    'if (.result.workspaces | type) == "array" then ([.result.workspaces[] | select(.workspace_id == $ws)][0].label // "") else error("missing result.workspaces") end' 2>/dev/null) || return 2
+  [ -n "$workspace_label" ] || return 1
+  [ "$workspace_label" = firstmate ] || return 1
+  fm_backend_herdr_task_is_owned "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" || return 2
+}
+
+fm_backend_herdr_rename_owned_task() {  # <target> <workspace_id> <tab_id> <current_label> <worktree> <new_label>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 new_label=$6
+  fm_backend_herdr_task_is_owned "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab rename "$tab_id" "$new_label" >/dev/null 2>&1
+}
+
+fm_backend_herdr_close_owned_task() {  # <target> <workspace_id> <tab_id> <current_label> <worktree>
+  local target=$1 workspace_id=$2 tab_id=$3 current_label=$4 worktree=$5 tabs
+  fm_backend_herdr_task_is_owned "$target" "$workspace_id" "$tab_id" "$current_label" "$worktree" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || return 1
+  tabs=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab list 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab_id" \
+    '(.result.tabs | type) == "array" and ([.result.tabs[]? | select(.tab_id == $tab)] | length) == 0' >/dev/null 2>&1
 }
 
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself

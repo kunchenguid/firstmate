@@ -297,6 +297,23 @@ test_rename_task_resolves_tab_from_pane_target() {
   pass "fm_backend_herdr_rename_task: resolves the current tab from the recorded pane target"
 }
 
+test_close_owned_task_requires_confirmed_absence() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/close-owned-confirmation"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-owned"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"tab_id":"w1:t2","foreground_cwd":"/tmp/owned-worktree"}}}\n' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-owned"}]}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_owned_task fmtest:w1:p2 w1 w1:t2 fm-owned /tmp/owned-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "close_owned_task should fail when the supposedly closed tab is still listed"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "close_owned_task did not attempt the corroborated close"
+  pass "fm_backend_herdr_close_owned_task: closure succeeds only after the owned tab is confirmed absent"
+}
+
 test_fm_label_updates_herdr_tab_and_meta() {
   local dir log resp fb home state out
   dir="$TMP_ROOT/fm-label-herdr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -546,6 +563,44 @@ test_container_ensure_reuses_existing_workspace() {
   [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing firstmate workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
   pass "fm_backend_herdr_container_ensure: reuses an existing firstmate workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+}
+
+test_legacy_workspace_preference_requires_owned_live_task() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/legacy-owned-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"fm-legacy-task"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w0:p2","tab_id":"w0:t2"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"pane":{"tab_id":"w0:t2","foreground_cwd":"/tmp/legacy-worktree"}}}\n' > "$resp/5.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"},{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" \
+    || fail "corroborated live legacy task should select its existing workspace"
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp fmtest w0' "$ROOT" ) \
+    || fail "container ensure should reuse a corroborated preferred legacy workspace"
+  [ "$out" = $'fmtest:w0\t' ] || fail "container ensure did not target the corroborated legacy workspace: '$out'"
+
+  dir="$TMP_ROOT/legacy-recycled-workspace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"firstmate"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w0:t2","label":"manual"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 2 ] || fail "uncorroborated recycled legacy workspace should fail closed with status 2, got $status: $out"
+
+  dir="$TMP_ROOT/legacy-malformed-workspace-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":"unreadable"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" HERDR_SESSION=fmtest FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_legacy_task_is_owned fmtest:w0:p2 w0 w0:t2 fm-legacy-task /tmp/legacy-worktree' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 2 ] || fail "malformed legacy workspace inventory should fail closed with status 2, got $status: $out"
+  pass "legacy workspace compatibility: reuse requires session, workspace, tab, label, pane, and worktree ownership"
 }
 
 test_create_task_refuses_duplicate_label() {
@@ -1067,12 +1122,21 @@ printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
   "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
-  "tab list") printf '{"result":{"tabs":[]}}\n' ;;
+  "tab list")
+    if [ -e "${FM_FAKE_TAB_STATE:?}" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w1:t-new","label":"fm-%s","workspace_id":"w1"}]}}\n' "${FM_FAKE_ID:?}"
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
+    ;;
   "tab create")
     [ -L "${FM_FAKE_META_LOCK:?}" ] || exit 9
+    touch "${FM_FAKE_TAB_STATE:?}"
     printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n'
     ;;
+  "pane list") printf '{"result":{"panes":[{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
+  "pane close") rm -f "${FM_FAKE_TAB_STATE:?}" ;;
   "tab rename")
     [ -L "${FM_FAKE_META_LOCK:?}" ] || exit 9
     grep -qx 'window=fmtest:w1:p-new' "${FM_FAKE_META:?}" || exit 9
@@ -1101,6 +1165,7 @@ SH
       FM_HERDR_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_WORKTREE="$wt" \
       FM_TREEHOUSE_FAIL="$treehouse_fail" GROK_HOME="$grok_home" FM_FAKE_META="$state/$id.meta" \
       FM_FAKE_META_LOCK="$state/.$id.meta.lock" FM_LOCK_PROOF="$dir/lock-proof" \
+      FM_FAKE_TAB_STATE="$dir/tab-live" FM_FAKE_ID="$id" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
     status=$?
     [ "$status" -ne 0 ] || fail "fm-spawn should fail when the herdr display rename fails"
@@ -1174,9 +1239,17 @@ printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
   "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate-crew"}]}}\n' ;;
-  "tab list") printf '{"result":{"tabs":[]}}\n' ;;
-  "tab create") printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n' ;;
+  "tab list")
+    if [ -e "${FM_FAKE_TAB_STATE:?}" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w1:t-new","label":"fm-%s","workspace_id":"w1"}]}}\n' "${FM_FAKE_ID:?}"
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
+    ;;
+  "tab create") touch "${FM_FAKE_TAB_STATE:?}"; printf '{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}\n' ;;
+  "pane list") printf '{"result":{"panes":[{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}" ;;
+  "pane close") rm -f "${FM_FAKE_TAB_STATE:?}" ;;
 esac
 exit 0
 SH
@@ -1203,6 +1276,7 @@ SH
   out=$( PATH="$fakebin:$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$home" HERDR_SESSION=fmtest \
     FM_HERDR_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_WORKTREE="$wt" \
     FM_TREEHOUSE_RETURNED="$dir/worktree-returned" FM_FAKE_ID="$id" \
+    FM_FAKE_TAB_STATE="$dir/tab-live" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr --label building 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn should fail when labeled-spawn snapshot setup fails"
@@ -2611,6 +2685,7 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_rename_task_resolves_tab_from_pane_target
+test_close_owned_task_requires_confirmed_absence
 test_fm_label_updates_herdr_tab_and_meta
 test_fm_label_refuses_uncorroborated_recycled_target
 test_fm_label_rejects_secondmate_before_rename
@@ -2619,6 +2694,7 @@ test_fm_label_rolls_back_live_label_when_metadata_commit_fails
 test_fm_label_nonherdr_is_clear_noop
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
+test_legacy_workspace_preference_requires_owned_live_task
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab

@@ -267,34 +267,52 @@ orca_spawn_abort_cleanup() {
 }
 
 herdr_labeled_spawn_abort_cleanup() {
-  local hooks_dir suffix worktree_returned=1
+  local hooks_dir suffix worktree_returned=1 close_confirmed=0 cleanup_failed=0
   [ "$HERDR_LABEL_ABORT_CLEANUP" = 1 ] || return 0
   HERDR_LABEL_ABORT_CLEANUP=0
-  fm_backend_herdr_kill "$T" 2>/dev/null || true
+  if fm_backend_herdr_close_owned_task "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$W" "$WT"; then
+    close_confirmed=1
+  elif [ "$SPAWN_LABEL" != "$W" ] && fm_backend_herdr_close_owned_task "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$SPAWN_LABEL" "$WT"; then
+    close_confirmed=1
+  fi
+  if [ "$close_confirmed" != 1 ]; then
+    echo "warning: could not corroborate and confirm closure of herdr tab $HERDR_TAB_ID while rolling back labeled spawn $ID; preserving current attempt metadata, worktree, and rollback snapshot" >&2
+    return 1
+  fi
   case "$HERDR_LABEL_GROK_TOKEN_CREATED" in
     ''|*[!A-Za-z0-9._-]*) ;;
     *)
       hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-      rm -f "$hooks_dir/$HERDR_LABEL_GROK_TOKEN_CREATED"
+      rm -f "$hooks_dir/$HERDR_LABEL_GROK_TOKEN_CREATED" || {
+        echo "warning: failed to remove current-attempt Grok authorization while rolling back labeled herdr spawn $ID" >&2
+        cleanup_failed=1
+      }
       ;;
   esac
   if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
     if [ -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" ]; then
-      mkdir -p "$WT/.claude"
-      mv -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" "$WT/.claude/settings.local.json"
+      if ! mkdir -p "$WT/.claude" || ! mv -f "$HERDR_LABEL_ROLLBACK_DIR/claude-settings" "$WT/.claude/settings.local.json"; then
+        echo "warning: failed to restore Claude hook state while rolling back labeled herdr spawn $ID" >&2
+        cleanup_failed=1
+      fi
     else
-      rm -f "$WT/.claude/settings.local.json"
+      rm -f "$WT/.claude/settings.local.json" || cleanup_failed=1
     fi
     if [ -f "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin" ]; then
-      mkdir -p "$WT/.opencode/plugins"
-      mv -f "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin" "$WT/.opencode/plugins/fm-turn-end.js"
+      if ! mkdir -p "$WT/.opencode/plugins" || ! mv -f "$HERDR_LABEL_ROLLBACK_DIR/opencode-plugin" "$WT/.opencode/plugins/fm-turn-end.js"; then
+        echo "warning: failed to restore OpenCode hook state while rolling back labeled herdr spawn $ID" >&2
+        cleanup_failed=1
+      fi
     else
-      rm -f "$WT/.opencode/plugins/fm-turn-end.js"
+      rm -f "$WT/.opencode/plugins/fm-turn-end.js" || cleanup_failed=1
     fi
     if [ -f "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer" ]; then
-      mv -f "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer" "$WT/.fm-grok-turnend"
+      mv -f "$HERDR_LABEL_ROLLBACK_DIR/grok-pointer" "$WT/.fm-grok-turnend" || {
+        echo "warning: failed to restore Grok hook state while rolling back labeled herdr spawn $ID" >&2
+        cleanup_failed=1
+      }
     else
-      rm -f "$WT/.fm-grok-turnend"
+      rm -f "$WT/.fm-grok-turnend" || cleanup_failed=1
     fi
     rmdir "$WT/.opencode/plugins" "$WT/.opencode" "$WT/.claude" 2>/dev/null || true
   fi
@@ -309,7 +327,10 @@ herdr_labeled_spawn_abort_cleanup() {
   fi
   if [ -n "${TASK_TMP:-}" ]; then
     if [ "$HERDR_LABEL_TASK_TMP_PREEXISTED" = 0 ]; then
-      rm -rf "$TASK_TMP"
+      rm -rf "$TASK_TMP" || {
+        echo "warning: failed to remove task temp state while rolling back labeled herdr spawn $ID" >&2
+        cleanup_failed=1
+      }
     elif [ "$HERDR_LABEL_GOTMP_PREEXISTED" = 0 ]; then
       rmdir "$TASK_TMP/gotmp" 2>/dev/null || true
     fi
@@ -317,33 +338,48 @@ herdr_labeled_spawn_abort_cleanup() {
   if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ]; then
     for suffix in pi-ext.ts grok-turnend-token; do
       if [ -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" ]; then
-        mv -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" "$STATE/$ID.$suffix"
+        mv -f "$HERDR_LABEL_ROLLBACK_DIR/$suffix" "$STATE/$ID.$suffix" || {
+          echo "warning: failed to restore $suffix while rolling back labeled herdr spawn $ID" >&2
+          cleanup_failed=1
+        }
       else
-        rm -f "$STATE/$ID.$suffix"
+        rm -f "$STATE/$ID.$suffix" || cleanup_failed=1
       fi
     done
   fi
   if [ "$worktree_returned" = 1 ]; then
     if [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ]; then
       if [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
-        mv -f "$HERDR_LABEL_ROLLBACK_DIR/meta" "$STATE/$ID.meta"
+        mv -f "$HERDR_LABEL_ROLLBACK_DIR/meta" "$STATE/$ID.meta" || {
+          echo "warning: failed to restore prior metadata while rolling back labeled herdr spawn $ID; current attempt metadata remains in $STATE/$ID.meta" >&2
+          cleanup_failed=1
+        }
       else
-        rm -f "$STATE/$ID.meta"
+        rm -f "$STATE/$ID.meta" || cleanup_failed=1
       fi
     fi
-    [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
+    if [ "$cleanup_failed" = 0 ]; then
+      [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR" || cleanup_failed=1
+    else
+      echo "warning: rollback snapshot for $ID remains at $HERDR_LABEL_ROLLBACK_DIR" >&2
+    fi
   elif [ "$HERDR_LABEL_SNAPSHOT_READY" = 1 ] && [ -f "$HERDR_LABEL_ROLLBACK_DIR/meta" ]; then
     echo "warning: prior metadata for $ID remains at $HERDR_LABEL_ROLLBACK_DIR/meta" >&2
   else
-    [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR"
+    [ -z "$HERDR_LABEL_ROLLBACK_DIR" ] || rm -rf "$HERDR_LABEL_ROLLBACK_DIR" || cleanup_failed=1
   fi
+  return "$cleanup_failed"
 }
 
 spawn_abort_cleanup() {
-  local status=$?
-  herdr_labeled_spawn_abort_cleanup
-  orca_spawn_abort_cleanup
-  [ -z "$SPAWN_META_LOCK" ] || fm_lock_release "$SPAWN_META_LOCK"
+  local status=$? cleanup_status=0
+  set +e
+  herdr_labeled_spawn_abort_cleanup || cleanup_status=1
+  orca_spawn_abort_cleanup || cleanup_status=1
+  if [ -n "$SPAWN_META_LOCK" ]; then
+    fm_lock_release "$SPAWN_META_LOCK" || cleanup_status=1
+  fi
+  [ "$cleanup_status" = 0 ] || echo "warning: spawn rollback for ${ID:-unknown} was incomplete; retained recovery state must be inspected" >&2
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -834,7 +870,35 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+    HERDR_PRIOR_META="$STATE/$ID.meta"
+    HERDR_PRIOR_SESSION=
+    HERDR_PRIOR_WORKSPACE_ID=
+    HERDR_PRIOR_TAB_ID=
+    HERDR_PRIOR_TARGET=
+    HERDR_PRIOR_LABEL=
+    HERDR_PRIOR_WORKTREE=
+    if [ -f "$HERDR_PRIOR_META" ] && [ "$(fm_meta_get "$HERDR_PRIOR_META" backend)" = herdr ]; then
+      HERDR_PRIOR_SESSION=$(fm_meta_get "$HERDR_PRIOR_META" herdr_session)
+      HERDR_PRIOR_WORKSPACE_ID=$(fm_meta_get "$HERDR_PRIOR_META" herdr_workspace_id)
+      HERDR_PRIOR_TAB_ID=$(fm_meta_get "$HERDR_PRIOR_META" herdr_tab_id)
+      HERDR_PRIOR_TARGET=$(fm_meta_get "$HERDR_PRIOR_META" window)
+      HERDR_PRIOR_LABEL=$(fm_meta_get "$HERDR_PRIOR_META" label)
+      [ -n "$HERDR_PRIOR_LABEL" ] || HERDR_PRIOR_LABEL=$W
+      HERDR_PRIOR_WORKTREE=$(fm_meta_get "$HERDR_PRIOR_META" worktree)
+      if FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_legacy_task_is_owned \
+        "$HERDR_PRIOR_TARGET" "$HERDR_PRIOR_WORKSPACE_ID" "$HERDR_PRIOR_TAB_ID" "$HERDR_PRIOR_LABEL" "$HERDR_PRIOR_WORKTREE"; then
+        :
+      else
+        legacy_status=$?
+        if [ "$legacy_status" -eq 2 ]; then
+          echo "error: prior herdr metadata for $W points at a legacy workspace but live task ownership could not be corroborated; refusing to create a duplicate in firstmate-crew" >&2
+          exit 1
+        fi
+        HERDR_PRIOR_SESSION=
+        HERDR_PRIOR_WORKSPACE_ID=
+      fi
+    fi
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_PRIOR_SESSION" "$HERDR_PRIOR_WORKSPACE_ID") || exit 1
     # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
     # (the second field empty when this call ADOPTED a pre-existing workspace
     # rather than creating a fresh one). Split on the guaranteed single tab
@@ -848,7 +912,6 @@ case "$BACKEND" in
     HERDR_KNOWN_TAB_ID=
     HERDR_KNOWN_LABEL=
     HERDR_KNOWN_WORKTREE=
-    HERDR_PRIOR_META="$STATE/$ID.meta"
     if [ -f "$HERDR_PRIOR_META" ] \
       && [ "$(fm_meta_get "$HERDR_PRIOR_META" backend)" = herdr ] \
       && [ "$(fm_meta_get "$HERDR_PRIOR_META" herdr_session)" = "$HERDR_SES" ] \
@@ -1171,7 +1234,8 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ] && ! fm_backend_herdr_rename_task "$T" "$SPAWN_LABEL"; then
+if [ "$BACKEND" = herdr ] && [ "$LABEL_SET" -eq 1 ] \
+  && ! fm_backend_herdr_rename_owned_task "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$W" "$WT" "$SPAWN_LABEL"; then
   echo "error: could not apply herdr display label for $W" >&2
   exit 1
 fi
