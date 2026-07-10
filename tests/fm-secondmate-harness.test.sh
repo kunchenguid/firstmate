@@ -42,6 +42,12 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
 
+# omp (Oh My Pi) exports OMPCODE=1 (and CLAUDECODE=1) into child shells, and
+# fm-harness.sh detect_own checks OMPCODE first. Drop it so an ambient omp
+# session can't override the CLAUDECODE=1 pins below (CI has no such marker).
+# Extends the ambient-marker isolation from #432.
+unset OMPCODE
+
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
 # ===========================================================================
