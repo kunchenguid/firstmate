@@ -25,6 +25,7 @@ For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
+The lock's recorded home and watcher path are matched by filesystem identity (`fm_same_path`, device+inode) rather than string equality, so a case-insensitive-filesystem spelling or symlink alias of the same directory still matches a healthy watcher instead of spuriously blocking; string equality remains only as the fallback when a path no longer exists on disk.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
