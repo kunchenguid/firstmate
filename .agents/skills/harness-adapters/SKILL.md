@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and copilot.
 user-invocable: false
 metadata:
   internal: true
@@ -267,6 +267,6 @@ Accept with `2` (or Enter on the default `1`) to proceed; option `2`, "Yes, and 
 After every spawn, peek the pane within about 20 seconds and handle this dialog if shown, exactly as for the other harnesses.
 
 Turn-end hook: copilot fires an `agentStop` hook at every turn boundary (verified 1.0.68), the direct equivalent of claude's `Stop` hook.
-Unlike grok, copilot loads repository-level hooks (`<worktree>/.github/hooks/*.json`) with no separate hook-trust gate beyond the ordinary one-time folder-trust dialog above, so the turn-end hook is installed worktree-resident, the same shape as claude's `.claude/settings.local.json`: `fm-spawn` writes `<worktree>/.github/hooks/fm-turn-end.json` with an `agentStop` command hook that touches `state/<id>.turn-ended`, and excludes the path via git info/exclude so it never dirties the worktree or blocks teardown.
+Unlike grok, copilot loads repository-level hooks (`<worktree>/.github/hooks/*.json`) with no separate hook-trust gate beyond the ordinary one-time folder-trust dialog above, so the turn-end hook is installed worktree-resident, the same shape as claude's `.claude/settings.local.json`: `fm-spawn` writes `<worktree>/.github/hooks/fm-turn-end.<task-id>.json` with an `agentStop` command hook that touches `state/<id>.turn-ended`, and excludes the path via git info/exclude so it never dirties the worktree or blocks teardown.
 No global registry or per-task pointer token is needed (contrast with grok's global-hook workaround above), because the hook file itself lives inside, and is scoped to, this one task's worktree.
 The hook payload delivers the firing session's `cwd` on stdin, but `fm-spawn`'s hook command does not need to read it: the hook file is only ever loaded by copilot sessions launched inside this exact worktree.
