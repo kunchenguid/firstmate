@@ -195,6 +195,7 @@ test_lowercase_agents_md_refuses_case_fragile_symlink() {
   assert_contains "$out" "conflict:" "lowercase agents.md did not report a conflict"
   assert_contains "$out" "agents.md" "conflict message did not name the offending file"
   assert_absent "$repo/CLAUDE.md" "a case-fragile CLAUDE.md symlink was created for lowercase agents.md"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "a case-fragile CLAUDE.md symlink was created for lowercase agents.md"
   assert_present "$repo/agents.md" "the real lowercase agents.md was disturbed"
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
