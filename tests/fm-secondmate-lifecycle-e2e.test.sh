@@ -151,6 +151,12 @@ phase_send() {
 }
 
 phase_handoff() {
+  # The move is delegated to `tasks-axi mv`; skip cleanly when it is absent (the
+  # downstream recovery and teardown phases do not depend on this phase).
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+    return 0
+  fi
   cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] live-task - active work (repo: alpha, since 2026-06-20)

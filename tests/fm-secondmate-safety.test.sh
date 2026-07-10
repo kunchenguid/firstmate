@@ -2026,6 +2026,13 @@ EOF
 }
 
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
+  # The successful-move case below delegates to `tasks-axi mv`; skip cleanly when
+  # it is absent. (The pure-refusal paths live in test_backlog_handoff_aborts_safely,
+  # which aborts in the bash validation layer and needs no tasks-axi.)
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+    return 0
+  fi
   local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
   home="$TMP_ROOT/handoff-safety-main"
   subhome="$TMP_ROOT/handoff-safety-sub"
