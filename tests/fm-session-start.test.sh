@@ -48,12 +48,13 @@ new_world() {
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
-# make_fake_toolchain <fakebin>: every tool fm-bootstrap.sh detects, present
-# and compatible, so its own detect-only section stays quiet except where a
-# test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
+# make_fake_toolchain <fakebin>: every tool fm-bootstrap.sh detects is
+# controlled, so its own detect-only section stays quiet except for the
+# deliberately incompatible tasks-axi diagnostic. Mirrors
+# fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi tasks-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
