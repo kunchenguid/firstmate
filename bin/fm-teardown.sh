@@ -395,16 +395,18 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+retry_wait_secs_is_valid() {
+  [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
+}
+
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
 # Bounded patience window for transient index.lock after killing a crew process.
 # New knobs are preferred; FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS remains an alias
 # for the per-attempt wait so existing tests and operators keep working.
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
-if [ -n "${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS+x}" ]; then
-  TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=$FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
-elif [ -n "${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS+x}" ]; then
-  TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=$FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS
-else
+TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-1}}
+if ! retry_wait_secs_is_valid "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"; then
+  echo "teardown: invalid treehouse return lock retry wait '$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
   TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1
 fi
 # Compatibility alias used by the safety-check wait path and older call sites.
@@ -535,7 +537,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc total_wait
+  local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -558,7 +560,6 @@ teardown_treehouse_return() {
 
   max_retries=$TREEHOUSE_RETURN_LOCK_RETRIES
   case "$max_retries" in ''|*[!0-9]*) max_retries=3 ;; esac
-  total_wait=$(( max_retries * TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS ))
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$(( attempt + 1 ))
@@ -602,11 +603,11 @@ teardown_treehouse_return() {
       return 1
     fi
 
-    echo "teardown: $label return failed: git lock $lock_desc persisted across ${max_retries} retries (~${total_wait}s) and is not provably stale (may belong to a live process); leaving it in place" >&2
+    echo "teardown: $label return failed: git lock $lock_desc persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) and is not provably stale (may belong to a live process); leaving it in place" >&2
     return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
   fi
 
-  echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (~${total_wait}s) even after the lock file disappeared" >&2
+  echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
 }
 
