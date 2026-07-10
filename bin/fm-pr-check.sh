@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: appends pr=<url> and GitHub's pr_head=<sha> to
-# state/<id>.meta when available, then arms the watcher's merge poll by writing
-# state/<id>.check.sh, which prints one line iff the PR is merged (the watcher's
-# check contract: output = wake firstmate, silence = keep sleeping).
+# Record a PR/MR-ready task: appends pr=<url> and the provider's pr_head=<sha>
+# to state/<id>.meta when available, then arms the watcher's merge poll by
+# writing state/<id>.check.sh, which prints one line iff the PR/MR is merged
+# (the watcher's check contract: output = wake firstmate, silence = keep sleeping).
+# GitHub PRs use gh. Codebase MRs use bytedcli; missing or unauthenticated
+# bytedcli makes the poll stay silent, while direct invocations print the helper
+# error if the initial head lookup fails.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -13,16 +16,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
+
+fm_scm_parse_pr_url "$URL" >/dev/null || exit 1
 
 META="$STATE/$ID.meta"
 if [ -f "$META" ]; then
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   PR_HEAD=
   if [ -n "$WT" ] && [ -d "$WT" ]; then
-    if command -v gh >/dev/null 2>&1; then
-      if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
-        PR_HEAD=$REMOTE_HEAD
-      fi
+    if REMOTE_HEAD=$(fm_scm_pr_head "$WT" "$URL"); then
+      PR_HEAD=$REMOTE_HEAD
     fi
   fi
   if ! grep -qxF "pr=$URL" "$META"; then
@@ -33,8 +38,16 @@ if [ -f "$META" ]; then
   fi
 fi
 
+quoted_url=$(printf "%s\n" "$URL" | sed "s/'/'\\\\''/g")
+quoted_root=$(printf "%s\n" "$FM_ROOT" | sed "s/'/'\\\\''/g")
 cat > "$STATE/$ID.check.sh" <<EOF
-state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
-[ "\$state" = "MERGED" ] && echo "merged"
+# shellcheck shell=bash
+FM_ROOT='$quoted_root'
+# shellcheck source=bin/fm-scm-lib.sh
+. "\$FM_ROOT/bin/fm-scm-lib.sh"
+state=\$(fm_scm_pr_state "" '$quoted_url' 2>/dev/null || true)
+case "\$state" in
+  MERGED|merged) echo "merged" ;;
+esac
 EOF
 echo "armed: state/$ID.check.sh polls $URL"

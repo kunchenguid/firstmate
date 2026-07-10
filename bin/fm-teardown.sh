@@ -7,18 +7,21 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
+# normal ship task whose commits are not so reachable - when its PR/MR is merged
+# and its provider reports a head that contains the current local work, or its
+# content is already present in the up-to-date default branch. This recognizes
+# the common squash-merge-then-delete-branch flow, where the branch's own commits
+# live nowhere on a remote yet the change is fully in main.
+# The PR/MR itself is resolved from the task's recorded pr= when present, or -
+# when no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no
+# PR CI, where the usual "checks green" fm-pr-check.sh trigger never fires) - by
+# detecting the provider from the origin remote and looking up a merged PR/MR
+# whose head branch matches the worktree's branch. GitHub fetches
+# refs/pull/<n>/head; Codebase fetches the latest MR version's SourceRef
+# (refs/merge-requests/<...>). So a missing pr= never by itself causes a false
+# refusal of landed work.
+# A provider lookup error, including missing or unauthenticated bytedcli for a
+# Codebase MR, falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
@@ -80,6 +83,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -162,42 +167,10 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local provider=$1 target=$2 commit=$3 source_ref=${4:-}
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  fm_scm_fetch_pr_head "$WT" "$provider" "$target" "$commit" "$source_ref"
 }
 
 patch_id_for_commit() {
@@ -232,29 +205,31 @@ $unpushed
 EOF
 }
 
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# Is the worktree's PR/MR merged for local work contained in that PR/MR? Resolves
+# the PR/MR from the recorded pr= URL first, then from the branch name, and asks
+# the provider for both state and head. Returns non-zero when the PR/MR is not
+# merged, the current work is not contained in the provider head, no PR/MR is
+# found, or any provider error occurs - the caller then falls back to the content
+# check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target info provider state head source_ref current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    target=$(fm_scm_target_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
+  info=$(fm_scm_pr_info "$WT" "$target") || return 1
+  IFS=$'\t' read -r provider state head source_ref <<EOF
+$info
+EOF
+  [ -n "$provider" ] || return 1
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
+  ensure_commit_object "$provider" "$target" "$head" "$source_ref" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
   unpushed_patches_are_in_pr_head "$head"

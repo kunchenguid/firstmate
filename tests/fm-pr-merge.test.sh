@@ -14,6 +14,8 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) Codebase MR URL is parsed to number + -R for bytedcli and records head
+#   (j) Codebase merge-method shims map onto bytedcli's actual flags
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -51,11 +53,12 @@ add_gh_mocks() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<SH
+cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -79,9 +82,39 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' 'ffffffffffffffffffffffffffffffffffffffff' ; exit 0 ;;
+      *headRefOid*) printf '%s\n' 'ffffffffffffffffffffffffffffffffffffffff' ; exit 0 ;;
+    esac
+    ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_bytedcli_mock() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_BYTEDCLI_LOG"
+case "\$*" in
+  "--json codebase mr get 24 -R platform/team/repo")
+    cat <<'JSON'
+{"status":"success","data":{"merge_request":{"Number":24,"Status":"merged"},"version":{"SourceCommitId":"$head","SourceRef":"refs/merge-requests/24/24/1"}},"error":null}
+JSON
+    exit 0
+    ;;
+  codebase\\ mr\\ merge\\ 24\\ -R\\ platform/team/repo*)
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
 }
 
 run_pr_merge() {
@@ -89,6 +122,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
 }
@@ -181,7 +215,7 @@ test_malformed_url_refuses_before_merge() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/1' \
+  run_pr_merge "$case_dir" task-x1 'https://github.com/example/repo/merge_requests/1' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -189,7 +223,7 @@ test_malformed_url_refuses_before_merge() {
   expect_code 1 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
   assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
     "malformed-url: refusal did not explain the expected URL shape"
-  assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
+  assert_no_grep 'pr=https://github.com/example/repo/merge_requests/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "malformed-url: malformed PR URL armed a merge poll"
@@ -239,7 +273,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'must not override the repository or MR parsed from the PR/MR URL' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -295,6 +329,49 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_codebase_url_records_head_and_invokes_bytedcli_merge() {
+  local case_dir head poll_out
+  case_dir=$(make_case codebase-merge)
+  mkdir -p "$case_dir/wt"
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/bytedcli.log"
+
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-merge: fm-pr-merge failed"
+
+  assert_grep 'pr=https://code.byted.org/platform/team/repo/merge_requests/24' "$case_dir/state/task-x1.meta" \
+    "codebase-merge: pr= was not recorded"
+  assert_grep "pr_head=$head" "$case_dir/state/task-x1.meta" \
+    "codebase-merge: Codebase pr_head= was not recorded"
+  grep -qxF -- '--json codebase mr get 24 -R platform/team/repo' "$case_dir/bytedcli.log" \
+    || fail "codebase-merge: bytedcli MR get was not invoked from URL"
+  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method merge_commit --squash-commits true' "$case_dir/bytedcli.log" \
+    || fail "codebase-merge: bytedcli MR merge was not invoked with the default squash mapping"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "codebase-merge: gh-axi was invoked for a Codebase MR"
+  poll_out=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh")
+  [ "$poll_out" = merged ] || fail "codebase-merge: merge poll did not read merged state via bytedcli"
+  pass "fm-pr-merge parses Codebase MR URLs, records head, and invokes bytedcli merge"
+}
+
+test_codebase_merge_method_shims_map_to_bytedcli_flags() {
+  local case_dir
+  case_dir=$(make_case codebase-methods)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/bytedcli.log"
+
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --rebase --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-methods: fm-pr-merge failed"
+
+  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method rebase_merge --squash-commits false --remove-source-branch true' "$case_dir/bytedcli.log" \
+    || fail "codebase-methods: Codebase merge-method shims did not map to bytedcli flags"
+  pass "fm-pr-merge maps Codebase merge-method shims onto bytedcli flags"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -305,3 +382,5 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_codebase_url_records_head_and_invokes_bytedcli_merge
+test_codebase_merge_method_shims_map_to_bytedcli_flags
