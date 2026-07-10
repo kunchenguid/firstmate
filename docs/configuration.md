@@ -73,6 +73,17 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Worktree provisioning (config/provision/&lt;project&gt;.toml)
+
+`bin/fm-provision-worktree.sh <project> <worktree>` runs after the isolation guard and before the agent launches, for every ship and scout spawn (never for secondmate homes), to make a freshly-cut worktree run-ready.
+It is opt-in per project: a local, gitignored config at `config/provision/<project>.toml` (`<project>` is the registered `projects/<name>` basename) declares `env_source_dir` (absolute source dir; a leading `~`/`~/` expands to `$HOME`), `env_files` (a repo-relative path array copied into the worktree, parent dirs created, relative layout preserved), `setup_cmd` (a shell command run in the worktree root, e.g. `npm install`), and an optional `setup_timeout` in seconds.
+A project with no config file is a silent no-op.
+The helper never reads or prints copied file contents, only copies and names them; a source file missing at `env_source_dir` is skipped with a warning rather than failing.
+`setup_cmd` is bounded by a timeout so a hanging or interactive install can never block the spawn indefinitely: `FM_PROVISION_SETUP_TIMEOUT` overrides the config's `setup_timeout`, which overrides the 600 second default (only a positive integer of seconds is accepted; an invalid value warns and falls back to 600); on expiry the whole setup process group is killed and the timeout is treated as a non-aborting provisioning failure.
+Provisioning is best-effort: a failure prints a `PROVISION:` warning to stderr but does not abort the spawn, and a single spawn can skip it entirely with `FM_SPAWN_NO_PROVISION=1`.
+See [`docs/examples/provision.toml`](examples/provision.toml) for a documented starting point to copy into local `config/provision/<project>.toml`.
+`config/provision/` is not inherited by secondmate homes.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -313,6 +324,8 @@ FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh t
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
+FM_SPAWN_NO_PROVISION=  # set to skip worktree provisioning for a single ship/scout spawn
+FM_PROVISION_SETUP_TIMEOUT=  # seconds allowed for a project's provision setup_cmd; overrides config/provision/<project>.toml's setup_timeout, then defaults to 600
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
