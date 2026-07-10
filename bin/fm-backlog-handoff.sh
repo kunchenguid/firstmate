@@ -32,10 +32,14 @@
 # links preserved. It refuses a move that would strand a dependency across the
 # two files; that error is surfaced verbatim and nothing is moved.
 #
-# The move needs `tasks-axi` on PATH. Bootstrap requires it fleet-wide, so this
-# works everywhere; the `config/backlog-backend=manual` knob only governs
-# firstmate's own hand-editing of its own backlog, not this validated helper.
-# Idempotent: re-running converges. Atomic: on any move failure nothing moves.
+# Item bodies must use at least two leading spaces. The helper refuses a selected
+# item with a single-space or tab-indented continuation rather than risk leaving
+# it orphaned, because tasks-axi treats only two-or-more-space lines as body.
+# The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`
+# (introduced in 0.2.2). Bootstrap requires it fleet-wide, so this works
+# everywhere; the `config/backlog-backend=manual` knob only governs firstmate's
+# own hand-editing of its own backlog, not this validated helper. Idempotent:
+# re-running converges. Atomic: on any move failure nothing moves.
 # See AGENTS.md project management and task lifecycle.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 set -eu
@@ -46,6 +50,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -196,6 +202,23 @@ backlog_key_section() {
   ' "$file"
 }
 
+backlog_key_noncanonical_body_lines() {
+  local file=$1 key=$2
+  awk -v key="$key" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (capturing) exit
+      if (id == key) { capturing = 1 }
+      next
+    }
+    capturing && /^## / { exit }
+    capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
+  ' "$file"
+}
+
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
@@ -242,10 +265,23 @@ if [ "${#TO_MOVE[@]}" -eq 0 ]; then
   exit 0
 fi
 
-command -v tasks-axi >/dev/null 2>&1 || {
-  echo "error: tasks-axi is required to move backlog items but is not on PATH" >&2
+FAILED=0
+for key in "${TO_MOVE[@]}"; do
+  while IFS= read -r line; do
+    printf 'error: refusing to hand off %s: non-2-space continuation line: %s\n' \
+      "$key" "$line" >&2
+    FAILED=1
+  done < <(backlog_key_noncanonical_body_lines "$MAIN_BACKLOG" "$key")
+done
+if [ "$FAILED" -ne 0 ]; then
+  echo "       nothing was moved." >&2
   exit 1
-}
+fi
+
+if ! fm_tasks_axi_compatible; then
+  echo "error: tasks-axi with atomic multi-ID mv support (0.2.2+) is required to move backlog items" >&2
+  exit 1
+fi
 
 # Seed the destination with firstmate's standard three-section scaffold when it
 # does not exist yet, so the moved item lands under the right section. (Left to

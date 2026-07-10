@@ -308,6 +308,48 @@ EOF
   pass "body-carrying handoff is idempotent: re-run changes nothing"
 }
 
+test_noncanonical_indented_continuations_refuse_without_changes() {
+  local home="$TMP_ROOT/noncanonical-main"
+  local sub="$TMP_ROOT/noncanonical-sub"
+  setup_homes "$home" "$sub"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] malformed-body - must not orphan continuations (repo: alpha)
+ one-space continuation
+EOF
+  printf '\ttab continuation\n' >> "$home/data/backlog.md"
+  cat >> "$home/data/backlog.md" <<'EOF'
+- [ ] untouched-item - remains in the main backlog (repo: beta)
+  canonical body
+EOF
+  cat > "$sub/data/backlog.md" <<'EOF'
+## Queued
+- [ ] resident-item - remains in the secondmate backlog (repo: alpha)
+  resident body
+EOF
+
+  local source_before="$TMP_ROOT/noncanonical-source-before.md"
+  local destination_before="$TMP_ROOT/noncanonical-destination-before.md"
+  local out
+  cp "$home/data/backlog.md" "$source_before"
+  cp "$sub/data/backlog.md" "$destination_before"
+
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design malformed-body 2>&1); then
+    fail "handoff accepted a noncanonical indented continuation"
+  fi
+
+  assert_contains "$out" "malformed-body" "refusal did not name the selected item"
+  assert_contains "$out" "one-space continuation" "refusal did not name the one-space continuation"
+  assert_contains "$out" "tab continuation" "refusal did not name the tab continuation"
+  cmp -s "$source_before" "$home/data/backlog.md" \
+    || fail "noncanonical-continuation refusal changed the main backlog"
+  cmp -s "$destination_before" "$sub/data/backlog.md" \
+    || fail "noncanonical-continuation refusal changed the secondmate backlog"
+
+  pass "noncanonical one-space and tab continuations refuse without changes"
+}
+
 test_indented_heading_is_not_section_boundary() {
   # Standalone focus on the tokenizer trap that caused the live incident.
   local home="$TMP_ROOT/intent-trap-main"
@@ -437,6 +479,7 @@ test_body_moves_when_last_lines_of_file
 test_eof_body_before_seeded_destination_section_keeps_boundary
 test_untouched_eof_line_preserves_terminator
 test_body_handoff_is_idempotent
+test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
 
 echo "ALL TESTS PASSED"
