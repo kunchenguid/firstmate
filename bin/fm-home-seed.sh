@@ -846,9 +846,10 @@ refuse_populated_projectless_home() {
 }
 
 refuse_projectful_projectless_charter() {
-  local id=$1 brief=$2
-  if grep -F 'None. This is a project-less domain' "$brief" >/dev/null 2>&1 \
-    && ! grep -F 'The projects above are local clones for work you supervise' "$brief" >/dev/null 2>&1; then
+  local id=$1 brief=$2 project_clones
+  project_clones=$(brief_section_text "$brief" "Project clones")
+  if printf '%s\n' "$project_clones" | grep -F 'None. This is a project-less domain' >/dev/null 2>&1 \
+    && ! printf '%s\n' "$project_clones" | grep -Eq '^[[:space:]]*-[[:space:]]+'; then
     return 0
   fi
   printf 'error: cannot seed project-less secondmate home because existing charter brief at %s conflicts with --no-projects\n' "$brief" >&2
