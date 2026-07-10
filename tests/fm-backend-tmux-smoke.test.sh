@@ -60,6 +60,16 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+NUMERIC_SESSION="12345"
+NUMERIC_WINDOW="fm-numeric"
+tmux new-session -d -s "$NUMERIC_SESSION" -x 200 -y 50 \
+  || fail "real tmux: numeric new-session failed"
+fm_backend_tmux_create_task "$NUMERIC_SESSION" "$NUMERIC_WINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed for a purely numeric session name"
+tmux list-windows -t "$NUMERIC_SESSION:" -F '#{window_name}' | grep -qx "$NUMERIC_WINDOW" \
+  || fail "numeric session window is not visible in the real session"
+pass "real tmux: fm_backend_tmux_create_task creates a window in a purely numeric session"
+
 # --- send text + Enter -------------------------------------------------------
 
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter

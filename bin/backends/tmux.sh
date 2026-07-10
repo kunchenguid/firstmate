@@ -72,12 +72,13 @@ fm_backend_tmux_container_ensure() {
 # duplicate-check-then-new-window sequence, including the exact error text
 # (session:window, matching how fm-spawn.sh composed its own $T).
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
-  local ses=$1 wname=$2 proj_abs=$3
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  local ses=$1 wname=$2 proj_abs=$3 target
+  target="${ses}:"
+  if tmux list-windows -t "$target" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  tmux new-window -d -t "$target" -n "$wname" -c "$proj_abs"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

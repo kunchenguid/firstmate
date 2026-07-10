@@ -598,6 +598,36 @@ test_backend_of_selector_matches_explicit_target_meta() {
   pass "fm_backend_of_selector: exact task ids, legacy fm-<id> labels, and matching explicit targets inherit metadata backend"
 }
 
+test_tmux_create_task_scopes_numeric_session_as_session_target() {
+  local fakebin log log_text
+  fakebin="$TMP_ROOT/tmux-create-task-fakebin"
+  log="$TMP_ROOT/tmux-create-task.log"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  list-windows|new-window) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+
+  fm_backend_source tmux || fail "fm_backend_source tmux failed"
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" \
+    fm_backend_tmux_create_task 123 fm-numeric "$TMP_ROOT" \
+    || fail "fm_backend_tmux_create_task should succeed for a numeric session name"
+  log_text=$(cat "$log")
+  assert_contains "$log_text" $'tmux\x1flist-windows\x1f-t\x1f123:\x1f-F\x1f#{window_name}' \
+    "numeric tmux session duplicate check must target the session scope with a trailing colon"
+  assert_contains "$log_text" $'tmux\x1fnew-window\x1f-d\x1f-t\x1f123:\x1f-n\x1ffm-numeric\x1f-c' \
+    "numeric tmux session new-window must target the session scope with a trailing colon"
+
+  pass "fm_backend_tmux_create_task: numeric session names are passed to tmux as session targets"
+}
+
 # --- old vs new: fm-send.sh --------------------------------------------------
 
 make_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $FM_TMUX_LOG
@@ -1103,6 +1133,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
+test_tmux_create_task_scopes_numeric_session_as_session_target
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_conformance_old_vs_new
