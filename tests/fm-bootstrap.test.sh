@@ -38,6 +38,10 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-v2.0.0}"
+  exit 0
+fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
@@ -466,6 +470,290 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# --- update-availability check ----------------------------------------------
+#
+# bin/fm-update-check-lib.sh answers "is a newer STABLE version out?" without ever
+# being allowed to block, fail, or nag onto a prerelease. These cases fake the two
+# network surfaces (a `curl` that serves canned GitHub/npm payloads and logs every
+# call, and a `git` wrapper that logs every ls-remote) so the four hard constraints
+# are pinned: prerelease filtering, offline degrade-to-silence, cache hits making
+# zero network calls, and read-only sessions writing no cache.
+
+# curl stub: serves canned release/registry payloads by URL and appends every call
+# to FM_FAKE_NET_LOG. FM_FAKE_CURL_FAIL=1 simulates offline (curl's exit 7).
+make_fake_curl() {
+  local fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do
+  case "$a" in https://*) url=$a ;; esac
+done
+[ -z "${FM_FAKE_NET_LOG:-}" ] || printf 'curl %s\n' "$url" >> "$FM_FAKE_NET_LOG"
+[ "${FM_FAKE_CURL_FAIL:-0}" = 1 ] && exit 7
+case "$url" in
+  *"/repos/kunchenguid/no-mistakes/releases"*)
+    [ -f "${FM_FAKE_NM_RELEASES:-}" ] || exit 22
+    cat "$FM_FAKE_NM_RELEASES"
+    ;;
+  *"/repos/kunchenguid/treehouse/releases"*)
+    [ -f "${FM_FAKE_TH_RELEASES:-}" ] || exit 22
+    cat "$FM_FAKE_TH_RELEASES"
+    ;;
+  *"registry.npmjs.org/tasks-axi/latest"*)
+    [ -n "${FM_FAKE_NPM_TASKS_AXI:-}" ] || exit 22
+    printf '{"version":"%s"}\n' "$FM_FAKE_NPM_TASKS_AXI"
+    ;;
+  *) exit 22 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/curl"
+}
+
+# git wrapper: transparent, but records ls-remote (the only networked git call the
+# update check makes) so a cache hit can be proven to touch the network zero times.
+make_fake_git() {
+  local fakebin=$1 real_git
+  real_git=$(command -v git 2>/dev/null) || fail "git is required for update-check tests"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ -n "\${FM_FAKE_NET_LOG:-}" ]; then
+  for a in "\$@"; do
+    if [ "\$a" = ls-remote ]; then
+      printf 'git ls-remote\n' >> "\$FM_FAKE_NET_LOG"
+      break
+    fi
+  done
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+uc_commit() {
+  git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "$2"
+}
+
+# A firstmate primary checkout on main with a file:// origin that is <behind> commits
+# ahead. The checkout fetches once, so origin's objects are local and the emitted line
+# can carry an exact commit count.
+make_fake_firstmate_repo() {
+  local dir=$1 behind=$2 root remote scratch i
+  root="$dir/root"
+  remote="$dir/origin.git"
+  scratch="$dir/scratch"
+  mkdir -p "$root"
+  git -C "$root" init -q -b main
+  printf 'firstmate\n' > "$root/README.md"
+  git -C "$root" add README.md
+  uc_commit "$root" initial
+  git init -q --bare -b main "$remote"
+  git -C "$root" remote add origin "file://$remote"
+  git -C "$root" push -q origin main
+  if [ "$behind" -gt 0 ]; then
+    git clone -q "$remote" "$scratch"
+    i=1
+    while [ "$i" -le "$behind" ]; do
+      printf 'commit %s\n' "$i" >> "$scratch/README.md"
+      git -C "$scratch" add README.md
+      uc_commit "$scratch" "upstream $i"
+      i=$((i + 1))
+    done
+    git -C "$scratch" push -q origin main
+    git -C "$root" fetch -q origin
+  fi
+  printf '%s\n' "$root"
+}
+
+# Build a case: a fake toolchain with version-reporting tools, real jq, the curl and
+# git stubs, a manual backlog backend (so no TASKS_AXI line muddies the assertions),
+# and a firstmate repo <behind> commits behind origin/main.
+# Sets UC_HOME, UC_ROOT, UC_BIN, UC_NETLOG, UC_NM_RELEASES, UC_TH_RELEASES.
+setup_update_check_case() {
+  local name=$1 behind=$2 case_dir
+  case_dir="$TMP_ROOT/$name"
+  UC_HOME="$case_dir/home"
+  mkdir -p "$UC_HOME/config"
+  printf '%s\n' manual > "$UC_HOME/config/backlog-backend"
+  UC_BIN=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$UC_BIN"
+  make_fake_curl "$UC_BIN"
+  make_fake_git "$UC_BIN"
+  UC_ROOT=$(make_fake_firstmate_repo "$case_dir" "$behind")
+  UC_NETLOG="$case_dir/net.log"
+  UC_NM_RELEASES="$case_dir/nm-releases.json"
+  UC_TH_RELEASES="$case_dir/th-releases.json"
+}
+
+# Run bootstrap with the update check ENABLED (tests/lib.sh disables it globally).
+# Extra KEY=VAL overrides may be passed after the fixed arguments.
+run_update_check_bootstrap() {
+  env PATH="$UC_BIN:$BASE_PATH" \
+    FM_HOME="$UC_HOME" FM_ROOT_OVERRIDE="$UC_ROOT" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_NM_RELEASES="$UC_NM_RELEASES" \
+    FM_FAKE_TH_RELEASES="$UC_TH_RELEASES" \
+    FM_UPDATE_CHECK=1 \
+    "$@" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+}
+
+test_update_check_reports_every_stale_tool() {
+  local out cache
+  setup_update_check_case update-stale 2
+  # v1.35.0 is a DRAFT and v1.33.0 a prerelease: the newest stable is v1.34.0.
+  printf '%s\n' '[{"tag_name":"v1.35.0","prerelease":false,"draft":true},{"tag_name":"v1.34.0","prerelease":false,"draft":false},{"tag_name":"v1.33.0","prerelease":true,"draft":false},{"tag_name":"v1.31.2","prerelease":false,"draft":false}]' > "$UC_NM_RELEASES"
+  printf '%s\n' '[{"tag_name":"v2.1.0","prerelease":false,"draft":false},{"tag_name":"v2.0.0","prerelease":false,"draft":false}]' > "$UC_TH_RELEASES"
+
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0 \
+    FM_FAKE_NPM_TASKS_AXI=0.2.0)
+
+  assert_contains "$out" 'UPDATE_AVAILABLE: no-mistakes 1.33.0 -> 1.34.0 (update: no-mistakes update - restarts the daemon and aborts any in-flight validation run)' \
+    "stale no-mistakes should report the newest STABLE release and warn about the daemon restart"
+  assert_contains "$out" 'UPDATE_AVAILABLE: treehouse 2.0.0 -> 2.1.0 (update: treehouse update)' \
+    "stale treehouse should report a GitHub release upgrade"
+  assert_contains "$out" 'UPDATE_AVAILABLE: tasks-axi 0.1.1 -> 0.2.0 (update: npm install -g tasks-axi@latest)' \
+    "stale tasks-axi should report an npm registry upgrade"
+  assert_contains "$out" ', 2 commits behind origin/main (update: /updatefirstmate)' \
+    "firstmate's own staleness should be counted in commits and point at /updatefirstmate"
+  assert_contains "$out" 'UPDATE_AVAILABLE: firstmate ' "firstmate staleness should use the UPDATE_AVAILABLE line format"
+  assert_not_contains "$out" '-> 1.35.0' "a draft release must never be suggested"
+  assert_not_contains "$out" '-> 1.31.2' "a newer prerelease must not make the older stable look like an upgrade"
+
+  cache="$UC_HOME/state/.update-check"
+  assert_present "$cache" "a locked session should persist the probed remote answers"
+  assert_grep 'no-mistakes=v1.34.0' "$cache" "cache should record the resolved stable release, not the raw newest release"
+  assert_grep 'checked_at=' "$cache" "cache should record its probe time"
+  pass "bootstrap reports one UPDATE_AVAILABLE line per stale tool plus firstmate itself"
+}
+
+# The 2026-07-09 incident, exactly: the fleet ran no-mistakes v1.33.0, which was a
+# PRERELEASE, while the newest stable was the older v1.31.2. A naive "latest release"
+# check recommends a downgrade onto a known gate bug; this one must stay silent.
+test_update_check_never_nags_onto_a_prerelease() {
+  local out
+  setup_update_check_case update-prerelease 0
+  printf '%s\n' '[{"tag_name":"v1.33.0","prerelease":true,"draft":false},{"tag_name":"v1.31.2","prerelease":false,"draft":false}]' > "$UC_NM_RELEASES"
+  printf '%s\n' '[{"tag_name":"v2.9.0","prerelease":true,"draft":false},{"tag_name":"v2.0.0","prerelease":false,"draft":false}]' > "$UC_TH_RELEASES"
+
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0 \
+    FM_FAKE_NPM_TASKS_AXI=0.1.1)
+
+  [ -z "$out" ] || fail "a prerelease newer than the installed stable must never trigger a suggestion, got: $out"
+  pass "bootstrap compares against the latest stable release and never suggests a prerelease downgrade"
+}
+
+test_update_check_is_silent_when_everything_is_current() {
+  local out
+  setup_update_check_case update-current 0
+  printf '%s\n' '[{"tag_name":"v1.34.0","prerelease":false,"draft":false}]' > "$UC_NM_RELEASES"
+  printf '%s\n' '[{"tag_name":"v2.0.0","prerelease":false,"draft":false}]' > "$UC_TH_RELEASES"
+  add_tasks_axi "$UC_BIN" "0.2.0"
+
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.34.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0 \
+    FM_FAKE_NPM_TASKS_AXI=0.2.0)
+
+  [ -z "$out" ] || fail "current tooling should print nothing new, got: $out"
+  pass "bootstrap stays silent when every tool and firstmate itself is current"
+}
+
+test_update_check_offline_degrades_to_silence() {
+  local out code start elapsed
+  setup_update_check_case update-offline 2
+  # No origin to reach and a curl that fails like an offline host.
+  git -C "$UC_ROOT" remote set-url origin "file://$TMP_ROOT/update-offline/nonexistent.git"
+
+  start=$(date +%s)
+  set +e
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_CURL_FAIL=1 \
+    FM_UPDATE_CHECK_TIMEOUT=2 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0 \
+    FM_FAKE_NPM_TASKS_AXI=0.2.0)
+  code=$?
+  set -e
+  elapsed=$(( $(date +%s) - start ))
+
+  expect_code 0 "$code" "an offline update check must never fail bootstrap"
+  [ -z "$out" ] || fail "an offline update check must degrade to silence, got: $out"
+  [ "$elapsed" -le 8 ] || fail "an offline update check must not stall bootstrap (took ${elapsed}s)"
+  assert_absent "$UC_HOME/state/.update-check" "a probe round that learned nothing must not poison the cache"
+  pass "bootstrap degrades to silence and stays fast when the update check cannot reach the network"
+}
+
+test_update_check_cache_hit_makes_no_network_call() {
+  local out cache
+  setup_update_check_case update-cache 0
+  mkdir -p "$UC_HOME/state"
+  cache="$UC_HOME/state/.update-check"
+  {
+    printf 'checked_at=%s\n' "$(date +%s)"
+    printf 'no-mistakes=v1.34.0\n'
+    printf 'treehouse=v2.1.0\n'
+    printf 'tasks-axi=0.2.0\n'
+  } > "$cache"
+
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_NET_LOG="$UC_NETLOG" \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0)
+
+  assert_absent "$UC_NETLOG" "a fresh cache hit must make zero network calls"
+  assert_contains "$out" 'UPDATE_AVAILABLE: no-mistakes 1.33.0 -> 1.34.0' "a cache hit should still report staleness from cached answers"
+  assert_contains "$out" 'UPDATE_AVAILABLE: treehouse 2.0.0 -> 2.1.0' "a cache hit should report every cached tool"
+  assert_contains "$out" 'UPDATE_AVAILABLE: tasks-axi 0.1.1 -> 0.2.0' "a cache hit should report the cached npm answer"
+
+  # A cache file is editable state: a junk sha or a junk version must be refused,
+  # not interpolated into the report.
+  {
+    printf 'checked_at=%s\n' "$(date +%s)"
+    printf 'firstmate=not-a-sha\n'
+    printf 'no-mistakes=v9.9.9-rc1\n'
+  } > "$cache"
+  out=$(run_update_check_bootstrap \
+    FM_FAKE_NET_LOG="$UC_NETLOG" \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)')
+  assert_not_contains "$out" 'not-a-sha' "a corrupted cached sha must never reach the report"
+  assert_not_contains "$out" '9.9.9' "a cached prerelease version must never reach the report"
+  assert_absent "$UC_NETLOG" "the corrupted-cache case must still be served from cache"
+
+  # An expired cache falls through to the probes, proving the TTL is what gates them.
+  printf 'checked_at=1\n' > "$cache"
+  printf '%s\n' '[{"tag_name":"v1.34.0","prerelease":false,"draft":false}]' > "$UC_NM_RELEASES"
+  printf '%s\n' '[{"tag_name":"v2.1.0","prerelease":false,"draft":false}]' > "$UC_TH_RELEASES"
+  run_update_check_bootstrap \
+    FM_FAKE_NET_LOG="$UC_NETLOG" \
+    FM_FAKE_NPM_TASKS_AXI=0.2.0 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' >/dev/null
+  assert_present "$UC_NETLOG" "an expired cache must fall through to a live probe"
+  pass "bootstrap serves a fresh update-check cache without touching the network"
+}
+
+test_update_check_read_only_session_writes_no_cache() {
+  local out
+  setup_update_check_case update-readonly 1
+  printf '%s\n' '[{"tag_name":"v1.34.0","prerelease":false,"draft":false}]' > "$UC_NM_RELEASES"
+  printf '%s\n' '[{"tag_name":"v2.0.0","prerelease":false,"draft":false}]' > "$UC_TH_RELEASES"
+
+  out=$(run_update_check_bootstrap \
+    FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.33.0 (fake)' \
+    FM_FAKE_TREEHOUSE_VERSION=v2.0.0 \
+    FM_FAKE_NPM_TASKS_AXI=0.2.0)
+
+  assert_contains "$out" 'UPDATE_AVAILABLE: no-mistakes 1.33.0 -> 1.34.0' "a read-only session should still report staleness"
+  assert_contains "$out" ', 1 commit behind origin/main (update: /updatefirstmate)' "a single-commit lag should read as one commit, not 1 commits"
+  assert_absent "$UC_HOME/state/.update-check" "a read-only session must not write the update-check cache"
+  pass "bootstrap reports updates in a read-only session without writing the cache"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_orca_backend_gates_orca_tool_only_when_selected
@@ -476,3 +764,9 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_update_check_reports_every_stale_tool
+test_update_check_never_nags_onto_a_prerelease
+test_update_check_is_silent_when_everything_is_current
+test_update_check_offline_degrades_to_silence
+test_update_check_cache_hit_makes_no_network_call
+test_update_check_read_only_session_writes_no_cache

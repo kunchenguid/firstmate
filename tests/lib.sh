@@ -30,6 +30,11 @@ FM_TEST_LIB_SOURCED=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Bootstrap's update-availability check (bin/fm-update-check-lib.sh) reaches the
+# network. Default it off for every suite so tests stay hermetic and offline-safe;
+# the update-check cases in fm-bootstrap.test.sh opt back in per case, against fakes.
+export FM_UPDATE_CHECK=${FM_UPDATE_CHECK:-0}
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

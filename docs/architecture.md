@@ -220,6 +220,11 @@ The update is fast-forward only: dirty, diverged, offline, and off-default targe
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+Detecting staleness is a separate, report-only concern from performing an update: bootstrap's toolchain checks only enforce a version floor, so a tool that clears the floor can still sit behind a released fix for weeks with no signal.
+A best-effort update-availability check closes that gap, printing an `UPDATE_AVAILABLE:` line per stale tool (`no-mistakes`, `treehouse`, `tasks-axi`) or for firstmate itself, compared against the latest *stable* release only so a mislabeled prerelease never suggests a downgrade.
+It never installs anything itself; the captain consents exactly like the `MISSING:` flow.
+See [`configuration.md`](configuration.md) for the caching, timeout, and opt-out mechanics.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.

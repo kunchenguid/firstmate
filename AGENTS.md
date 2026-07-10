@@ -100,6 +100,7 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
+  .update-check      cached latest-stable answers for the bootstrap update-availability check; never written by a read-only session; safe to delete
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
@@ -167,6 +168,10 @@ Otherwise it prints one line per problem or capability fact; handle each:
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
   For `tasks-axi`, this also covers an installed build whose `tasks-axi --version` is older than 0.1.1, whose `tasks-axi update --help` lacks `--archive-body`, or whose `tasks-axi mv --help` lacks the `[<id>...]` atomic multi-ID marker; `config/backlog-backend=manual` only suppresses the `TASKS_AXI: available` capability line, not this missing-tool report.
   For `quota-axi`, bootstrap requires it because crew-dispatch `quota-balanced` may call it; `bin/fm-dispatch-select.sh` still degrades at runtime when quota data is unavailable.
+- `UPDATE_AVAILABLE: <tool> <current> -> <latest> (update: <command>)` - a newer stable release of `no-mistakes`, `treehouse`, `tasks-axi`, or of firstmate itself exists.
+  This is report-only and consent-gated exactly like `MISSING:`: surface each stale tool to the captain with its printed update command, wait for approval, then run it.
+  Never update a tool as a side effect of a session start, and never update `no-mistakes` while a validation run is in flight, because `no-mistakes update` restarts its daemon and aborts the run.
+  Only stable releases are compared, so a newer prerelease never produces a line, and a check that cannot reach the network stays silent instead of failing bootstrap.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
