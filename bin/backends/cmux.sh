@@ -109,7 +109,7 @@ FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# shellcheck source=bin/fm-backend-hometag-lib.sh
+# shellcheck source=bin/fm-backend-hometag-lib.sh disable=SC1091
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide

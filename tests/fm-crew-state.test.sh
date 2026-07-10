@@ -27,9 +27,9 @@
 #       benefits from the fix in both directions.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
 . "$ROOT/bin/fm-classify-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"

@@ -10,10 +10,11 @@
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-supervision-lib.sh
+# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
+# shellcheck disable=SC2153
 . "$ROOT/bin/fm-supervision-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)

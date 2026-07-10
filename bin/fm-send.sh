@@ -55,7 +55,7 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-marker-lib.sh
+# shellcheck source=bin/fm-marker-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true

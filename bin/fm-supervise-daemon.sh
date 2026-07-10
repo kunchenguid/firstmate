@@ -137,7 +137,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
 # classification predicates have exactly one definition.
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
@@ -1029,6 +1029,7 @@ fm_super_main() {
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"

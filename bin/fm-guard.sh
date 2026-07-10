@@ -26,11 +26,11 @@ READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
 
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-tangle-lib.sh
+# shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
-# shellcheck source=bin/fm-supervision-lib.sh
+# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the

@@ -3,7 +3,7 @@
 # terminal adapter primitives in bin/backends/orca.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
@@ -83,6 +83,7 @@ test_capture_reads_terminal_tail_json() {
   local out
   orca_case capture-tail
   printf '{"result":{"terminal":{"tail":["line one","line two"]}}}\n' > "$RESP/1.out"
+  # shellcheck disable=SC2153
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_capture term-123 40' "$ROOT" )
   [ "$out" = $'line one\nline two' ] || fail "capture should print result.terminal.tail joined by newlines, got '$out'"

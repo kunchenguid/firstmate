@@ -33,7 +33,7 @@ esac
 
 mkdir -p "$STATE"
 
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-supervise-daemon.sh
 . "$DAEMON"

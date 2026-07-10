@@ -7,7 +7,7 @@ set -u
 # is captured to a send-log so the template, autonomy flag, model/effort flags, and
 # (for hermes) the post-launch brief delivery can be asserted without a live agent.
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"

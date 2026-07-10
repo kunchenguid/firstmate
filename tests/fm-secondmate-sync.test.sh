@@ -21,10 +21,10 @@
 #     before launch, or warns and launches unchanged when the sync is skipped.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$ROOT/bin/fm-ff-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -272,9 +272,9 @@ test_sweep_nudge_requires_instruction_change() {
   bump_primary "$w" readme
   base=$(primary_head_commit "$w/main")
 
-  FM_ROOT="$w/main" FM_HOME="$w/home"
+  export FM_ROOT="$w/main" FM_HOME="$w/home"
   FF_NUDGE_WINDOWS=""
-  FF_SEEN_HOMES=""
+  export FF_SEEN_HOMES=""
   sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
 
   [ -z "$FF_NUDGE_WINDOWS" ] \

@@ -39,7 +39,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
-# shellcheck source=bin/fm-supervision-lib.sh
+# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
@@ -73,7 +73,7 @@ GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || ex
 [ -d "$STATE" ] || exit 0
 
 # --- the actual predicate ----------------------------------------------------
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 fm_supervision_status "$STATE" "$GRACE"

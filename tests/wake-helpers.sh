@@ -4,7 +4,7 @@
 # watcher/daemon/composer behavior, so they live here rather than in the generic
 # tests/lib.sh. Generic reporters/assertions come from lib.sh, pulled in below.
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # fm-wake-drain.sh now calls fm-guard.sh to assert watcher liveness on every

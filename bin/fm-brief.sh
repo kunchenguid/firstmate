@@ -53,7 +53,7 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 
-# shellcheck source=bin/fm-marker-lib.sh
+# shellcheck source=bin/fm-marker-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"

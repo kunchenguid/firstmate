@@ -45,12 +45,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 mkdir -p "$STATE"
 
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
 # predicates), the SAME library the away-mode daemon uses, so the triage policy
 # has one definition.
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
 # (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
