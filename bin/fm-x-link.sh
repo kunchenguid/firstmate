@@ -22,6 +22,16 @@
 # already knows about. Pass --carry-platform and --carry-max from the prior
 # task's x_platform and x_reply_max_chars when the original inbox file is gone.
 #
+# Platform resolution is ordering-proof. The fmx-respond ack path can drain the
+# inbox file before the task is spawned and linked, which used to leave a fresh
+# link with no platform and silently default longer Discord follow-ups to the X
+# 280-char budget (mangling them into a numbered thread). So for a fresh link
+# where neither the stashed inbox payload nor carry flags carry the platform,
+# this asks the relay AUTHORITATIVELY by request_id (fmx_request_relay_context).
+# If even the relay cannot resolve it, the link is still recorded but a loud
+# WARNING is printed: platform context is never silently lost, and the follow-up
+# budget never falls back to X without a visible reason.
+#
 # This is a separate step the fmx-respond skill runs AFTER fm-spawn.sh, so it
 # never changes fm-spawn's interface. The follow-up itself - detection, the
 # window/cap check, the post, and clearing the link - is owned by
@@ -139,12 +149,37 @@ if [ -n "$CARRY_PLATFORM" ]; then
 fi
 if [ -n "$CARRY_MAX" ]; then
   REQ_REPLY_MAX=$CARRY_MAX
-elif [ -n "$REQ_PLATFORM" ] || [ -n "$REQ_EXPLICIT_MAX" ]; then
+fi
+
+# Authoritative fallback for a FRESH link (not a carry relink) whose inbox
+# payload told us nothing: ask the relay by request_id. This is what makes the
+# link-vs-inbox-cleanup ordering irrelevant - the request_id survives the inbox
+# drain, so a Discord follow-up keeps its budget even when the link is recorded
+# after the ack reply cleaned up the inbox file.
+if [ -z "$CARRY_TS" ] && [ -z "$REQ_PLATFORM" ] && [ -z "$REQ_EXPLICIT_MAX" ]; then
+  if RELAY_CONTEXT=$(fmx_request_relay_context "$RID"); then
+    RELAY_PLATFORM=$(printf '%s' "$RELAY_CONTEXT" | jq -r '.platform // ""')
+    RELAY_MAX=$(printf '%s' "$RELAY_CONTEXT" | jq -r '.reply_max_chars // ""')
+    case "$RELAY_PLATFORM" in discord|x) REQ_PLATFORM=$RELAY_PLATFORM ;; esac
+    case "$RELAY_MAX" in ''|*[!0-9]*) ;; *) REQ_EXPLICIT_MAX=$RELAY_MAX ;; esac
+  fi
+fi
+
+if [ -z "$REQ_REPLY_MAX" ] && { [ -n "$REQ_PLATFORM" ] || [ -n "$REQ_EXPLICIT_MAX" ]; }; then
   REQ_REPLY_MAX=$(fmx_reply_limit_for_platform "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX")
 fi
+
 if [ -n "$CARRY_TS" ] && [ -z "$REQ_PLATFORM" ] && [ -z "$REQ_REPLY_MAX" ]; then
   echo "fm-x-link: relink requires carried reply context; pass --carry-platform and --carry-max from the prior task" >&2
   exit 2
+fi
+
+# Loud, never-silent warning: a fresh link with no resolvable platform (inbox
+# payload absent and the relay could not answer by request_id) means completion
+# follow-ups will fall back to the X 280-char split budget, which wrongly threads
+# a longer Discord reply. Record the link anyway, but make the loss visible.
+if [ -z "$CARRY_TS" ] && [ -z "$REQ_PLATFORM" ] && [ -z "$REQ_REPLY_MAX" ]; then
+  echo "fm-x-link: WARNING: no reply-platform context for request $RID (inbox payload absent and the relay did not resolve it by request_id); completion follow-ups will use the default X 280-char split budget and may wrongly split a longer Discord reply into a numbered thread. Link the task before the inbox file is drained, or ensure the relay request-context lookup is available." >&2
 fi
 
 FOLLOWUPS=0

@@ -22,9 +22,10 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 TMP_ROOT=$(fm_test_tmproot fm-x-mode-tests)
 
 # A fakebin `curl` that mimics the relay: it reads its behavior from env
-# (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE), records each call to
-# FAKE_CURL_LOG, writes the poll body to the script's -o file, and prints the
-# HTTP code to stdout exactly as the real `-w '%{http_code}'` would.
+# (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE, and
+# FAKE_REQCTX_CODE/FAKE_REQCTX_BODY for the request-context lookup), records each
+# call to FAKE_CURL_LOG, writes the poll/lookup body to the script's -o file, and
+# prints the HTTP code to stdout exactly as the real `-w '%{http_code}'` would.
 make_fake_curl() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -77,6 +78,10 @@ case "$url" in
     ;;
   */connector/dismiss)
     printf '%s' "${FAKE_DISMISS_CODE:-200}"
+    ;;
+  */connector/request-context)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_REQCTX_BODY:-}" > "$ofile"
+    printf '%s' "${FAKE_REQCTX_CODE:-200}"
     ;;
 esac
 exit 0
@@ -1267,8 +1272,11 @@ test_link_records_request_and_timestamp() {
   home="$TMP_ROOT/link-ok"; mkdir -p "$home/state"
   meta="$home/state/fix-login-k3.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  # No inbox and no relay reachable here: this test pins the request/timestamp
+  # recording, not platform resolution, so fm-x-link's no-platform warning to
+  # stderr is expected and dropped.
   out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-42); rc=$?
+    "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-42 2>/dev/null); rc=$?
   expect_code 0 "$rc" "link exit"
   assert_grep "x_request=req-42" "$meta" "link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "link must record the timestamp"
@@ -1276,7 +1284,7 @@ test_link_records_request_and_timestamp() {
   assert_grep "kind=ship" "$meta" "link must preserve other meta lines"
   assert_grep "yolo=off" "$meta" "link must preserve other meta lines"
   # Re-linking replaces the prior link rather than appending a duplicate.
-  FM_HOME="$home" FMX_NOW_OVERRIDE=1700009999 "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-99 >/dev/null
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700009999 "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-99 >/dev/null 2>&1
   [ "$(grep -c '^x_request=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request"
   [ "$(grep -c '^x_request_ts=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request_ts"
   [ "$(grep -c '^x_followups=' "$meta")" = "1" ] || fail "re-link must not duplicate x_followups"
@@ -1316,6 +1324,88 @@ TXT
   jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord-follow.json" >/dev/null \
     || fail "Discord follow-up below its message budget must not split after inbox drain"
   pass "fm-x-link records Discord platform context so follow-ups keep the Discord budget"
+}
+
+# Regression (2026-07-10 incident): a ~470-char Discord follow-up posted as a
+# (1/2)(2/2) thread because the link was recorded AFTER the ack reply drained the
+# inbox file, so the platform was lost and the splitter defaulted to X's 280-char
+# budget. The fix resolves the platform AUTHORITATIVELY from the relay by
+# request_id, so this ordering no longer loses it: the follow-up posts as ONE
+# message even though the inbox file is already gone at link time.
+test_link_resolves_platform_by_request_id_after_inbox_cleanup() {
+  local home fakebin log meta out rc reply
+  home="$TMP_ROOT/link-relay-lookup"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  meta="$home/state/fix-after-cleanup.meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'FMX_PAIRING_TOKEN=tok-reqctx\n' > "$home/.env"
+  # No inbox file at all: the ack reply already cleaned it up before the link.
+  # The relay resolves the platform by request_id.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 FAKE_CURL_LOG="$log" \
+    FAKE_REQCTX_CODE=200 FAKE_REQCTX_BODY='{"platform":"discord"}' \
+    "$ROOT/bin/fm-x-link.sh" fix-after-cleanup req-after-cleanup); rc=$?
+  expect_code 0 "$rc" "link after inbox cleanup exit"
+  assert_grep "url=https://relay.test/connector/request-context" "$log" \
+    "link must resolve the platform authoritatively by request_id when the inbox is gone"
+  grep '^data=' "$log" | tail -1 | sed 's/^data=//' | jq -e '.request_id == "req-after-cleanup"' >/dev/null \
+    || fail "the relay lookup must send the request_id in the body"
+  assert_grep "x_platform=discord" "$meta" "relay lookup must record the Discord platform after inbox cleanup"
+  assert_grep "x_reply_max_chars=1900" "$meta" "relay lookup must record the Discord split budget after inbox cleanup"
+  # The follow-up (still with the inbox gone) must post the ~470-char reply as ONE
+  # Discord message, not an X-length thread.
+  reply=$(cat <<'TXT'
+Aye captain, the sign-in redirect is patched and the change is up for review. The fix restores the callback path that was dropping the return URL, adds a regression guard so it cannot silently break again, and keeps the existing session handling untouched. This message is deliberately longer than a single X tweet so the test proves a Discord follow-up stays in one message instead of splitting into a numbered thread.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-after-cleanup - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord follow-up after relay lookup exit"
+  [ "$out" = "req-after-cleanup" ] || fail "follow-up must echo the request_id (got: $out)"
+  [ "$(printf '%s' "$reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
+    || fail "the regression reply must exceed the X 280-char budget to be meaningful"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-after-cleanup.json" >/dev/null \
+    || fail "a >280 <2000 Discord follow-up must post as ONE message even when linked after inbox cleanup"
+  pass "fm-x-link resolves the platform by request_id so a post-cleanup link keeps the Discord budget"
+}
+
+# Criterion 2 loud-warning branch: when neither the inbox nor the relay can
+# resolve the platform, the link is still recorded but fm-x-link WARNS loudly -
+# it must never silently fall back to the X budget. This test also confirms the
+# warned-about behavior actually happens (the follow-up does split at X length),
+# so the warning is truthful, not decorative.
+test_link_warns_loudly_when_platform_unresolvable() {
+  local home fakebin err meta out rc reply
+  home="$TMP_ROOT/link-warn-unresolvable"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  meta="$home/state/fix-unresolvable.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  printf 'FMX_PAIRING_TOKEN=tok-unresolved\n' > "$home/.env"
+  # No inbox, and the relay cannot resolve the request (404): platform unknowable.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 FAKE_REQCTX_CODE=404 \
+    "$ROOT/bin/fm-x-link.sh" fix-unresolvable req-unresolvable 2>"$err"); rc=$?
+  expect_code 0 "$rc" "link with unresolvable platform still records the link"
+  [ "$out" = "linked fix-unresolvable to X request req-unresolvable" ] \
+    || fail "link must still succeed on stdout even when the platform is unknown (got: $out)"
+  assert_grep "WARNING" "$err" "an unresolvable platform must warn loudly, never silently default to X"
+  assert_grep "req-unresolvable" "$err" "the warning must name the request it could not resolve"
+  assert_grep "x_request=req-unresolvable" "$meta" "the link itself must still be recorded"
+  assert_no_grep "x_platform=" "$meta" "no platform must be recorded when none could be resolved"
+  assert_no_grep "x_reply_max_chars=" "$meta" "no split budget must be recorded when none could be resolved"
+  # The warning is truthful: a longer follow-up now really does split at X length.
+  reply=$(cat <<'TXT'
+This acknowledgement is intentionally written to run past the X tweet budget so the test can confirm the warned-about fallback truly happens: with no resolvable platform the splitter uses the 280-character X budget and breaks this into a numbered thread, which is exactly the outcome the loud warning exists to make visible.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-unresolvable - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "unresolvable follow-up dry-run exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-unresolvable.json" >/dev/null \
+    || fail "with no platform the follow-up falls back to the X thread split, as the warning predicts"
+  pass "fm-x-link warns loudly instead of silently defaulting to the X budget when the platform is unknown"
 }
 
 test_link_carry_count_and_ts_preserve_followup_binding() {
@@ -1413,7 +1503,7 @@ test_meta_rewrites_do_not_depend_on_tmpdir() {
   meta="$home/state/fix-meta-k4.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
   out=$(TMPDIR="$badtmp" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" fix-meta-k4 req-local); rc=$?
+    "$ROOT/bin/fm-x-link.sh" fix-meta-k4 req-local 2>/dev/null); rc=$?
   expect_code 0 "$rc" "link with unusable TMPDIR exit"
   [ "$out" = "linked fix-meta-k4 to X request req-local" ] \
     || fail "link with unusable TMPDIR must still succeed (got: $out)"
@@ -1458,7 +1548,10 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
     FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
       --carry-count "$count" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
   else
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
+    # A fresh link with no inbox and no relay reachable intentionally has no
+    # platform context, so fm-x-link warns to stderr; these follow-up fixtures
+    # exercise the counter/link mechanics, not platform resolution, so drop it.
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null 2>&1
   fi
 }
 
@@ -1811,6 +1904,8 @@ test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
 test_link_records_discord_platform_for_followups
+test_link_resolves_platform_by_request_id_after_inbox_cleanup
+test_link_warns_loudly_when_platform_unresolvable
 test_link_carry_count_and_ts_preserve_followup_binding
 test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
