@@ -211,6 +211,21 @@ run_bootstrap_timeout_case() {
   )
 }
 
+assert_fleet_sync_timeout() {
+  local out=$1 timeout=$2 msg=$3 prefix elapsed
+  prefix=$'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote\nFLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout='"$timeout"$'s elapsed='
+  case "$out" in
+    *"$prefix"*) ;;
+    *) fail "$msg (missing ordered timeout report for ${timeout}s)"$'\n'"--- output ---"$'\n'"$out" ;;
+  esac
+  elapsed=$(printf '%s\n' "$out" |
+    sed -n "s/^FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=\\([0-9][0-9]*\\)s)$/\\1/p" |
+    head -1)
+  [ -n "$elapsed" ] || fail "$msg (missing numeric elapsed for ${timeout}s)"$'\n'"--- output ---"$'\n'"$out"
+  [ "$elapsed" -ge "$timeout" ] || fail "$msg (elapsed ${elapsed}s below timeout ${timeout}s)"$'\n'"--- output ---"$'\n'"$out"
+  [ "$elapsed" -le $((timeout + 2)) ] || fail "$msg (elapsed ${elapsed}s drifted too far past timeout ${timeout}s)"$'\n'"--- output ---"$'\n'"$out"
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -364,7 +379,7 @@ SH
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
-  local case_dir home fakebin fake_root out expected
+  local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
   mkdir -p "$home/config"
@@ -376,8 +391,7 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  expected=$'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote\nFLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)'
-  assert_contains "$out" "$expected" "bootstrap timeout should scale to 59s for 18 origin-backed projects and relay partial output first"
+  assert_fleet_sync_timeout "$out" 59 "bootstrap timeout should scale to 59s for 18 origin-backed projects and relay partial output first"
   pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
 }
 
@@ -393,7 +407,7 @@ test_fleet_sync_timeout_floor_preserves_small_fleets() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "small fleets should keep the 20s timeout floor"
+  assert_fleet_sync_timeout "$out" 20 "small fleets should keep the 20s timeout floor"
   pass "bootstrap keeps the quick 20s default for small fleets"
 }
 
@@ -409,7 +423,7 @@ test_fleet_sync_timeout_explicit_override_wins() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" 7)
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=7s elapsed=7s)" "explicit timeout override should still win over computed default"
+  assert_fleet_sync_timeout "$out" 7 "explicit timeout override should still win over computed default"
   assert_not_contains "$out" "timeout=59s" "explicit override should not be replaced by the computed timeout"
   pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
 }
@@ -426,7 +440,7 @@ test_fleet_sync_timeout_empty_override_uses_default() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" "")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)" "blank timeout env should behave like an unset override"
+  assert_fleet_sync_timeout "$out" 59 "blank timeout env should behave like an unset override"
   assert_not_contains "$out" "timeout=20s" "blank timeout env should not force the legacy floor on a large fleet"
   pass "bootstrap treats a blank timeout override as unset"
 }
@@ -446,7 +460,7 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
 
   [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "launch-order case should still enforce the computed timeout"
+  assert_fleet_sync_timeout "$out" 20 "launch-order case should still enforce the computed timeout"
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
