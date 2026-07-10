@@ -180,7 +180,7 @@ validate_backlog_file() {
   fi
 }
 
-# Classify a single key by the "## " section it lives under (## In flight /
+# Classify a single key by the section it lives under (## In flight /
 # ## Queued / ## Done), or return non-zero if no `- [ ] <key>` / `- [x] <key>`
 # header exists in the file. This reads only section headings and item header
 # lines - never item bodies - so it drives the fleet-level classification (in-
@@ -191,7 +191,12 @@ backlog_key_section() {
   [ -f "$file" ] || return 1
   awk -v key="$key" '
     BEGIN { section = "## Queued" }
-    /^## / { section = $0; next }
+    /^##[[:space:]]+/ {
+      section = $0
+      sub(/^##[[:space:]]+/, "## ", section)
+      sub(/[[:space:]]+$/, "", section)
+      next
+    }
     /^- \[[ x]\] / {
       rest = $0
       sub(/^- \[[ x]\] +/, "", rest)
@@ -215,7 +220,7 @@ backlog_key_noncanonical_body_lines() {
       if (id == key) { capturing = 1 }
       next
     }
-    capturing && /^## / { exit }
+    capturing && /^##[[:space:]]+/ { exit }
     capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
   ' "$file"
 }

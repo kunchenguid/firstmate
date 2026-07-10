@@ -2039,10 +2039,7 @@ test_backlog_handoff_refuses_done_items_and_non_secondmate_homes() {
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '## Queued\n- [ ] keep-me - stays (repo: alpha)\n' > "$subhome/data/backlog.md"
   printf -- '- archive - archival (home: %s; scope: archival; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
-  cat > "$home/data/backlog.md" <<'EOF'
-## Done
-- [x] shipped-task - shipped thing - local main (merged 2026-06-19)
-EOF
+  printf '##\tDone\n- [x] shipped-task - shipped thing - local main (merged 2026-06-19)\n' > "$home/data/backlog.md"
   before_main="$TMP_ROOT/handoff-safety-main.before"
   before_sub="$TMP_ROOT/handoff-safety-sub.before"
   cp "$home/data/backlog.md" "$before_main"
@@ -2098,7 +2095,7 @@ EOF
   fi
   [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
   grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
-  pass "fm-backlog-handoff refuses Done items and unsafe homes"
+  pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
 test_fm_home_parameterization
