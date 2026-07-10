@@ -41,6 +41,8 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
+#          orca is also MISSING when an executable named orca does not expose
+#          the expected Orca developer CLI commands in `orca --help`.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
