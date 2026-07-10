@@ -136,6 +136,57 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_stop_conditions_default_for_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/stop-conditions-default-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-stop-default-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Rules" "$brief" "$kind brief lost the Rules section"
+    assert_grep "## Stop conditions" "$brief" "$kind brief missing the stop-conditions block"
+    assert_grep "Expected waiting on a validation run or long test suite does not count as a no-phase-change stretch." "$brief" \
+      "$kind brief treats healthy validation waiting as budget exhaustion"
+    assert_grep "If roughly two hours or 50 significant actions pass without a supervisor-actionable phase change" "$brief" \
+      "$kind brief missing the default turn and time cap"
+    assert_grep "blocked: budget - {one-line progress + what remains}" "$brief" \
+      "$kind brief missing the budget exhaustion status protocol"
+    assert_grep "blocked: scope - {one-line progress + newly discovered work}" "$brief" \
+      "$kind brief missing the scope-expansion stop condition"
+    assert_grep "# Definition of done" "$brief" "$kind brief lost the Definition of done section"
+    assert_no_grep "Task-specific budget:" "$brief" "$kind brief rendered a budget override without --budget"
+  done
+  pass "fm-brief.sh: ship and scout briefs include safe default stop conditions"
+}
+
+test_stop_conditions_budget_override_for_ship_and_scout() {
+  local home id brief budget
+  home="$TMP_ROOT/stop-conditions-budget-home"
+  budget="hard stop at 30 minutes"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-stop-budget-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --budget "$budget" >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget "$budget" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "Task-specific budget: $budget" "$brief" "$kind brief omitted its --budget override"
+    assert_grep "Treat this as a hard cap" "$brief" "$kind brief did not make --budget a stop condition"
+    assert_grep "blocked: budget - {one-line progress + what remains}" "$brief" \
+      "$kind brief lost the budget exhaustion status protocol"
+  done
+  pass "fm-brief.sh: --budget renders in ship and scout stop conditions"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -347,6 +398,8 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_stop_conditions_default_for_ship_and_scout
+test_stop_conditions_budget_override_for_ship_and_scout
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--budget '<text>']
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,8 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --budget '<text>' adds a task-specific hard stop to a crewmate ship or scout
+#   brief's standard stop conditions.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -73,20 +75,35 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+BUDGET=""
 POS=()
-for a in "$@"; do
-  case "$a" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    *) POS+=("$a") ;;
+    --budget)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "error: --budget requires non-empty text" >&2
+        exit 1
+      fi
+      BUDGET=$2
+      shift
+      ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ -n "$BUDGET" ]; then
+  echo "error: --budget applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -189,6 +206,20 @@ fi
 
 REPO=${POS[1]}
 
+STOP_CONDITIONS=$(cat <<'EOF'
+## Stop conditions
+Keep working while the task makes meaningful progress.
+Expected waiting on a validation run or long test suite does not count as a no-phase-change stretch.
+If roughly two hours or 50 significant actions pass without a supervisor-actionable phase change, append `blocked: budget - {one-line progress + what remains}` and stop.
+If the work is clearly larger than this brief, append `blocked: scope - {one-line progress + newly discovered work}` and stop before silently expanding scope.
+EOF
+)
+if [ -n "$BUDGET" ]; then
+  STOP_CONDITIONS="${STOP_CONDITIONS}
+Task-specific budget: $BUDGET
+Treat this as a hard cap, and when it is reached append \`blocked: budget - {one-line progress + what remains}\` and stop."
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -257,6 +288,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$STOP_CONDITIONS
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -367,6 +400,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$STOP_CONDITIONS
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
