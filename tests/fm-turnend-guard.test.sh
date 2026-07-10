@@ -87,6 +87,7 @@ install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-turnend-guard-codex.sh" "$dir/bin/fm-turnend-guard-codex.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
@@ -94,13 +95,13 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-codex.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
   local dir=$1
   mkdir -p "$dir/.codex"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard-codex.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
 }
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
@@ -444,9 +445,35 @@ test_codex_hook_invokes_shared_guard() {
   [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
   assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
   assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
-  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_contains "$command" 'fm-turnend-guard-codex.sh' "codex hook must invoke its fail-open adapter"
+  assert_contains "$(cat "$ROOT/bin/fm-turnend-guard-codex.sh")" 'fm-turnend-guard.sh' "codex adapter must invoke the shared guard"
   assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
+}
+
+test_codex_hook_never_blocks_when_watcher_is_unhealthy() {
+  local settings command dir payload out err status queue
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-unhealthy")
+  mkdir -p "$dir/.codex"
+  cp "$settings" "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  payload='{"stop_hook_active":false}'
+  err="$dir/codex-hook.err"
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>"$err"); status=$?
+  expect_code 0 "$status" "Codex Stop adapter must never block when the shared predicate finds an unhealthy watcher"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("TURN WOULD END BLIND"))' >/dev/null \
+    || fail "Codex adapter must return valid non-blocking JSON with a systemMessage: $out"
+  [ ! -s "$err" ] || fail "Codex adapter must keep stderr clean on the expected unhealthy-watcher path: $(cat "$err")"
+  queue="$dir/state/.wake-queue"
+  [ -s "$queue" ] || fail "Codex adapter must leave a durable wake when it cannot block"
+  assert_contains "$(cat "$queue")" "codex-turnend-guard" "Codex adapter durable wake must identify its source"
+  assert_not_contains "$out" 'decision:block' "Codex adapter output must not request a blocking decision"
+  assert_not_contains "$command" 'decision:block' "Codex Stop adapter must not return a blocking decision"
+  pass ".codex/hooks.json: unhealthy watcher returns systemMessage JSON and queues durably without blocking Codex"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
@@ -489,7 +516,7 @@ test_codex_hook_ignores_nested_git_root_guard() {
   git -C "$nested" commit -q --allow-empty -m init
   mkdir -p "$nested/bin" "$nested/.codex"
   : > "$nested/AGENTS.md"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$nested/.codex/hooks.json"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard-codex.sh"}]}]}}\n' > "$nested/.codex/hooks.json"
   cat > "$nested/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'nested guard executed\n'
@@ -737,6 +764,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
+test_codex_hook_never_blocks_when_watcher_is_unhealthy
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
