@@ -320,15 +320,27 @@ task_json_lines() {
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. Reconcile against the authoritative
-    # current state: an activity read (run-step or busy pane) showing the crew
-    # working/done/failed means it moved past any decision, so clear the set; a
-    # parked/blocked state, or a non-authoritative status-log/none read (as for a
-    # secondmate, which has no run-step to reconcile against) trusts the fold so the
-    # open decision keeps surfacing.
+    # never mask a still-open captain decision. The set is derived purely from the
+    # keyed fold - never from report bodies or decision-like prose - and then
+    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
+    # crew has provably moved past. Two lifecycle signals clear it, neither of which
+    # reads any report content:
+    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #     crew that resumed past a gate is not still reported as parked; and
+    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
+    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
+    #     report POINTER, never as a reopened pending decision.
+    # Secondmates are excluded from the terminal case: they are persistent and
+    # multiplex many concerns onto one stream, so a per-concern done must never
+    # clear another concern's keyed decision - that exclusion is what keeps the
+    # unrelated-event masking fix intact. A parked/blocked state, or a
+    # non-authoritative status-log/none read on a still-live task, keeps the fold's
+    # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-       && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; then
+    if { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+       || { [ "$kind" != secondmate ] \
+           && { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '

@@ -231,8 +231,36 @@ test_partial_github_failure_degrades() {
   pass "a partial GitHub failure degrades gracefully"
 }
 
+# The Lavish-103 defect, end to end: a COMPLETED scout that raised a decision and
+# then finished (done), whose report body reads like that decision, must surface as
+# a report POINTER only - never in decisions_open. Report prose must never open or
+# reopen a pending decision; only the keyed durable state does.
+test_completed_scout_report_not_pending() {
+  local home fakebin json
+  home=$(make_home completed-scout); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/lav-wt" "$home/data/lavish-103"
+  fm_write_meta "$home/state/lavish-103.meta" \
+    "window=firstmate:fm-lavish-103" \
+    "worktree=$home/projects/lav-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
+  printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
+  printf '# Lavish 103\nThe open question is whether to adopt approach A or B; this needs a captain decision.\n' > "$home/data/lavish-103/report.md"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "lavish-103") | not)
+      and (.reports | any(.[]; .id == "lavish-103"))
+  ' >/dev/null || fail "completed scout must be a report pointer, never a pending decision: $json"
+  pass "a completed scout with decision-like report prose is a pointer, not pending"
+}
+
 test_default_is_bounded_and_local_only
 test_toon_json_parity
+test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default

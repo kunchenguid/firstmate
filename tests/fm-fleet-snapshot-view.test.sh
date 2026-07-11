@@ -465,11 +465,75 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
+# A COMPLETED scout report must never be read as a pending decision. A scout that
+# raised a needs-decision and then finished (done) - its report delivered, its
+# decision either answered or captured in the report for the captain - must surface
+# only as a report POINTER, not a reopened pending decision, even when the report
+# body and the stale status line contain decision-like prose. This is the Lavish-103
+# defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
+# must not linger as pending. Decisions come purely from the keyed fold reconciled
+# against the crew lifecycle; report prose never opens or reopens a decision.
+test_completed_scout_report_is_pointer_not_pending() {
+  local home fakebin out
+  home=$(make_home completed-scout)
+  mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
+  fm_write_meta "$home/state/lavish-103.meta" \
+    "window=firstmate:fm-lavish-103" \
+    "worktree=$home/projects/scout-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  # Stale needs-decision, then the scout finished (done). No keyed resolution.
+  printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
+  printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
+  # Completed report whose PROSE reads like the decision.
+  printf '# Lavish 103\nThe open question is whether to adopt approach A or B.\nThis needs a captain decision. Recommendation: A.\n' > "$home/data/lavish-103/report.md"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lavish-103")
+    | .current_state.state == "done"
+      and .hints.pending_decision == false
+      and (.hints.open_decisions | length) == 0
+      and .hints.scout_report_present == true
+  ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
+  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
+}
+
+# The complementary safety property: a scout still PARKED at a decision (its last
+# event is the needs-decision, it has not finished) DOES stay pending. The terminal
+# clear must not over-fire on a live, undecided scout.
+test_parked_scout_decision_stays_pending() {
+  local home fakebin out
+  home=$(make_home parked-scout)
+  mkdir -p "$home/projects/scout-wt2"
+  fm_write_meta "$home/state/parked-scout.meta" \
+    "window=firstmate:fm-parked-scout" \
+    "worktree=$home/projects/scout-wt2" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  printf 'needs-decision [key=q1]: adopt approach A or B\n' > "$home/state/parked-scout.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "parked-scout")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "q1"
+  ' >/dev/null || fail "a scout still parked at a decision must stay pending: $out"
+  pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_open_decision_clears_on_keyed_resolution
+test_completed_scout_report_is_pointer_not_pending
+test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
