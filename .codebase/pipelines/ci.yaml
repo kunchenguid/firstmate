@@ -128,24 +128,29 @@ jobs:
           # state dir unwritable and asserts the write fails; root ignores
           # permission bits, so as root that assertion silently inverts.
           # GitHub's runner is non-root, which is why it passes there.
+          #
+          # The GIT_* identity is required, not cosmetic: fm-teardown.test.sh's
+          # commit_tree_from_wt_head runs git commit-tree without an explicit
+          # -c user.email/-c user.name (unlike its sibling helpers), so it falls
+          # back to an ambient identity. A bare container has none, commit-tree
+          # fails, and the fixture hands teardown an empty PR head. Passing it as
+          # env rather than `git config --global` on purpose: the runner points
+          # XDG_CONFIG_HOME at a root-owned dir the test user cannot write.
           - |
             set -eu
             id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
             chown -R ci:ci .
-            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" bash -c '
-              set -eu
-              [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
-              node --version
-              # tests/fm-teardown.test.sh\'"'"'s commit_tree_from_wt_head runs
-              # git commit-tree without an explicit -c user.email/-c user.name,
-              # so it needs an ambient identity. A bare container has none, and
-              # commit-tree then fails, leaving an empty PR head.
-              git config --global user.email ci@firstmate.invalid
-              git config --global user.name "firstmate ci"
-              for test_script in tests/*.test.sh; do
-                "$test_script"
-              done
-            '
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" \
+              GIT_AUTHOR_NAME="firstmate ci" GIT_AUTHOR_EMAIL=ci@firstmate.invalid \
+              GIT_COMMITTER_NAME="firstmate ci" GIT_COMMITTER_EMAIL=ci@firstmate.invalid \
+              bash -c '
+                set -eu
+                [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
+                node --version
+                for test_script in tests/*.test.sh; do
+                  "$test_script"
+                done
+              '
 
   invariants:
     name: Repo invariants
