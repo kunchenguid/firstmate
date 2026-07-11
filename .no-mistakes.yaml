@@ -21,9 +21,12 @@ disable_project_settings: true
 # tests/*.test.sh, run each, and fail the step if any one exits non-zero (an
 # agent-driven test step has crashed the daemon). The e2e tests need tmux on
 # PATH, which the firstmate environment provides.
+# Each test runs with ambient harness/backend markers stripped
+# (OMPCODE/CLAUDECODE/HERDR_ENV/TMUX) so the gate matches CI's clean env even when
+# the daemon or push originates from inside an omp or herdr session.
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
+  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; env -u OMPCODE -u CLAUDECODE -u HERDR_ENV -u TMUX bash "$t" || rc=1; done; exit "$rc"'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:
