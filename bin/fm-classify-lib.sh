@@ -312,21 +312,22 @@ crew_absorb_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
+  if [ "$state" = paused ]; then printf 'paused'; return; fi
   status_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
   if [ -n "$status_dir" ]; then
     last=$(last_status_line "$status_dir/$id.status")
-    if status_is_paused "$last"; then printf 'paused'; return; fi
+    if status_is_paused "$last" && [ "$state:$src:${line##* · }" = "failed:run-step:run cancelled" ]; then
+      printf 'paused'
+      return
+    fi
   fi
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = "done" ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src:$line" in
-      run-step:*"checks green: PR ready for review"*) printf 'merge-wait'; return ;;
-      status-log:*"checks green"*"run still monitoring PR"*) printf 'merge-wait'; return ;;
+    case "$line" in
+      *"(still monitoring for merge/close)") printf 'merge-wait'; return ;;
     esac
   fi
   printf 'none'

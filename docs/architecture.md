@@ -14,7 +14,7 @@ Repeated provably-working stale escalations on the same unchanged pane add an es
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew is classified as a legitimate idle wait when its trailing verb declares `paused:` and no active work supersedes that declaration, or when its matching no-mistakes run reports checks green while monitoring the PR for merge or close.
-Terminal run metadata does not mask a trailing pause because cancelling validation is a normal part of entering an external wait.
+A cancelled terminal run does not mask a trailing pause because cancelling validation is a normal part of entering an external wait; failed runs and parked gates still surface immediately.
 Both idle-wait forms are absorbed and re-surfaced only on the longer pause cadence, while their stale and wedge-escalation counters are cleared.
 The task check script remains the immediate wake path when a monitored PR actually merges or closes.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
