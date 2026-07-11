@@ -23,6 +23,26 @@ jobs:
       env: boe
     image: hub.byted.org/codebase/ci_nodejs_20:latest
     steps:
+      - name: PROBE - runner toolchain and egress
+        commands:
+          - |
+            set +e
+            echo "--- os ---"; cat /etc/os-release | head -3
+            echo "--- bash ---"; bash --version | head -1
+            echo "--- jq ---"; command -v jq && jq --version
+            echo "--- jq -e on empty input (the cmux surface_exists predicate) ---"
+            printf '' | jq -e '[.panes[]? | select(.surface_ids // [] | index("x"))] | length > 0'
+            echo "jq -e empty-input exit=$?  (expect nonzero; 0 means false-positive 'surface exists')"
+            echo "--- apt candidates ---"
+            apt-get update >/dev/null 2>&1
+            apt-cache policy shellcheck jq 2>/dev/null | grep -E "^[a-z]|Candidate"
+            echo "--- egress: github release download ---"
+            curl -sSfL --max-time 25 -o /tmp/sc.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+            echo "github curl exit=$?"; ls -l /tmp/sc.tar.xz 2>/dev/null
+            echo "--- egress: npm binary-wrapper packages ---"
+            npm install -g shellcheck >/dev/null 2>&1; echo "npm shellcheck exit=$?"; shellcheck --version 2>/dev/null | grep version
+            echo "PROBE DONE"
+            exit 0
       - name: Install shellcheck
         commands:
           - apt-get update
