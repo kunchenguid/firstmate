@@ -1178,7 +1178,11 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  if [ "$verdict" = send-deferred ]; then
+    log "inject failed: target pane still booting after boot-wait window (verdict=$verdict, nothing typed)"
+  else
+    log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  fi
   return 1
 }
 

@@ -153,6 +153,8 @@ fm_tmux_pane_boot_state() {  # <target> -> booting|ready|unknown
 
 fm_tmux_wait_until_not_booting() {  # <target> -> ready|unknown|send-deferred
   local target=$1 max_s=${FM_TMUX_BOOT_WAIT_SECS:-20} poll_s=${FM_TMUX_BOOT_POLL_SLEEP:-1}
+  case $max_s in '' | *[!0-9]*) max_s=20 ;; esac
+  case $poll_s in '' | *[!0-9]* | 0) poll_s=1 ;; esac
   local elapsed=0 state
   while :; do
     state=$(fm_tmux_pane_boot_state "$target")
