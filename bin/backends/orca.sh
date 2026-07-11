@@ -267,26 +267,85 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 }
 
 FM_BACKEND_ORCA_COMPOSER_LINES=${FM_BACKEND_ORCA_COMPOSER_LINES:-200}
-FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^Type a message\.\.\.$'}
+FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Ask anything\.\.\..*|Type a message….*)$'}
 
 # fm_backend_orca_composer_state <terminal>: classify the composer's bordered
 # row as empty|pending|unknown. Mirrors the old CLI version: read the last
 # FM_BACKEND_ORCA_COMPOSER_LINES lines, find the bordered row, strip borders,
 # decide.
+#
+# Two bordered-row shapes are supported:
+#   1. Full box (claude/codex/pi style): both leading AND trailing vertical,
+#      e.g. "│ > hello cap │", "┃ > hi ┃", "| > hi |".
+#   2. Left-only border (opencode style): just a leading vertical, e.g.
+#      "┃  hello world", "┃  Ask anything...". The matching bottom border
+#      renders as "╹▀▀▀..." rather than a closing vertical.
+# We accept either; rows starting with the horizontal-border markers "╹",
+# "▀", "═", "─", "╼", "╾" are explicitly skipped so the bottom of the
+# opencode composer is never mistaken for a content row.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   local terminal=$1 cap line trimmed stripped="" found=0
   cap=$(fmod snapshot "$terminal" --strip-ansi --lines "$FM_BACKEND_ORCA_COMPOSER_LINES" 2>/dev/null) || { printf 'unknown'; return 0; }
+  # Pass 1: collect bordered content rows so we can pick the right one.
+  # In opencode's TUI, the bottom region contains TWO bordered content rows:
+  # the actual composer ("┃  hello world") and a footer line ("┃  Build ·
+  # ...") sitting above the ╹▀▀▀... underline. The composer is the bordered
+  # content row whose IMMEDIATE NEXT LINE is also bordered (i.e. not the
+  # horizontal underline that follows the footer). The legacy claude/codex
+  # shape has only one bordered content row, which trivially satisfies
+  # this rule.
+  local -a bordered=()
+  local inside=""
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    [ -n "$trimmed" ] || continue
-    case "$trimmed" in
-      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
-      *) continue ;;
+    [ -n "$trimmed" ] || { bordered+=(""); continue; }
+    case "${trimmed:0:1}" in
+      '╹'|'▀'|'═'|'─'|'╼'|'╾'|'╭'|'╮'|'╰'|'╯') bordered+=(""); continue ;;
     esac
-    stripped=$trimmed
-    found=1
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|')
+        inside=$trimmed
+        inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
+        inside="${inside#"${inside%%[![:space:]]*}"}"
+        inside="${inside%"${inside##*[![:space:]]}"}"
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=(""); fi
+        ;;
+      '│'*|'┃'*)
+        inside=$trimmed
+        inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
+        inside="${inside#"${inside%%[![:space:]]*}"}"
+        inside="${inside%"${inside##*[![:space:]]}"}"
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=(""); fi
+        ;;
+      *) bordered+=("") ;;
+    esac
   done <<< "$cap"
+  local i n=${#bordered[@]}
+  for ((i = n - 1; i >= 0; i--)); do
+    [ -n "${bordered[$i]:-}" ] || continue
+    # Does the NEXT line also have a bordered content row? If yes, this
+    # is the composer (the line above is also bordered because the box
+    # has decorative empty ┃ rows around the content). If no, the next
+    # line is the underline and this is the footer, so step up.
+    if (( i + 1 < n )) && [ -n "${bordered[$((i + 1))]:-}" ]; then
+      stripped=${bordered[$i]}
+      found=1
+      break
+    fi
+  done
+  # Fallback: if no bordered content row was paired with another, take the
+  # LAST bordered content row we found (legacy single-region shapes).
+  if [ "$found" -eq 1 ]; then
+    :
+  else
+    for ((i = n - 1; i >= 0; i--)); do
+      [ -n "${bordered[$i]:-}" ] || continue
+      stripped=${bordered[$i]}
+      found=1
+      break
+    done
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   stripped=${stripped//│/}
   stripped=${stripped//┃/}

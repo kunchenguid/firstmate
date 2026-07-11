@@ -435,6 +435,58 @@ test_composer_state_unknown_when_no_bordered_row() {
   pass "fm_backend_orca_composer_state: unknown when the snapshot has no bordered row"
 }
 
+# Opencode's TUI uses a left-only ┃ border with a horizontal ▀ underline
+# (no matching right ┃). The detector must accept that shape so submit
+# retries can see typed text inside the composer.
+test_composer_state_pending_when_opencode_left_only_border_with_text() {
+  fmod_case composer-opencode-pending
+  # opencode TUI snapshot with text typed: a row that is "┃  hello world"
+  # with no trailing ┃, sitting above the "╹▀▀▀..." bottom border.
+  printf '%s\n' \
+    '             ┃' \
+    '             ┃  hello world' \
+    '             ┃' \
+    '             ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' > "$RESP/1.out"
+  local out
+  out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$ROOT" )
+  [ "$out" = "pending" ] || fail "opencode left-only ┃ border with typed text should be pending, got '$out'"
+  pass "fm_backend_orca_composer_state: pending for opencode's left-only ┃ border + typed text"
+}
+
+test_composer_state_empty_when_opencode_placeholder_only() {
+  fmod_case composer-opencode-empty
+  # opencode TUI idle snapshot: the bordered row contains only the
+  # "Ask anything..." placeholder, no user text yet.
+  printf '%s\n' \
+    '             ┃' \
+    '             ┃  Ask anything... "Fix a TODO in the codebase"' \
+    '             ┃' \
+    '             ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' > "$RESP/1.out"
+  local out
+  out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$ROOT" )
+  [ "$out" = "empty" ] || fail "opencode idle placeholder should be empty, got '$out'"
+  pass "fm_backend_orca_composer_state: empty for opencode's 'Ask anything...' placeholder"
+}
+
+# Bottom-border-shaped rows like the opencode "╹▀▀▀..." underline must NOT
+# be mistaken for the composer's content row.
+test_composer_state_ignores_horizontal_underline_row() {
+  fmod_case composer-opencode-no-bordered-row
+  # A snapshot whose only "border-like" rows are the horizontal underline.
+  printf '%s\n' \
+    '                  ▄' \
+    '                  █▀▀█ █▀▀█' \
+    '             ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' \
+    '                  tab agents  ctrl+p commands' > "$RESP/1.out"
+  local out
+  out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$ROOT" )
+  [ "$out" = "unknown" ] || fail "horizontal-only underline row should be unknown (no real composer), got '$out'"
+  pass "fm_backend_orca_composer_state: skips the opencode ▀ underline row"
+}
+
 # ---- dispatcher ----------------------------------------------------------
 
 test_dispatcher_sources_orca_and_routes_primitives() {
