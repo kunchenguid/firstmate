@@ -1,0 +1,103 @@
+# Codebase CI (code.byted.org). This is the pipeline that actually runs on MRs.
+#
+# .github/workflows/ci.yml is the same three jobs for the GitHub mirror, which
+# still owns releases and Pages. Neither file runs on the other's host, so keep
+# the two in step when you change one.
+#
+# Each job below surfaces on the MR as a check run named
+# "[Pipeline] MR CI - <job name>", which is what no-mistakes reads through
+# `bytedcli codebase mr status`.
+name: MR CI
+
+trigger:
+  change:
+    branches: [main]
+    types: [create, push, update]
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint shell scripts
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    steps:
+      - name: Install shellcheck
+        commands:
+          - apt-get update
+          - apt-get install -y --no-install-recommends shellcheck
+          - shellcheck --version
+      - name: Shellcheck
+        commands:
+          - shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+
+  tests:
+    name: Behavior tests
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on
+    # a hung watcher or tmux test instead of riding the 120-minute default.
+    timeout: 15
+    steps:
+      - name: Require tmux for e2e tests
+        commands:
+          - apt-get update
+          - apt-get install -y --no-install-recommends tmux
+          - tmux -V
+      - name: Install tasks-axi for backlog-handoff delegation
+        commands:
+          - npm install -g tasks-axi
+          - tasks-axi --version
+          # bin/fm-backlog-handoff.sh needs atomic multi-ID `mv`, added in 0.2.2.
+          - |
+            set -eu
+            have=$(tasks-axi --version | tr -d '[:space:]')
+            lowest=$(printf '%s\n0.2.2\n' "$have" | sort -V | head -n1)
+            if [ "$lowest" != "0.2.2" ]; then
+              echo "tasks-axi ${have} is older than the required 0.2.2"
+              exit 1
+            fi
+      - name: Fetch default-branch history
+        commands:
+          # tests/fm-backend.test.sh resolves a merge-base against main and
+          # hard-fails without it; the MR checkout does not carry that ref.
+          - |
+            set -eu
+            git_dir=$(git rev-parse --git-dir)
+            if [ -f "$git_dir/shallow" ]; then
+              git fetch --unshallow origin || git fetch --depth=1000 origin
+            fi
+            git fetch origin "main:refs/remotes/origin/main"
+            git merge-base HEAD origin/main >/dev/null
+      - name: Run suite
+        commands:
+          - |
+            set -eu
+            for test_script in tests/*.test.sh; do
+              "$test_script"
+            done
+
+  invariants:
+    name: Repo invariants
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    steps:
+      - name: Symlinks must stay intact
+        commands:
+          - |
+            set -eu
+            [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+            [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo ".claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        commands:
+          - |
+            set -eu
+            tracked=$(git ls-files -- data state config projects .no-mistakes)
+            if [ -n "$tracked" ]; then
+              echo "Personal fleet paths are tracked in git:"
+              printf '%s\n' "$tracked"
+              exit 1
+            fi
