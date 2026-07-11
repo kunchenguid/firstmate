@@ -577,7 +577,7 @@ SH
   wait_for_exit "$pid" 40 || fail "watcher did not park the ratelimit pane on the first poll"
   grep -F "ratelimited: $window" "$out" >/dev/null || fail "first poll did not park the pane: $(cat "$out")"
   [ "$(wc -c < "$dir/pycount" 2>/dev/null | tr -d ' ')" = 1 ] \
-    || fail "first park did not re-parse the reset exactly once: count=$(cat "$dir/pycount" 2>/dev/null | wc -c)"
+    || fail "first park did not re-parse the reset exactly once: count=$(wc -c < "$dir/pycount" 2>/dev/null)"
 
   # Poll 2+: the marker now holds the reset, so the parked pane is absorbed by reuse
   # across several polls with NO further python re-parse and no new wake.
@@ -589,7 +589,7 @@ SH
   wait_live "$pid" 30 || { reap "$pid"; fail "watcher exited while absorbing a parked reuse pane: $(cat "$out")"; }
   reap "$pid"
   [ "$(wc -c < "$dir/pycount" 2>/dev/null | tr -d ' ')" = 1 ] \
-    || fail "parked pane re-spawned python to re-parse the reset: count=$(cat "$dir/pycount" 2>/dev/null | wc -c)"
+    || fail "parked pane re-spawned python to re-parse the reset: count=$(wc -c < "$dir/pycount" 2>/dev/null)"
   [ ! -s "$out" ] || fail "parked reuse pane printed another wake: $(cat "$out")"
   pass "a parked ratelimit pane reuses its recorded reset instead of re-parsing every poll"
 }
