@@ -496,7 +496,9 @@ event_wait_or_sleep() {
     # One socket connection covers one backend+session; a home normally has a
     # single herdr session. A window in a different backend/session stays on the
     # poll path this cycle.
-    [ "$b" = "$first_backend" ] && [ "$session" = "$first_session" ] || continue
+    if [ "$b" != "$first_backend" ] || [ "$session" != "$first_session" ]; then
+      continue
+    fi
     windows+=("$w")
   done < <(recorded_windows)
 

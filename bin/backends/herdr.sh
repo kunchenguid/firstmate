@@ -1231,7 +1231,9 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   local pane_ids=()
   for w in "${windows[@]}"; do
     pane_id=${w#*:}
-    [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
+    if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
+      continue
+    fi
     pane_ids+=("$pane_id")
   done
   [ "${#pane_ids[@]}" -gt 0 ] || return 2
@@ -1271,7 +1273,9 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   if [ "$rc" -ne 2 ]; then
     for w in "${windows[@]}"; do
       pane_id=${w#*:}
-      [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
+      if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
+        continue
+      fi
       raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
       [ -n "$raw" ] || continue
       record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
