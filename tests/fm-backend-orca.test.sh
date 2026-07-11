@@ -785,6 +785,42 @@ PY
   pass "fmod write: waits for daemon RPC acknowledgement"
 }
 
+test_fmod_info_reports_missing_token_as_unreachable_json() {
+  fmod_case fmod-info-missing-token
+  python3 - "$ROOT/bin/fmod" <<'PY' || fail "fmod info should report missing token as JSON"
+import argparse
+import contextlib
+import io
+import json
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+
+class MissingTokenClient:
+    def __init__(self, sock, token):
+        self.sock = sock
+        self.token = token
+
+    def __enter__(self):
+        raise FileNotFoundError(self.token)
+
+    def __exit__(self, *exc):
+        pass
+
+mod["cmd_info"].__globals__["DaemonClient"] = MissingTokenClient
+args = argparse.Namespace(sock="sock", token="missing-token")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = mod["cmd_info"](args)
+out = json.loads(buf.getvalue())
+assert rc == 0
+assert out["daemon_reachable"] is False
+assert "missing-token" in out["daemon_error"], out
+PY
+  pass "fmod info: missing token reports daemon_reachable=false JSON"
+}
+
 # ---- test runner ---------------------------------------------------------
 
 run_test() {

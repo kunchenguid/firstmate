@@ -277,7 +277,7 @@ def cmd_info(args: argparse.Namespace) -> int:
             pong = c.rpc("ping", timeout=2.0)
             out["daemon_reachable"] = True
             out["daemon_pong"] = pong
-    except (DaemonHelloError, DaemonConnError, DaemonRpcError, DaemonRpcTimeout) as e:
+    except (OSError, DaemonHelloError, DaemonConnError, DaemonRpcError, DaemonRpcTimeout) as e:
         out["daemon_reachable"] = False
         out["daemon_error"] = str(e)
     json.dump(out, sys.stdout, indent=2)
