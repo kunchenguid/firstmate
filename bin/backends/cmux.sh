@@ -596,17 +596,56 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   done
 }
 
+# fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for
+# the window that contains <workspace_id>, or nothing if it is not found live.
+# `workspace list --json` with no `--window` is scoped to the CURRENT window
+# only (verified live), so the containing window is found by walking every
+# window from `list-windows --json` and asking each for its own scoped list.
+# The count comes straight from that window's `workspace_count` field.
+fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count>"
+  local wsid=$1 wins wid cnt
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 0
+  while IFS=$'\t' read -r wid cnt; do
+    [ -n "$wid" ] || continue
+    if fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null \
+        | jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+      printf '%s %s' "$wid" "$cnt"
+      return 0
+    fi
+  done < <(printf '%s' "$wins" | jq -r '.[]? | "\(.id)\t\(.workspace_count)"' 2>/dev/null)
+}
+
 # fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
 # every other backend's `kill` `|| true` contract). A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
+#
+# The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
+# workspace in a window"): cmux keeps every window at >=1 workspace, so
+# `close-workspace` on the ONLY workspace in its window silently no-ops - it
+# still returns `OK`, but the workspace stays, which is exactly what left a
+# selected task workspace open at teardown (the last workspace in a window is
+# always the selected one). `close-window`/`window.close` cannot rescue it
+# either: a window holding a live terminal session cannot be closed over the
+# control socket (verified: returns success-shaped output, closes nothing).
+# The reliable primitive is close-workspace on a NON-last workspace, so when the
+# target is the last one in its window a throwaway sibling is created first,
+# leaving that window a fresh default workspace (never an fm-<home>- title, so
+# recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-}
+  local expected_label=${3:-} wsid wininfo win count
   if [ -n "$expected_label" ]; then
     fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
   else
     fm_backend_cmux_parse_target "$1" || return 0
   fi
-  fm_backend_cmux_cli close-workspace --workspace "$FM_BACKEND_CMUX_WORKSPACE" >/dev/null 2>&1 || true
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  if [ -n "$win" ] && [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

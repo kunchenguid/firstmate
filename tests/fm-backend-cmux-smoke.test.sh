@@ -139,6 +139,26 @@ bs=$(fm_backend_busy_state cmux "$TARGET")
 [ "$bs" = unknown ] || fail "fm_backend_busy_state should report unknown for cmux (no native primitive), got '$bs'"
 pass "real cmux: fm_backend_busy_state reports unknown (watcher falls back to pane-regex, same as tmux/zellij/orca)"
 
+# --- window_of_workspace: real-cmux window/count detection -------------------
+# The last-workspace-in-a-window teardown fix (docs/cmux-backend.md "Closing the
+# last workspace in a window") pivots on window_of_workspace reading the live
+# `list-windows` / `workspace list --window` JSON correctly (the version-fragile
+# part the fake-CLI suite cannot prove). This task workspace shares its window
+# with at least the app's own workspace, so it reports "<window_id> <count>"
+# with a count of two or more. The last-in-window branch itself is proven end to
+# end in the fake-CLI suite and in this document's manual verification record;
+# it is not driven live here because closing the last workspace inherently
+# leaves a window cmux cannot close over the control socket.
+WININFO=$(fm_backend_cmux_window_of_workspace "$WS1")
+case "$WININFO" in
+  *' '[0-9]*) : ;;
+  *) fail "window_of_workspace did not report '<window_id> <count>' for a live task workspace, got '$WININFO'" ;;
+esac
+WCOUNT=${WININFO##* }
+[ "$WCOUNT" -ge 2 ] 2>/dev/null \
+  || fail "task workspace shares its window with the app default, so the count should be >= 2, got '$WININFO'"
+pass "real cmux: window_of_workspace locates a task workspace's window and counts its workspaces"
+
 # --- kill: whole-workspace close ----------------------------------------------
 
 fm_backend_cmux_kill "$TARGET"

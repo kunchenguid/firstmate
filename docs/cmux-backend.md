@@ -179,7 +179,7 @@ No session field is needed - unlike herdr/zellij there is no session layer to re
 | Bounded capture | `cmux read-screen --workspace <id> --surface <id> --scrollback --lines <N> --json`, trimmed locally with `tail` | No herdr-style small-N empty-result bug: N=1..10 all verified to return correctly-clamped, non-empty content on an already-interacted-with surface. A single call is still bounded by the surface's actual current viewport height regardless of the requested `--lines` value (verified: capped at 16 rows in a headless/no-attached-window test run), so "fetch generous, trim locally" is kept for consistency even though the specific herdr bug does not reproduce. |
 | Worktree-path discovery | marked active cwd probe + capture-scrape (`fm_backend_cmux_current_path`), NOT `current_directory` | `current_directory` DOES reflect a `cd` run directly in the surface's own top-level shell, but stays FROZEN at wherever that shell was when it launched a foreground subshell (exactly what `treehouse get` does) - zellij-shape, not herdr-shape. See "Worktree-path discovery: current_directory does not track a subshell" below. |
 | Busy state | *(no native primitive)* | cmux has agent-awareness elsewhere (Claude Code hooks integration, session-resume tokens) but exposes nothing over the socket API for generic busy/idle classification; `surface.health`/`surface-health` is render health, not agent status. `fm_backend_busy_state`'s dispatcher (`bin/fm-backend.sh`) falls through to `unknown` for cmux via its wildcard case, exactly like tmux/zellij/Orca - the watcher's existing pane-hash + regex path is the only busy-state source for this backend. |
-| Kill | `cmux close-workspace --workspace <id>` | See "Closing the last surface: a third shape" below. The backend owns the whole task workspace, so kill closes the whole workspace directly, best-effort (`\|\| true`), matching every other backend's `kill` contract. |
+| Kill | `cmux close-workspace --workspace <id>`, preceded by a throwaway `new-workspace --window <win> --focus false` when the target is the only workspace in its window | See "Closing the last workspace in a window" below. The backend owns the whole task workspace; kill closes it best-effort (`\|\| true`), but cmux silently refuses to close the LAST workspace in a window, so kill first detects that case (`fm_backend_cmux_window_of_workspace`) and adds a throwaway sibling before closing, matching every other backend's `kill` contract. |
 | Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and `FM_ROOT` hash. |
 
 ## Socket control modes: the full matrix (default `cmuxOnly` rejects external CLIs)
@@ -237,8 +237,71 @@ Verified live: `cmux close-surface --workspace <id> --surface <id>` against a wo
 `cmux close-workspace --workspace <id>` against that same workspace succeeds cleanly, removing the whole workspace (surface included) in one call, verified with no ghost left behind afterward.
 
 Since every firstmate cmux task uses exactly one owned workspace, `close-workspace` is the correct teardown primitive.
-The no-mistakes review gate follow-up was captain-directed here too: `fm_backend_cmux_kill` now calls `close-workspace` directly and best-effort, reclaiming the whole task workspace and any surfaces inside it.
+The no-mistakes review gate follow-up was captain-directed here too: `fm_backend_cmux_kill` reclaims the whole task workspace and any surfaces inside it via `close-workspace`, best-effort.
 That matches the backend ownership invariant more closely than preserving user-added surfaces in a task workspace that firstmate is about to forget.
+There is one important caveat this section's "cleanly removes the whole workspace in one call" claim glosses over: `close-workspace` does that only when the target is NOT the last workspace in its window - the next section ("Closing the last workspace in a window") owns that case and the teardown fix it required.
+
+## Closing the last workspace in a window (the selected-workspace teardown fix)
+
+Verified live 2026-07-10 against the installed cmux 0.64.17 (build 97), macOS aarch64, socket in `automation` mode; the captain's app was not modified, relaunched, or reconfigured, and only `fm-test-` task workspaces and throwaway default workspaces were touched.
+
+The incident this fixes: a cmux-backed task's teardown left its workspace open because it was the currently selected workspace, and the crew closed it by hand.
+`close-workspace` cleanly removes a workspace ONLY when that workspace is not the last one in its window.
+cmux keeps every window at one or more workspaces, so `close-workspace` against the ONLY workspace in a window silently no-ops: it still prints `OK`, but the workspace stays.
+The last workspace in a window is always the selected one, so from the outside this reads as "the selected task workspace would not close" - but being selected is not itself the trigger.
+A workspace that is selected while sharing its window with another workspace closes normally (verified); being the last workspace in its window is the actual trigger.
+
+Evidence (workspace refs are session-relative, shown as observed):
+
+```
+# control: a NON-last workspace (its window holds another workspace too) closes cleanly
+$ cmux close-workspace --workspace <ws-A>
+OK workspace:2
+# -> <ws-A> gone from `workspace list`
+
+# the bug: the LAST/ONLY workspace in its window
+$ cmux close-workspace --workspace <ws-B>
+OK workspace:7
+# -> <ws-B> STILL PRESENT; its window still reports workspace_count=1 (silent no-op)
+```
+
+Neither window-closing primitive rescues it, because a window holding a live terminal session cannot be closed over the control socket:
+
+```
+$ cmux close-window --window <win>
+OK
+# -> <win> and its workspace STILL PRESENT
+
+$ cmux rpc window.close '{"window_id":"<win>"}'
+{ "window_id" : "<win>", "window_ref" : "window:2" }
+# -> STILL PRESENT
+```
+
+Exiting the surface's shell does not help either: cmux immediately respawns a fresh shell in a new surface (the surface id changes), so the last workspace/window is never left empty to collapse on its own.
+
+The reliable primitive is `close-workspace` on a workspace that is NOT the last in its window, so `fm_backend_cmux_kill` makes the target non-last first.
+`fm_backend_cmux_window_of_workspace` walks `list-windows --json` and each window's own `workspace list --json --window <id>` to find the target's window and that window's `workspace_count`.
+When the count is one (last in window), kill creates a throwaway sibling in that same window - `new-workspace --window <win> --focus false`, an unnamed default that never carries an `fm-<home>-` title, so recovery and `list_live` ignore it - and only then closes the target.
+When the count is greater than one, kill closes the target directly, exactly as before, with no sibling.
+
+```
+# the fix, end to end: real fm_backend_cmux_kill on a SELECTED, last-in-window fm-test task workspace
+$ fm_backend_cmux_window_of_workspace <ws-B>
+<win> 1
+$ cmux new-workspace --window <win> --focus false --id-format uuids
+OK workspace:9
+$ cmux close-workspace --workspace <ws-B>
+OK workspace:8
+# -> <ws-B> GONE; <win> survives with a fresh default workspace (title "zsh"/"~", never fm-*)
+```
+
+The window keeping a fresh default workspace is cmux's own "closed the last tab" outcome, not extra firstmate state; it is the closest reachable result to removing the task's workspace, given a window cannot be socket-closed.
+The branch logic (sibling-then-close when last, close-directly otherwise) is pinned in `tests/fm-backend-cmux.test.sh`; the live `window_of_workspace` window/count detection is pinned in `tests/fm-backend-cmux-smoke.test.sh`.
+The last-in-window path is not driven end to end in the automated smoke suite because closing the last workspace inherently leaves a window cmux cannot close over the socket, so a live end-to-end run cannot self-clean; the manual run recorded above is its empirical proof instead.
+
+Related current-window scoping, observed during this work and left out of scope for this fix: `workspace list --json` WITHOUT `--window` is scoped to the CURRENT window only (verified live).
+`fm_backend_cmux_window_of_workspace` passes `--window` per window and is unaffected, but `fm_backend_cmux_workspace_id_for_label` and `fm_backend_cmux_list_live` see only the current window's workspaces, and `fm_backend_cmux_target_ready`'s label recovery inherits that scope.
+That is correct for the selected-workspace teardown case (a selected workspace is in the current window) but is a known limitation for a task workspace parked in a non-current window.
 
 ## Workspace ids do not survive a relaunch (verified from source, not a live restart)
 
@@ -309,3 +372,4 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 - **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
 - **Backend-specific bootstrap detection is absent** - `bin/fm-bootstrap.sh` does not conditionally add `cmux` and `jq` when a backend selection resolves to cmux, mirroring the same accepted gap already documented for herdr/zellij; the version/tool/reachability gate happens at spawn time instead and refuses loudly.
 - **A surface can still die in the brief window between `target_ready` succeeding and the operation's own call running.** That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out, `fm_backend_cmux_send_text_submit`'s retry loop (which reports `send-failed`/`pending`/`unknown` rather than a false "sent"), or the watcher's stale-pane detection.
+- **Windows cannot be closed over the control socket, and label lookup is current-window scoped** - both owned by "Closing the last workspace in a window" above. Teardown of a last-in-window task workspace therefore leaves that window a fresh default workspace rather than closing it, and `fm_backend_cmux_workspace_id_for_label`/`fm_backend_cmux_list_live` only see the current window, so a task workspace parked in a non-current window is a known blind spot for label-based recovery.
