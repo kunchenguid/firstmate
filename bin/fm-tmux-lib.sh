@@ -187,9 +187,35 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   fi
 }
 
+# fm_tmux_send_literal_bytes: type <text> literally, routing any ASCII unit
+# separator (0x1f) through `send-keys -H 1f`. tmux 3.7 silently drops C0
+# control bytes from `send-keys -l` (verified live on 3.7: only the printable
+# bytes reach the pty, even in raw mode), which would strip the daemon's
+# FM_INJECT_MARK and fm-send's from-firstmate marker before they ever reach
+# the supervisor or secondmate pane; a hex key send still delivers the raw
+# byte. Text without the byte keeps the exact single `send-keys -l` call.
+fm_tmux_send_literal_bytes() {  # <target> <text>
+  local target=$1 text=$2 us=$'\x1f' chunk
+  case "$text" in
+    *"$us"*) ;;
+    *) tmux send-keys -t "$target" -l "$text" 2>/dev/null; return $? ;;
+  esac
+  while :; do
+    chunk=${text%%"$us"*}
+    [ "$chunk" = "$text" ] && break
+    if [ -n "$chunk" ]; then
+      tmux send-keys -t "$target" -l "$chunk" 2>/dev/null || return 1
+    fi
+    tmux send-keys -t "$target" -H 1f 2>/dev/null || return 1
+    text=${text#*"$us"}
+  done
+  [ -z "$text" ] || tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
+  return 0
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  fm_tmux_send_literal_bytes "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
 }

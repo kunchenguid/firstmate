@@ -41,13 +41,21 @@ case "${1:-}" in
   send-keys)
     shift
     literal=0
+    hexmode=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -t) shift 2 ;;
         -l) literal=1; shift ;;
+        -H) hexmode=1; shift ;;
         *) break ;;
       esac
     done
+    if [ "$hexmode" = 1 ]; then
+      # A 0x1f byte rides through a hex key send (tmux 3.7 drops it from -l);
+      # append the raw bytes so the log holds the full typed stream.
+      for b in "$@"; do printf "\\x$b"; done >> "$FM_SEND_LOG"
+      exit 0
+    fi
     if [ "$literal" = 1 ]; then
       printf '%s' "${1:-}" >> "$FM_SEND_LOG"
     fi

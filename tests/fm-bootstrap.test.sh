@@ -170,9 +170,9 @@ run_bootstrap_timeout_case() {
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
-      # Advance fake time quickly, but yield on every tick so the background
-      # fleet-sync process can deterministically write its partial output before
-      # the simulated timeout kills it, even on a busy full-suite runner.
+      # Yield real time on every poll so the backgrounded fake fleet-sync is
+      # always scheduled (and its partial output written) before the virtual
+      # timeout expires; a capped yield count raced the child on cold runs.
       command sleep 0.01
     }
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
