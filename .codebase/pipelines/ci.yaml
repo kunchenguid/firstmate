@@ -73,6 +73,18 @@ jobs:
             # gawk takes over the awk alternative; POSIX classes must work.
             awk --version | head -1
             printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
+      - name: Install Node 22
+        commands:
+          # The image ships Node 20. tests/fm-pi-watch-extension.test.sh imports
+          # the .ts extension directly, which needs Node's native TypeScript
+          # type stripping - default-on only from 22.18.
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
+              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
+            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+            node --version
       - name: Install jq
         commands:
           - |
