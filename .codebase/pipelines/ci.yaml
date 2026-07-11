@@ -196,15 +196,22 @@ jobs:
             chmod 1777 /tmp
             set +e
             runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" TMPDIR=/tmp \
-              bash -c './tests/fm-teardown.test.sh' 2>&1 | tail -5
+              bash -c './tests/fm-teardown.test.sh' > /tmp/suite.out 2>&1
+            echo "suite exit=$?"
             set -e
-            echo "############ CASE DIRS ############"
-            for d in /tmp/fm-teardown-tests.*/codebase-branch-discovery; do
+            echo "############ SUITE OUTPUT (last 30) ############"
+            tail -30 /tmp/suite.out
+            echo "############ TEMP DIRS ############"
+            ls -d /tmp/fm-teardown-tests.* 2>/dev/null || echo "NO TEMP DIRS KEPT"
+            for d in /tmp/fm-teardown-tests.*/*/; do
+              case "$d" in
+                *fork-allow*|*codebase-branch-discovery*) ;;
+                *) continue ;;
+              esac
               echo "=== $d ==="
               echo "--- stderr ---"; cat "$d/stderr" 2>/dev/null
               echo "--- stdout ---"; cat "$d/stdout" 2>/dev/null
-              echo "--- bytedcli.log ---"; cat "$d/../bytedcli.log" 2>/dev/null || true
-              ls "$d" 2>/dev/null
+              echo "--- bytedcli.log ---"; cat "$d/bytedcli.log" 2>/dev/null || true
             done
             echo "PROBE DONE"
             exit 1
