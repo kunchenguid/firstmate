@@ -14,10 +14,10 @@
 #   FM_SUPERVISOR_TARGET override is set, there is no verifiable pane to deliver
 #   escalations to (the legacy firstmate:0 guess is a crewmate session, not
 #   firstmate's input). Rather than set state/.afk and let the daemon wedge
-#   silently overnight, this refuses immediately, clears any pre-existing
-#   state/.afk flag so the fleet reverts to full per-wake supervision, and
-#   exits non-zero with a clear message. The same guard, plus the supervisor
-#   discovery it shares, lives in bin/fm-supervisor-target-lib.sh.
+#   silently overnight, this refuses immediately, attempts to clear any
+#   pre-existing state/.afk flag, verifies it is absent before claiming full per-wake
+#   supervision, and exits non-zero with a clear message. The same guard, plus
+#   the supervisor discovery it shares, lives in bin/fm-supervisor-target-lib.sh.
 #
 # Run this command as its own tracked background terminal/session.
 # Do not wrap it in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
@@ -46,6 +46,9 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+# shellcheck source=bin/fm-afk-state-lib.sh
+. "$SCRIPT_DIR/fm-afk-state-lib.sh"
 
 # Supervisor-target discovery + the trustworthy-target predicate, shared with
 # the daemon so /afk refuses fast on exactly the targets the daemon would.
@@ -100,7 +103,7 @@ pid=$(daemon_lock_pid 2>/dev/null || true)
 if daemon_lock_held_by_live_daemon; then
   # A live daemon already verified its own supervisor target at startup, so a
   # re-invocation only refreshes the away flag - never re-checks or resets it.
-  date '+%s' > "$STATE/.afk"
+  afk_enter "$STATE"
   echo "afk: daemon already running pid=$pid"
   exit 0
 fi
@@ -115,15 +118,18 @@ fi
 if ! supervisor_target_is_trustworthy; then
   echo "afk: refusing to enter away mode - firstmate's own pane could not be verified as an escalation target." >&2
   echo "     firstmate is not running inside a tmux or herdr pane and no FM_SUPERVISOR_TARGET override is set, so away-mode escalations would be delivered to the wrong window and silently wedge." >&2
-  if [ -e "$STATE/.afk" ]; then
-    rm -f "$STATE/.afk"
-    echo "     Cleared the pre-existing away flag (state/.afk): the fleet is back in full per-wake supervision instead of deferring to a daemon that cannot start." >&2
+  if afk_flag_present "$STATE"; then
+    if afk_clear_flag "$STATE"; then
+      echo "     Cleared the pre-existing away flag (state/.afk): the fleet is back in full per-wake supervision instead of deferring to a daemon that cannot start." >&2
+    else
+      echo "     ERROR: state/.afk still exists after the clear attempt; full per-wake supervision is not guaranteed until that path is removed." >&2
+    fi
   fi
   echo "     Run firstmate inside tmux/herdr, or export FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) pointing at firstmate's own pane, then retry." >&2
   exit 1
 fi
 
-date '+%s' > "$STATE/.afk"
+afk_enter "$STATE"
 echo "afk: supervisor target verified"
 echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
 exec "$DAEMON"

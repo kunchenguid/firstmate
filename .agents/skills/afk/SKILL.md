@@ -16,21 +16,16 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
-1. **Set the durable away-mode flag:**
-   ```sh
-   date '+%s' > state/.afk
-   ```
-   This file survives a firstmate restart: recovery re-enters afk if the
-   flag is present.
-
-2. **Ensure the sub-supervisor daemon is running.** Start the helper as its own
+1. **Start the sub-supervisor through the helper.** Run the helper as its own
    tracked background terminal/session:
    ```sh
    bin/fm-afk-start.sh
    ```
+   `bin/fm-afk-start.sh` is the sole entry point that creates or refreshes `state/.afk`.
+   The flag is the helper's internal durable away-mode effect and survives a firstmate restart: recovery re-enters afk if the flag is present.
    The helper exits immediately (refreshing `state/.afk`) if the identity-backed daemon lock already names a live process; otherwise it first verifies an injectable supervisor target exists, then sets `state/.afk` and execs `bin/fm-supervise-daemon.sh` in the foreground.
-   If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, clears any pre-existing `state/.afk` flag so the fleet reverts to full per-wake supervision, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
-   The daemon's own post-lock startup refusals (an unsupported supervisor backend, the blind fallback target, or an explicit target that fails the pane-exists probe) clear `state/.afk` the same way, so no startup refusal on either side ever leaves the away flag set with no daemon running.
+   If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, attempts to clear any pre-existing `state/.afk` flag, verifies absence before claiming full per-wake supervision, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
+   The daemon's own post-lock startup refusals (an unsupported supervisor backend, the blind fallback target, or an explicit target that fails the pane-exists probe) use the same verified clear path, so startup refusals report plainly if `state/.afk` still exists and full per-wake supervision is not guaranteed.
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
@@ -38,10 +33,10 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
+2. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** to the captain that away-mode is active.
+3. **Acknowledge** to the captain that away-mode is active.
    The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
 
 ## How to exit afk
@@ -196,17 +191,12 @@ the marker lets firstmate distinguish it from a real captain message.
   resolve - firstmate is not itself a tmux or herdr pane and no override is set -
   the only candidate left is the legacy `firstmate:0` guess, which is the
   crewmate tmux session rather than firstmate's input; injecting there wedged the
-  daemon silently overnight. Both `/afk` (before it ever sets `state/.afk`) and
-  the daemon now refuse loudly and abort on that blind fallback instead of
-  proceeding, so the failure is immediate and visible. Every daemon startup
-  refusal taken after its singleton lock is acquired - the unsupported-backend
-  gate, the blind-fallback refusal, and the target-exists probe - also clears
-  any `state/.afk` flag on the way out, because the lock proves no other daemon
-  owns away mode; the fleet reverts to full per-wake supervision instead of
-  deferring to a daemon that never started. Set `FM_SUPERVISOR_TARGET`
-  to firstmate's own pane, or run firstmate inside tmux/herdr, to activate. Both
-  resolution sources are logged at startup so a wrong-but-resolving target is
-  detectable. Other runtime
+  daemon silently overnight.
+  Both `/afk` (before it ever sets `state/.afk`) and the daemon now refuse loudly and abort on that blind fallback instead of proceeding, so the failure is immediate and visible.
+  Every daemon startup refusal taken after its singleton lock is acquired - the unsupported-backend gate, the blind-fallback refusal, and the target-exists probe - also attempts to clear and verify any `state/.afk` flag on the way out, because the lock proves no other daemon owns away mode; the fleet reverts to full per-wake supervision only after the flag is verified absent instead of deferring to a daemon that never started.
+  Set `FM_SUPERVISOR_TARGET` to firstmate's own pane, or run firstmate inside tmux/herdr, to activate.
+  Both resolution sources are logged at startup so a wrong-but-resolving target is detectable.
+  Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one

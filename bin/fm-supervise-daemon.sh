@@ -18,10 +18,10 @@
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
 # Every startup refusal taken AFTER the singleton lock is acquired (unsupported
 # supervisor backend, the blind firstmate:0 fallback target, a target-exists
-# probe failure) also clears state/.afk before exiting: the lock proves no
-# other daemon owns away mode, so leaving the flag set would defer the fleet
-# to a daemon that never started. fm-afk-start.sh clears the flag the same way
-# on its own pre-.afk refusal.
+# probe failure) also attempts to clear and verify state/.afk before exiting:
+# the lock proves no other daemon owns away mode, so leaving the flag set would
+# defer the fleet to a daemon that never started. fm-afk-start.sh uses the same
+# helper on its own pre-.afk refusal.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
@@ -170,6 +170,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# shellcheck source=bin/fm-afk-state-lib.sh
+. "$FM_DAEMON_DIR/fm-afk-state-lib.sh"
+
 # Supervisor-pane resolution (discover_supervisor_target/backend, the fallback
 # defaults, and the supervisor_target_is_trustworthy predicate) is shared with
 # bin/fm-afk-start.sh so /afk can refuse fast when no injectable target exists.
@@ -223,7 +226,6 @@ LOG_KEEP_LINES_DEFAULT=2000
 # Portable across harnesses: it travels with the message text, independent of
 # any harness-level typed-vs-injected distinction.
 FM_INJECT_MARK=$'\x1f'
-AFK_FLAG_NAME=".afk"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
@@ -246,24 +248,6 @@ _file_age() {  # seconds since mtime; very large if missing
 _hash_text() {
   if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
   else printf '%s' "$1" | md5sum | cut -d ' ' -f1; fi
-}
-
-# --- presence-gating helpers (PURE-ish: side-effect-free reads of state) -----
-# afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
-afk_active() {  # <state>
-  [ -e "$1/$AFK_FLAG_NAME" ]
-}
-
-# afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
-# skill (enter) and by firstmate on user return (exit). Durable: a plain file,
-# so recovery (§5) re-enters afk if it is present after a restart.
-afk_enter() {  # <state>
-  mkdir -p "$1"
-  date '+%s' > "$1/$AFK_FLAG_NAME"
-}
-
-afk_exit() {  # <state>
-  rm -f "$1/$AFK_FLAG_NAME"
 }
 
 # should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
@@ -1286,13 +1270,17 @@ fm_super_main() {
   # Every refusal below runs while THIS daemon holds the singleton lock, so no
   # other daemon owns away mode; a lingering state/.afk would defer the whole
   # fleet to a daemon that never started (the wedge fm-afk-start.sh's own
-  # refusal also clears). Clearing it here reverts to full per-wake supervision.
+  # refusal also clears). Only a verified clear reverts to full per-wake supervision.
   startup_refuse() {
     local reason=$1
-    if [ -e "$STATE/.afk" ]; then
-      rm -f "$STATE/.afk" 2>/dev/null || true
-      echo "note: cleared the away flag (state/.afk); the fleet reverted to full per-wake supervision instead of deferring to a daemon that is not running" >&2
-      reason="$reason; cleared state/.afk"
+    if afk_flag_present "$STATE"; then
+      if afk_clear_flag "$STATE"; then
+        echo "note: cleared the away flag (state/.afk); the fleet reverted to full per-wake supervision instead of deferring to a daemon that is not running" >&2
+        reason="$reason; cleared state/.afk"
+      else
+        echo "error: state/.afk still exists after the clear attempt; full per-wake supervision is not guaranteed until that path is removed" >&2
+        reason="$reason; state/.afk still present after clear attempt"
+      fi
     fi
     log "startup failed: $reason"
     fm_lock_release "$LOCK" 2>/dev/null || true

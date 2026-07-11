@@ -136,6 +136,40 @@ test_afk_start_refusal_clears_stale_afk_flag() {
   pass "fm-afk-start.sh refusal clears a pre-existing away flag so the fleet reverts to full per-wake supervision"
 }
 
+test_afk_start_refusal_clears_stale_afk_directory() {
+  local dir state out status
+  dir=$(make_supercase afk-start-stale-flag-directory)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse when no injectable supervisor target exists"
+  assert_contains "$out" "Cleared the pre-existing away flag" "fm-afk-start.sh did not report clearing the stale away directory"
+  assert_absent "$state/.afk" "fm-afk-start.sh left a stale away directory in place"
+  pass "fm-afk-start.sh refusal clears a stale away directory"
+}
+
+test_afk_start_refusal_does_not_claim_uncleared_afk_flag() {
+  local dir state out status
+  dir=$(make_supercase afk-start-uncleared-flag)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+  : > "$state/.afk/kept"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse when no injectable supervisor target exists"
+  assert_contains "$out" "state/.afk still exists" "fm-afk-start.sh did not report the uncleared away flag"
+  assert_not_contains "$out" "fleet is back in full per-wake supervision" "fm-afk-start.sh claimed full supervision while state/.afk still existed"
+  assert_present "$state/.afk" "test setup expected the non-empty away directory to remain"
+  pass "fm-afk-start.sh refusal does not claim full supervision when the away flag remains"
+}
+
 test_daemon_refuses_blind_fallback_target() {
   local dir state out status
   dir=$(make_supercase daemon-blind-fallback)
@@ -175,6 +209,43 @@ test_daemon_unsupported_backend_refusal_clears_stale_afk_flag() {
   assert_absent "$state/.afk" "unsupported-backend refusal left the away flag set with no daemon running"
   assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after the backend refusal"
   pass "daemon unsupported-backend refusal clears a pre-existing away flag"
+}
+
+test_daemon_unsupported_backend_refusal_clears_stale_afk_directory() {
+  local dir state out status
+  dir=$(make_supercase daemon-unsupported-backend-stale-flag-directory)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=unsupported "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse an unsupported supervisor backend"
+  assert_contains "$out" "cleared the away flag" "daemon did not report clearing the stale away directory"
+  assert_absent "$state/.afk" "unsupported-backend refusal left a stale away directory in place"
+  assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after the backend refusal"
+  pass "daemon unsupported-backend refusal clears a stale away directory"
+}
+
+test_daemon_refusal_does_not_claim_uncleared_afk_flag() {
+  local dir state out status
+  dir=$(make_supercase daemon-uncleared-flag)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+  : > "$state/.afk/kept"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=unsupported "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse an unsupported supervisor backend"
+  assert_contains "$out" "state/.afk still exists" "daemon did not report the uncleared away flag"
+  assert_not_contains "$out" "fleet reverted to full per-wake supervision" "daemon claimed full supervision while state/.afk still existed"
+  assert_present "$state/.afk" "test setup expected the non-empty away directory to remain"
+  assert_grep "state/.afk still present after clear attempt" "$state/.supervise-daemon.log" "daemon log missing the uncleared away flag reason"
+  assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after the backend refusal"
+  pass "daemon refusal does not claim full supervision when the away flag remains"
 }
 
 test_daemon_missing_target_refusal_clears_stale_afk_flag() {
@@ -1778,8 +1849,12 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_supervisor_target_is_trustworthy_predicate
 test_afk_start_refuses_without_supervisor_target
 test_afk_start_refusal_clears_stale_afk_flag
+test_afk_start_refusal_clears_stale_afk_directory
+test_afk_start_refusal_does_not_claim_uncleared_afk_flag
 test_daemon_refuses_blind_fallback_target
 test_daemon_unsupported_backend_refusal_clears_stale_afk_flag
+test_daemon_unsupported_backend_refusal_clears_stale_afk_directory
+test_daemon_refusal_does_not_claim_uncleared_afk_flag
 test_daemon_missing_target_refusal_clears_stale_afk_flag
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
