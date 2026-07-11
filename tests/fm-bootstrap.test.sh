@@ -161,14 +161,19 @@ add_no_origin_projects() {
 run_bootstrap_timeout_case() {
   local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
   override=__unset__
-  started_marker=${5:-}
+  started_marker=${5:-$home/fleet-sync-started}
   git_record=${6:-}
   wait_for_marker=${7:-0}
   [ "$#" -lt 4 ] || override=$4
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
+      local inc=${1:-1} tries
+      tries=0
+      while [ "$tries" -lt 100 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do
+        command sleep 0.01
+        tries=$((tries + 1))
+      done
       SECONDS=$((SECONDS + inc))
       # Advance fake time quickly, but yield on every tick so the background
       # fleet-sync process can deterministically write its partial output before
