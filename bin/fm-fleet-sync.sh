@@ -278,5 +278,6 @@ fi
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
+  [ "$(basename "$proj")" != "_orca-wt" ] || continue
   sync_project "$proj"
 done

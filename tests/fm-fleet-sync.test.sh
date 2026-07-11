@@ -262,12 +262,14 @@ test_whole_fleet_form() {
   behind=$(build_pair "$home" fleet-behind)
   advance_origin "$home" fleet-behind C1
   current=$(build_pair "$home" fleet-current)
+  mkdir -p "$home/projects/_orca-wt"
 
   # Whole-fleet form: no project-dir argument.
   out=$(run_sync "$home")
 
   assert_contains "$out" "fleet-behind: synced" "whole-fleet form syncs a behind clone"
   assert_contains "$out" "fleet-current: already current" "whole-fleet form reports a current clone"
+  assert_not_contains "$out" "_orca-wt" "whole-fleet form should ignore legacy Orca worktree bucket"
   : "$behind $current"
   pass "whole-fleet form processes every clone under projects/"
 }

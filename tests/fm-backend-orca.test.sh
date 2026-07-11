@@ -275,11 +275,22 @@ build_test_repo() {  # <dir> <name> -> echoes repo path
   printf '%s\n' "$repo"
 }
 
+expected_orca_wt() {  # <repo> <name>
+  local repo=$1 name=$2 parent project_name home_guess
+  parent=$(dirname "$repo")
+  project_name=$(basename "$repo")
+  if [ "$(basename "$parent")" = projects ]; then
+    home_guess=$(dirname "$parent")
+  else
+    home_guess=$parent
+  fi
+  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
+}
+
 test_worktree_create_makes_git_worktree_and_fmod_session() {
   fmod_case wt-create-happy
   local repo
   repo=$(build_test_repo "$CASE_DIR" repo)
-  local wt_root="$repo/_orca-wt/fm-test1"
   PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test1' "$ROOT" "$repo" > "$CASE_DIR/raw"
   local raw
@@ -313,11 +324,8 @@ test_worktree_create_refuses_existing_path() {
   fmod_case wt-create-exists
   local repo
   repo=$(build_test_repo "$CASE_DIR" repo)
-  # fm_backend_orca_worktree_dir puts the worktree under
-  # $(dirname "$project")/_orca-wt/<name>, NOT under $project/_orca-wt/<name>.
-  # Mirror that exact layout so the existence check has something to find.
   local expected_wt
-  expected_wt="$(dirname "$repo")/_orca-wt/fm-test2"
+  expected_wt=$(expected_orca_wt "$repo" fm-test2)
   mkdir -p "$expected_wt"
   local out status
   out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
@@ -343,7 +351,7 @@ test_worktree_create_cleans_up_on_fmod_failure() {
   status=$?
   [ "$status" -ne 0 ] || fail "worktree_create should fail when fmod create fails (rc=$status)"
   local expected_wt
-  expected_wt="$(dirname "$repo")/_orca-wt/fm-test3"
+  expected_wt=$(expected_orca_wt "$repo" fm-test3)
   [ ! -d "$expected_wt" ] || fail "worktree_create should clean up the git worktree when fmod fails"
   if git -C "$repo" show-ref --verify --quiet refs/heads/fm/fm-test3; then
     fail "worktree_create should delete the just-created task branch when fmod fails"
@@ -356,7 +364,7 @@ test_remove_worktree_kills_session_and_removes_dir() {
   local repo
   repo=$(build_test_repo "$CASE_DIR" repo)
   local wt_path
-  wt_path="$(dirname "$repo")/_orca-wt/fm-test4"
+  wt_path=$(expected_orca_wt "$repo" fm-test4)
   # Manually build a real worktree (no need to spin up the daemon session)
   # so remove_worktree's git-remove branch has a target. The marker file
   # is what binds the orca session id to the worktree path.
@@ -382,7 +390,7 @@ test_remove_worktree_falls_back_to_basename_session_id() {
   # missing, the adapter derives the session id from basename. Mirror that
   # shape here so the test exercises the real fallback path.
   local wt_path
-  wt_path="$(dirname "$repo")/_orca-wt/fm-legacy"
+  wt_path=$(expected_orca_wt "$repo" fm-legacy)
   mkdir -p "$wt_path"
   git -C "$repo" worktree add --detach "$wt_path" HEAD >/dev/null
   PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
@@ -426,6 +434,17 @@ SH
 }
 
 # ---- composer state -------------------------------------------------------
+
+test_worktree_dir_for_project_registry_path_uses_state_bucket() {
+  fmod_case wt-dir-projects
+  local home="$CASE_DIR/home" repo out
+  repo="$home/projects/repo"
+  mkdir -p "$repo"
+  out=$(bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_dir "$1" fm-test' "$ROOT" "$repo")
+  [ "$out" = "$home/state/orca-worktrees/repo/fm-test" ] \
+    || fail "project registry worktree dir should use state bucket, got '$out'"
+  pass "fm_backend_orca_worktree_dir: keeps registry project worktrees under state"
+}
 
 test_composer_state_empty_when_bare_prompt() {
   fmod_case composer-empty
@@ -517,6 +536,20 @@ test_composer_state_ignores_horizontal_underline_row() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$ROOT" )
   [ "$out" = "unknown" ] || fail "horizontal-only underline row should be unknown (no real composer), got '$out'"
   pass "fm_backend_orca_composer_state: skips the opencode ▀ underline row"
+}
+
+test_composer_state_uses_bundled_fmod_fallback() {
+  fmod_case composer-bundled-fmod
+  local mini_root="$CASE_DIR/mini-root"
+  mkdir -p "$mini_root/bin/backends"
+  cp "$ROOT/bin/backends/orca.sh" "$mini_root/bin/backends/orca.sh"
+  cp "$FB/fmod" "$mini_root/bin/fmod"
+  printf '╭──╮\n│ > │\n╰──╯\n' > "$RESP/1.out"
+  local out
+  out=$( PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$mini_root" )
+  [ "$out" = "empty" ] || fail "composer_state should use bundled fmod fallback, got '$out'"
+  pass "fm_backend_orca_composer_state: loads bundled fmod before snapshot"
 }
 
 # ---- dispatcher ----------------------------------------------------------

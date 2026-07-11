@@ -73,13 +73,16 @@ fm_backend_orca_session_id_of() {  # <window-name>
   printf '%s' "$1"
 }
 
-# fm_backend_orca_worktree_dir <project-path> <name>: where the orca-owned
-# worktree lives. Sibling of the project under a private `_orca-wt/` parent so
-# it cannot be confused with the project's own checked-out tree and so cleanup
-# is one rm of a known directory.
 fm_backend_orca_worktree_dir() {  # <project-path> <name>
-  local project=$1 name=$2
-  printf '%s/_orca-wt/%s' "$(dirname "$project")" "$name"
+  local project=$1 name=$2 project_parent project_name home_guess
+  project_parent=$(dirname "$project")
+  project_name=$(basename "$project")
+  if [ "$(basename "$project_parent")" = projects ]; then
+    home_guess=$(dirname "$project_parent")
+  else
+    home_guess=$project_parent
+  fi
+  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
 }
 
 # fm_backend_orca_create_terminal <session-id> <cwd> <title>: createOrAttach
@@ -293,6 +296,7 @@ FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Ask a
 # opencode composer is never mistaken for a content row.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   local terminal=$1 cap line trimmed stripped="" found=0
+  fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
   cap=$(fmod snapshot "$terminal" --strip-ansi --lines "$FM_BACKEND_ORCA_COMPOSER_LINES" 2>/dev/null) || { printf 'unknown'; return 0; }
   # Pass 1: collect bordered content rows so we can pick the right one.
   # In opencode's TUI, the bottom region contains TWO bordered content rows:
