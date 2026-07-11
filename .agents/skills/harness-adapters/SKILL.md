@@ -150,6 +150,9 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
+Boot screens: a freshly launched codex pane can show an "Update available!" / "Press enter to continue" prompt or an "OpenAI Codex" banner with `model: loading` before its composer exists, and typing then is swallowed by the boot UI.
+The tmux submit core waits these screens out automatically before typing (docs/tmux-backend.md "Codex boot guard"); a `send-deferred` verdict or `fm-send` exit 2 (`send-deferred: pane booting`) means the pane never left that boot screen within the wait window and nothing was typed - peek the pane and retry once it is ready.
+
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 

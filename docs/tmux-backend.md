@@ -77,6 +77,12 @@ It reads tmux's own `#{pane_current_command}`, which reports the pane's live for
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
+## Codex boot guard
+
+A codex pane can briefly show a pre-composer boot screen - an "Update available!" / "Press enter to continue" prompt or an "OpenAI Codex" banner with `model: loading` - before its real composer exists, and typing during that window is swallowed by the boot UI.
+`fm_tmux_submit_core` (`bin/fm-tmux-lib.sh`) therefore classifies the pane with `fm_tmux_pane_boot_state` before typing anything and waits for those codex-specific screens to clear, polling every `FM_TMUX_BOOT_POLL_SLEEP` seconds (default 1) for up to `FM_TMUX_BOOT_WAIT_SECS` seconds (default 20).
+A screen that never clears yields the verdict `send-deferred` with nothing typed: `fm-send.sh` exits non-zero (`send-deferred: pane booting`) instead of injecting into boot UI, and the away-mode daemon logs the injection as deferred with the buffered escalation retried later.
+
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
 ```sh

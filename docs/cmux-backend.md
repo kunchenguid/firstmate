@@ -334,7 +334,7 @@ Per this build task's explicit direction, `fm_backend_cmux_composer_state` is ad
 After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt with no boxed composer row reads `unknown`, not empty.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
 `tests/fm-backend-cmux.test.sh` pins this exact regression shape (`test_send_text_submit_popup_autocomplete_requires_second_enter`), verifying the adapter retries a genuine second Enter rather than declaring victory after the first one closes a popup.
-All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
+All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`, plus the tmux boot guard's `send-deferred`; docs/tmux-backend.md "Codex boot guard"), so `fm-send.sh` needs no cmux-specific branching.
 
 ## Test safety
 

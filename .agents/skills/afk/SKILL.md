@@ -109,6 +109,11 @@ For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
 For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
+On tmux, the submit core first waits out known codex pre-composer boot/update
+screens (docs/tmux-backend.md "Codex boot guard"); a screen that never clears
+returns `send-deferred` with nothing typed, and the daemon defers the injection
+(logged as "target pane still booting") with the buffered escalation retried
+later, exactly like any other non-`empty` verdict.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
