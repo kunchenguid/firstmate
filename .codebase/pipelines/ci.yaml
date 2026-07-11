@@ -1,12 +1,24 @@
 # Codebase CI (code.byted.org). This is the pipeline that actually runs on MRs.
 #
-# .github/workflows/ci.yml is the same three jobs for the GitHub mirror, which
-# still owns releases and Pages. Neither file runs on the other's host, so keep
-# the two in step when you change one.
+# .github/workflows/ci.yml holds the same three jobs for the GitHub mirror,
+# which still owns releases and Pages. Neither file runs on the other's host,
+# so keep the two in step when you change one.
 #
-# Each job below surfaces on the MR as a check run named
+# Each job surfaces on the MR as a check run named
 # "[Pipeline] MR CI - <job name>", which is what no-mistakes reads through
 # `bytedcli codebase mr status`.
+#
+# TOOLCHAIN: the ci_nodejs_20 image is Debian 10 (buster), whose apt packages
+# are from 2018 and too old to trust:
+#   - shellcheck 0.5.0 still emits SC1117 (removed upstream in 0.7) and flags
+#     backticks inside single quotes, so it fails on code that is clean under
+#     any current shellcheck.
+#   - jq 1.5 exits 0 from `jq -e` on empty input instead of 4. cmux.sh's
+#     surface_exists is exactly that predicate, so an absent surface reads as
+#     present and tests/fm-backend-cmux.test.sh fails.
+# github.com is not reachable from the runner directly, so both tools are
+# pinned and fetched through the internal relay into /usr/local/bin (ahead of
+# /usr/bin on PATH). Bump the versions here, not in apt.
 name: MR CI
 
 trigger:
@@ -25,9 +37,14 @@ jobs:
     steps:
       - name: Install shellcheck
         commands:
-          - apt-get update
-          - apt-get install -y --no-install-recommends shellcheck
-          - shellcheck --version
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/sc.tar.xz \
+              https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+            tar -xJf /tmp/sc.tar.xz -C /tmp
+            install -m 0755 /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+            shellcheck --version
       - name: Shellcheck
         commands:
           - shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
@@ -43,16 +60,27 @@ jobs:
     steps:
       - name: Require tmux for e2e tests
         commands:
-          - apt-get update
-          - apt-get install -y --no-install-recommends tmux
-          - tmux -V
-      - name: Install tasks-axi for backlog-handoff delegation
-        commands:
-          - npm install -g tasks-axi
-          - tasks-axi --version
-          # bin/fm-backlog-handoff.sh needs atomic multi-ID `mv`, added in 0.2.2.
           - |
             set -eu
+            apt-get update
+            apt-get install -y --no-install-recommends tmux
+            tmux -V
+      - name: Install jq
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/jq \
+              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            install -m 0755 /tmp/jq /usr/local/bin/jq
+            jq --version
+      - name: Install tasks-axi for backlog-handoff delegation
+        commands:
+          - |
+            set -eu
+            npm install -g tasks-axi
+            tasks-axi --version
+            # bin/fm-backlog-handoff.sh needs atomic multi-ID `mv`, added in 0.2.2.
             have=$(tasks-axi --version | tr -d '[:space:]')
             lowest=$(printf '%s\n0.2.2\n' "$have" | sort -V | head -n1)
             if [ "$lowest" != "0.2.2" ]; then
@@ -65,8 +93,7 @@ jobs:
           # hard-fails without it; the MR checkout does not carry that ref.
           - |
             set -eu
-            git_dir=$(git rev-parse --git-dir)
-            if [ -f "$git_dir/shallow" ]; then
+            if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
               git fetch --unshallow origin || git fetch --depth=1000 origin
             fi
             git fetch origin "main:refs/remotes/origin/main"
@@ -101,30 +128,3 @@ jobs:
               printf '%s\n' "$tracked"
               exit 1
             fi
-
-  probe_egress:
-    name: PROBE egress
-    runs-on:
-      env: boe
-    image: hub.byted.org/codebase/ci_nodejs_20:latest
-    steps:
-      - name: Can we reach github through the internal relay
-        commands:
-          - |
-            set +e
-            P=http://sys-proxy-rd-relay.byted.org:8118
-            echo "=== shellcheck 0.10.0 static via relay ==="
-            https_proxy=$P http_proxy=$P curl -sSfL --max-time 60 -o /tmp/sc.tar.xz \
-              https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
-            echo "curl exit=$?"
-            tar -xJf /tmp/sc.tar.xz -C /tmp 2>/dev/null && /tmp/shellcheck-v0.10.0/shellcheck --version | grep '^version'
-            echo "=== jq 1.7.1 static via relay ==="
-            https_proxy=$P http_proxy=$P curl -sSfL --max-time 60 -o /tmp/jq \
-              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
-            echo "curl exit=$?"
-            chmod +x /tmp/jq 2>/dev/null && /tmp/jq --version
-            echo "=== does jq 1.7.1 fix the empty-input -e bug ==="
-            printf '' | /tmp/jq -e '[.panes[]? | select(.surface_ids // [] | index("x"))] | length > 0'
-            echo "jq1.7 -e empty exit=$? (want nonzero)"
-            echo "PROBE DONE"
-            exit 1
