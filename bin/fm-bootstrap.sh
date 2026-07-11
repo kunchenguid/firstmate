@@ -179,7 +179,12 @@ install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    # Pinned + checksum-verified install of a specific no-mistakes release,
+    # replacing the former unversioned, unverified `curl .../main/docs/install.sh
+    # | sh`. The version pin, per-platform SHA256s, and fail-closed verification
+    # live in fm-install-no-mistakes.sh; a FUTURE step will mirror the artifact to
+    # our own storage and later replace the engine with our own squared-away.
+    no-mistakes) echo "$SCRIPT_DIR/fm-install-no-mistakes.sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi) echo "npm install -g tasks-axi" ;;
     *) return 1 ;;

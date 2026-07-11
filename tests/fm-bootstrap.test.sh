@@ -127,7 +127,10 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  # The no-mistakes install command is now the pinned, checksum-verified helper
+  # (fm-install-no-mistakes.sh) rather than the former unversioned curl|sh; the
+  # helper path is absolute (SCRIPT_DIR = "$ROOT/bin").
+  missing="MISSING: no-mistakes (install: $ROOT/bin/fm-install-no-mistakes.sh)"
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
