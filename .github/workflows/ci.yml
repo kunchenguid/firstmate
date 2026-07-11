@@ -15,7 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+      # Pin ShellCheck to the exact version bin/fm-lint.sh requires (it prints it
+      # via --required-version), instead of floating with the runner image, so CI
+      # and local resolve the identical rule set. The version lives once, in
+      # bin/fm-lint.sh; this step just installs whatever it names and logs it.
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          version="$(bin/fm-lint.sh --required-version)"
+          url="https://github.com/koalaman/shellcheck/releases/download/v${version}/shellcheck-v${version}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o /tmp/shellcheck.tar.xz
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-v${version}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+      # Single owner of the lint definition (file set + config + version). Do not
+      # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
+      - run: bin/fm-lint.sh
 
   tests:
     name: Behavior tests
@@ -27,6 +42,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      # Same pinned ShellCheck as the lint job so tests/fm-lint.test.sh exercises
+      # the one owner against the version it enforces, not the runner default.
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          version="$(bin/fm-lint.sh --required-version)"
+          url="https://github.com/koalaman/shellcheck/releases/download/v${version}/shellcheck-v${version}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o /tmp/shellcheck.tar.xz
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-v${version}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
       - name: Require tmux for e2e tests
         run: |
           set -eu
