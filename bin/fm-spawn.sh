@@ -173,6 +173,8 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_SPAWN_BRANCH=
+ORCA_SPAWN_HEAD=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -192,7 +194,7 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=$? current_head
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -217,6 +219,11 @@ orca_spawn_abort_cleanup() {
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
         } > "$STATE/$ID.meta" 2>/dev/null || true
+      fi
+    elif [ -n "${ORCA_SPAWN_BRANCH:-}" ] && [ -n "${ORCA_SPAWN_HEAD:-}" ]; then
+      current_head=$(git -C "$PROJ_ABS" rev-parse --verify "$ORCA_SPAWN_BRANCH" 2>/dev/null || true)
+      if [ "$current_head" = "$ORCA_SPAWN_HEAD" ] && case "$ORCA_SPAWN_BRANCH" in fm/*) true ;; *) false ;; esac; then
+        git -C "$PROJ_ABS" branch -D "$ORCA_SPAWN_BRANCH" >/dev/null 2>&1 || true
       fi
     fi
   fi
@@ -744,6 +751,8 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    ORCA_SPAWN_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    ORCA_SPAWN_HEAD=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -827,6 +836,9 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  if [ "$BACKEND" = orca ]; then
+    exclude_path '.fm-orca-session'
+  fi
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"

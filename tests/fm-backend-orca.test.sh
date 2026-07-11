@@ -452,6 +452,54 @@ SH
   pass "fm_backend_orca_remove_worktree: propagates git removal failure"
 }
 
+test_spawn_excludes_orca_session_marker() {
+  fmod_case spawn-excludes-session-marker
+  local home data state config repo wt_path exclude_file
+  home="$CASE_DIR/home"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  mkdir -p "$data/marker" "$state" "$config"
+  printf 'brief\n' > "$data/marker/brief.md"
+  repo=$(build_test_repo "$home" repo)
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-spawn.sh" marker "$repo" --backend orca --harness codex >/dev/null
+  wt_path=$(expected_orca_wt "$repo" fm-marker)
+  exclude_file=$(git -C "$wt_path" rev-parse --git-path info/exclude)
+  grep -qxF '.fm-orca-session' "$exclude_file" \
+    || fail "fm-spawn should exclude .fm-orca-session from git status"
+  git -C "$repo" worktree remove --force "$wt_path" >/dev/null 2>&1 || true
+  git -C "$repo" branch -D fm/fm-marker >/dev/null 2>&1 || true
+  rm -rf /tmp/fm-marker
+  pass "fm-spawn.sh: excludes Orca session marker from worktree status"
+}
+
+test_spawn_abort_removes_unmodified_orca_branch() {
+  fmod_case spawn-abort-branch-cleanup
+  local home data config state_file repo out status
+  home="$CASE_DIR/home"
+  data="$home/data"
+  config="$home/config"
+  state_file="$home/not-a-dir-state"
+  mkdir -p "$data/abort" "$config"
+  printf 'brief\n' > "$data/abort/brief.md"
+  printf 'not a directory\n' > "$state_file"
+  repo=$(build_test_repo "$home" repo)
+  out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state_file" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-spawn.sh" abort "$repo" --backend orca --harness codex 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn should fail when state path is not a directory"
+  assert_contains "$out" "cannot create directory" "spawn failure should come from the post-create state setup"
+  if git -C "$repo" show-ref --verify --quiet refs/heads/fm/fm-abort; then
+    fail "abort cleanup should delete the unmodified Orca task branch"
+  fi
+  [ ! -d "$(expected_orca_wt "$repo" fm-abort)" ] || fail "abort cleanup should remove the Orca worktree"
+  rm -rf /tmp/fm-abort
+  pass "fm-spawn.sh: abort cleanup removes unmodified Orca branch"
+}
+
 # ---- composer state -------------------------------------------------------
 
 test_worktree_dir_for_project_registry_path_uses_state_bucket() {
