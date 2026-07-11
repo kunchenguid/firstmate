@@ -73,18 +73,6 @@ jobs:
             # gawk takes over the awk alternative; POSIX classes must work.
             awk --version | head -1
             printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
-      - name: Install Node 22
-        commands:
-          # The image ships Node 20. tests/fm-pi-watch-extension.test.sh imports
-          # the .ts extension directly, which needs Node's native TypeScript
-          # type stripping - default-on only from 22.18.
-          - |
-            set -eu
-            relay=http://sys-proxy-rd-relay.byted.org:8118
-            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
-              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
-            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
-            node --version
       - name: Install jq
         commands:
           - |
@@ -107,6 +95,22 @@ jobs:
               echo "tasks-axi ${have} is older than the required 0.2.2"
               exit 1
             fi
+      - name: Install Node 22
+        commands:
+          # The image ships Node 20, but tests/fm-pi-watch-extension.test.sh
+          # imports the .ts extension directly, which needs Node's native
+          # TypeScript type stripping - default-on only from 22.18.
+          # It goes in its own prefix: unpacking over /usr/local would replace
+          # the image's npm and its internal-registry config, and the
+          # tasks-axi install above needs that npm.
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
+              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
+            mkdir -p /opt/node22
+            tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
+            /opt/node22/bin/node --version
       - name: Fetch default-branch history
         commands:
           # tests/fm-backend.test.sh resolves a merge-base against main and
@@ -128,9 +132,10 @@ jobs:
             set -eu
             id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
             chown -R ci:ci .
-            runuser -u ci -- env HOME=/home/ci PATH="$PATH" bash -c '
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" bash -c '
               set -eu
               [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
+              node --version
               for test_script in tests/*.test.sh; do
                 "$test_script"
               done
