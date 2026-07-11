@@ -138,7 +138,10 @@ Classify each wake this way:
   on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
-  captain-relevant status line the per-wake classifier might miss.
+  captain-relevant status line the per-wake classifier might miss. That scan
+  (`scan_captain_relevant_statuses` in `bin/fm-classify-lib.sh`) skips and
+  removes any `.status` with no matching `state/<id>.meta` - an orphan left
+  behind by a torn-down task - so it can never escalate one even while afk.
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =

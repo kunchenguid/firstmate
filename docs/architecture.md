@@ -18,6 +18,7 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 A `.status`, `.turn-ended`, or `.check.sh` file with no matching `state/<id>.meta` is an orphan left behind by a torn-down task (or a leaked turn-end hook writer that outlived teardown's best-effort process kill); the watcher never classifies it at all, removing it before it can wake anyone, even under afk - the one named exception is `state/x-watch.check.sh`, the X-mode relay shim, which has no per-task meta by design.
+The same guard is enforced inside `scan_captain_relevant_statuses`, the shared heartbeat/catch-all fleet scan used by both the always-on watcher's own heartbeat backstop and the away-mode daemon's housekeeping catch-all, so an orphaned status can never resurface through that backstop path either, even while afk is active.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
