@@ -34,6 +34,7 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 # Skip gracefully if tmux is not installed.
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+command -v perl >/dev/null 2>&1 || { echo "skip: perl not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="afk-e2e-$$"
@@ -72,62 +73,73 @@ LOG_FILE="$STATE_DIR/submitted.log"
 # shellcheck source=bin/fm-supervise-daemon.sh
 . "$DAEMON"
 
-# Private tmux server with a supervisor session.
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50
-SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
-
 # Supervisor pane loop: a small deterministic composer that logs each submitted
 # line verbatim (hex + text + classification). It draws the in-progress input
 # itself instead of relying on the terminal driver's canonical-mode echo, because
 # tmux cursor placement for that echo varies across CI environments.
-LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
+LOOP_SCRIPT="$STATE_DIR/supervisor-loop.pl"
 cat > "$LOOP_SCRIPT" <<'LOOP'
-#!/usr/bin/env bash
-MARK=$'\x1f'
-LOG="$1"
-OLD_STTY=$(stty -g 2>/dev/null || true)
-[ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
-cleanup() {
-  [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use bytes;
 
-_buf=
-redraw() {
-  printf '\r\033[K%s' "$_buf"
-}
-submit_line() {
-  local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
-  _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
-  printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
-  _buf=
-  printf '\r\033[K\n'
-  redraw
+$| = 1;
+my $mark = chr(0x1f);
+my $log = shift @ARGV;
+my $old_stty = `stty -g 2>/dev/null`;
+chomp $old_stty;
+system('stty', '-echo', '-icanon', 'min', '1', 'time', '0') if $old_stty ne '';
+$SIG{INT} = $SIG{TERM} = sub {
+  system('stty', $old_stty) if $old_stty ne '';
+  exit 0;
+};
+END {
+  system('stty', $old_stty) if defined $old_stty && $old_stty ne '';
 }
 
-redraw
-while IFS= read -r -n 1 _ch; do
-  if [ -z "$_ch" ]; then
-    submit_line
-    continue
-  fi
-  case "$_ch" in
-    $'\r'|$'\n') submit_line ;;
-    $'\177'|$'\b') _buf=${_buf%?}; redraw ;;
-    *) _buf="${_buf}${_ch}"; redraw ;;
-  esac
-done
+binmode STDIN;
+binmode STDOUT;
+my $buf = '';
+
+sub redraw {
+  print "\r\033[K$buf";
+}
+
+sub submit_line {
+  my $class = substr($buf, 0, 1) eq $mark ? 'injection' : 'user';
+  my $hex = unpack('H*', $buf);
+  open my $fh, '>>', $log or die "open log: $!";
+  binmode $fh;
+  print {$fh} "$hex\t$buf\t$class\n";
+  close $fh;
+  $buf = '';
+  print "\r\033[K\n";
+  redraw();
+}
+
+redraw();
+while (sysread(STDIN, my $ch, 1)) {
+  if ($ch eq "\r" || $ch eq "\n") {
+    submit_line();
+  } elsif ($ch eq "\177" || $ch eq "\b") {
+    chop $buf;
+    redraw();
+  } else {
+    $buf .= $ch;
+    redraw();
+  }
+}
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-# Start the loop in the supervisor pane.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
-  "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
+# Private tmux server with a supervisor pane running the composer directly.
+# The shell-target guard refuses panes whose foreground command is a shell, so
+# the fixture must model a real agent-like process instead of a shell that was
+# later sent a command.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50 \
+  "perl '$LOOP_SCRIPT' '$LOG_FILE'"
+SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
 sleep 1  # let the loop start and settle
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows

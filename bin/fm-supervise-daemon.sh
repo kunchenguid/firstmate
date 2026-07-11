@@ -19,6 +19,11 @@
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
 #
+# SHELL-TARGET SAFETY. When the selected supervisor backend can report the
+# pane's foreground command, the daemon refuses to arm or inject if the target
+# is a login shell. If fallback discovery lands on a shell, set
+# FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND to firstmate's own agent pane.
+#
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
 # at the start of a message. Firstmate's contract: a message that starts with
@@ -507,6 +512,15 @@ pane_input_pending() {  # <target> [backend]
   [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
 }
 
+supervisor_target_login_shell() {  # <backend> <target> -> prints command on match
+  local backend=$1 target=$2 comm
+  comm=$(fm_backend_current_command "$backend" "$target" 2>/dev/null) || return 1
+  [ -n "$comm" ] || return 1
+  fm_is_login_shell_name "$comm" || return 1
+  printf '%s' "$comm"
+  return 0
+}
+
 task_window_backend() {  # <window> <state>
   local win=$1 state=$2 task meta
   task=$(window_to_task "$win" "$state")
@@ -714,7 +728,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict
+  local msg=$1 state target backend shell_cmd retries sleep_s verdict
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -734,6 +748,10 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
+  if shell_cmd=$(supervisor_target_login_shell "$backend" "$target"); then
+    log "inject refused: supervisor target '$target' is a login shell (current command: $shell_cmd); buffer preserved"
+    return 1
+  fi
   # (3) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   #   b) pane_input_pending: the cursor line has real unsubmitted text after
@@ -950,6 +968,14 @@ fm_super_main() {
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
+  local shell_cmd
+  if shell_cmd=$(supervisor_target_login_shell "$BACKEND" "$TARGET"); then
+    echo "error: away-mode daemon refuses to arm: supervisor target '$TARGET' on backend '$BACKEND' is a login shell (current command: $shell_cmd), not firstmate's agent pane. Set FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND to firstmate's own pane." >&2
+    log "startup failed: target '$TARGET' is a login shell (backend=$BACKEND, command=$shell_cmd, source=$target_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1

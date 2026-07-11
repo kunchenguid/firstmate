@@ -39,6 +39,15 @@
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
+fm_is_login_shell_name() {  # <command-name>
+  local name=${1##*/}
+  name=${name#-}
+  case "$name" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
 # normal-intensity text, the text a human actually typed. Dim/faint runs are

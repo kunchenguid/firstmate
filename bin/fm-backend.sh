@@ -605,6 +605,21 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
   esac
 }
 
+# fm_backend_current_command: foreground process command for backends that can
+# expose it without side effects.
+# tmux owns the verified implementation via `#{pane_current_command}`.
+# Backends without an equivalent return non-zero so callers can preserve
+# existing behavior instead of inventing confidence they do not have.
+fm_backend_current_command() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_current_command "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

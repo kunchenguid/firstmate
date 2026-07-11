@@ -141,11 +141,9 @@ fm_backend_tmux_current_command() {  # <target>
 fm_backend_tmux_agent_alive() {  # <target>
   local target=$1 comm
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
-  comm=${comm#-}
-  case "$comm" in
+  case "${comm#-}" in
     '') printf 'unknown' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
-    *) printf 'unknown' ;;
+    *) if fm_is_login_shell_name "$comm"; then printf 'dead'; else printf 'unknown'; fi ;;
   esac
 }

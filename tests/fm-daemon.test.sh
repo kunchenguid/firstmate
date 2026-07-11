@@ -423,6 +423,74 @@ test_busy_guard_defers_when_supervisor_busy() {
   pass "busy-guard defers injection when supervisor pane is busy"
 }
 
+test_inject_refuses_login_shell_target_preserves_buffer() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase inject-login-shell)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '$ \n' > "$capture"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
+    fail "escalate_flush succeeded against a login-shell supervisor target"
+  fi
+  [ ! -s "$sent" ] || fail "daemon typed into a login-shell target"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when login-shell target was refused"
+  grep -F "done: PR 1" "$state/.subsuper-escalations" >/dev/null \
+    || fail "buffered escalation content changed after login-shell refusal"
+  pass "inject guard refuses a login-shell target and preserves the buffered escalation"
+}
+
+test_inject_allows_non_shell_target_and_flushes() {
+  local dir state fakebin sent capture n
+  dir=$(make_supercase inject-agent-pane)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed against a non-shell agent-pane target"
+  grep -F "Supervisor escalate" "$sent" >/dev/null || fail "digest not typed for non-shell target"
+  n=$(grep -c '\[ENTER\]' "$sent")
+  [ "$n" -eq 1 ] || fail "expected one submitted Enter for non-shell target, got $n"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after non-shell target flush"
+  pass "inject guard allows a non-shell agent-pane target and preserves the normal flush path"
+}
+
+test_startup_refuses_fallback_login_shell_releases_lock() {
+  local dir state fakebin out err rc
+  dir=$(make_supercase startup-login-shell)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/daemon.out"
+  err="$dir/daemon.err"
+  rc=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' \
+    FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CURRENT_COMMAND=dash \
+    "$DAEMON" >"$out" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "daemon startup succeeded against fallback login-shell target"
+  grep -F "refuses to arm" "$err" >/dev/null || fail "startup refusal did not name the problem: $(cat "$err")"
+  grep -F "FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND" "$err" >/dev/null \
+    || fail "startup refusal did not name the explicit-target fix: $(cat "$err")"
+  [ ! -e "$state/.supervise-daemon.pid" ] || fail "pidfile survived startup refusal"
+  [ ! -e "$state/.supervise-daemon.lock" ] && [ ! -L "$state/.supervise-daemon.lock" ] \
+    || fail "lock survived startup refusal"
+  if find "$state" -maxdepth 1 -name '.supervise-daemon.lock.owner.*' -print -quit | grep -q .; then
+    fail "lock owner dir survived startup refusal"
+  fi
+  pass "startup refuses a fallback login-shell target, exits non-zero, and releases pidfile + lock"
+}
+
 test_marker_detection() {
   # message_is_injection: marker present -> injection; absent -> real message
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
@@ -991,6 +1059,9 @@ test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
+test_inject_refuses_login_shell_target_preserves_buffer
+test_inject_allows_non_shell_target_and_flushes
+test_startup_refuses_fallback_login_shell_releases_lock
 test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
