@@ -93,6 +93,41 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Away-mode Slack DM delivery (config/afk-slack-dm)
+
+`config/afk-slack-dm` is an optional local, gitignored file that changes the `/afk` escalation delivery channel from firstmate-pane injection to direct Slack DM.
+When the file is absent, away-mode behavior is unchanged.
+When the file exists, `bin/fm-supervise-daemon.sh` still uses its existing classification, batching, dedupe, retry, and durable buffer, but `escalate_flush` calls `bin/fm-slack-dm.mjs` at the same flush boundary.
+A successful Slack DM is the acknowledgement that clears `state/.subsuper-escalations`.
+A failed Slack DM leaves the buffer and sidecar timestamp intact for the next daemon retry, and writes the secret-free marker `state/.subsuper-slack-dm-failed` for catch-up.
+Terminal injection is not counted as captain delivery while this config is active.
+
+The config format is key-value, one setting per non-comment line:
+
+```text
+destination=U0123456789
+sender=slack-api
+token-source=file:/absolute/path/to/dedicated-slack-bot-token
+# Or:
+# token-source=command:/absolute/path/to/print-dedicated-slack-bot-token
+```
+
+`destination` is required and must be a Slack user ID beginning with `U` or `W`.
+Channel IDs, group IDs, and DM conversation IDs beginning with `C`, `G`, or `D` are rejected.
+`sender` is optional today and defaults to `slack-api`, the only implemented sender, which posts JSON `{channel, text}` to Slack `chat.postMessage` with Bearer auth.
+`token-source` is required for real delivery and may be `file:<absolute path>`, `command:<command>`, or `none`.
+The token is read inside the helper process and is never passed as an argv value to another command.
+Do not put token literals in this config; command sources should invoke a local credential reader that prints the token on stdout.
+Empty output, an absent file, or a non-zero token command degrades gracefully as a failed delivery: no token is logged, the buffer is retained, and the daemon retries.
+
+Do not source broad production or staging firehose tokens for this file.
+Unattended daemon delivery requires either a dedicated least-privilege Slack bot token or a future MCP-call token-source plugin that performs the send without exposing a general-purpose token.
+See [`examples/afk-slack-dm`](examples/afk-slack-dm) for a copyable local config.
+
+An explicit status-digest DM can be requested by creating `state/.subsuper-status-digest-dm-request`.
+On the next housekeeping pass the daemon converts the current status tails into one buffered digest item and removes the request marker.
+This does not broaden routine wake classification; ordinary `working:` updates still self-handle unless that explicit marker exists.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.

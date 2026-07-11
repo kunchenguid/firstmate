@@ -174,6 +174,17 @@ marker, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
 the marker lets firstmate distinguish it from a real captain message.
 
+## Slack DM delivery mode
+
+If local `config/afk-slack-dm` exists, the same escalation buffer flushes through `bin/fm-slack-dm.mjs` instead of pane injection.
+The config schema and token-source contract live in `docs/configuration.md` "Away-mode Slack DM delivery"; do not restate them here.
+A successful DM is the captain-facing acknowledgement and clears `state/.subsuper-escalations`.
+A failed DM retains the buffer and sidecar timestamp for retry, and writes the secret-free catch-up marker `state/.subsuper-slack-dm-failed`.
+Terminal injection is not counted as captain delivery while Slack DM mode is configured.
+Messages sent by the helper must begin `AI agent for Tim here —` and the helper rejects Slack channel, group, and DM-conversation IDs.
+An explicit status digest DM request is represented by `state/.subsuper-status-digest-dm-request`; housekeeping converts it into one buffered digest item, then removes the marker.
+This explicit request does not broaden routine classification: ordinary `working:` and other non-captain-relevant statuses still self-handle unless that marker exists.
+
 ## Injection hardening
 
 - **Single-line digest** - embedded newlines are collapsed to a literal

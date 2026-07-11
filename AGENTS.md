@@ -71,6 +71,7 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/afk-slack-dm  optional away-mode Slack DM delivery config; LOCAL, gitignored; absent preserves pane-injection delivery; see docs/configuration.md "Away-mode Slack DM delivery"
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -355,6 +356,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 - A marked message while away mode is active is internal escalation and does not exit away mode.
 - A message beginning `/afk` refreshes away mode.
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.
+- When `config/afk-slack-dm` exists, a successful Slack DM is the daemon's captain-facing acknowledgement of a flushed escalation; a failed DM preserves the buffered escalation and writes a secret-free catch-up marker, and terminal injection is never captain delivery.
 - Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
 - Bias ambiguous input toward exit because a present captain takes precedence.
 

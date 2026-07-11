@@ -121,6 +121,8 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
+#          FM_SLACK_DM_BIN          override the Slack DM helper used when local
+#                                   config/afk-slack-dm exists (testing seam).
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
@@ -189,6 +191,10 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+SLACK_DM_CONFIG_NAME="afk-slack-dm"
+SLACK_DM_FAIL_MARKER_NAME=".subsuper-slack-dm-failed"
+SLACK_DM_STATUS_DIGEST_REQUEST_NAME=".subsuper-status-digest-dm-request"
+SLACK_DM_PREFIX="AI agent for Tim here —"
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -612,6 +618,119 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+afk_slack_dm_config_path() {
+  printf '%s/%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$SLACK_DM_CONFIG_NAME"
+}
+
+afk_slack_dm_configured() {
+  [ -f "$(afk_slack_dm_config_path)" ]
+}
+
+afk_slack_dm_marker() {  # <state>
+  printf '%s/%s' "$1" "$SLACK_DM_FAIL_MARKER_NAME"
+}
+
+afk_slack_dm_write_failure_marker() {  # <state> <reason>
+  local state=$1 reason=$2 marker
+  marker=$(afk_slack_dm_marker "$state")
+  {
+    printf 'fm away-mode Slack DM delivery failed as of %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Buffered escalations remain in state/.subsuper-escalations for retry and catch-up.\n'
+    printf 'Terminal injection is not counted as captain delivery while config/%s is active.\n' "$SLACK_DM_CONFIG_NAME"
+    printf 'Last result: %s\n' "$reason"
+  } > "$marker" 2>/dev/null || true
+}
+
+afk_slack_dm_sanitize_item() {  # <buffer-line>
+  local item=$1 age
+  item=$(_collapse_newlines "$item")
+  case "$item" in
+    *.status:\ *) item=${item#*: } ;;
+  esac
+  item=${item%" (catch-all scan)"}
+  case "$item" in
+    stale\ +\ terminal\ status:\ *) item=${item#stale + terminal status: } ;;
+    check:\ *:\ *) item=${item#check: }; item=${item#*: } ;;
+    unknown\ wake:*) item="An unknown away-mode event needs attention." ;;
+  esac
+  if [[ $item =~ ^stale\ persisted\ ([0-9]+)s ]]; then
+    age=${BASH_REMATCH[1]}
+    item="A worker appears stuck after ${age}s without progress."
+  elif [[ $item =~ ^paused\ ([0-9]+)s ]]; then
+    age=${BASH_REMATCH[1]}
+    item="An external wait has been idle for ${age}s and should be rechecked."
+  fi
+  printf '%s' "$item"
+}
+
+afk_slack_dm_message_from_buffer() {  # <buffer-file>
+  local buf=$1 line cleaned n=0
+  printf '%s update from your fleet:\n' "$SLACK_DM_PREFIX"
+  while IFS= read -r line || [ -n "$line" ]; do
+    cleaned=$(afk_slack_dm_sanitize_item "$line")
+    [ -n "$cleaned" ] || continue
+    printf -- '- %s\n' "$cleaned"
+    n=$((n + 1))
+  done < "$buf"
+  [ "$n" -gt 0 ] || printf -- '- No current status details were available.\n'
+}
+
+afk_slack_dm_send_buffer() {  # <state> <buffer-file>
+  local state=$1 buf=$2 helper cfg msg_tmp rc
+  helper="${FM_SLACK_DM_BIN:-$FM_DAEMON_DIR/fm-slack-dm.mjs}"
+  cfg=$(afk_slack_dm_config_path)
+  if [ ! -x "$helper" ]; then
+    afk_slack_dm_write_failure_marker "$state" "helper-unavailable"
+    log "slack dm failed: helper unavailable; buffer preserved"
+    return 1
+  fi
+  msg_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-slack-dm-message.XXXXXX") || {
+    afk_slack_dm_write_failure_marker "$state" "message-tempfile-failed"
+    return 1
+  }
+  afk_slack_dm_message_from_buffer "$buf" > "$msg_tmp"
+  if "$helper" --config "$cfg" --message-file "$msg_tmp" >/dev/null 2>&1; then
+    rm -f "$msg_tmp"
+    rm -f "$(afk_slack_dm_marker "$state")"
+    log "slack dm delivered: buffered escalation acknowledged"
+    return 0
+  fi
+  rc=$?
+  rm -f "$msg_tmp"
+  afk_slack_dm_write_failure_marker "$state" "helper-exit-$rc"
+  log "slack dm failed: helper exited $rc; buffer preserved"
+  return 1
+}
+
+afk_status_digest_item() {  # <state>
+  local state=$1 f last count=0 msg=""
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    last=$(last_status_line "$f")
+    [ -n "$last" ] || continue
+    msg="${msg}${msg:+ | }$last"
+    count=$((count + 1))
+  done
+  if [ "$count" -eq 0 ]; then
+    printf 'status digest requested: no active status updates'
+  else
+    printf 'status digest requested (%s update(s)): %s' "$count" "$msg"
+  fi
+}
+
+afk_status_digest_request_flush() {  # <state>
+  local state=$1 req
+  req="$state/$SLACK_DM_STATUS_DIGEST_REQUEST_NAME"
+  [ -e "$req" ] || return 0
+  if ! afk_slack_dm_configured; then
+    rm -f "$req"
+    log "status digest DM request ignored: Slack DM config absent"
+    return 0
+  fi
+  escalate_add "$state" "$(afk_status_digest_item "$state")"
+  rm -f "$req"
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
@@ -625,6 +744,10 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  if afk_slack_dm_configured; then
+    if afk_slack_dm_send_buffer "$state" "$buf"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+    return 1
+  fi
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
@@ -932,9 +1055,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs defer_marker
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+  afk_status_digest_request_flush "$state"
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -952,16 +1076,22 @@ housekeeping() {  # <state>
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    defer_marker="$state/.subsuper-inject-wedged"
+    afk_slack_dm_configured && defer_marker=$(afk_slack_dm_marker "$state")
+    # Throttle the alarm to once per max-defer window. The active delivery
+    # marker doubles as the throttle: pane wedge marker for injection mode,
+    # Slack failure marker for DM mode.
     if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+       && [ "$(_file_age "$defer_marker")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
-        inject_wedge_alarm "$state" "$oldest"
+        if afk_slack_dm_configured; then
+          afk_slack_dm_write_failure_marker "$state" "max-defer-${oldest}s"
+        else
+          inject_wedge_alarm "$state" "$oldest"
+        fi
       fi
     fi
   fi
