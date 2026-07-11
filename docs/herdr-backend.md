@@ -687,8 +687,6 @@ Dedupe (one wake per `->blocked` edge, marker cleared when the pane returns to `
 
 ## Known gaps and follow-up notes
 
-- **RESOLVED: `events.subscribe` native push.** The immediate blocked-state escalation described in "Native `pane.agent_status_changed` push escalation" above replaces the former poll-only consumption of the busy-state read.
-  A crew going `blocked` now wakes its supervisor sub-second through the native event stream, with the poll loop retained as the permanent fail-closed backstop.
 - **Backend-specific bootstrap detection is absent.** `bin/fm-bootstrap.sh` still requires `tmux` outside Orca mode, and does not yet conditionally add `herdr` and `jq` when a backend selection resolves to herdr.
   The version/tool gate happens at spawn time instead and refuses loudly, so this is bootstrap-detection polish, not a functional gap.
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.
