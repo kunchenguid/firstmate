@@ -49,6 +49,12 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
@@ -618,6 +624,24 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_herdr_capture_ansi() {  # <target> <lines>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-200} fetch out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fetch=$lines
+  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
+# Thin adapter over the shared plain-text stripper (bin/fm-composer-lib.sh),
+# used only for STRUCTURAL row/shape detection where ghost text must be kept so
+# the box border or bare prompt glyph is still visible. Content extraction uses
+# the shared fm_composer_strip_ghost instead.
+fm_backend_herdr_strip_ansi() {  # <text>
+  printf '%s' "$1" | fm_composer_strip_ansi
+}
+
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
@@ -651,9 +675,12 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
 #              through to `unknown` instead of being misread as delivered.
 #
-#   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
+#   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder). Safe to treat as submitted.
+#             placeholder), or only de-emphasised ANSI ghost/placeholder text
+#             recognized by the shared fm_composer_strip_ghost extractor
+#             (dim/faint or dark-TRUECOLOR foreground). Safe to treat as
+#             submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the
@@ -663,16 +690,16 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #   unknown - the pane could not be read, or no composer row (of either shape)
 #             was found in the captured window.
 #
-# KNOWN REMAINING GAP (docs/herdr-backend.md "Incident (2026-07-07)"): codex's
-# idle composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") rather than blank or a fixed placeholder string, so it cannot be
-# told apart from real pending input by pattern matching alone - a genuinely
-# idle codex composer under herdr classifies as "pending", not "empty". This
-# makes injection defer forever rather than redeliver, which is a narrower,
-# already-safe failure mode (the buffer is preserved, never silently lost, and
-# the max-defer wedge alarm still fires) - not fixed here; a real fix needs
-# either an upstream herdr cursor-row/style primitive or a codex-specific
-# signal, neither available today.
+# Ghost/placeholder note: herdr's ANSI pane read preserves the harness's own
+# de-emphasis styling, and the classifier extracts real typed content with the
+# shared fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops dim/faint
+# runs (claude's rotating prompt suggestion, codex's idle suggestion after the
+# bare `›` prompt) AND dark/muted truecolor foreground runs (grok's placeholder),
+# while keeping non-de-emphasised real typed input. This is the same owner the
+# tmux adapter routes through, so the two backends cannot drift (task
+# afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
+# that recognized only codex's bold-wrapped bare prompt and missed claude's own
+# dim ghost - the overnight away-mode injection wedge on the primary claude pane.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -683,52 +710,58 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed stripped="" found=0 shape=""
-  cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  # Structural scan: locate the bottom-most composer row and remember its RAW
+  # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
+  # keeps ghost text so the border/prompt glyph is still visible); the raw row is
+  # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed=$(fm_backend_herdr_strip_ansi "$line")
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
-        stripped=$trimmed
         shape=bordered
+        raw_match=$line
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
-          stripped=$trimmed
           shape=bare
+          raw_match=$line
           found=1
         fi
         ;;
     esac
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # Content: extract the real typed text from the raw row with the shared,
+  # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
+  # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
+  # faint byte-pattern check (which recognized only Codex's bold-wrapped bare
+  # prompt and missed claude's own dim prompt-suggestion ghost - the overnight
+  # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
+  # dark box border too, which is why the bordered flag was read from the plain
+  # shape above, not from this ghost-stripped content.
+  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bordered ]; then
-    # Strip the border glyphs, then trim again.
+    bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
   fi
-  # A bare prompt glyph = empty composer.
-  case "$stripped" in
-    '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # Strip a leading prompt glyph before judging what remains.
-  case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'
+  # Delegate the empty/pending/unknown decision to the shared owner. The bare
+  # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
+  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # via the no-composer-row path above, exactly as before.
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -749,18 +782,17 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # semantic signal regardless of what text a harness's idle composer happens
 # to display.
 #
-# Incident (2026-07-07): a redelivery loop in the away-mode daemon. Root
-# cause: fm_backend_herdr_composer_state's structural row classifier
-# recognizes only bordered and two hardcoded bare prompt glyphs; real codex's
-# IDLE composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") that no static pattern can tell apart from genuinely unsubmitted
-# input, so a codex confirmation built on composer content classified a
-# landed submit as still-"pending" forever - see docs/herdr-backend.md for
-# the full account. Composer content is retained for other callers (the
-# away-mode daemon's PRE-injection empty-box guard, still dispatched via
-# fm_backend_composer_state / fm_backend_herdr_composer_state, unchanged) and
-# for submit attempts whose pre-Enter agent-state baseline is not legibly
-# idle.
+# Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
+# away-mode daemon. Root cause: composer-content submit confirmation was too
+# sensitive to harness rendering details. Real claude/codex use bare prompt
+# rows, and real codex adds dynamic idle suggestions after `›`; the later
+# ANSI-aware composer classifier now handles the pre-injection guard for that
+# Codex shape, but idle-baseline submit confirmation deliberately stays on
+# native agent-state so delivery does not depend on composer text. Composer
+# content is retained for other callers (the away-mode daemon's PRE-injection
+# empty-box guard, still dispatched via fm_backend_composer_state /
+# fm_backend_herdr_composer_state) and for submit attempts whose pre-Enter
+# agent-state baseline is not legibly idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a

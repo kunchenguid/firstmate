@@ -9,7 +9,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/orca" <<'SH'
 #!/usr/bin/env bash
@@ -49,7 +49,7 @@ orca_case() {  # <name> -> sets CASE_DIR LOG RESP FB
 }
 
 neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
-  local dir=$1 root="$1/root"
+  local root="$1/root"
   mkdir -p "$root/bin"
   cat > "$root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -195,6 +195,20 @@ test_composer_state_popup_placeholder_fill_is_pending() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
   [ "$out" = pending ] || fail "a popup-close-with-placeholder-fill must still read as pending (not yet submitted), got '$out'"
   pass "fm_backend_orca_composer_state: a slash-command popup's argument-hint placeholder still reads pending"
+}
+
+# Dead-shell injection safety (task fm-composer-shellglyph-safety): a pane whose
+# agent has exited to a bare login shell has no bordered composer row, so the
+# classifier finds nothing and reports `unknown` - NOT a safe (empty) injection
+# target. Covers the same guarantee herdr/cmux/tmux tests pin for their backends.
+test_composer_state_bare_shell_prompt_is_unknown() {
+  local out
+  orca_case composer-bare-shell
+  printf '{"ok":true,"result":{"terminal":{"tail":["some earlier output","kunchen@mac firstmate $ "]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = unknown ] || fail "a bare dead-shell prompt (no bordered composer row) must read unknown, got '$out'"
+  pass "fm_backend_orca_composer_state: a bare dead-shell prompt reads unknown (unsafe-for-injection), never empty"
 }
 
 test_send_text_submit_popup_autocomplete_requires_second_enter() {
@@ -698,9 +712,11 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
   [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
   printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1265,6 +1281,7 @@ test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send
 test_send_text_submit_reports_send_failed

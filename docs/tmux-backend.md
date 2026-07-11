@@ -12,12 +12,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
-- `git` with GitHub auth (`gh auth login`).
-- `node`, required by firstmate's universal toolchain.
-- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer and `quota-axi` for bootstrap-managed backlog and dispatch support.
-
-The first mate detects missing tools at session start and offers to install them after you approve.
+- The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
 
 ## Selecting it
 
@@ -58,7 +53,7 @@ tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 
 Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
-You do not need to attach at all for routine supervision: the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `bin/fm-send.sh fm-<id> "<text>"` when it needs to intervene.
+You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
 ## Verifying it works
 
@@ -78,6 +73,9 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
+
+Agent liveness and composer safety are separate checks.
+During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
@@ -111,7 +109,7 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
-Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=1`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
+Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
 ## Limitations
 

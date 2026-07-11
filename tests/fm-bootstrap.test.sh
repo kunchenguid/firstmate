@@ -7,8 +7,10 @@
 # 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# quota-axi is on PATH, whether the local backend config opts out of tasks-axi
-# backlog mutations, and which no-mistakes version is on PATH.
+# tasks-axi update advertises --archive-body, whether its mv help advertises
+# multi-ID moves, whether quota-axi is on PATH,
+# whether the local backend config opts out of tasks-axi backlog mutations, and
+# which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -71,11 +73,26 @@ SH
 }
 
 add_tasks_axi() {
-  local fakebin=$1 version=$2
+  local fakebin=$1 version=$2 archive_body=${3:-yes} multi_id=${4:-yes} archive_line mv_usage
+  archive_line=""
+  [ "$archive_body" = yes ] && archive_line='  --archive-body'
+  mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  [ "$multi_id" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
   cat > "$fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
   printf '%s\n' '$version'
+  exit 0
+fi
+if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  [ -z '$archive_line' ] || printf '%s\n' '$archive_line'
+  exit 0
+fi
+if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '$mv_usage'
+  exit 0
 fi
 exit 0
 SH
@@ -200,7 +217,7 @@ run_bootstrap_timeout_case() {
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
+  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -215,7 +232,21 @@ test_bootstrap_reporting() {
     if [ "$tasks" = "-" ]; then
       rm -f "$fakebin/tasks-axi"
     else
-      add_tasks_axi "$fakebin" "$tasks"
+      archive_body=yes
+      multi_id=yes
+      case "$tasks" in
+        *:noarchive)
+          archive_body=no
+          tasks=${tasks%:noarchive}
+          ;;
+      esac
+      case "$tasks" in
+        *:nomulti)
+          multi_id=no
+          tasks=${tasks%:nomulti}
+          ;;
+      esac
+      add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -243,6 +274,8 @@ treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^M
 compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
@@ -279,6 +312,32 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_git_is_required_with_supported_install_instruction() {
+  local case_dir fakebin bash_env out expected
+  case_dir="$TMP_ROOT/git-required"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/no-git.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+git() {
+  return 127
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  expected="MISSING: git (install: brew install git  # or the platform's package manager)"
+  [ "$out" = "$expected" ] || fail "missing git should report the supported install instruction, got: $out"
+  pass "bootstrap requires git with an install instruction"
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
@@ -448,6 +507,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

@@ -6,6 +6,26 @@
 # Input may be a full rule object with `use` and optional `select`, a single
 # profile object, or an ordered array of profile objects.
 # Output is one compact JSON profile object on stdout.
+#
+# quota-balanced is deterministic, and this header is the single owner of its
+# contract:
+#   - It runs quota-axi --json (or the --quota-json fixture).
+#   - Per candidate vendor it takes the minimum percentRemaining across that
+#     vendor's GENERAL windows only - Claude five_hour and seven_day, Codex
+#     five_hour and weekly - ignoring model-scoped windows such as model:fable
+#     and model:codex_bengalfox:*.
+#   - The vendor with the higher minimum remaining quota wins; an exact tie
+#     between equally trusted candidates uses the first array element.
+#   - Stale-but-cached general-window numbers are usable, but a fresh candidate
+#     wins unless the stale candidate's minimum is at least the stale-clear
+#     margin higher (default 20 points - the definition of "clearly less
+#     constrained").
+#   - A vendor absent from quota output, or with no usable general windows, is
+#     unavailable; selection happens among available candidates.
+#   - If quota-axi is missing, exits non-zero, returns unparseable JSON, or no
+#     candidate is usable, the reason is logged to stderr and the first array
+#     element is printed - quota trouble never blocks dispatch.
+#
 # quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
@@ -17,7 +37,11 @@ QUOTA_JSON_FILE=
 ARGS=()
 
 usage() {
-  sed -n '2,10p' "$0" >&2
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0" >&2
 }
 
 log() {

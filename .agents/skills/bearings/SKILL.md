@@ -18,8 +18,9 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 
 1. **Gather live fleet state, cheaply and in this order.**
    Read each source once and do not re-derive what a script already reports.
-   - `data/backlog.md` - the In flight / Queued / Done sections are the spine of the report; the active backend edits this file in place, so reading it directly is always correct.
-   - Each `state/<id>.meta` for the current direct-report set, then each task's live state via `bin/fm-crew-state.sh <id>`.
+   - `bin/fm-fleet-snapshot.sh --json` - the deterministic fleet source for backlog rows, task metadata, current state, endpoint facts, PR/report pointers, scout report paths, status-event hints, and secondmate return-channel guidance.
+     Its schema is owned by the script header; consume those structured fields before rereading raw fleet files.
+   - If the snapshot command is unavailable or its JSON is invalid, fall back to `data/backlog.md`, each `state/<id>.meta`, and each task's live state via `bin/fm-crew-state.sh <id>`.
      Never infer current state from a raw `tail` of `state/<id>.status`: that log is an append-only wake-event history and its last line goes stale the moment a resolved gate lets a run resume, while `bin/fm-crew-state.sh` reconciles the authoritative run-step over the stale log line - which is exactly what a catch-up report needs.
    - Open PRs awaiting the captain's merge, via `gh-axi` per repo touched by in-flight or recent tasks.
      A PR-based ship task records `pr=` in `state/<id>.meta`; collect those repos, list their open PRs, and cross-reference each task's recorded PR.

@@ -2,16 +2,21 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> <project>...
+#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
-#       That project list is non-exclusive provisioning data. The charter brief
+#       That project list is non-exclusive provisioning data. Pass --no-projects
+#       instead of a project list to seed a project-less home for a domain whose
+#       subject is the firstmate repo itself; it is mutually exclusive with a
+#       project list, and omitting both still fails loudly. A project-less seed
+#       refuses a home with project clones or project-registry entries, so it
+#       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, a .fm-secondmate-home marker is written, and
+#       initialized, an ignored .fm-secondmate-home identity marker is written, and
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
@@ -35,7 +40,7 @@ REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -800,12 +805,85 @@ write_registry() {
   mv "$tmp" "$REG"
 }
 
+refuse_populated_projectless_home() {
+  local home=$1 project_path project registry_entries
+  local clones=()
+  local registry_projects=()
+  if [ -L "$home/projects" ]; then
+    echo "error: cannot inspect existing projects directory at $home/projects because it is a symlink; resolve the symlink or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
+  if [ -e "$home/projects" ] && [ ! -d "$home/projects" ]; then
+    echo "error: cannot inspect existing projects directory at $home/projects because it is not a directory; resolve its path or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
+  if [ -d "$home/projects" ] && ! find -P "$home/projects" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1; then
+    echo "error: cannot inspect existing projects directory at $home/projects; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
+    return 1
+  fi
+  for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
+    [ -e "$project_path" ] || [ -L "$project_path" ] || continue
+    clones+=("$(basename "$project_path")")
+  done
+  if [ -f "$home/data/projects.md" ]; then
+    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+      echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
+      return 1
+    }
+    while IFS= read -r project; do
+      [ -n "$project" ] && registry_projects+=("$project")
+    done <<< "$registry_entries"
+  fi
+  [ "${#clones[@]}" -eq 0 ] && [ "${#registry_projects[@]}" -eq 0 ] && return 0
+
+  echo "error: cannot seed project-less secondmate home $home because it contains project data" >&2
+  if [ "${#clones[@]}" -gt 0 ]; then
+    printf 'error: projects/ entries: %s\n' "$(join_projects "${clones[@]}")" >&2
+  fi
+  if [ "${#registry_projects[@]}" -gt 0 ]; then
+    printf 'error: data/projects.md entries: %s\n' "$(join_projects "${registry_projects[@]}")" >&2
+  fi
+  echo "error: retire or clean this home first before seeding with --no-projects" >&2
+  return 1
+}
+
+refuse_projectful_projectless_charter() {
+  local id=$1 brief=$2 project_clones
+  project_clones=$(brief_section_text "$brief" "Project clones")
+  if printf '%s\n' "$project_clones" | grep -F 'None. This is a project-less domain' >/dev/null 2>&1 \
+    && ! printf '%s\n' "$project_clones" | grep -Eq '^[[:space:]]*-[[:space:]]+'; then
+    return 0
+  fi
+  printf 'error: cannot seed project-less secondmate home because existing charter brief at %s conflicts with --no-projects\n' "$brief" >&2
+  printf 'error: re-scaffold it with fm-brief.sh %s --secondmate --no-projects or remove the stale brief before seeding\n' "$id" >&2
+  return 1
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local no_projects=0 arg
+  local filtered=()
   shift 2
-  [ $# -gt 0 ] || { echo "error: secondmate needs at least one project" >&2; return 1; }
+  # A deliberate --no-projects signal (anywhere in the project position) seeds a
+  # project-less home; an accidental omission with no signal still fails loudly.
+  for arg in "$@"; do
+    if [ "$arg" = "--no-projects" ]; then
+      no_projects=1
+    else
+      filtered+=("$arg")
+    fi
+  done
+  if [ "${#filtered[@]}" -gt 0 ]; then
+    set -- "${filtered[@]}"
+  else
+    set --
+  fi
+  if [ "$no_projects" -eq 1 ]; then
+    [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
+  else
+    [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  fi
 
-  mkdir -p "$DATA"
   validate_registry
   for project in "$@"; do
     validate_seed_project "$project"
@@ -850,9 +928,15 @@ seed_home() {
   SEED_HOME="$home"
   validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  if [ "$no_projects" -eq 1 ]; then
+    refuse_populated_projectless_home "$home" || return 1
+    if [ -f "$SEED_PARENT_BRIEF" ]; then
+      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+    fi
+  fi
+  mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
@@ -873,7 +957,11 @@ seed_home() {
       return 1
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    if [ "$no_projects" -eq 1 ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+    else
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    fi
     SEED_PARENT_BRIEF_CREATED=1
   fi
   if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
