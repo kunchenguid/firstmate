@@ -1096,6 +1096,221 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   pass "matching non-terminal stale suppressors repair missing or corrupt stale-since timers"
 }
 
+# --- a finished crew awaiting merge surfaces once per situation ---------------
+# Regression for the 2026-07-11 merge-wait incident (task fix-sync-ssh-m4): a
+# ship task whose run finished (done via run-step, PR open awaiting the captain's
+# merge) was re-surfaced as stale on effectively every poll. Two mechanisms: a
+# live idle agent's ticking status bar changes the pane hash every minute, so the
+# hash-keyed .stale-* suppressor never held; and a paused: log line superseded by
+# run-step precedence re-entered classification (and surfacing) on every poll
+# through the status_is_paused re-entry branch. The fix keys surfaced stales on
+# the SITUATION (branch + last status line, .stale-surfaced-*): an identical
+# situation is absorbed across polls, hash ticks, and watcher restarts, while
+# positive working evidence (busy pane, active run) re-arms surfacing.
+
+test_terminal_stale_not_resurfaced_per_pane_hash_tick() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case terminal-stale-tick); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-merge-wait"
+  printf 'composer idle | 11:52' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-wait.meta"
+  printf 'done: PR https://example.test/pr/9 checks green\n' > "$state/merge-wait.status"
+  sig=$(seen_sig "$state/merge-wait.status"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'composer idle | 11:52')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The run finished (checks green, awaiting the captain's merge): done via
+  # run-step, NOT provably working, so the first stale must surface - only once.
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green, awaiting merge'
+
+  # Round 1: the finished crew's first terminal stale surfaces.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the finished crew's first terminal stale did not surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "round 1 did not print the terminal stale wake"
+
+  # Round 2: only the ticking status bar changed (a new pane hash, same finished
+  # run, same terminal status line). Pre-fix, this re-surfaced once per tick.
+  printf 'composer idle | 11:53' > "$capture_file"
+  : > "$out"; : > "$state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a pane-hash tick re-surfaced an already-surfaced terminal situation: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "absorbed hash tick printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbed hash tick enqueued a wake"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text 'composer idle | 11:53')" ] \
+    || { reap "$pid"; fail "absorbed hash tick did not advance the stale suppressor"; }
+  reap "$pid"
+
+  # Round 3: a genuinely NEW terminal situation (a new captain-relevant status
+  # line) on yet another hash must still surface.
+  printf 'failed: merge conflict while rebasing\n' >> "$state/merge-wait.status"
+  sig=$(seen_sig "$state/merge-wait.status"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
+  printf 'composer idle | 11:54' > "$capture_file"
+  : > "$out"; : > "$state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a new terminal status line did not re-surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "round 3 did not print the new-situation stale wake"
+
+  # Round 4: the crew visibly resumes (an active run, fresh hash): absorbed, and
+  # the surfaced-situation record is cleared so the next stop counts as new.
+  printf 'composer idle | 11:55' > "$capture_file"
+  : > "$out"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an active run's stale was surfaced instead of absorbed: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-surfaced-$key" ] || { reap "$pid"; fail "positive working evidence did not clear the surfaced-situation record"; }
+  reap "$pid"
+
+  # Round 5: it stops again with the SAME last status line - a new stop after a
+  # working interlude, so it surfaces again.
+  printf 'composer idle | 11:56' > "$capture_file"
+  : > "$out"; : > "$state/.wake-queue"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green, awaiting merge'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a stop after a working interlude did not re-surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "round 5 did not print the post-interlude stale wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a finished crew awaiting merge surfaces once per terminal situation, not once per pane-hash tick"
+}
+
+test_paused_log_done_crew_not_resurfaced_per_poll() {
+  local dir state fakebin out capture_file window key sig pid calls
+  dir=$(make_case paused-done-per-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; calls="$dir/crew-state-calls"
+  window="test:fm-pause-done"
+  printf 'composer idle at prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-done.meta"
+  # The crew declared a pause for the merge wait, but the authoritative run-step
+  # reports done (run-step precedence), so the pause never holds.
+  printf 'paused: awaiting captain merge of the open PR\n' > "$state/pause-done.status"
+  sig=$(seen_sig "$state/pause-done.status"); printf '%s' "$sig" > "$state/.seen-pause-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'composer idle at prompt')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'composer idle at prompt')" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Counting fake: every read appends a line, so the test can assert the costly
+  # crew-state read is not repeated on every poll.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'x\n' >> "$calls"
+printf '%s\n' "\${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green, awaiting merge'
+
+  # Round 1: the pause recheck discovers the crew actually stopped: surface once.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the superseded pause's stopped crew did not surface once"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "round 1 did not print the stopped-crew stale wake"
+
+  # Round 2: identical situation on an unchanged hash. Pre-fix, the paused
+  # re-entry branch re-classified and re-surfaced this on EVERY poll.
+  : > "$out"; : > "$state/.wake-queue"; : > "$calls"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an unchanged superseded-pause situation was re-surfaced per poll: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "absorbed superseded pause printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbed superseded pause enqueued a wake"; }
+  [ ! -s "$calls" ] || { reap "$pid"; fail "the superseded pause re-ran the costly crew-state read every poll ($(wc -l < "$calls" | tr -d '[:space:]') reads)"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a done crew behind a superseded paused: line surfaces once, then stays quiet without per-poll reads"
+}
+
+test_surfaced_stopped_stale_not_wedge_nagged() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case surfaced-stale-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-stopped-quiet"
+  printf 'stopped at the prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped-quiet.meta"
+  printf 'working: implementing\n' > "$state/stopped-quiet.status"
+  sig=$(seen_sig "$state/stopped-quiet.status"); printf '%s' "$sig" > "$state/.seen-stopped-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'stopped at the prompt')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'stopped at the prompt')" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  # This stale was already SURFACED (situation recorded, no wedge timer). Later
+  # identical polls must stay quiet instead of re-arming the wedge timer and
+  # nagging "possible wedge" every FM_STALE_ESCALATE_SECS.
+  printf 'stopped|working: implementing' > "$state/.stale-surfaced-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an already-surfaced stopped stale was wedge-nagged: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "already-surfaced stopped stale printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "already-surfaced stopped stale enqueued a wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "already-surfaced stopped stale re-armed the wedge timer"; }
+  reap "$pid"
+  pass "an already-surfaced stopped stale stays quiet; wedge timing remains reserved for provably-working absorbs"
+}
+
+test_busy_pane_rearms_stale_surfacing() {
+  local dir state fakebin out capture_file window key sig pid i
+  dir=$(make_case busy-pane-rearm); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busy-rearm"
+  printf 'building... esc to interrupt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/busy-rearm.meta"
+  printf 'working: implementing\n' > "$state/busy-rearm.status"
+  sig=$(seen_sig "$state/busy-rearm.status"); printf '%s' "$sig" > "$state/.seen-busy-rearm_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'building... esc to interrupt')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A previously surfaced situation is on record; the pane then shows a busy
+  # signature (positive evidence), which must clear that record so the NEXT stop
+  # surfaces even with an unchanged status line.
+  printf 'stopped|working: implementing' > "$state/.stale-surfaced-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ -e "$state/.stale-surfaced-$key" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.stale-surfaced-$key" ] || { reap "$pid"; fail "a busy pane did not clear the surfaced-situation record"; }
+  # The crew stops again: same status line, new idle hash - must surface.
+  printf 'stopped at the prompt' > "$capture_file"
+  wait_for_exit "$pid" 80 || fail "a stop after visible busy activity did not re-surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "post-busy stop did not print a stale wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a busy pane re-arms stale surfacing so a later stop with the same status line surfaces"
+}
+
 # --- triage debug log stays size capped -------------------------------------
 
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
@@ -1298,6 +1513,10 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
+test_terminal_stale_not_resurfaced_per_pane_hash_tick
+test_paused_log_done_crew_not_resurfaced_per_poll
+test_surfaced_stopped_stale_not_wedge_nagged
+test_busy_pane_rearms_stale_surfacing
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
