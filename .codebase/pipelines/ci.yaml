@@ -155,3 +155,26 @@ jobs:
                   "$test_script"
                 done
               '
+
+  invariants:
+    name: Repo invariants
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    steps:
+      - name: Symlinks must stay intact
+        commands:
+          - |
+            set -eu
+            [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+            [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo ".claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        commands:
+          - |
+            set -eu
+            tracked=$(git ls-files -- data state config projects .no-mistakes)
+            if [ -n "$tracked" ]; then
+              echo "Personal fleet paths are tracked in git:"
+              printf '%s\n' "$tracked"
+              exit 1
+            fi
