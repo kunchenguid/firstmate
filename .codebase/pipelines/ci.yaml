@@ -189,7 +189,7 @@ jobs:
         commands:
           - |
             set -eu
-            sed -i 's|\[ -n "\$d" \] \&\& rm -rf "\$d"|[ -n "$d" ] \&\& echo "KEEPING $d"|' tests/lib.sh
+            sed -i 's|rm -rf "$d"|echo "KEEPING $d"|' tests/lib.sh
             grep -n 'KEEPING' tests/lib.sh
             id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
             chown -R ci:ci .
