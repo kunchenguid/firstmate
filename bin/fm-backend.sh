@@ -749,3 +749,14 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
     *) return 1 ;;
   esac
 }
+
+fm_backend_clear_transition() {  # <backend> <state_dir> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 0
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_clear_transition "$@" ;;
+    *) return 0 ;;
+  esac
+}

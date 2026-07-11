@@ -1242,6 +1242,27 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_herdr_teardown_clears_escalation_marker() {
+  local case_dir marker
+  case_dir=$(make_case herdr-marker-cleanup)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+  : > "$marker"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-marker-cleanup: forced teardown failed"
+  [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
+  pass "herdr teardown removes pane-owned escalation dedupe state"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1250,6 +1271,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

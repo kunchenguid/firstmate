@@ -1199,6 +1199,13 @@ fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
   : > "$marker"
 }
 
+fm_backend_herdr_clear_transition() {  # <state_dir> <window>
+  local state=$1 window=$2 marker
+  [ -n "$window" ] || return 0
+  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
+  rm -f "$marker" 2>/dev/null || true
+}
+
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
 # fresh `blocked` edge, then prints the normalized record and returns 0.
@@ -1257,10 +1264,11 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo reader_pid line ws status agent rc=1
-  fifo=$(mktemp -u "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
+  local fifo_dir fifo reader_pid line ws status agent rc=1
+  fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
+  fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
-    rm -f "$fifo" 2>/dev/null || true
+    rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
   "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
@@ -1286,7 +1294,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   if [ "$rc" -eq 0 ]; then
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
-    rm -f "$fifo" 2>/dev/null || true
+    rm -rf "$fifo_dir" 2>/dev/null || true
     return 0
   fi
   # No actionable edge: distinguish a clean full-budget wait (reader exit 0 ->
@@ -1295,7 +1303,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # runtime-disable threshold).
   local reader_rc=0
   wait "$reader_pid" 2>/dev/null || reader_rc=$?
-  rm -f "$fifo" 2>/dev/null || true
+  rm -rf "$fifo_dir" 2>/dev/null || true
   [ "$reader_rc" -eq 0 ] && return 1
   return 2
 }

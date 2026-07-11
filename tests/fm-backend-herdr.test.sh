@@ -1790,6 +1790,16 @@ test_apply_transition_working_clears_marker() {
   pass "fm_backend_herdr_apply_transition: a working edge clears the marker so the next ->blocked re-escalates"
 }
 
+test_clear_transition_removes_task_marker() {
+  local dir state marker
+  dir="$TMP_ROOT/clear-transition"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-default_wG_pQ"
+  : > "$marker"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_clear_transition "$1" "$2"' "$ROOT" "$state" default:wG:pQ
+  [ ! -e "$marker" ] || fail "clear_transition must remove the marker owned by a torn-down pane"
+  pass "fm_backend_herdr_clear_transition removes task-owned dedupe state"
+}
+
 test_apply_transition_defer_and_fallback_are_noops() {
   local dir state marker rc s
   dir="$TMP_ROOT/apply-defer"; state="$dir/state"; mkdir -p "$state"
@@ -1890,15 +1900,16 @@ test_wait_transition_stream_absorb_clears_then_timeout() {
 }
 
 test_wait_transition_reader_failure_returns_2() {
-  local dir state agent fb reader lines rc
-  dir="$TMP_ROOT/wt-reader-fail"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  local dir state agent temp fb reader lines rc
+  dir="$TMP_ROOT/wt-reader-fail"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" idle
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
-  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+  rc=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_EXIT=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
   [ "$rc" = 2 ] || fail "a reader connect/subscribe failure must return 2 (fall back to poll), got $rc"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "reader failure must remove its private FIFO directory"
   pass "fm_backend_herdr_wait_transition: a reader/subscribe failure falls back to polling (rc 2)"
 }
 
@@ -2003,6 +2014,7 @@ test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
+test_clear_transition_removes_task_marker
 test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
