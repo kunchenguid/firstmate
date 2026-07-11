@@ -243,10 +243,14 @@ fm_backend_orca_send_literal() {  # <terminal> <text>
 # the path doesn't exist or has unique commits, so we can no-op the terminal
 # kill cleanly. Terminal kill is best-effort.
 fm_backend_orca_remove_worktree() {  # <wt-id>
-  local wt_path=${1:-} session_id main_repo gitdir_line
+  local wt_path=${1:-} session_id main_repo gitdir_line git_common_dir branch project_name bucket state_dir home_guess
   [ -n "$wt_path" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
 
+  branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [ -z "$branch" ] || [ "$branch" = HEAD ]; then
+    branch="fm/$(basename "$wt_path")"
+  fi
   if [ -f "$wt_path/.fm-orca-session" ]; then
     session_id=$(cat "$wt_path/.fm-orca-session")
   else
@@ -264,8 +268,28 @@ fm_backend_orca_remove_worktree() {  # <wt-id>
     gitdir_line=$(cat "$wt_path/.git" 2>/dev/null || true)
     main_repo=$(printf '%s\n' "$gitdir_line" | sed -n 's|^gitdir: \(.*\)/.git/worktrees/[^/]*$|\1|p' | head -1)
   fi
+  if [ -z "$main_repo" ]; then
+    git_common_dir=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "$git_common_dir" ]; then
+      main_repo=$(dirname "$git_common_dir")
+    fi
+  fi
+  if [ -z "$main_repo" ]; then
+    project_name=$(basename "$(dirname "$wt_path")")
+    bucket=$(dirname "$(dirname "$wt_path")")
+    state_dir=$(dirname "$bucket")
+    home_guess=$(dirname "$state_dir")
+    if git -C "$home_guess/projects/$project_name" rev-parse --git-dir >/dev/null 2>&1; then
+      main_repo="$home_guess/projects/$project_name"
+    elif git -C "$home_guess/$project_name" rev-parse --git-dir >/dev/null 2>&1; then
+      main_repo="$home_guess/$project_name"
+    fi
+  fi
   if [ -n "$main_repo" ] && [ -d "$main_repo" ]; then
     git -C "$main_repo" worktree remove --force "$wt_path" || return 1
+    case "$branch" in
+      fm/*) git -C "$main_repo" branch -D -- "$branch" >/dev/null 2>&1 || true ;;
+    esac
     fmod kill "$session_id" >/dev/null 2>&1 || true
     return 0
   fi

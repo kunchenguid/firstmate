@@ -428,6 +428,23 @@ PY
   pass "fm_backend_orca_remove_worktree: fmod kill + git worktree remove"
 }
 
+test_remove_worktree_deletes_task_branch() {
+  fmod_case wt-remove-branch
+  local repo
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  local wt_path
+  wt_path=$(expected_orca_wt "$repo" fm-direct)
+  git -C "$repo" worktree add -q -b fm/fm-direct "$wt_path" HEAD
+  printf '%s\n' "fm-direct" > "$wt_path/.fm-orca-session"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "$1"' "$ROOT" "$wt_path"
+  [ ! -d "$wt_path" ] || fail "remove_worktree should delete $wt_path"
+  if git -C "$repo" show-ref --verify --quiet refs/heads/fm/fm-direct; then
+    fail "remove_worktree should delete the Orca task branch"
+  fi
+  pass "fm_backend_orca_remove_worktree: deletes the task branch"
+}
+
 test_remove_worktree_falls_back_to_basename_session_id() {
   fmod_case wt-remove-fallback
   local repo
