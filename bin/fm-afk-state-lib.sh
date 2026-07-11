@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
+# Shared away-mode flag helpers.
+# Usage: . bin/fm-afk-state-lib.sh
+#
+# The flag path is state/.afk by default.
+# Presence means away-mode supervision is active or should be recovered on the next session start.
+# Callers that refuse startup use afk_clear_flag and must check its return value before claiming full per-wake supervision has resumed.
 
 : "${AFK_FLAG_NAME:=.afk}"
 
