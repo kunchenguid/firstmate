@@ -1628,8 +1628,10 @@ SH
       if [ -z "$rollback" ] || ! cmp -s "$prior" "$rollback/meta"; then
         fail "fm-spawn did not preserve prior metadata after treehouse rollback failed"
       fi
-      [ -f "$wt/.claude/settings.local.json" ] && [ "$(cat "$wt/.claude/settings.local.json")" = '{"prior":true}' ] \
-        || fail "fm-spawn did not restore the pre-existing worktree hook after rollback failed"
+      if [ ! -f "$wt/.claude/settings.local.json" ] \
+        || [ "$(cat "$wt/.claude/settings.local.json")" != '{"prior":true}' ]; then
+        fail "fm-spawn did not restore the pre-existing worktree hook after rollback failed"
+      fi
       [ -f "/tmp/fm-$id/prior" ] || fail "fm-spawn deleted pre-existing task temp state during rollback"
       [ "$(wc -l < "$treehouse_log" | tr -d ' ')" = 2 ] || fail "fm-spawn did not retry treehouse return once"
       git -C "$project" worktree remove --force "$wt"

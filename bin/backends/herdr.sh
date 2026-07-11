@@ -1297,7 +1297,9 @@ fm_backend_herdr_identity_for_tab() {  # <session> <workspace_id> <tab_id> <pane
     grep -qxF "herdr_tab_id=$tab_id" "$meta" 2>/dev/null || continue
     recorded_label=$(sed -n 's/^label=//p' "$meta" 2>/dev/null | head -1)
     recorded_worktree=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
-    [ -n "$recorded_label" ] && [ "$live_label" = "$recorded_label" ] && [ -n "$recorded_worktree" ] || continue
+    if [ -z "$recorded_label" ] || [ "$live_label" != "$recorded_label" ] || [ -z "$recorded_worktree" ]; then
+      continue
+    fi
     live_path=$(fm_backend_herdr_current_path "$session:$pane_id" 2>/dev/null || true)
     [ "$live_path" = "$recorded_worktree" ] || continue
     id=${meta##*/}
