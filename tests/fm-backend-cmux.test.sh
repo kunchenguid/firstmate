@@ -848,7 +848,7 @@ test_window_of_workspace_finds_window_and_count() {
   local dir fb out
   dir="$TMP_ROOT/win-of-ws"; mkdir -p "$dir/responses"
   # 1: list-windows --json -> two windows
-  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2 "e2222222-0000-0000-0000-000000000000" 2
   # 2: workspace list --window e1111111 -> does NOT contain the target
   cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
   # 3: workspace list --window e2222222 -> contains the target
@@ -857,10 +857,10 @@ test_window_of_workspace_finds_window_and_count() {
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_window_of_workspace "aaaaaaaa-0000-0000-0000-000000000000"' "$ROOT" )
   [ "$out" = "e2222222-0000-0000-0000-000000000000 1" ] \
-    || fail "window_of_workspace should echo '<window_id> <count>' for the owning window, got '$out'"
+    || fail "window_of_workspace should echo the owning window and its matched-list count, got '$out'"
   cmux_assert_call_order "$dir/log" $'\x1f''list-windows' $'\x1f''workspace'$'\x1f''list'$'\x1f''--json'$'\x1f''--id-format'$'\x1f''uuids'$'\x1f''--window'$'\x1f''e1111111-0000-0000-0000-000000000000' \
     "window_of_workspace did not list windows before scanning per-window workspaces"
-  pass "fm_backend_cmux_window_of_workspace: walks windows and reports the owner window id plus its workspace count"
+  pass "fm_backend_cmux_window_of_workspace: walks windows and counts the membership-confirming workspace list"
 }
 
 test_window_of_workspace_empty_when_not_found() {
@@ -885,7 +885,7 @@ test_kill_closes_workspace_directly_when_not_last() {
   # 1: list-windows -> the owning window has 2 workspaces (target is NOT last)
   cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
   # 2: workspace list --window eeeeeeee -> contains the target
-  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task"
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
@@ -904,8 +904,7 @@ test_kill_closes_workspace_directly_when_not_last() {
 test_kill_adds_sibling_when_last_in_window() {
   local dir fb
   dir="$TMP_ROOT/kill-last-in-window"; mkdir -p "$dir/responses"
-  # 1: list-windows -> the owning window has exactly 1 workspace (target IS last)
-  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
   # 2: workspace list --window eeeeeeee -> contains the target
   cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task"
   fb=$(make_cmux_fakebin "$dir")
@@ -929,7 +928,7 @@ test_kill_is_best_effort_when_close_workspace_fails() {
   dir="$TMP_ROOT/kill-workspace-fail"; mkdir -p "$dir/responses"
   # 1: list-windows (not last), 2: workspace list --window, 3: close-workspace fails
   cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task"
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task" "ffffffff-0000-0000-0000-000000000000" "other"
   printf '1\n' > "$dir/responses/3.exit"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
@@ -953,7 +952,7 @@ test_kill_recovers_stale_target_by_label() {
   cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
   # window_of_workspace on the REFRESHED id: 4 list-windows (not last), 5 workspace list --window.
   cmux_windows_response "$dir" 4 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"

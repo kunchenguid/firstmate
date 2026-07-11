@@ -280,7 +280,7 @@ $ cmux rpc window.close '{"window_id":"<win>"}'
 Exiting the surface's shell does not help either: cmux immediately respawns a fresh shell in a new surface (the surface id changes), so the last workspace/window is never left empty to collapse on its own.
 
 The reliable primitive is `close-workspace` on a workspace that is NOT the last in its window, so `fm_backend_cmux_kill` makes the target non-last first.
-`fm_backend_cmux_window_of_workspace` walks `list-windows --json` and each window's own `workspace list --json --window <id>` to find the target's window and that window's `workspace_count`.
+`fm_backend_cmux_window_of_workspace` walks `list-windows --json` and each window's own `workspace list --json --window <id>` to find the target's window and count the membership-confirming workspace-list response.
 When the count is one (last in window), kill creates a throwaway sibling in that same window - `new-workspace --window <win> --focus false`, an unnamed default that never carries an `fm-<home>-` title, so recovery and `list_live` ignore it - and only then closes the target.
 When the count is greater than one, kill closes the target directly, exactly as before, with no sibling.
 

@@ -601,18 +601,21 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # `workspace list --json` with no `--window` is scoped to the CURRENT window
 # only (verified live), so the containing window is found by walking every
 # window from `list-windows --json` and asking each for its own scoped list.
-# The count comes straight from that window's `workspace_count` field.
+# The count comes from the same scoped workspace list that confirms membership.
 fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count>"
-  local wsid=$1 wins wid cnt
+  local wsid=$1 wins wid wss count
   wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 0
-  while IFS=$'\t' read -r wid cnt; do
+  while IFS= read -r wid; do
     [ -n "$wid" ] || continue
-    if fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null \
-        | jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
-      printf '%s %s' "$wid" "$cnt"
-      return 0
-    fi
-  done < <(printf '%s' "$wins" | jq -r '.[]? | "\(.id)\t\(.workspace_count)"' 2>/dev/null)
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || continue
+    count=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '
+      (.workspaces // []) as $workspaces
+      | select(any($workspaces[]?; .id == $id))
+      | ($workspaces | length)
+    ' 2>/dev/null) || continue
+    printf '%s %s' "$wid" "$count"
+    return 0
+  done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
 }
 
 # fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
