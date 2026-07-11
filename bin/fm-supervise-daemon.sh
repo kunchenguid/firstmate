@@ -16,6 +16,12 @@
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# Every startup refusal taken AFTER the singleton lock is acquired (unsupported
+# supervisor backend, the blind firstmate:0 fallback target, a target-exists
+# probe failure) also clears state/.afk before exiting: the lock proves no
+# other daemon owns away mode, so leaving the flag set would defer the fleet
+# to a daemon that never started. fm-afk-start.sh clears the flag the same way
+# on its own pre-.afk refusal.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
@@ -1276,6 +1282,24 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
+  # --- post-lock startup refusals -------------------------------------------
+  # Every refusal below runs while THIS daemon holds the singleton lock, so no
+  # other daemon owns away mode; a lingering state/.afk would defer the whole
+  # fleet to a daemon that never started (the wedge fm-afk-start.sh's own
+  # refusal also clears). Clearing it here reverts to full per-wake supervision.
+  startup_refuse() {
+    local reason=$1
+    if [ -e "$STATE/.afk" ]; then
+      rm -f "$STATE/.afk" 2>/dev/null || true
+      echo "note: cleared the away flag (state/.afk); the fleet reverted to full per-wake supervision instead of deferring to a daemon that is not running" >&2
+      reason="$reason; cleared state/.afk"
+    fi
+    log "startup failed: $reason"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  }
+
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
   # (herdr) > tmux fallback. Resolved before the target below, since target
@@ -1306,10 +1330,7 @@ fm_super_main() {
   # for, instead of a confusing "does not resolve to a tmux pane" error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
-    log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
-    exit 1
+    startup_refuse "unsupported supervisor backend '$BACKEND' (source=$backend_source)"
   fi
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
@@ -1338,10 +1359,7 @@ fm_super_main() {
   # silently. Fail loud and early here rather than overnight.
   if ! discovered=$(discover_supervisor_target); then
     echo "error: cannot start away-mode daemon: firstmate's own supervisor pane could not be verified (not running inside a tmux or herdr pane, and no FM_SUPERVISOR_TARGET override). Away-mode escalations would be delivered to the wrong window (e.g. the '$discovered' crewmate session) and silently wedge. Set FM_SUPERVISOR_TARGET to firstmate's own pane, or run firstmate inside tmux/herdr." >&2
-    log "startup failed: no trustworthy supervisor target (would blind-fall back to '$discovered'; target_source=$target_source)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
-    exit 1
+    startup_refuse "no trustworthy supervisor target (would blind-fall back to '$discovered'; target_source=$target_source)"
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
@@ -1353,10 +1371,7 @@ fm_super_main() {
   # '#{pane_id}'` call as before.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
-    log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
-    exit 1
+    startup_refuse "target '$TARGET' not found (backend=$BACKEND)"
   fi
 
   local afk_status="off"

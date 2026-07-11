@@ -30,6 +30,7 @@ batched digest rather than per-wake injections.
    ```
    The helper exits immediately (refreshing `state/.afk`) if the identity-backed daemon lock already names a live process; otherwise it first verifies an injectable supervisor target exists, then sets `state/.afk` and execs `bin/fm-supervise-daemon.sh` in the foreground.
    If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, clears any pre-existing `state/.afk` flag so the fleet reverts to full per-wake supervision, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
+   The daemon's own post-lock startup refusals (an unsupported supervisor backend, the blind fallback target, or an explicit target that fails the pane-exists probe) clear `state/.afk` the same way, so no startup refusal on either side ever leaves the away flag set with no daemon running.
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
@@ -197,7 +198,12 @@ the marker lets firstmate distinguish it from a real captain message.
   crewmate tmux session rather than firstmate's input; injecting there wedged the
   daemon silently overnight. Both `/afk` (before it ever sets `state/.afk`) and
   the daemon now refuse loudly and abort on that blind fallback instead of
-  proceeding, so the failure is immediate and visible. Set `FM_SUPERVISOR_TARGET`
+  proceeding, so the failure is immediate and visible. Every daemon startup
+  refusal taken after its singleton lock is acquired - the unsupported-backend
+  gate, the blind-fallback refusal, and the target-exists probe - also clears
+  any `state/.afk` flag on the way out, because the lock proves no other daemon
+  owns away mode; the fleet reverts to full per-wake supervision instead of
+  deferring to a daemon that never started. Set `FM_SUPERVISOR_TARGET`
   to firstmate's own pane, or run firstmate inside tmux/herdr, to activate. Both
   resolution sources are logged at startup so a wrong-but-resolving target is
   detectable. Other runtime

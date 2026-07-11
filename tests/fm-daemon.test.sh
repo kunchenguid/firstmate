@@ -140,6 +140,7 @@ test_daemon_refuses_blind_fallback_target() {
   local dir state out status
   dir=$(make_supercase daemon-blind-fallback)
   state="$dir/state"
+  date '+%s' > "$state/.afk"
 
   # backend=tmux is supported, so the daemon passes the backend gate and reaches
   # target discovery, where the blind firstmate:0 fallback must be refused rather
@@ -150,10 +151,51 @@ test_daemon_refuses_blind_fallback_target() {
 
   [ "$status" -ne 0 ] || fail "daemon should refuse to start on the blind firstmate:0 fallback target"
   assert_contains "$out" "supervisor pane could not be verified" "daemon did not print the blind-fallback refusal"
+  assert_contains "$out" "cleared the away flag" "daemon did not report clearing the stale away flag on refusal"
+  assert_absent "$state/.afk" "daemon refusal left the away flag set with no daemon running"
   assert_present "$state/.supervise-daemon.log" "daemon did not log its startup failure"
   assert_grep "no trustworthy supervisor target" "$state/.supervise-daemon.log" "daemon log missing the startup-failed reason"
   assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after refusing to start"
   pass "daemon refuses the blind firstmate:0 fallback at startup instead of wedging on a crewmate pane"
+}
+
+test_daemon_unsupported_backend_refusal_clears_stale_afk_flag() {
+  local dir state out status
+  dir=$(make_supercase daemon-unsupported-backend-stale-flag)
+  state="$dir/state"
+  date '+%s' > "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=unsupported "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse an unsupported supervisor backend"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon did not print the unsupported-backend refusal"
+  assert_contains "$out" "cleared the away flag" "daemon did not report clearing the stale away flag on the backend refusal"
+  assert_absent "$state/.afk" "unsupported-backend refusal left the away flag set with no daemon running"
+  assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after the backend refusal"
+  pass "daemon unsupported-backend refusal clears a pre-existing away flag"
+}
+
+test_daemon_missing_target_refusal_clears_stale_afk_flag() {
+  local dir state fakebin out status
+  dir=$(make_supercase daemon-missing-target-stale-flag)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  date '+%s' > "$state/.afk"
+
+  # An explicit-but-wrong FM_SUPERVISOR_TARGET passes the trustworthiness gate
+  # (any override is trusted) and must be caught by the target-exists probe;
+  # the fake tmux reports the pane gone so the probe fails deterministically.
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_TARGET='no-such-session:0' FM_SUPERVISOR_BACKEND=tmux "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse an explicit target that does not resolve to a pane"
+  assert_contains "$out" "does not resolve to a tmux pane" "daemon did not print the target-probe refusal"
+  assert_contains "$out" "cleared the away flag" "daemon did not report clearing the stale away flag on the probe refusal"
+  assert_absent "$state/.afk" "target-probe refusal left the away flag set with no daemon running"
+  assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after the probe refusal"
+  pass "daemon target-probe refusal clears a pre-existing away flag"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1737,6 +1779,8 @@ test_supervisor_target_is_trustworthy_predicate
 test_afk_start_refuses_without_supervisor_target
 test_afk_start_refusal_clears_stale_afk_flag
 test_daemon_refuses_blind_fallback_target
+test_daemon_unsupported_backend_refusal_clears_stale_afk_flag
+test_daemon_missing_target_refusal_clears_stale_afk_flag
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
