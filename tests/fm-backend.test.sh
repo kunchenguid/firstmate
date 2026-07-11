@@ -871,6 +871,75 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
 }
 
+# --- the worktree poll must skip treehouse-get's transient intermediate cwds --
+#
+# Regression for the herdr single-slot wedge (task herdr-fix-r5): `treehouse get`
+# transits intermediate cwds while it sets the worktree up - it is momentarily at
+# `/` and at the treehouse root before it creates/enters the pooled worktree - and
+# herdr's foreground_cwd exposes those transients (tmux's pane_current_path
+# reported the settled cwd and never did). The old poll accepted the FIRST cwd
+# that merely differed from the project, so it grabbed `/`, failed the isolation
+# gate, and aborted - orphaning the still-initializing treehouse get, which then
+# held the pool slot forever with no crewmate. The poll now gates on
+# is_isolated_worktree, so it must skip a `/` transient and settle on the real
+# worktree. make_spawn_transient_fakebin's stub returns the unmoved project path,
+# then a transient `/`, then the real worktree, on successive polls.
+make_spawn_transient_fakebin() {  # <dir> <project-path> <transient-path> <worktree-path> -> echoes fakebin dir
+  local dir=$1 proj=$2 transient=$3 wt=$4 fb="$1/fakebin" counter="$1/poll-count"
+  mkdir -p "$fb"
+  : > "$counter"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      printf x >> "$counter"
+      n=\$(wc -c < "$counter")
+      if [ "\$n" -le 1 ]; then
+        printf '%s\\n' "$proj"
+      elif [ "\$n" -le 2 ]; then
+        printf '%s\\n' "$transient"
+      else
+        printf '%s\\n' "$wt"
+      fi
+      exit 0
+    ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+test_spawn_worktree_poll_skips_treehouse_get_transient_cwd() {
+  local proj wt id fb data state config log out rc
+  proj="$TMP_ROOT/transient-proj"
+  wt="$TMP_ROOT/transient-wt"
+  id="spawntransient"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  # First non-project poll returns `/` (the exact transient the real bug hit);
+  # the isolated-worktree gate must reject it and keep polling to the real wt.
+  fb=$(make_spawn_transient_fakebin "$TMP_ROOT/transient-fake" "$proj" "/" "$wt")
+  data="$TMP_ROOT/transient-data"; mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/transient-state"; config="$TMP_ROOT/transient-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/transient-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should skip treehouse get's transient '/' cwd and settle on the real worktree"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh resolved the worktree to a transient cwd instead of the real pooled worktree"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: the worktree-discovery poll skips treehouse get's transient intermediate cwds (/ , treehouse root) and resolves the real isolated worktree"
+}
+
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
@@ -1084,6 +1153,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_worktree_poll_skips_treehouse_get_transient_cwd
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
