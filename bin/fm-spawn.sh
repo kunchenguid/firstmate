@@ -112,6 +112,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+SELFFIX_WT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -128,6 +129,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      worktree) SELFFIX_WT=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +146,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --worktree) want_value=worktree ;;
+    --worktree=*) SELFFIX_WT=${a#--worktree=} ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -168,6 +172,10 @@ if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
   BACKEND=$(fm_backend_name)
+fi
+if [ -n "$SELFFIX_WT" ] && [ "$BACKEND" != tmux ]; then
+  echo "error: self-fix (--worktree) is only supported on the tmux backend" >&2
+  exit 1
 fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
@@ -632,6 +640,12 @@ if [ "$KIND" = secondmate ]; then
   else
     BRIEF="$DATA/$ID/brief.md"
   fi
+elif [ -n "$SELFFIX_WT" ]; then
+  # Self-fix: the "project" being fixed is the firstmate repo itself; WT is the
+  # pre-created isolated worktree from fm-self-fix.sh. No treehouse involved.
+  PROJ_ABS="$(cd "$FM_ROOT" && pwd -P)"
+  WT="$(cd "$SELFFIX_WT" && pwd -P)"
+  BRIEF="$DATA/$ID/brief.md"
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
@@ -676,6 +690,10 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 W="fm-$ID"
+# Self-fix starts the window directly in the pre-created worktree (there is no
+# `treehouse get` to chdir it); every other path starts in the project checkout.
+SPAWN_CWD="$PROJ_ABS"
+[ -z "$SELFFIX_WT" ] || SPAWN_CWD="$WT"
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -686,7 +704,9 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    # SPAWN_CWD is the project checkout normally, or the pre-created worktree for a
+    # self-fix task (no treehouse get to chdir the window afterward).
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -817,7 +837,7 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -z "$SELFFIX_WT" ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the
@@ -841,6 +861,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+elif [ -n "$SELFFIX_WT" ]; then
+  validate_spawn_worktree "--worktree" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -983,6 +1005,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # selffix=1 marks a worktree created by fm-self-fix.sh (plain git worktree, not
+  # a treehouse lease), so fm-teardown removes it with `git worktree remove`.
+  if [ -n "$SELFFIX_WT" ]; then echo "selffix=1"; fi
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

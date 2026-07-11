@@ -114,6 +114,8 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
+# selffix=1 marks a plain git worktree from fm-self-fix.sh (not a treehouse lease).
+SELFFIX=$(grep '^selffix=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
@@ -1063,6 +1065,18 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ "$SELFFIX" = 1 ] && [ -d "$WT" ]; then
+  # Self-fix: a plain git worktree of the firstmate repo (not a treehouse lease).
+  # The landed-work safety check above already passed (or --force was given), so
+  # `worktree remove --force` here only clears the admin entry - it never bypasses
+  # that check. Capture the fix branch before removal, then prune and delete it and
+  # the (now-empty) scratch parent dir.
+  sf_branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  git -C "$FM_ROOT" worktree remove --force "$WT" 2>/dev/null \
+    || echo "warning: could not remove self-fix worktree $WT; run 'git -C $FM_ROOT worktree prune' manually" >&2
+  git -C "$FM_ROOT" worktree prune 2>/dev/null || true
+  [ "$sf_branch" = HEAD ] || git -C "$FM_ROOT" branch -D "$sf_branch" 2>/dev/null || true
+  rmdir "$(dirname "$WT")" 2>/dev/null || true
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -1099,7 +1113,7 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] && [ "$SELFFIX" != 1 ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
