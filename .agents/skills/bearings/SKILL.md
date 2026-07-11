@@ -1,6 +1,6 @@
 ---
 name: bearings
-description: Generate a "pick up where I left off" status report from firstmate's live fleet state. Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works". Reads live fleet state cheaply (backlog, per-task crew state, open PRs, scout reports, pending decisions, date-gated queued work), composes a scannable dated report to data/status-report-<YYYY-MM-DD>.md, and surfaces a concise version in chat; it is read-mostly and must not tear down, merge, or mutate task state as a side effect of producing the brief.
+description: Generate a "pick up where I left off" status report from firstmate's live fleet state. Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works". Reads bounded local fleet state cheaply, optionally checks open PRs when requested, composes a scannable dated report to data/status-report-<YYYY-MM-DD>.md, and surfaces a concise version in chat; it is read-mostly and must not tear down, merge, or mutate task state as a side effect of producing the brief.
 user-invocable: true
 metadata:
   internal: true
@@ -18,13 +18,10 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 
 1. **Gather live fleet state with one deterministic command.**
    Run `bin/fm-bearings-snapshot.sh` and read its compact output.
-   It is the single bounded, deterministic source for this report: it projects the canonical `bin/fm-fleet-snapshot.sh` down to the fields a catch-up read needs and renders TOON by default (add `--json` for the same model as JSON).
+   It is the single bounded, deterministic source for this report and renders TOON by default.
    Do not hand-probe the snapshot schema and do not make ad-hoc `gh-axi`/`gh` calls to assemble fleet facts; this command already assembles them.
-   Its sections are `in_flight`, `decisions_open`, `landed`, `gates`, `reports`, `recorded_prs`, `unhealthy_endpoints` (only when non-empty), and `omitted` (the surfaces it deliberately dropped, each with the flag that reveals it).
-   The `decisions_open` set is the durable keyed open-decision set, so a decision the captain still owes never gets masked by a later unrelated event.
-   The default is LOCAL-ONLY and makes no network call; it surfaces already-recorded local PR URLs in `recorded_prs` and states in the `prs:` line that live checks were not requested.
-   When the captain asks for PRs (`/bearings include PRs`), run `bin/fm-bearings-snapshot.sh --include-prs` instead: that is the only path that does live open-PR discovery and checks, adding a `candidate_prs` section; a partial PR-fetch failure degrades gracefully and still returns the rest.
-   Opt into a dropped surface only when a specific read needs it (`--fields bodies|paths|actions|endpoints`, `--all-reports`, `--all-queued`).
+   The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
+   When the captain asks to include PRs, use the command's live-PR opt-in; otherwise keep the default local-only read.
    If the command is unavailable, fall back to `bin/fm-fleet-snapshot.sh --json` and `bin/fm-crew-state.sh <id>`; never infer current state from a raw `tail` of `state/<id>.status`, which is append-only wake-event history whose last line goes stale.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived; until then it stays queued with the reason.
 

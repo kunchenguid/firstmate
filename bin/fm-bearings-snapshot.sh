@@ -19,10 +19,8 @@
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
 # absence is never ambiguous.
 #
-# The durable keyed unresolved-decision model lives in the canonical layer
-# (fm-classify-lib.sh's status_open_decisions, surfaced as hints.open_decisions):
-# this wrapper only aggregates that already-correct open set. A later unrelated done
-# can never mask a still-open captain decision.
+# This wrapper consumes the canonical snapshot's hints.open_decisions field.
+# fm-classify-lib.sh owns the durable keyed-decision contract.
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only

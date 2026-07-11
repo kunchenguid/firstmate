@@ -19,11 +19,10 @@
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
-#     hints.open_decisions is the DURABLE keyed open-decision set, folded from the
-#     whole status stream by fm-classify-lib.sh's status_open_decisions and
-#     reconciled against the authoritative current_state, so a later unrelated
-#     event cannot mask a still-open decision; hints.pending_decision and
-#     hints.blocked_event are booleans derived from that set.
+#     hints.open_decisions is the keyed open-decision set returned by
+#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
+#     against current_state; hints.pending_decision and hints.blocked_event are
+#     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
