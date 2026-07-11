@@ -570,12 +570,36 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
 # fm-crew-state.sh also corroborates native idle verdicts before treating a
 # no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target>
-  local backend=$1
+#
+# With the optional <state-dir> argument, the read is also HARNESS-aware for
+# tasks whose meta records harness=hermes: hermes crewmates run one foreground
+# acpx process per turn and exit at end_turn (verified empirically), and acpx's
+# text output has no stable busy token in the pane tail, so for a hermes task
+# the live foreground process IS the semantic busy signal - `busy` while a
+# non-shell foreground command runs, `idle` once the pane rests at a bare
+# shell. Unlike herdr's generation-state `idle` (which callers corroborate
+# because a crew can be mid-tool-call while not generating), a hermes `idle`
+# means the turn PROCESS exited, so it is trustworthy on its own.
+fm_backend_busy_state() {  # <backend> <target> [state-dir]
+  local backend=$1 target=$2 state=${3:-} meta harness
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if [ -n "$state" ] && [ "$backend" = tmux ]; then
+    meta=$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null || true)
+    if [ -n "$meta" ]; then
+      harness=$(grep '^harness=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+      if [ "$harness" = hermes ]; then
+        case "$(fm_backend_tmux_foreground_state "$target")" in
+          shell) printf 'idle'; return 0 ;;
+          running) printf 'busy'; return 0 ;;
+        esac
+        printf 'unknown'
+        return 0
+      fi
+    fi
+  fi
   case "$backend" in
-    herdr) fm_backend_herdr_busy_state "$@" ;;
+    herdr) fm_backend_herdr_busy_state "$target" ;;
     *) printf 'unknown' ;;
   esac
 }

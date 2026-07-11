@@ -55,6 +55,10 @@ Pi keeps that latch active across every internal tool turn and clears it only wh
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
 
+`hermes` has NO tracked primary integration yet: a hermes primary fails open entirely to the pull-based `fm-guard.sh` warning.
+The identified path is hermes's per-turn `on_session_end` shell hook (a `hooks:` block in `~/.hermes/config.yaml`, consent-gated via `~/.hermes/shell-hooks-allowlist.json`, stdin JSON payload with `session_id`/`cwd`); it is passive, so the adapter shape would be grok-like.
+Promote it here only with the empirical validation this document requires (date, exact commands, exact output).
+
 ## Empirical Validation
 
 All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.

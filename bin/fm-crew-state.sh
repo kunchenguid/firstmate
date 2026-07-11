@@ -177,7 +177,17 @@ pane_readable() {  # <target>
 # corroboration does not mask that case: it stays correctly not-busy.
 crew_pane_is_busy() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) fm_pane_is_busy "$1" ;;
+    tmux)
+      # Harness-aware first: a hermes task classifies busy by foreground-process
+      # liveness (fm_backend_busy_state with the state dir; acpx text output has
+      # no busy token for the regex reader). `busy` is trusted outright; anything
+      # else falls through to the shared regex reader, which for hermes is a
+      # harmless no-match and for every other harness is byte-identical behavior.
+      case "$(fm_backend_busy_state tmux "$1" "$STATE" 2>/dev/null)" in
+        busy) return 0 ;;
+      esac
+      fm_pane_is_busy "$1"
+      ;;
     *)
       local bs tail40
       bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)

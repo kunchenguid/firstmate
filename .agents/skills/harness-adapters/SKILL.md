@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and hermes (crewmate/scout only).
 user-invocable: false
 metadata:
   internal: true
@@ -264,3 +264,33 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## hermes (VERIFIED as crewmate/scout 2026-07-12, hermes-agent 0.18.2, acpx via named sessions; secondmate REFUSED; primary UNVERIFIED)
+
+Hermes Agent (Nous Research) driven headlessly over the Agent Client Protocol: `acpx` is the client, `hermes acp` is the agent server.
+This adapter is unlike every TUI adapter: there is NO persistent composer.
+Each turn is one foreground `acpx ... prompt` process in the pane; acpx exits 0 at `end_turn` (verified live: `[done] end_turn`, exit 0, ~9s trivial round-trip), and between turns the pane rests at a bare shell prompt.
+That shell prompt is HEALTHY idle for a hermes crewmate, not a dead crew.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | none - acpx text output has no stable busy token in the pane tail (verified in the 2026-07-12 trial). Busy is classified by FOREGROUND-PROCESS liveness instead: `fm_backend_busy_state` (bin/fm-backend.sh) reports busy while a non-shell foreground command runs and idle at a bare shell, via `fm_backend_tmux_foreground_state`. |
+| Turn-end signal | `; touch state/<id>.turn-ended` rides the launch command and every fm-send steer; it fires when the acpx process exits, including on `--timeout` (3600s) expiry and errors. |
+| Session model | named, resumable acpx session `fm-<task-id>` (`acpx hermes sessions ensure --name` + `-s <name> prompt`), created by the launch template. Follow-up prompts keep full conversation context across separate acpx invocations (verified); the hermes ACP server implements `load_session`, so the session survives queue-owner idle shutdown (`--ttl`, default 300s). A bare `acpx exec` session is one-shot and NOT resumable - never use exec for a crewmate. |
+| Agent registration | named sessions need hermes registered as an acpx agent; fm-spawn writes worktree `.acpxrc.json` (`{"agents":{"hermes":{"command":"hermes acp"}}}`), git-excluded, teardown-removed only on byte-match. A pre-existing project `.acpxrc.json` without a hermes entry aborts the spawn. |
+| Steer | `fm-send` wraps the message in a follow-up `acpx ... hermes -s fm-<id> prompt '<msg>'` typed at the idle shell prompt (tmux only). It fails closed on busy or unconfirmable panes: raw text typed at a shell prompt would EXECUTE as shell commands. Mid-turn steering is not possible; wait for the turn-end wake. |
+| Exit command | none needed - the process exits itself at end_turn. A stuck turn: `Ctrl+C` (C-c) to the pane kills the foreground acpx (standard signal handling; the `; touch` still fires). |
+| Skill invocation | none verified; use natural language in the prompt. |
+| Autonomy | `--approve-all` (acpx global flag; auto-approves every ACP permission request client-side). |
+| Model flag | acpx global `--model <id>`, placed before the `hermes` subcommand; no effort flag exists, so effort is recorded in meta but not passed. |
+| Env marker | none set for child processes (checked hermes-agent 0.18.2 source); `fm-harness.sh` detects hermes by ancestry - a python interpreter whose args contain `hermes`, or the node `acpx` client. |
+| Resume after kill | the named session record persists; re-run the launch template's prompt command (or steer via fm-send) in the same worktree to continue with context. |
+
+Quirks and constraints:
+
+- Global acpx options MUST precede the agent subcommand (`acpx --approve-all ... hermes -s <name> prompt ...`); after it they are rejected.
+- `--timeout 3600` bounds one turn; a longer legitimate turn is killed, the turn-end marker still fires, and a "continue" steer resumes with context.
+- A hung acpx process reads as busy forever from process liveness; the watcher's provably-working wedge escalation (`demand-deep-inspection`) is the hung-turn backstop, exactly as for a wedged TUI harness.
+- The tmux server must be daemonized (PPID 1) before spawning, or the crewmate panes die with the launching shell; `fm_backend_tmux_agent_alive` reports `unknown` for acpx (a generic node process), never `alive`.
+- **Secondmate: REFUSED by fm-spawn.** A hermes secondmate's healthy idle is a dead shell, which the secondmate liveness sweep reads as a dead agent and respawns forever. An interactive `hermes chat` TUI shape may lift this later; it is unverified.
+- **Primary (firstmate itself on hermes): detection works, supervision is UNVERIFIED.** `bin/fm-harness.sh` resolves hermes, and the session-start digest emits the unknown-harness fallback block (bounded foreground waits over `bin/fm-watch.sh`, e.g. `bin/fm-watch-checkpoint.sh`, the Codex-shaped protocol). No turn-end guard or pre-arm seatbelt is wired; hermes's documented per-turn `on_session_end` shell hook (`hooks:` block in `~/.hermes/config.yaml`, consent-gated allowlist, stdin JSON payload) is the identified path for both, pending live validation. Until then a hermes primary fails open to `fm-guard.sh`'s next-command alarm.

@@ -183,7 +183,10 @@ hash_pane() {
 # regex-fallback path.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 bs
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
+  # STATE makes the read harness-aware: a hermes task classifies busy/idle by
+  # foreground-process liveness (fm-backend.sh), since acpx text output has no
+  # stable busy token for the regex fallback to match.
+  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" "$STATE" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
     idle) return 1 ;;

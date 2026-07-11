@@ -635,7 +635,10 @@ stale_window_is_busy() {  # <window> <state>
   backend=$(task_window_backend "$win" "$state")
   label="fm-$(window_to_task "$win" "$state")"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  # <state> makes the read harness-aware (hermes: process-liveness busy). Only
+  # `busy` short-circuits; `idle` still falls through to the regex corroboration
+  # exactly as before (the herdr lesson), which for hermes is a harmless no-match.
+  bs=$(fm_backend_busy_state "$backend" "$win" "$state" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac

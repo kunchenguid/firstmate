@@ -44,6 +44,11 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      # hermes has no verified env marker; it runs as a python interpreter
+      # (venv .../bin/hermes) or, for acpx-driven crewmates, under the node
+      # acpx client, so both interpreter-args patterns below match it. A direct
+      # hermes binary name is matched here for completeness.
+      hermes*) echo hermes; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +58,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *hermes*|*acpx*) echo hermes; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

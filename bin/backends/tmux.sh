@@ -165,3 +165,24 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_foreground_state: coarser sibling of the agent-alive probe for
+# harnesses that run as a generic interpreter and so can never match a harness
+# binary name (hermes crewmates run acpx, a node script). Prints one of:
+#   shell   - the foreground command is a bare shell (same shell list as
+#             fm_backend_tmux_agent_alive's `dead`): nothing is running.
+#   running - any other non-empty foreground command: the launched command is
+#             still alive, whatever its process name.
+#   unknown - unreadable pane or empty value.
+# fm_backend_busy_state (bin/fm-backend.sh) maps this to busy/idle for tasks
+# whose meta records harness=hermes, where process liveness IS the turn signal.
+fm_backend_tmux_foreground_state() {  # <target>
+  local comm
+  comm=$(fm_backend_tmux_current_command "$1") || { printf 'unknown'; return 0; }
+  comm=${comm#-}
+  case "$comm" in
+    '') printf 'unknown' ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
+    *) printf 'running' ;;
+  esac
+}

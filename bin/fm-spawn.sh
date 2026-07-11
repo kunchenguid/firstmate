@@ -73,7 +73,12 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __ACPXSESSION__ named acpx session for the task (fm-<task-id>; hermes runs in a
+#                  resumable acpx session so follow-up steers keep conversation context)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# hermes needs no hook (its turn-end touch rides the launch command) but gets a
+# worktree .acpxrc.json registering the acpx agent, git-excluded, removed by
+# fm-teardown only when it byte-matches fm-spawn's exact content.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -341,14 +346,30 @@ launch_template() {
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     # hermes (Hermes Agent over ACP): acpx is the headless ACP client; `hermes acp`
-    # is the agent server command (verified: `acpx --agent "hermes acp" ... exec`
-    # round-trips a prompt). Global acpx options MUST precede the `exec` subcommand.
-    # --approve-all is the autonomy equivalent of claude's
-    # --dangerously-skip-permissions; the brief rides in via `exec -f` so no shell
-    # quoting of the brief body is needed. acpx streams the turn then exits at
-    # end_turn, so a finished hermes crewmate pane returns to a shell prompt
-    # (exit-classified by the watcher) rather than idling in a TUI composer.
-    hermes) printf '%s' 'acpx --agent "hermes acp" --approve-all --format text --timeout 3600 exec -f __BRIEF__' ;;
+    # is the agent server command. The task runs in a NAMED, RESUMABLE acpx session
+    # (verified: `sessions ensure --name X` + `-s X prompt` round-trips follow-up
+    # prompts with full conversation context, each invocation exiting 0 at end_turn;
+    # a bare `exec` session is one-shot and NOT resumable, so exec would make the
+    # crewmate unsteerable). Named sessions require hermes registered as an acpx
+    # agent, so the hook block below writes a worktree .acpxrc.json (git-excluded).
+    # Global acpx options MUST precede the agent subcommand. --approve-all is the
+    # autonomy equivalent of claude's --dangerously-skip-permissions. acpx streams
+    # the turn then exits at end_turn, so between turns the pane sits at a shell
+    # prompt: the trailing `touch __TURNEND__` is the turn-end signal, and the
+    # process-liveness busy read (fm_backend_busy_state, bin/fm-backend.sh) covers
+    # mid-turn, because acpx text output has no stable busy token in the pane tail.
+    # --timeout 3600 bounds one turn; on timeout acpx exits, the turn-end marker
+    # still fires, and the session remains resumable via a follow-up prompt.
+    # Secondmates are refused: the process-per-turn model leaves an idle shell
+    # between turns, which the secondmate liveness sweep would read as a dead
+    # agent and respawn forever, and no interactive hermes home session is verified.
+    hermes)
+      if [ "$kind" = secondmate ]; then
+        echo "error: hermes cannot run a secondmate: its process-per-turn ACP model leaves an idle shell between turns, which the secondmate liveness sweep reads as a dead agent (respawn loop); use a TUI-capable harness for secondmates" >&2
+        return 1
+      fi
+      printf '%s' 'acpx hermes sessions ensure --name __ACPXSESSION__ >/dev/null && acpx __MODELFLAG__--approve-all --format text --timeout 3600 hermes -s __ACPXSESSION__ prompt "$(cat __BRIEF__)"; touch __TURNEND__'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -437,6 +458,12 @@ model_flag_for_harness() {
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
     claude|codex|opencode|pi|grok)
+      printf -- '--model %s ' "$(shell_quote "$model")"
+      ;;
+    hermes)
+      # acpx global --model <id>; must precede the agent subcommand, which is
+      # where the hermes template places __MODELFLAG__. No acpx effort flag exists,
+      # so effort_flag_for_harness deliberately emits nothing for hermes.
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -972,6 +999,25 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    hermes*)
+      # hermes has no turn-end hook to install: the turn-end signal rides the
+      # launch command (`; touch __TURNEND__` fires when acpx exits at end_turn).
+      # What it DOES need is the acpx agent registration that makes named,
+      # resumable sessions possible: a worktree-local .acpxrc.json, firstmate-owned
+      # wiring git-excluded like the other harnesses' worktree hook files and
+      # removed by fm-teardown only when it byte-matches this exact content.
+      # A pre-existing .acpxrc.json is a project file firstmate must not
+      # overwrite: abort the spawn so the captain merges the entry deliberately.
+      if [ -e "$WT/.acpxrc.json" ]; then
+        if ! grep -q '"hermes"' "$WT/.acpxrc.json" 2>/dev/null; then
+          echo "error: $WT/.acpxrc.json already exists without a hermes agent entry; merge {\"agents\":{\"hermes\":{\"command\":\"hermes acp\"}}} into it (or remove the file) and respawn" >&2
+          exit 1
+        fi
+      else
+        printf '%s\n' '{"agents":{"hermes":{"command":"hermes acp"}}}' > "$WT/.acpxrc.json"
+        exclude_path '.acpxrc.json'
+      fi
+      ;;
   esac
 fi
 
@@ -1043,8 +1089,10 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+sq_acpxsession=$(shell_quote "fm-$ID")
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__ACPXSESSION__/$sq_acpxsession}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}

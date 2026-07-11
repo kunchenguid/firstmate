@@ -27,6 +27,11 @@
 # or a status-pointed doc instead of stranding it in chat the main firstmate
 # never reads. A crewmate/scout target, an explicit backend-target escape-hatch
 # target, and the --key path are never marked - their behavior is unchanged.
+# hermes targets: a hermes crewmate has no composer (its pane rests at a shell
+# prompt between turns), so the message is delivered as a follow-up prompt into
+# the task's named resumable acpx session instead of as typed composer text.
+# Mid-turn (busy) and unconfirmable panes are refused fail-closed, because text
+# typed at an unexpected surface would execute as shell commands. tmux only.
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
 # accepted, but the harness needs a beat to spin up the turn before its busy
@@ -197,11 +202,61 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+fm_send_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+elif [ "$TARGET_HARNESS" = hermes ]; then
+  # hermes crewmates have no TUI composer: between turns the pane rests at a
+  # bare shell prompt, so typing the message directly would EXECUTE it as shell
+  # commands. The steer instead becomes a follow-up prompt into the task's
+  # named, resumable acpx session (created by fm-spawn's hermes launch template,
+  # the launch-shape owner), typed as a shell command at that idle prompt and
+  # carrying the same turn-end touch the launch does. Follow-up prompts keep
+  # full conversation context (verified; see harness-adapters "hermes").
+  if [ -z "$TARGET_META" ]; then
+    echo "error: hermes steer needs task metadata; an explicit backend target is not steerable for hermes" >&2
+    exit 1
+  fi
+  if [ "$TARGET_BACKEND" != tmux ]; then
+    echo "error: hermes steer is verified on the tmux backend only (target backend: $TARGET_BACKEND)" >&2
+    exit 1
+  fi
+  case "$*" in
+    *$'\n'*)
+      echo "error: hermes steer must be a single line (it is typed at the pane's shell prompt); put anything long in a file the crewmate can read" >&2
+      exit 1
+      ;;
+  esac
+  HERMES_ID=$(fm_send_id_from_meta "$TARGET_META")
+  # Surface-mode gate: only an idle shell prompt (acpx exited at end_turn) may
+  # receive the steer command. busy means mid-turn; unknown means the pane
+  # cannot be confirmed safe to type into, and fm-send fails closed.
+  case "$(fm_backend_busy_state "$TARGET_BACKEND" "$T" "$STATE" 2>/dev/null)" in
+    idle) : ;;
+    busy)
+      echo "error: hermes crew fm-$HERMES_ID is mid-turn (acpx still running); wait for its turn-end wake, or interrupt the turn first, then steer" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: cannot confirm the hermes pane at $T is resting at an idle shell prompt; refusing to type into an unconfirmed surface (tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
+  esac
+  HERMES_CMD="acpx --approve-all --format text --timeout 3600 hermes -s $(fm_send_shell_quote "fm-$HERMES_ID") prompt $(fm_send_shell_quote "$*"); touch $(fm_send_shell_quote "$STATE/$HERMES_ID.turn-ended")"
+  fm_backend_source tmux || exit 1
+  if ! fm_backend_tmux_send_text_line "$T" "$HERMES_CMD"; then
+    echo "error: hermes steer not sent to $T (tmux send failed; tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
+  [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
 else
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before

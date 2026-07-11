@@ -74,6 +74,10 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
 
+`fm_backend_tmux_foreground_state` (same file) is the coarser shell|running|unknown sibling used for harnesses that run as a generic interpreter and can never match a harness binary name.
+Its consumer is `fm_backend_busy_state`'s harness-aware read (`bin/fm-backend.sh`): a task whose meta records `harness=hermes` classifies busy by foreground-process liveness, because acpx runs one process per turn and exits at end_turn while its text output carries no stable busy token for the pane-tail regex.
+For the same reason `fm_backend_tmux_agent_alive` reports `unknown` (never `alive`) for acpx, which shows as a bare `node`.
+
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
