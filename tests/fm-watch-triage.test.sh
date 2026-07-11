@@ -64,6 +64,16 @@ wait_numeric_file() {
   return 1
 }
 
+wait_file_value() {
+  local file=$1 expected=$2 limit=${3:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$file" 2>/dev/null || true)" = "$expected" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -889,6 +899,71 @@ test_merge_wait_without_status_uses_idle_marker_cadence() {
   pass "a status-less merge wait anchors its bounded recheck to the idle marker's first sighting"
 }
 
+test_working_stale_reclassifies_merge_wait_when_wedge_due() {
+  local dir state fakebin out capture_file window key pane_hash sig pid back
+  dir=$(make_case working-to-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-working-to-merge-wait"
+  printf 'validation pane remains idle\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/working-to-merge-wait.meta"
+  printf 'working: validating pull request\n' > "$state/working-to-merge-wait.status"
+  sig=$(seen_sig "$state/working-to-merge-wait.status"); printf '%s' "$sig" > "$state/.seen-working-to-merge-wait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "validation pane remains idle")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  back=$(( $(date +%s) - 500 ))
+  : > "$state/.stale-since-$key"
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.stale-since-$key"
+  else touch -m -d "@$back" "$state/.stale-since-$key"; fi
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_file_value "$state/.paused-$key" merge-wait 30 || { reap "$pid"; fail "due working stale did not reclassify as merge-wait"; }
+  if ! wait_live "$pid" 10; then
+    reap "$pid"; fail "due working stale surfaced a wedge instead of entering merge-wait: $(cat "$out")"
+  fi
+  [ "$(cat "$state/.paused-$key" 2>/dev/null || true)" = merge-wait ] || { reap "$pid"; fail "due working stale recorded the wrong idle class"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "merge-wait transition retained its wedge timer"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "merge-wait transition enqueued a wedge wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a due working stale revalidates and transitions to merge-wait without wedge churn"
+}
+
+test_merge_wait_hash_churn_preserves_first_sighting() {
+  local dir state fakebin out capture_file window key old_hash back sig pid
+  dir=$(make_case merge-wait-hash-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-merge-wait-hash-churn"
+  printf 'merge monitor pane changed\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-wait-hash-churn.meta"
+  printf 'done: PR checks green, monitoring for merge/close\n' > "$state/merge-wait-hash-churn.status"
+  sig=$(seen_sig "$state/merge-wait-hash-churn.status"); printf '%s' "$sig" > "$state/.seen-merge-wait-hash-churn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  old_hash=$(hash_text "older merge monitor pane")
+  printf '%s' "$old_hash" > "$state/.hash-$key"
+  printf '4\n' > "$state/.count-$key"
+  printf 'merge-wait\n' > "$state/.paused-$key"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.paused-$key"
+  else touch -m -d "@$back" "$state/.paused-$key"; fi
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "hash-churned merge wait lost its bounded first-sighting recheck"
+  grep -F "merge-wait" "$out" >/dev/null || fail "hash-churned merge wait did not preserve its classification"
+  grep -F "possible wedge" "$out" >/dev/null && fail "hash-churned merge wait was mislabeled a wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "hash-churned merge wait did not retain its first-sighting cadence"
+  unset FM_FAKE_CREW_STATE
+  pass "merge-wait hash churn preserves the durable first-sighting cadence"
+}
+
 test_real_terminal_failure_still_surfaces() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case real-terminal-failure); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1446,6 +1521,8 @@ test_paused_terminal_run_absorbs_without_wedge_churn
 test_checks_green_merge_wait_absorbs_then_rechecks
 test_cached_idle_classes_revalidate_authoritative_state
 test_merge_wait_without_status_uses_idle_marker_cadence
+test_working_stale_reclassifies_merge_wait_when_wedge_due
+test_merge_wait_hash_churn_preserves_first_sighting
 test_real_terminal_failure_still_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

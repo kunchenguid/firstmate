@@ -1049,7 +1049,15 @@ EOF
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              if [ "$(age_of "$ssf")" -ge "$STALE_ESCALATE_SECS" ]; then
+                case "$(crew_absorb_class "$task")" in
+                  paused) handle_idle_stale "$w" "$task" "$h" paused ;;
+                  merge-wait) handle_idle_stale "$w" "$task" "$h" merge-wait ;;
+                  *) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                esac
+              else
+                wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              fi
             fi
           fi
         fi
@@ -1065,7 +1073,8 @@ EOF
       echo 0 > "$cf"
       rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
+      if ! afk_present && ! window_is_busy "$w" "$tail40" \
+        && { [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; }; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_idle_stale "$w" "$task" "$h" paused ;;
           merge-wait) handle_idle_stale "$w" "$task" "$h" merge-wait ;;
