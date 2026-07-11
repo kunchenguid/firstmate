@@ -165,7 +165,8 @@ if [ "$INCLUDE_PRS" = 1 ]; then
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
     while IFS= read -r wt; do
-      [ -n "$wt" ] && [ -d "$wt" ] || continue
+      [ -n "$wt" ] || continue
+      [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
