@@ -121,6 +121,10 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
     ln -s "$ROOT/bin/$f" "$bin/$f"
   done
+  # The BASE_REF teardown fixture still sources fm-lock-lib.sh, which no longer
+  # exists in the current checkout after the wake-lib split.
+  git -C "$ROOT" show "$BASE_REF:bin/fm-lock-lib.sh" > "$bin/fm-lock-lib.sh"
+  chmod +x "$bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
