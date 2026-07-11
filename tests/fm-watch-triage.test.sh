@@ -111,6 +111,9 @@ test_stale_is_terminal_classifier() {
 test_scan_captain_relevant_statuses_classifier() {
   local dir state out
   dir=$(make_case classify-scan); state="$dir/state"
+  printf 'window=sess:fm-one\nkind=ship\n' > "$state/one.meta"
+  printf 'window=sess:fm-two\nkind=ship\n' > "$state/two.meta"
+  printf 'window=sess:fm-three\nkind=ship\n' > "$state/three.meta"
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
@@ -119,6 +122,19 @@ test_scan_captain_relevant_statuses_classifier() {
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+}
+
+test_scan_captain_relevant_statuses_skips_orphan() {
+  local dir state out
+  dir=$(make_case classify-scan-orphan); state="$dir/state"
+  # No matching four.meta: an orphan from a torn-down task must never surface,
+  # even though its last line is captain-relevant, and must be removed so a
+  # leaked writer cannot keep leaving a permanently "fresh" file in state/.
+  printf 'done: PR https://x/y/pull/2\n' > "$state/four.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "four.status" >/dev/null && fail "scan surfaced an orphan status with no matching state/<id>.meta"
+  [ ! -e "$state/four.status" ] || fail "scan did not remove the orphan status it absorbed"
+  pass "scan_captain_relevant_statuses skips and removes an orphan status with no matching state/<id>.meta"
 }
 
 test_classifier_primitives() {
@@ -1223,6 +1239,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
+test_scan_captain_relevant_statuses_skips_orphan
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier

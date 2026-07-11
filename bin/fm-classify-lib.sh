@@ -210,13 +210,23 @@ stale_is_terminal() {  # <window> <state>
 # catch-all backstop for a captain-relevant status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+# Shares the watcher's scan_signals orphan guard: a .status with no matching
+# state/<id>.meta belongs to a torn-down (or never-recorded) task, so it is
+# skipped and best-effort removed here too - this is the ONLY other place a raw
+# state/*.status sweep can surface a status without going through scan_signals
+# first, and it backs BOTH the watcher's heartbeat backstop and the away-mode
+# daemon's housekeeping catch-all, so fixing it here closes the gap in one place.
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    if [ ! -e "$state/$task.meta" ]; then
+      rm -f "$f" 2>/dev/null || true
+      continue
+    fi
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
