@@ -254,8 +254,8 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = merge-wait ] || fail "checks-green merge monitoring not classed as an idle wait"
   FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
   [ "$(crew_absorb_class a)" = none ] || fail "bare checks-passed run classed as a merge wait"
-  FM_FAKE_CREW_STATE='state: done · source: status-log · PR checks green · run still monitoring PR'
-  [ "$(crew_absorb_class a)" = none ] || fail "coarse checks-green detail without the explicit suffix classed as a merge wait"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · checks green: PR ready for review (still monitoring for merge/close)'
+  [ "$(crew_absorb_class a)" = none ] || fail "status-log detail with the monitoring suffix classed as a merge wait"
   printf 'failed: validation failed\n' > "$state/a.status"
   FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
   [ "$(crew_absorb_class a)" = none ] || fail "real terminal failure was classed absorbable"
@@ -787,6 +787,9 @@ test_checks_green_merge_wait_absorbs_then_rechecks() {
   printf 'checks green, monitoring merge\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-wait.meta"
   printf 'done: PR checks green, monitoring for merge/close\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "checks green, monitoring merge")
@@ -796,7 +799,7 @@ test_checks_green_merge_wait_absorbs_then_rechecks() {
   export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -807,10 +810,8 @@ test_checks_green_merge_wait_absorbs_then_rechecks() {
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "merge wait retained accumulated wedge escalations"; }
   reap "$pid"
 
-  back=$(( $(date +%s) - 500 ))
-  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
-  else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.paused-$key"
+  else touch -m -d "@$back" "$state/.paused-$key"; fi
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -822,6 +823,47 @@ test_checks_green_merge_wait_absorbs_then_rechecks() {
   [ ! -e "$state/.stale-since-$key" ] || fail "merge-wait recheck started a wedge timer"
   unset FM_FAKE_CREW_STATE
   pass "checks-green merge monitoring absorbs stale churn and re-surfaces only on the bounded long cadence"
+}
+
+test_cached_idle_classes_revalidate_authoritative_state() {
+  local class dir state fakebin out capture_file task window key pane_hash sig pid verdict status
+  for class in paused merge-wait; do
+    dir=$(make_case "cached-$class-transition"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; task="cached-$class"
+    window="test:fm-$task"
+    printf 'idle state became terminal\n' > "$capture_file"
+    printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
+    case "$class" in
+      paused)
+        status='paused: awaiting upstream'
+        verdict='state: failed · source: run-step · run failed'
+        ;;
+      merge-wait)
+        status='done: PR checks green, monitoring for merge/close'
+        verdict='state: parked · source: run-step · parked at awaiting_approval'
+        ;;
+    esac
+    printf '%s\n' "$status" > "$state/$task.status"
+    sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "idle state became terminal")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf '%s\n' "$class" > "$state/.paused-$key"
+    date +%s > "$state/.paused-rechecked-$key"
+    export FM_FAKE_CREW_STATE="$verdict"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "cached $class suppressed its authoritative terminal transition"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "cached $class transition did not surface as stale"
+    [ ! -e "$state/.paused-$key" ] || fail "cached $class marker survived its authoritative terminal transition"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "cached idle markers revalidate failed and parked authoritative transitions immediately"
 }
 
 test_merge_wait_without_status_uses_idle_marker_cadence() {
@@ -1402,6 +1444,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_paused_terminal_run_absorbs_without_wedge_churn
 test_checks_green_merge_wait_absorbs_then_rechecks
+test_cached_idle_classes_revalidate_authoritative_state
 test_merge_wait_without_status_uses_idle_marker_cadence
 test_real_terminal_failure_still_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

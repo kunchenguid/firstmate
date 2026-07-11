@@ -325,7 +325,7 @@ crew_absorb_class() {  # <id>
       return
     fi
   fi
-  if [ "$state" = "done" ]; then
+  if [ "$state" = "done" ] && [ "$src" = run-step ]; then
     case "$line" in
       *"(still monitoring for merge/close)") printf 'merge-wait'; return ;;
     esac

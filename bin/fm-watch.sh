@@ -309,13 +309,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # a dead-agent captain-held transfer, or checks-green PR merge monitoring.
 # Re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
 # invisibly.
-# Called on any stale poll once pause_state_class permits the bounded cadence, so
-# it must be cheap and never re-read crew state.
-# The re-surface age is anchored on the wait's status file mtime, not a per-hash
-# marker, so a churny idle pane cannot keep resetting the cadence.
-# A .paused-resurfaced-<key> throttle marker records the last
+# Called after crew_absorb_class authoritatively confirms the idle state.
+# A declared pause is aged from its status-file mtime, while merge monitoring is
+# aged from the idle marker's first sighting because validation may postdate the
+# latest status. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# every poll. Advances the stale suppressor to <hash> and records the idle class.
 handle_idle_stale() {  # <window> <task> <hash> <paused|merge-wait>
   local win=$1 task=$2 h=$3 class=$4 key marker marked statusf mtime age rf rf_age reason detail
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -326,9 +325,14 @@ handle_idle_stale() {  # <window> <task> <hash> <paused|merge-wait>
     printf '%s\n' "$class" > "$marker"
   fi
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(stat_mtime "$marker") ;; esac
+  case "$class" in
+    paused)
+      statusf="$STATE/$task.status"
+      mtime=$(stat_mtime "$statusf")
+      case "$mtime" in ''|*[!0-9]*) mtime=$(stat_mtime "$marker") ;; esac
+      ;;
+    merge-wait) mtime=$(stat_mtime "$marker") ;;
+  esac
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
@@ -373,59 +377,56 @@ idle_marker_class() {  # <window-key>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class marked agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive line state src
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
+  class=$(crew_absorb_class "$task")
+  case "$class" in
+    working|merge-wait)
+      rm -f "$recheck_file"
+      printf '%s' "$class"
+      return
+      ;;
+  esac
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    printf 'none'
     return
   fi
-  marked=$(idle_marker_class "$key")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$marked" = merge-wait ]; then
-      printf 'merge-wait'
-      return
-    fi
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
+  if [ "$(window_kind "$win")" = secondmate ]; then
+    case "$class" in paused) date +%s > "$recheck_file" ;; *) rm -f "$recheck_file" ;; esac
+    printf '%s' "$class"
+    return
+  fi
+  agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+  if [ "$agent_alive" != dead ]; then
+    rm -f "$recheck_file"
+    printf 'live-hold'
+    return
+  fi
+  if [ "$class" = paused ]; then
+    date +%s > "$recheck_file"
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
-  if [ "$class" = merge-wait ]; then
-    date +%s > "$recheck_file"
-    printf 'merge-wait'
-    return
-  fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
-  fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused|merge-wait) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  case "$line" in
+    state:*)
+      state=${line#state: }; state=${state%% *}
+      src=${line#*source: }; src=${src%% *}
+      ;;
+    *) state=unknown; src=none ;;
   esac
-  printf '%s' "$class"
+  if [ "$src" = run-step ] && [ "$state" != paused ]; then
+    rm -f "$recheck_file"
+    printf 'none'
+    return
+  fi
+  date +%s > "$recheck_file"
+  printf 'paused'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
