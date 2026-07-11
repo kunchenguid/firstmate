@@ -780,8 +780,15 @@ EOF
         if [ -n "$rl_task" ] && [ ! -e "$STATE/$rl_task.ratelimit.failed" ]; then
           reuse_reset=$(fm_ratelimit_marker_reset "$STATE" "$rl_task" "$w" "$rl_harness" 2>/dev/null || true)
         fi
+        # An empty composer is required to PARK a fresh episode (no active marker),
+        # so a human mid-typing is never mistaken for a quota wait. But once an
+        # episode is already active (a valid, non-failed marker exists, so
+        # reuse_reset is set), keep it parked even when the composer is not empty:
+        # a `continue` typed into the composer during an in-flight resume retry is
+        # the episode continuing, not proof it ended. The still-rendered footer is
+        # re-verified either way by fm_ratelimit_render_match below.
         limit_match=""
-        if [ "$rl_harness" = claude ] && [ "$rl_composer" = empty ]; then
+        if [ "$rl_harness" = claude ] && { [ "$rl_composer" = empty ] || [ -n "$reuse_reset" ]; }; then
           limit_match=$(fm_ratelimit_render_match "$tail40" "" "$reuse_reset" || true)
         fi
         if [ -n "$limit_match" ]; then
