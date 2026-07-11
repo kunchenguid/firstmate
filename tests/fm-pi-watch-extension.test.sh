@@ -12,6 +12,7 @@ install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  write_pi_watch_extension_runtime_copy "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.mjs"
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
 JSON
@@ -22,6 +23,31 @@ export const Type = {
   },
 };
 JS
+}
+
+write_pi_watch_extension_runtime_copy() {
+  local src=$1 dest=$2
+  # These behavior tests run under plain Node, while Pi itself loads the tracked TypeScript extension.
+  perl -0pe '
+    s/^import type .*\n//m;
+    s/^type ArmResult = \{\n  ok: boolean;\n  message: string;\n\};\n\n//m;
+    s/^type LockOwnership = [^\n]+;\n\n//m;
+    s/let child: any = null;/let child = null;/;
+    s/function parentPid\(pid: string\): string/function parentPid(pid)/;
+    s/function pidAlive\(pid: string\): boolean/function pidAlive(pid)/;
+    s/function lockOwnership\(\): LockOwnership/function lockOwnership()/;
+    s/function sessionOwnsLock\(\): boolean/function sessionOwnsLock()/;
+    s/function markLoaded\(\): void/function markLoaded()/;
+    s/function actionableLine\(output: string\): string/function actionableLine(output)/;
+    s/function failureLine\(stdout: string, stderr: string, code: number \| null\): string/function failureLine(stdout, stderr, code)/;
+    s/export default function \(pi: ExtensionAPI\)/export default function (pi)/;
+    s/function stopArm\(\): void/function stopArm()/;
+    s/async function sendWake\(message: string\)/async function sendWake(message)/;
+    s/function startArm\(\): ArmResult/function startArm()/;
+    s/\(chunk: Buffer\)/(chunk)/g;
+    s/\(code: number \| null\)/(code)/g;
+    s/\(error: Error\)/(error)/g;
+  ' "$src" > "$dest"
 }
 
 test_tracked_extension_present_and_self_hashing() {
@@ -76,7 +102,7 @@ test_pi_extension_reports_external_healthy_watcher() {
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.mjs"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
@@ -150,7 +176,7 @@ test_pi_tool_returns_agent_tool_result() {
   home="$TMP_ROOT/pi-tool-result-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.mjs"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -199,7 +225,7 @@ test_pi_process_exit_cleanup_listener_lifecycle() {
   home="$TMP_ROOT/pi-exit-listener-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.mjs"
   : > "$repo/bin/fm-watch-arm.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
@@ -240,7 +266,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   pid_file="$TMP_ROOT/pi-process-exit-child.pid"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.mjs"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 trap 'printf "cleaned\n" > "$FM_CLEANUP_LOG"; exit 0' TERM

@@ -592,14 +592,31 @@ test_pi_extension_forces_followup() {
   pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
 }
 
+write_pi_extension_runtime_copy() {
+  local src=$1 dest=$2
+  # These behavior tests run under plain Node, while Pi itself loads the tracked TypeScript extension.
+  perl -0pe '
+    s/^import type .*\n//m;
+    s/^type LockOwnership = [^\n]+;\n\n//m;
+    s/function parentPid\(pid: string\): string/function parentPid(pid)/;
+    s/function pidAlive\(pid: string\): boolean/function pidAlive(pid)/;
+    s/function lockOwnership\(\): LockOwnership/function lockOwnership()/;
+    s/function markLoaded\(\): void/function markLoaded()/;
+    s/function runGuard\(\): Promise<\{ code: number; stderr: string \}>/function runGuard()/;
+    s/function runPretoolCheck\(command: string\): Promise<\{ code: number; stderr: string \}>/function runPretoolCheck(command)/;
+    s/export default function \(pi: ExtensionAPI\)/export default function (pi)/;
+    s/\(event\.input as \{ command\?: unknown \}\)\?\.command/event.input?.command/;
+  ' "$src" > "$dest"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
   home="$TMP_ROOT/pi-logical-run-home"
-  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.mjs"
   log="$TMP_ROOT/pi-logical-run-guard.log"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
-  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  write_pi_extension_runtime_copy "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -658,9 +675,9 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-delivery-failure-root"
   home="$TMP_ROOT/pi-delivery-failure-home"
-  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.mjs"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
-  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  write_pi_extension_runtime_copy "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
