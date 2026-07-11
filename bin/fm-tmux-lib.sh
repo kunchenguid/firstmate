@@ -63,8 +63,14 @@ FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+
 # anchors this, so the default requires a visible non-alphanumeric prefix
 # (glyph/punctuation) before the literal and a trailing overloaded_error JSON
 # payload after it. That keeps bare transcript/log lines ending in
-# "API Error: 529" from being parked. Confirm this default against a real idle
-# 529 render; override via FM_OVERLOAD_REGEX if the actual footer differs.
+# "API Error: 529" from being parked. This shape is a best-effort default: it
+# is deliberately strict rather than broad, and is not yet confirmed against a
+# captured real idle-529 render. If a real render ever splits the glyph and the
+# JSON across separate captured lines (or reshapes them), this pattern safely
+# no-ops - the pane is not parked, normal stale/wedge detection still surfaces
+# the crew, and primary quota-reset auto-resume is unaffected. Verify/tune this
+# default against a real idle-529 render; override via FM_OVERLOAD_REGEX if the
+# actual footer differs.
 FM_OVERLOAD_REGEX_DEFAULT='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
 
 # FM_INJECT_MARK: the away-mode daemon's in-band sentinel (U+2063 INVISIBLE
