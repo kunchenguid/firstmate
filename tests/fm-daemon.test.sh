@@ -686,6 +686,27 @@ test_slack_dm_config_absent_keeps_terminal_injection_path() {
   pass "absent Slack DM config preserves existing AFK terminal injection behavior"
 }
 
+test_slack_dm_afk_inactive_defers_and_preserves_buffer() {
+  local dir state helper dm_log
+  dir=$(make_supercase slack-afk-inactive)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "done: PR https://github.example/pr/9"
+  # afk flag deliberately NOT set: this mirrors the captain-returned shutdown
+  # flush, where .afk is cleared before the daemon is stopped. The DM path must
+  # defer just like inject_msg, preserving the buffer for in-chat catch-up.
+  if FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state"; then
+    fail "Slack DM escalate_flush succeeded while afk inactive"
+  fi
+  [ ! -s "$dm_log" ] || fail "daemon sent a Slack DM while afk inactive"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved for catch-up when afk inactive"
+  [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "afk-inactive defer wrote a delivery-failure marker"
+  pass "afk inactive: Slack DM path defers and preserves the buffer, like the injection path"
+}
+
 test_slack_dm_failure_marker_redacts_helper_output() {
   local dir state helper dm_log secret out
   dir=$(make_supercase slack-redaction)
@@ -1912,6 +1933,7 @@ test_slack_dm_flush_success_acknowledges_without_terminal_injection
 test_slack_dm_failure_preserves_buffer_for_retry
 test_slack_dm_no_double_send_after_ack
 test_slack_dm_config_absent_keeps_terminal_injection_path
+test_slack_dm_afk_inactive_defers_and_preserves_buffer
 test_slack_dm_failure_marker_redacts_helper_output
 test_status_digest_dm_request_is_explicit_only
 test_heartbeat_scan_dedup

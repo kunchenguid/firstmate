@@ -745,6 +745,12 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if afk_slack_dm_configured; then
+    # Presence-gate the DM path exactly like inject_msg (below) gates the pane
+    # path: deliver only while away mode is active. On the captain's return the
+    # afk flag is cleared BEFORE the daemon is stopped, so the shutdown flush
+    # (cleanup) must NOT fire a Slack DM at a now-present captain; the buffer is
+    # preserved for firstmate's in-chat "while you were out" catch-up instead.
+    afk_active "$state" || { log "slack dm deferred: afk inactive"; return 1; }
     if afk_slack_dm_send_buffer "$state" "$buf"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
     return 1
   fi
