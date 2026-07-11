@@ -203,19 +203,14 @@ jobs:
               bash -c './tests/fm-teardown.test.sh' > /tmp/suite.out 2>&1
             echo "suite exit=$?"
             set -e
-            echo "############ SUITE OUTPUT (last 30) ############"
-            tail -30 /tmp/suite.out
-            echo "############ TEMP DIRS ############"
-            ls -d /tmp/fm-teardown-tests.* 2>/dev/null || echo "NO TEMP DIRS KEPT"
-            for d in /tmp/fm-teardown-tests.*/*/; do
-              case "$d" in
-                *fork-allow*|*codebase-branch-discovery*) ;;
-                *) continue ;;
-              esac
-              echo "=== $d ==="
-              echo "--- stderr ---"; cat "$d/stderr" 2>/dev/null
-              echo "--- stdout ---"; cat "$d/stdout" 2>/dev/null
-              echo "--- bytedcli.log ---"; cat "$d/bytedcli.log" 2>/dev/null || true
+            echo "############ SUITE OUTPUT (full) ############"
+            cat /tmp/suite.out
+            echo "############ CASE TREE ############"
+            find /tmp/fm-teardown-tests.* -maxdepth 1 -type d 2>/dev/null
+            echo "############ ALL STDERR FILES ############"
+            find /tmp/fm-teardown-tests.* -name stderr 2>/dev/null | while read -r f; do
+              echo "=== $f ==="
+              cat "$f"
             done
             echo "PROBE DONE"
             exit 1
