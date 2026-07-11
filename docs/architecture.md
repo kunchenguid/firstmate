@@ -87,6 +87,10 @@ Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
 Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 
+Because the firstmate repo is not treehouse-pooled, a self-fix task cannot get its worktree the usual way.
+`bin/fm-self-fix.sh` instead creates a plain `git worktree` on a `fix/<id>` branch rooted outside any `FM_HOME` and hands it to `fm-spawn.sh --worktree` (tmux only), which skips `treehouse get`, starts the window directly in that worktree, and records `selffix=1` in meta.
+The primary checkout stays on its default branch throughout, and teardown removes the worktree with `git worktree remove` only after the same landed-work safety check every ship task passes.
+
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
