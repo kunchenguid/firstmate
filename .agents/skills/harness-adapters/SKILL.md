@@ -123,6 +123,9 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+Claude (v2.1.x, verified against a live pane) also renders its EMPTY composer prompt as the agent glyph `❯` followed by a NON-BREAKING space (U+00A0) and then a regular space, which bash's `[:space:]` trim never matches.
+That stray NBSP once made an empty composer read as pending text, so every `fm-send` steer to a claude tmux pane falsely failed with "Enter swallowed" even though the message had submitted; the shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`) now folds NBSP to a plain space before classifying, so NBSP-only spacing reads empty while real typed text containing an NBSP stays pending - see `docs/herdr-backend.md`'s "Composer-emptiness safety" NBSP-normalization record (task fix-fmsend-falsefail).
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers `bin/fm-turnend-guard.sh` as a Stop hook, and exiting with status 2 plus stderr reliably forces the model to continue.

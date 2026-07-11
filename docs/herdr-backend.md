@@ -596,6 +596,12 @@ The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 
+**NBSP normalization (2026-07-11, task fix-fmsend-falsefail).** claude (v2.1.x) draws its EMPTY composer prompt as the agent glyph followed by a NON-BREAKING space (U+00A0) and then a regular space, verified empirically against a live claude tmux pane.
+bash's `[:space:]` class never matches U+00A0, so the caller's whitespace trim left that lone NBSP behind after the leading glyph was stripped, and an empty claude composer misclassified as `pending` - `bin/fm-send.sh` then exited non-zero with a false "text not submitted (Enter swallowed)" error on every claude tmux steer even though the message had actually submitted, inviting a dangerous double-send.
+`fm_composer_classify_content` now folds every NBSP to a regular space and re-trims both inputs before classifying, so NBSP-only spacing reads `empty` while real typed text that merely contains an NBSP still reads `pending`; the fold lives in this shared owner, so every backend adapter benefits.
+Verified against the same live claude pane after the fix: the real `bin/fm-send.sh` exits 0 where it previously exited 1.
+Regression coverage: `tests/fm-composer-lib.test.sh` (`test_nbsp_empty_composer_is_empty`, `test_nbsp_does_not_swallow_real_text`) at the classifier unit level, and `tests/fm-composer-ghost.test.sh` (`test_nbsp_empty_claude_composer_is_not_pending`, `test_nbsp_with_real_text_still_pending`) end-to-end through `fm_pane_input_pending` and `fm_tmux_composer_state` using claude's real cursor-row bytes.
+
 ## Incident (2026-07-10): away-mode injection wedged all night on the primary claude-on-herdr composer's ghost text
 
 The captain woke to find away-mode had never injected: 20 escalations buffered, the max-defer wedge marker at 30623s undelivered, the wake queue at 65.
