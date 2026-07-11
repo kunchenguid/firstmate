@@ -174,3 +174,53 @@ jobs:
               printf '%s\n' "$tracked"
               exit 1
             fi
+
+  probe_teardown:
+    name: PROBE teardown
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 15
+    steps:
+      - name: Setup
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            apt-get update && apt-get install -y --no-install-recommends tmux gawk
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/jq \
+              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            install -m 0755 /tmp/jq /usr/local/bin/jq
+            npm install -g tasks-axi
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
+              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
+            mkdir -p /opt/node22 && tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
+            if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+              git fetch --unshallow origin || git fetch --depth=1000 origin
+            fi
+            git fetch origin "main:refs/remotes/origin/main"
+      - name: Dump the failing teardown case
+        commands:
+          - |
+            set -eu
+            sed -i '56s|.*|    [ -n "$d" ] \&\& echo "KEEPCASE $d" >\&2|' tests/lib.sh
+            id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+            chown -R ci:ci .
+            set +e
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" \
+              GIT_AUTHOR_NAME="firstmate ci" GIT_AUTHOR_EMAIL=ci@firstmate.invalid \
+              GIT_COMMITTER_NAME="firstmate ci" GIT_COMMITTER_EMAIL=ci@firstmate.invalid \
+              bash -c './tests/fm-teardown.test.sh' > /tmp/suite.out 2>&1
+            echo "suite exit=$?"
+            set -e
+            tail -2 /tmp/suite.out
+            d=$(find /tmp -maxdepth 2 -type d -name codebase-branch-discovery | head -1)
+            echo "############ CASE=$d ############"
+            echo "--- stderr ---"; cat "$d/stderr" 2>/dev/null
+            echo "--- bytedcli.log ---"; cat "$d/bytedcli.log" 2>/dev/null || echo "(no bytedcli.log)"
+            echo "--- meta ---"; cat "$d/state/task-x1.meta" 2>/dev/null
+            echo "--- wt log ---"; git -C "$d/wt" log --oneline --all 2>/dev/null | head -5
+            echo "--- origin url ---"; git -C "$d/wt" remote get-url origin 2>/dev/null
+            echo "--- mr ref ---"; git -C "$d/project" rev-parse refs/merge-requests/7/7/1 2>&1 | head -1
+            echo "PROBE DONE"
+            exit 1
