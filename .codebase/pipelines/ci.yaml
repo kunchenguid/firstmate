@@ -108,11 +108,21 @@ jobs:
             git merge-base HEAD origin/main >/dev/null
       - name: Run suite
         commands:
+          # The suite must NOT run as root. tests/fm-daemon.test.sh chmods a
+          # state dir unwritable and asserts the write fails; root ignores
+          # permission bits, so as root that assertion silently inverts.
+          # GitHub's runner is non-root, which is why it passes there.
           - |
             set -eu
-            for test_script in tests/*.test.sh; do
-              "$test_script"
-            done
+            id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+            chown -R ci:ci .
+            runuser -u ci -- env HOME=/home/ci PATH="$PATH" bash -c '
+              set -eu
+              [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
+              for test_script in tests/*.test.sh; do
+                "$test_script"
+              done
+            '
 
   invariants:
     name: Repo invariants
