@@ -949,6 +949,72 @@ test_composer_state_bare_prompt_below_stale_bordered_banner_wins() {
   pass "fm_backend_herdr_composer_state: a live unbordered prompt row below a stale bordered decorative box still wins (not misread as the box's own row)"
 }
 
+# THE OVERNIGHT WEDGE regression (task afk-herdr-false-pending). Captured
+# read-only from the live primary claude-on-herdr pane default:w1:p3 on
+# 2026-07-10: an idle composer whose only content is claude's rotating
+# prompt-suggestion GHOST, rendered SGR-2 dim after the bare "❯" prompt
+# ("❯ \033[0m\033[2m<suggestion>\033[0m"). herdr's `pane read --format ansi`
+# preserves the dim attribute. The pre-fix herdr classifier stripped ALL ANSI
+# and read the suggestion as real pending text (its only faint check matched
+# codex's bold-wrapped "\033[1m❯ \033[0m\033[2m", which this shape is NOT), so
+# every away-mode injection deferred with "pending input (non-empty composer)"
+# all night (6524 lifetime defers; wedge 30623s undelivered). The shared
+# ANSI-aware owner now drops the dim ghost and the row reads empty (safe to
+# inject).
+test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-dim-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x9c\xbb Brewed for 2m 40s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf \x1b[0m\x1b[2mwhat did the wheelhouse healing verification find?\x1b[0m\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = empty ] || fail "the overnight shape - claude's SGR-2 dim prompt-suggestion ghost after a bare '❯' - must read empty, got '$out' (regression: this false-pending wedged away-mode injection all night)"
+  pass "fm_backend_herdr_composer_state: claude's dim prompt-suggestion ghost (the overnight wedge shape) reads empty"
+}
+
+# Same prompt row, but the text after "❯" is REAL (normal intensity, no dim) -
+# it must still read pending, so the ghost fix never weakens real-input
+# protection.
+test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-dim-ghost-real"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf land pr 416 now\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = pending ] || fail "real normal-intensity text after '❯' must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
+}
+
+# grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
+# the same owner. grok renders its composer inside a bordered box whose border
+# and placeholder/hint text use a dark, muted truecolor foreground (verified live
+# against grok 0.2.93: border 38;2;86;82;110, muted 38;2;50;47;70, hint
+# 38;2;110;106;134; real input is the BRIGHT 38;2;224;222;244), while the "❯"
+# prompt glyph stays bright. The dark placeholder drops and the row reads empty.
+test_composer_state_grok_dark_truecolor_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-grok-truecolor-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf \x1b[38;2;50;47;70mType a message...\x1b[38;2;86;82;110m \xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a grok bordered composer whose only content is a dark-truecolor placeholder must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: grok's dark-truecolor placeholder (the TRUECOLOR gap) reads empty"
+}
+
+# grok's bordered composer with REAL bright typed input must still read pending.
+test_composer_state_grok_bright_truecolor_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-grok-truecolor-real"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf fix the login bug \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real bright typed text in a grok bordered composer must read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: grok's real bright typed input still reads pending"
+}
+
 test_composer_state_codex_bare_prompt_glyph_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-codex-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -958,6 +1024,28 @@ test_composer_state_codex_bare_prompt_glyph_is_empty() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
   [ "$out" = empty ] || fail "a bare '›' (codex) prompt glyph with no trailing text should read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: a real-codex unbordered '›' prompt row reads empty"
+}
+
+test_composer_state_codex_faint_suggestion_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-codex-faint-suggestion"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x80\xa2 You have 2 usage limit resets available. Run /usage\nto use one.\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mFind and fix a bug in @filename\x1b[0m\n\n  gpt-5.5 xhigh \xc2\xb7 Context 100%% left\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a faint real-codex ghost suggestion should read empty, not pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: a faint real-codex ghost suggestion reads empty"
+}
+
+test_composer_state_codex_non_faint_same_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-codex-non-faint-same-text"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x80\xa2 You have 2 usage limit resets available. Run /usage\nto use one.\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0mFind and fix a bug in @filename\n\n  gpt-5.5 xhigh \xc2\xb7 Context 100%% left\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "the same words without faint styling should still protect real typed input, got '$out'"
+  pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
@@ -1175,18 +1263,10 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
-# The core regression test for the 2026-07-07 incident this task fixes: a
-# genuinely idle real-codex composer shows DYNAMIC tip/hint text
-# (docs/herdr-backend.md "Incident (2026-07-07)"), which
-# fm_backend_herdr_composer_state (used ONLY for the pre-injection empty-box
-# guard now, never for submit confirmation) still cannot tell apart from real
-# pending input - see test_composer_state_codex_dynamic_idle_tip_still_reads_pending
-# immediately below, which documents that this narrower, already-known gap is
-# untouched by this change. What this test proves is that
-# fm_backend_herdr_send_text_submit no longer cares on an idle baseline: it
-# never calls `pane read` at all, so a codex target whose composer would
-# forever misclassify as "pending" still gets a correct, prompt "empty"
-# (confirmed submitted) verdict from the native agent-state transition alone.
+# Regression for the submit-confirmation side of the 2026-07-07 incident:
+# even if a Codex idle composer displays suggestion text, an idle-baseline
+# submit must confirm from native agent-state rather than composer scraping.
+# The pre-injection composer guard has its own faint-suggestion coverage below.
 test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-codex-idle-tip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1200,23 +1280,20 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state alone, immune to a codex-style dynamic idle-tip composer that would have misread as 'pending' under the old composer-based confirmation"
 }
 
-# Companion test documenting the narrower, already-known, UNFIXED gap this
-# task deliberately leaves in place: fm_backend_herdr_composer_state itself
-# (still used for the pre-injection empty-box guard, e.g.
-# bin/fm-supervise-daemon.sh's pane_input_pending) cannot tell a real codex
-# idle composer's dynamic tip text apart from genuinely pending input. Fixture
-# captured verbatim from a real herdr session (herdr 0.7.1, real codex
-# 0.142.1, isolated session, 2026-07-07): an idle codex pane showing its own
-# rotating suggestion ("Summarize recent commits") after a prior reply.
-test_composer_state_codex_dynamic_idle_tip_still_reads_pending() {
+# Companion regression for the pre-injection empty-box guard itself
+# (bin/fm-supervise-daemon.sh's pane_input_pending): a real Codex idle
+# composer can show faint ghost suggestions after the bare `›` prompt.
+# The guard must ignore that faint suggestion text, otherwise away-mode
+# escalation delivery defers forever even though the human has typed nothing.
+test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-codex-dynamic-tip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '\xe2\x80\xa2 OK\n\n\n\xe2\x80\xba Summarize recent commits\n\n  gpt-5.5 xhigh \xc2\xb7 Context 97%% left \xc2\xb7 /private/tmp \xc2\xb7 2\xe2\x80\xa6\n' > "$resp/1.out"
+  printf '\xe2\x80\xa2 OK\n\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mSummarize recent commits\x1b[0m\n\n  gpt-5.5 xhigh \xc2\xb7 Context 97%% left \xc2\xb7 /private/tmp \xc2\xb7 2\xe2\x80\xa6\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = pending ] || fail "documenting the known gap: a real codex dynamic idle-tip row was expected to still misread as pending via composer_state, got '$out' (if this now reads 'empty' or 'unknown', the known gap noted in docs/herdr-backend.md may have been fixed - update the doc if so)"
-  pass "fm_backend_herdr_composer_state: a real codex dynamic idle-tip composer row still misreads as pending (known, already-documented gap, untouched by this task - only the pre-injection guard still consults this path, and submit confirmation no longer does)"
+  [ "$out" = empty ] || fail "a faint real-codex dynamic idle-tip row should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a faint real-codex dynamic idle-tip composer row reads empty"
 }
 
 # Regression guard for the PRE-injection empty-box guard itself
@@ -1350,7 +1427,7 @@ SH
     "fm-peek did not route the explicit stale target through herdr capture"
 
   : > "$log"
-  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
     FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     "$ROOT/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
   expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through herdr"
@@ -1640,7 +1717,13 @@ test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
+test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
+test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
+test_composer_state_grok_dark_truecolor_placeholder_is_empty
+test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
+test_composer_state_codex_faint_suggestion_is_empty
+test_composer_state_codex_non_faint_same_text_is_pending
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep
@@ -1654,7 +1737,7 @@ test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
-test_composer_state_codex_dynamic_idle_tip_still_reads_pending
+test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed

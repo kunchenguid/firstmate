@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One short-poll of the relay connector for a pending X mention.
+# One short-poll of the relay connector for a pending X-mode mention.
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless X mode is configured
 # via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment).

@@ -15,7 +15,7 @@ Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi); treehouse still provides the worktree, zellij only provides the session.
+- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
@@ -27,7 +27,7 @@ No first-run provisioning is needed beyond having `zellij` and `jq` on `PATH`; f
 Watching and attaching: firstmate uses one shared session (default name `firstmate`, overridable with `FM_ZELLIJ_SESSION`) with one tab per task.
 The tab's caller-facing label is always `fm-<id>`, but its actual visible title is home-scoped - `fm-<home-label>-<id>`, e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` - so that two firstmate homes sharing this one session (a primary plus a secondmate, two secondmates, or two independent primary installations on the same machine) never collide on the tab bar even if their task ids happen to match; see "Home-scoped tab titles" below.
 Attach to the selected `FM_ZELLIJ_SESSION` (or the default `firstmate` session) with `zellij attach <name>` to see every task, primary or secondmate, as a tab in that one tab bar.
-You do not need to attach for routine supervision: `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `bin/fm-send.sh fm-<id> "<text>"` steers it.
+You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home.
 
 Verify it works by spawning a trivial task with `--backend zellij` and confirming the task's meta records `backend=zellij` plus `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`; attaching to the session should show the new home-scoped tab title, such as `fm-firstmate-<8hex>-<id>`.
 
@@ -57,7 +57,7 @@ No empirical evidence surfaced during verification that forces a different conta
 Because every task in every firstmate home - primary or secondmate - shares this ONE session's tab bar with no per-home container split, and zellij enforces no tab-name uniqueness at all (verified: two tabs can share a name), two firstmate homes whose task ids happen to collide could send/peek/close each other's tabs.
 This is the exact gap a captain-directed no-mistakes review gate caught for the cmux backend (`docs/cmux-backend.md` "Task container shape") - cmux's fix was ported here for the identical reason, sharing its tag-derivation code (`bin/fm-backend-hometag-lib.sh`).
 
-The caller-facing task label stays `fm-<id>` in meta and briefs, while `fm-send.sh` and `fm-peek.sh` also accept exact task ids before the legacy `fm-<id>` selector fallback.
+The caller-facing task label stays `fm-<id>` in meta and briefs; task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 The actual zellij tab title a NEW task's tab is created with is home-scoped: `fm-<home-label>-<id>`.
 `<home-label>` is `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_ROOT` path - the same identity scheme as cmux's home label (`docs/cmux-backend.md` "Task container shape"), so e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` or `fm-2ndmate-sm1-9f8e7d6c-fix-login-k3`.
 The path hash means even two independent PRIMARY installations on one machine (each with no `.fm-secondmate-home` marker, so both would otherwise resolve to the same `firstmate` prefix) still get distinct tags.
@@ -78,7 +78,7 @@ This is accepted, exactly as it is for cmux: a task's own recorded worktree path
 A zellij task's `window=` meta field holds `<zellij-session>:<pane-id>`, for example `firstmate:7`.
 The pane id is a bare non-negative integer with no embedded colon (simpler than herdr's own pane-id shape, which itself contains a colon), so splitting on the first colon is trivially correct.
 This mirrors tmux's `session:window` and herdr's `session:pane` target shapes closely enough that `fm_backend_resolve_selector` (`bin/fm-backend.sh`) needed no zellij-specific logic at all.
-When a caller reaches a zellij endpoint through firstmate metadata (an exact task id, a legacy `fm-<id>` selector, or a meta scan), it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
+When the shared selector contract routes a zellij caller through firstmate metadata, it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
 That label check prevents a stale numeric pane id from being trusted after an external session deletion/recreation, or from being trusted for a different firstmate home's same-named tab; explicit raw `session:pane` targets remain a pane-existence-only escape hatch because there is no metadata label to verify.
 
 Zellij tasks additionally record:
@@ -184,7 +184,7 @@ This is why `fm_backend_zellij_kill` resolves the owning tab id from the pane wh
 ## Composer verification: delta-based
 
 Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` still uses a content-diff strategy: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
-This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state only for pending-input guards and submit fallback.
+This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state for the affirmative-empty injection guard and submit fallback.
 All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching.
 
 ## Session safety
@@ -199,10 +199,10 @@ Every real-zellij test in this document and its accompanying test files uses a u
 Beyond the fake-CLI unit tests (`tests/fm-backend-zellij.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-zellij-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `FM_ZELLIJ_SESSION` (never the real `firstmate` session name):
 
 1. `FM_HOME=<scratch> FM_BACKEND=zellij FM_ZELLIJ_SESSION=<isolated> bin/fm-spawn.sh zellij-e2e-t1 projects/scratch-e2e-project claude` - spawned successfully, printing `window=<session>:<pane>` in the summary and writing `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, `zellij_pane_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-probe workaround.
-2. `bin/fm-peek.sh fm-zellij-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
-3. `bin/fm-send.sh fm-zellij-e2e-t1 --key Enter` - accepted the trust dialog.
-4. `bin/fm-peek.sh fm-zellij-e2e-t1` again - showed claude actively working through the brief (verifying isolation, then implementing).
-5. `bin/fm-send.sh fm-zellij-e2e-t1 "captain says: proceed as planned, this is a trivial verification task"` - a plain-text steer while claude was mid-turn, exercising the delta-based send-and-verify path; the send completed without a `pending`/`send-failed` error.
+2. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-peek.sh fm-zellij-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
+3. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-send.sh fm-zellij-e2e-t1 --key Enter` - accepted the trust dialog.
+4. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-peek.sh fm-zellij-e2e-t1` again - showed claude actively working through the brief (verifying isolation, then implementing).
+5. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-send.sh fm-zellij-e2e-t1 "captain says: proceed as planned, this is a trivial verification task"` - a plain-text steer while claude was mid-turn, exercising the delta-based send-and-verify path; the send completed without a `pending`/`send-failed` error.
 6. The crewmate appended `done: ready in branch fm/zellij-e2e-t1` to its status file, and its commit (`add hello.txt`, message `add hello.txt`) was confirmed present on branch `fm/zellij-e2e-t1` in the project's git history, with `hello.txt` containing exactly the expected line.
 7. `bin/fm-teardown.sh zellij-e2e-t1` **REFUSED**, exactly as required: `REFUSED: local-only worktree ... has work not yet merged into main and not on any remote.`
 8. `bin/fm-merge-local.sh zellij-e2e-t1` - fast-forwarded local `main` to the crewmate's commit (`02c9dd2 -> ba41f90`).

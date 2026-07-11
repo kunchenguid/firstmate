@@ -22,9 +22,10 @@ JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 TMP_ROOT=$(fm_test_tmproot fm-x-mode-tests)
 
 # A fakebin `curl` that mimics the relay: it reads its behavior from env
-# (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE), records each call to
-# FAKE_CURL_LOG, writes the poll body to the script's -o file, and prints the
-# HTTP code to stdout exactly as the real `-w '%{http_code}'` would.
+# (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE, and
+# FAKE_REQCTX_CODE/FAKE_REQCTX_BODY for the request-context lookup), records each
+# call to FAKE_CURL_LOG, writes the poll/lookup body to the script's -o file, and
+# prints the HTTP code to stdout exactly as the real `-w '%{http_code}'` would.
 make_fake_curl() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -77,6 +78,10 @@ case "$url" in
     ;;
   */connector/dismiss)
     printf '%s' "${FAKE_DISMISS_CODE:-200}"
+    ;;
+  */connector/request-context)
+    [ -n "$ofile" ] && printf '%s' "${FAKE_REQCTX_BODY:-}" > "$ofile"
+    printf '%s' "${FAKE_REQCTX_CODE:-200}"
     ;;
 esac
 exit 0
@@ -569,8 +574,10 @@ test_bootstrap_opt_out_cleanup() {
   assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
+  assert_contains "$out" "Claude Code background task" "opt-out remediation must use the harness-aware repair renderer"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
   assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"
   # Steady-state off: another run with nothing to remove is silent.
@@ -706,7 +713,29 @@ test_split_thread_lib() {
   out=$(printf 'one two three four five six seven eight nine ten' | fmx_split_thread 20 2)
   [ "$(printf '%s' "$out" | jq 'length')" -le 2 ] || fail "thread must respect the cap"
   case "$(printf '%s' "$out" | jq -r '.[-1]')" in *…*) : ;; *) fail "a capped thread must mark truncation" ;; esac
-  pass "fmx_split_thread: word-boundary, within-limit, numbered, lossless, capped"
+  txt=$(cat <<'TXT'
+Intro paragraph has enough words to make the reply split before the fenced block.
+
+```bash
+printf '%s\n' "hello from a fenced block"
+printf '%s\n' "the marker must not land in here"
+```
+
+Final paragraph also has enough words to make the reply split after the fenced block.
+TXT
+)
+  out=$(printf '%s' "$txt" | fmx_split_thread 120 25)
+  [ "$(printf '%s' "$out" | jq 'length')" -gt 1 ] || fail "fenced markdown reply must split"
+  printf '%s' "$out" | jq -e \
+    'all(.[]; (((gsub(" \\([0-9]+/[0-9]+\\)$"; "") | split("```") | length) - 1) % 2) == 0)' \
+    >/dev/null || fail "thread chunks must not leave an open code fence"
+  printf '%s' "$out" | jq -e \
+    'any(.[]; contains("```bash\nprintf") and contains("marker must not land in here\"") and contains("\n```"))' \
+    >/dev/null || fail "the fenced code block must stay in one chunk"
+  printf '%s' "$out" | jq -e \
+    'all(.[] | split("\n")[]; (test("^[[:space:]]*```.* \\([0-9]+/[0-9]+\\)$") | not))' \
+    >/dev/null || fail "numbering markers must not be appended to fenced-code boundary lines"
+  pass "fmx_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
 }
 
 test_reply_single_no_texts() {
@@ -731,6 +760,60 @@ test_reply_thread_dry_run() {
   [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-t.json")" -le 50 ] || fail "each thread tweet must be within the limit"
   [ "$(jq -r '.text' "$home/state/x-outbox/req-t.json")" = "$(jq -r '.texts[0]' "$home/state/x-outbox/req-t.json")" ] || fail "text must equal the first chunk"
   pass "fm-x-reply auto-splits a long reply into a numbered thread (texts[])"
+}
+
+test_reply_discord_inbox_uses_discord_budget() {
+  local home out reply
+  home="$TMP_ROOT/reply-discord-budget"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-discord",tweet_id:"discord:channel:message",text:"question"}' \
+    > "$home/state/x-inbox/req-discord.json"
+  reply=$(cat <<'TXT'
+First paragraph stays intact in a single Discord reply even though it is comfortably over the X tweet budget.
+
+```bash
+printf '%s\n' "the code fence must remain intact"
+printf '%s\n' "no numbering marker belongs here"
+```
+
+Final paragraph also remains in the same public Discord message because the total is far below the 1900 character split budget.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-discord "$reply" 2>/dev/null)
+  [ "$out" = "req-discord" ] || fail "Discord dry-run must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord.json" >/dev/null \
+    || fail "Discord reply below its message budget must not be split into texts[]"
+  assert_contains "$(jq -r '.text' "$home/state/x-outbox/req-discord.json")" '```bash' \
+    "Discord reply must preserve the fenced code block"
+  pass "fm-x-reply uses the Discord inbox platform budget instead of the X tweet budget"
+}
+
+test_reply_x_inbox_still_uses_x_budget() {
+  local home out long
+  home="$TMP_ROOT/reply-x-budget"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-x",tweet_id:"1234567890",text:"question"}' > "$home/state/x-inbox/req-x.json"
+  long="This X reply intentionally runs beyond the default tweet budget so it still needs a numbered thread on X. It has enough plain words to cross the limit while staying easy to split at word boundaries without code fences or platform ambiguity. The old default must remain intact for numeric tweet ids."
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-x "$long" 2>/dev/null)
+  [ "$out" = "req-x" ] || fail "X dry-run must echo the request_id (got: $out)"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-x.json" >/dev/null \
+    || fail "X reply over 280 characters must still split into texts[]"
+  [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-x.json")" -le 280 ] \
+    || fail "X reply chunks must stay within the default X budget"
+  pass "fm-x-reply keeps numeric X requests on the X tweet budget"
+}
+
+test_reply_inbox_explicit_limit_wins() {
+  local home out long
+  home="$TMP_ROOT/reply-explicit-limit"; mkdir -p "$home/state/x-inbox"
+  jq -cn '{request_id:"req-limit",platform:"discord",reply_max_chars:90,text:"question"}' \
+    > "$home/state/x-inbox/req-limit.json"
+  long="Discord normally has a much larger budget, but an explicit relay-provided reply_max_chars value must be honored when the payload carries one."
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-limit "$long" 2>/dev/null)
+  [ "$out" = "req-limit" ] || fail "explicit-limit dry-run must echo the request_id (got: $out)"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-limit.json" >/dev/null \
+    || fail "explicit reply_max_chars must force a split even on Discord"
+  [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-limit.json")" -le 90 ] \
+    || fail "explicit-limit chunks must stay within the relay-provided budget"
+  pass "fm-x-reply prefers an explicit relay-provided reply limit"
 }
 
 test_reply_max_chars_floor_clamps_to_minimum() {
@@ -1189,8 +1272,11 @@ test_link_records_request_and_timestamp() {
   home="$TMP_ROOT/link-ok"; mkdir -p "$home/state"
   meta="$home/state/fix-login-k3.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  # No inbox and no relay reachable here: this test pins the request/timestamp
+  # recording, not platform resolution, so fm-x-link's no-platform warning to
+  # stderr is expected and dropped.
   out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-42); rc=$?
+    "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-42 2>/dev/null); rc=$?
   expect_code 0 "$rc" "link exit"
   assert_grep "x_request=req-42" "$meta" "link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "link must record the timestamp"
@@ -1198,7 +1284,7 @@ test_link_records_request_and_timestamp() {
   assert_grep "kind=ship" "$meta" "link must preserve other meta lines"
   assert_grep "yolo=off" "$meta" "link must preserve other meta lines"
   # Re-linking replaces the prior link rather than appending a duplicate.
-  FM_HOME="$home" FMX_NOW_OVERRIDE=1700009999 "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-99 >/dev/null
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700009999 "$ROOT/bin/fm-x-link.sh" fix-login-k3 req-99 >/dev/null 2>&1
   [ "$(grep -c '^x_request=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request"
   [ "$(grep -c '^x_request_ts=' "$meta")" = "1" ] || fail "re-link must not duplicate x_request_ts"
   [ "$(grep -c '^x_followups=' "$meta")" = "1" ] || fail "re-link must not duplicate x_followups"
@@ -1208,18 +1294,166 @@ test_link_records_request_and_timestamp() {
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
 }
 
+test_link_records_discord_platform_for_followups() {
+  local home meta out rc reply
+  home="$TMP_ROOT/link-discord-platform"; mkdir -p "$home/state/x-inbox"
+  meta="$home/state/fix-discord.meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",text:"question"}' \
+    > "$home/state/x-inbox/req-discord-follow.json"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    "$ROOT/bin/fm-x-link.sh" fix-discord req-discord-follow >/dev/null; rc=$?
+  expect_code 0 "$rc" "Discord link exit"
+  assert_grep "x_platform=discord" "$meta" "link must record Discord platform context"
+  assert_grep "x_reply_max_chars=1900" "$meta" "link must record the Discord split budget for follow-ups"
+  rm -f "$home/state/x-inbox/req-discord-follow.json"
+  reply=$(cat <<'TXT'
+The follow-up is longer than an X tweet but should stay in one Discord message because the linked task meta recorded the platform before the inbox was drained.
+
+```bash
+printf '%s\n' "this fenced block should stay whole"
+```
+
+The final sentence confirms that the follow-up path did not fall back to the X budget after the inbox file disappeared.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-discord - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord follow-up dry-run exit"
+  [ "$out" = "req-discord-follow" ] || fail "Discord follow-up must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord-follow.json" >/dev/null \
+    || fail "Discord follow-up below its message budget must not split after inbox drain"
+  pass "fm-x-link records Discord platform context so follow-ups keep the Discord budget"
+}
+
+# Regression (2026-07-10 incident): a ~470-char Discord follow-up posted as a
+# (1/2)(2/2) thread because the link was recorded AFTER the ack reply drained the
+# inbox file, so the platform was lost and the splitter defaulted to X's 280-char
+# budget. The fix resolves the platform AUTHORITATIVELY from the relay by
+# request_id, so this ordering no longer loses it: the follow-up posts as ONE
+# message even though the inbox file is already gone at link time.
+test_link_resolves_platform_by_request_id_after_inbox_cleanup() {
+  local home fakebin log meta out rc reply
+  home="$TMP_ROOT/link-relay-lookup"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  meta="$home/state/fix-after-cleanup.meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'FMX_PAIRING_TOKEN=tok-reqctx\n' > "$home/.env"
+  # No inbox file at all: the ack reply already cleaned it up before the link.
+  # The relay resolves the platform by request_id.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 FAKE_CURL_LOG="$log" \
+    FAKE_REQCTX_CODE=200 FAKE_REQCTX_BODY='{"platform":"discord"}' \
+    "$ROOT/bin/fm-x-link.sh" fix-after-cleanup req-after-cleanup); rc=$?
+  expect_code 0 "$rc" "link after inbox cleanup exit"
+  assert_grep "url=https://relay.test/connector/request-context" "$log" \
+    "link must resolve the platform authoritatively by request_id when the inbox is gone"
+  grep '^data=' "$log" | tail -1 | sed 's/^data=//' | jq -e '.request_id == "req-after-cleanup"' >/dev/null \
+    || fail "the relay lookup must send the request_id in the body"
+  assert_grep "x_platform=discord" "$meta" "relay lookup must record the Discord platform after inbox cleanup"
+  assert_grep "x_reply_max_chars=1900" "$meta" "relay lookup must record the Discord split budget after inbox cleanup"
+  # The follow-up (still with the inbox gone) must post the ~470-char reply as ONE
+  # Discord message, not an X-length thread.
+  reply=$(cat <<'TXT'
+Aye captain, the sign-in redirect is patched and the change is up for review. The fix restores the callback path that was dropping the return URL, adds a regression guard so it cannot silently break again, and keeps the existing session handling untouched. This message is deliberately longer than a single X tweet so the test proves a Discord follow-up stays in one message instead of splitting into a numbered thread.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-after-cleanup - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord follow-up after relay lookup exit"
+  [ "$out" = "req-after-cleanup" ] || fail "follow-up must echo the request_id (got: $out)"
+  [ "$(printf '%s' "$reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
+    || fail "the regression reply must exceed the X 280-char budget to be meaningful"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-after-cleanup.json" >/dev/null \
+    || fail "a >280 <2000 Discord follow-up must post as ONE message even when linked after inbox cleanup"
+  pass "fm-x-link resolves the platform by request_id so a post-cleanup link keeps the Discord budget"
+}
+
+# Criterion 2 loud-warning branch: when neither the inbox nor the relay can
+# resolve the platform, the link is still recorded but fm-x-link WARNS loudly -
+# it must never silently fall back to the X budget. This test also confirms the
+# warned-about behavior actually happens (the follow-up does split at X length),
+# so the warning is truthful, not decorative.
+test_link_warns_loudly_when_platform_unresolvable() {
+  local home fakebin err meta out rc reply
+  home="$TMP_ROOT/link-warn-unresolvable"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  err="$home/err.txt"
+  meta="$home/state/fix-unresolvable.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  printf 'FMX_PAIRING_TOKEN=tok-unresolved\n' > "$home/.env"
+  # No inbox, and the relay cannot resolve the request (404): platform unknowable.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 FAKE_REQCTX_CODE=404 \
+    "$ROOT/bin/fm-x-link.sh" fix-unresolvable req-unresolvable 2>"$err"); rc=$?
+  expect_code 0 "$rc" "link with unresolvable platform still records the link"
+  [ "$out" = "linked fix-unresolvable to X request req-unresolvable" ] \
+    || fail "link must still succeed on stdout even when the platform is unknown (got: $out)"
+  assert_grep "WARNING" "$err" "an unresolvable platform must warn loudly, never silently default to X"
+  assert_grep "req-unresolvable" "$err" "the warning must name the request it could not resolve"
+  assert_grep "x_request=req-unresolvable" "$meta" "the link itself must still be recorded"
+  assert_no_grep "x_platform=" "$meta" "no platform must be recorded when none could be resolved"
+  assert_no_grep "x_reply_max_chars=" "$meta" "no split budget must be recorded when none could be resolved"
+  # The warning is truthful: a longer follow-up now really does split at X length.
+  reply=$(cat <<'TXT'
+This acknowledgement is intentionally written to run past the X tweet budget so the test can confirm the warned-about fallback truly happens: with no resolvable platform the splitter uses the 280-character X budget and breaks this into a numbered thread, which is exactly the outcome the loud warning exists to make visible.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" fix-unresolvable - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "unresolvable follow-up dry-run exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-unresolvable.json" >/dev/null \
+    || fail "with no platform the follow-up falls back to the X thread split, as the warning predicts"
+  pass "fm-x-link warns loudly instead of silently defaulting to the X budget when the platform is unknown"
+}
+
 test_link_carry_count_and_ts_preserve_followup_binding() {
   local home meta rc
   home="$TMP_ROOT/link-carry"; mkdir -p "$home/state"
   meta="$home/state/successor-task.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
-    "$ROOT/bin/fm-x-link.sh" successor-task req-carry --carry-count 2 --carry-ts 1700000000 >/dev/null; rc=$?
+    "$ROOT/bin/fm-x-link.sh" successor-task req-carry \
+      --carry-count 2 --carry-ts 1700000000 --carry-platform x --carry-max 280 >/dev/null; rc=$?
   expect_code 0 "$rc" "link paired carry flags exit"
   assert_grep "x_request=req-carry" "$meta" "carried link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "--carry-ts must preserve the original timestamp, not the current time"
   assert_grep "x_followups=2" "$meta" "--carry-count must seed the follow-up counter, not reset it"
+  assert_grep "x_platform=x" "$meta" "--carry-platform must preserve the prior reply platform"
+  assert_grep "x_reply_max_chars=280" "$meta" "--carry-max must preserve the prior split budget"
   pass "fm-x-link paired carry flags preserve a prior task's follow-up binding onto a successor"
+}
+
+test_link_recovery_relink_carries_discord_context_after_inbox_drain() {
+  local home meta out rc reply
+  home="$TMP_ROOT/link-carry-discord"; mkdir -p "$home/state"
+  meta="$home/state/successor-discord.meta"
+  printf 'window=w\nkind=ship\n' > "$meta"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
+    "$ROOT/bin/fm-x-link.sh" successor-discord req-discord-recovery \
+      --carry-count 1 --carry-ts 1700000000 --carry-platform discord --carry-max 1900 >/dev/null; rc=$?
+  expect_code 0 "$rc" "Discord recovery relink exit"
+  assert_grep "x_platform=discord" "$meta" "Discord recovery relink must preserve the platform after inbox drain"
+  assert_grep "x_reply_max_chars=1900" "$meta" "Discord recovery relink must preserve the split budget after inbox drain"
+  reply=$(cat <<'TXT'
+The recovered task is reporting back with enough text to exceed an X tweet, but it is still comfortably within the Discord budget carried over from the prior task.
+
+```bash
+printf '%s\n' "the code fence should not force an unnecessary Discord split"
+```
+
+The successor task must post this as one Discord follow-up even though the original inbox payload has already been drained.
+TXT
+)
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" successor-discord - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "Discord recovery follow-up dry-run exit"
+  [ "$out" = "req-discord-recovery" ] || fail "Discord recovery follow-up must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-discord-recovery.json" >/dev/null \
+    || fail "Discord recovery follow-up below its message budget must not fall back to X splitting"
+  assert_grep "x_followups=2" "$meta" "Discord recovery follow-up must increment the carried count"
+  pass "fm-x-link recovery relink preserves Discord platform context after inbox drain"
 }
 
 test_link_carry_count_validation() {
@@ -1246,6 +1480,19 @@ test_link_carry_count_validation() {
     "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "link --carry-ts without --carry-count exit"
   assert_grep "--carry-ts requires --carry-count" "$err" "link must require --carry-count when carrying timestamp"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link carry without reply context exit"
+  assert_grep "relink requires carried reply context" "$err" "link must not silently drop reply context on relink"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-platform discord >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-platform without paired carry flags exit"
+  assert_grep "--carry-platform and --carry-max require --carry-count and --carry-ts" "$err" \
+    "link must require the paired carry binding when carrying reply context"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 --carry-max 49 >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-max below floor exit"
+  assert_grep "--carry-max needs an integer of at least 50" "$err" "link must reject an unusable carried split budget"
   pass "fm-x-link rejects malformed or unpaired carry flags"
 }
 
@@ -1256,7 +1503,7 @@ test_meta_rewrites_do_not_depend_on_tmpdir() {
   meta="$home/state/fix-meta-k4.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
   out=$(TMPDIR="$badtmp" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" fix-meta-k4 req-local); rc=$?
+    "$ROOT/bin/fm-x-link.sh" fix-meta-k4 req-local 2>/dev/null); rc=$?
   expect_code 0 "$rc" "link with unusable TMPDIR exit"
   [ "$out" = "linked fix-meta-k4 to X request req-local" ] \
     || fail "link with unusable TMPDIR must still succeed (got: $out)"
@@ -1298,9 +1545,13 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
   if [ -n "$count" ]; then
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" --carry-count "$count" --carry-ts "$ts" >/dev/null
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
+      --carry-count "$count" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
   else
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null
+    # A fresh link with no inbox and no relay reachable intentionally has no
+    # platform context, so fm-x-link warns to stderr; these follow-up fixtures
+    # exercise the counter/link mechanics, not platform resolution, so drop it.
+    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null 2>&1
   fi
 }
 
@@ -1625,6 +1876,9 @@ test_reply_dry_run_fails_when_outbox_unwritable
 test_split_thread_lib
 test_reply_single_no_texts
 test_reply_thread_dry_run
+test_reply_discord_inbox_uses_discord_budget
+test_reply_x_inbox_still_uses_x_budget
+test_reply_inbox_explicit_limit_wins
 test_reply_max_chars_floor_clamps_to_minimum
 test_reply_thread_live_posts_texts
 test_reply_image_live_posts_image_object
@@ -1649,7 +1903,11 @@ test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
+test_link_records_discord_platform_for_followups
+test_link_resolves_platform_by_request_id_after_inbox_cleanup
+test_link_warns_loudly_when_platform_unresolvable
 test_link_carry_count_and_ts_preserve_followup_binding
+test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing

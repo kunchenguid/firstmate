@@ -10,18 +10,21 @@
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. Normal wake handling (watcher
-# briefly down between a wake and its re-arm) stays inside the grace window and
-# stays silent. Always exits 0: the guard warns, it never blocks.
+# briefly down between a wake and the next supervision resume) stays inside the
+# grace window and stays silent. Always exits 0: the guard warns, it never
+# blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
+CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -72,13 +75,18 @@ beacon_desc=$FM_SUP_BEACON_DESC
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
 if [ "$watcher_fresh" = false ]; then
-  if [ "$READ_ONLY" -eq 1 ]; then
-    fix='Watcher repair belongs to the session holding the fleet lock; do not drain or re-arm from this read-only session.'
-  elif "$queue_pending"; then
-    fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
-  else
-    fix='Re-arm it NOW: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
-  fi
+  afk=0
+  [ -e "$STATE/.afk" ] && afk=1
+  queue_arg=0
+  "$queue_pending" && queue_arg=1
+  x_mode=0
+  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+  fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --read-only "$READ_ONLY" \
+    --afk "$afk" \
+    --x-mode "$x_mode" \
+    --queue-pending "$queue_arg" \
+    --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
@@ -87,8 +95,9 @@ if [ "$watcher_fresh" = false ]; then
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else
-      printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
+      printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
     fi
+    printf '●  %s\n' "$CONTINUE_LINE"
     printf '●  %s\n' "$fix"
     printf '●%s\n' "$rule"
   } >&2

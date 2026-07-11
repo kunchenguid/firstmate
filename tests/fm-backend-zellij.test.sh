@@ -955,7 +955,7 @@ SH
     "fm-peek did not route the explicit metadata-matched target through zellij capture"
 
   : > "$dir/log"
-  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-send.sh" firstmate:7 --key Escape >/dev/null 2>&1
   expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through zellij"
@@ -998,7 +998,7 @@ test_scripts_reject_fm_target_label_mismatch() {
   zellij_tab_response "$dir" 2 3 not-the-task
   fb=$(make_zellij_fakebin "$dir")
 
-  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-send.sh" fm-zreuse --key Escape >/dev/null 2>&1
   status=$?
