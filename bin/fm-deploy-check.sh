@@ -83,10 +83,31 @@ LOG_LINES="${FM_DEPLOY_LOG_LINES:-50}"
 # that is never created (autodeploy off, or superseded before creation) can
 # never hold teardown open forever.
 VERIFY_DEADLINE="${FM_DEPLOY_VERIFY_DEADLINE:-1800}"
+# Hard bound on the `render services -o json` resolution fallback: the merge
+# poll calls --arm inside the watcher's FM_CHECK_TIMEOUT (default 30s) budget,
+# and a hanging render CLI must fail fast enough that the poll's plain
+# "merged" fallback wake is still reachable within that budget.
+SERVICES_TIMEOUT="${FM_RENDER_SERVICES_TIMEOUT:-10}"
 
 usage() {
   echo "usage: fm-deploy-check.sh [--once|--resolve|--arm] <service|project> <sha> ..." >&2
   exit 4
+}
+
+# run_bounded <seconds> <cmd...>: run cmd under a hard process-group-killing
+# timeout (same GNU timeout / gtimeout / perl fallback chain as the watcher's
+# run_check) so a wedged network call can never hang the caller.
+run_bounded() {
+  local t=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$t" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$t" "$@"
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$@"
+  fi
 }
 
 # resolve_service <service-or-project> -> prints a srv- id or exits 4.
@@ -113,9 +134,10 @@ resolve_service() {
 
   # Runtime fallback: match the live service list by name. `render services
   # -o json` wraps each resource under a type key, so a web service's name/id
-  # live under .service.
+  # live under .service. Bounded so a hanging CLI can never starve the merge
+  # poll's fallback wake.
   if command -v "$RENDER_BIN" >/dev/null 2>&1; then
-    line=$("$RENDER_BIN" services -o json --confirm 2>/dev/null \
+    line=$(run_bounded "$SERVICES_TIMEOUT" "$RENDER_BIN" services -o json --confirm 2>/dev/null \
       | jq -r --arg n "$arg" 'map(select(.service.name == $n)) | .[0].service.id // empty' 2>/dev/null || true)
     if [ -n "$line" ] && [ "$line" != "null" ]; then
       printf '%s\n' "$line"
@@ -175,20 +197,32 @@ if [ "${1:-}" = "--arm" ]; then
   armed_at=$(date +%s)
   meta="$STATE/$id.meta"
   if [ -f "$meta" ]; then
-    grep -qxF "deploy_service=$service" "$meta" || echo "deploy_service=$service" >> "$meta"
-    grep -qxF "deploy_sha=$sha" "$meta" || echo "deploy_sha=$sha" >> "$meta"
-    grep -q '^deploy_armed_at=' "$meta" || echo "deploy_armed_at=$armed_at" >> "$meta"
+    # A re-arm (e.g. re-verification after a timed-out wake) replaces the
+    # deploy_* lines with fresh values rather than skipping or duplicating.
+    metatmp=$(mktemp "$STATE/.$id.meta.tmp.XXXXXX")
+    grep -v -e '^deploy_service=' -e '^deploy_sha=' -e '^deploy_armed_at=' "$meta" > "$metatmp" || true
+    {
+      echo "deploy_service=$service"
+      echo "deploy_sha=$sha"
+      echo "deploy_armed_at=$armed_at"
+    } >> "$metatmp"
+    mv -f "$metatmp" "$meta"
   fi
   # The generated check runs --once every watcher check sweep; the watcher's
   # cadence is the poll loop, so this stays a single cheap probe per sweep.
   # It carries the arm time (bounded-deadline reference) and its own path, so
   # --once can disarm after a terminal wake and fire exactly once.
-  cat > "$STATE/$id.check.sh" <<EOF
+  # Written via temp-then-mv so a watcher process-group kill landing while the
+  # merge poll self-rewrites into this probe can never leave check.sh empty or
+  # partial; the running bash keeps the old inode open, so mv-over-path is safe.
+  checktmp=$(mktemp "$STATE/.$id.check.tmp.XXXXXX")
+  cat > "$checktmp" <<EOF
 FM_DEPLOY_LOG_OUT="$STATE/$id.deploy-log" \\
 FM_DEPLOY_ARMED_AT="$armed_at" \\
 FM_DEPLOY_DISARM_PATH="$STATE/$id.check.sh" \\
   "$SCRIPT_DIR/fm-deploy-check.sh" --once "$service" "$sha"
 EOF
+  mv -f "$checktmp" "$STATE/$id.check.sh"
   echo "armed: state/$id.check.sh verifies $sha reaches Live on $service"
   exit 0
 fi

@@ -86,6 +86,20 @@ pass "resolve: runtime services fallback"
 FM_RENDER_SERVICES_MAP=/dev/null run 4 "resolve: unknown project errors" -- "$DEPLOY_CHECK" --resolve nosuchproj
 pass "resolve: unknown project errors"
 
+# A hanging render CLI must not hang resolution: the runtime services fallback
+# runs under FM_RENDER_SERVICES_TIMEOUT so the merge poll's --arm always fails
+# within the watcher's check budget and the plain merged wake stays reachable.
+HANGBIN="$TMP_ROOT/hangbin"
+mkdir -p "$HANGBIN"
+printf '#!/usr/bin/env bash\nsleep 300\n' > "$HANGBIN/render"
+chmod +x "$HANGBIN/render"
+HANG_START=$(date +%s)
+FM_RENDER_SERVICES_MAP=/dev/null FM_RENDER_BIN="$HANGBIN/render" FM_RENDER_SERVICES_TIMEOUT=1 \
+  run 4 "resolve: hanging render CLI is bounded" -- "$DEPLOY_CHECK" --resolve astroai
+HANG_ELAPSED=$(( $(date +%s) - HANG_START ))
+[ "$HANG_ELAPSED" -lt 10 ] || fail "bounded resolve took ${HANG_ELAPSED}s"
+pass "resolve: hanging render CLI is bounded"
+
 # --- --once classification (watcher check contract) -------------------------
 
 run 0 "once: live wins over a same-sha failure" -- "$DEPLOY_CHECK" --once srv-x 1111111111111111
@@ -179,6 +193,31 @@ assert_contains "$ARMOUT" "deploy live" "armed check.sh probes the deploy"
 assert_absent "$STATE/armtask.check.sh" "armed probe disarms after the terminal wake"
 pass "arm: resolves + writes check.sh"
 
+# --- --arm atomic write + re-arm meta replacement ----------------------------
+
+RSTATE="$TMP_ROOT/rstate"
+mkdir -p "$RSTATE"
+printf 'project=/repos/mtmccarthy\n' > "$RSTATE/rearm.meta"
+FM_STATE_OVERRIDE="$RSTATE" FM_RENDER_SERVICES_MAP="$MAP" \
+  run 0 "arm: first arm succeeds" -- "$DEPLOY_CHECK" --arm rearm mtmccarthy 1111111111111111
+[ -s "$RSTATE/rearm.check.sh" ] || fail "armed check.sh is empty"
+# Re-arm with a different sha (e.g. re-verification after a timed-out wake):
+# the deploy_* meta lines are replaced with fresh values, never skipped stale
+# or appended as duplicates, and unrelated meta lines survive.
+FM_STATE_OVERRIDE="$RSTATE" FM_RENDER_SERVICES_MAP="$MAP" \
+  run 0 "arm: re-arm succeeds" -- "$DEPLOY_CHECK" --arm rearm mtmccarthy 2222222222222222
+[ "$(grep -c '^deploy_sha=' "$RSTATE/rearm.meta")" = 1 ] || fail "re-arm duplicated deploy_sha lines"
+assert_grep "deploy_sha=2222222222222222" "$RSTATE/rearm.meta" "re-arm records the fresh sha"
+assert_no_grep "deploy_sha=1111111111111111" "$RSTATE/rearm.meta" "re-arm drops the stale sha"
+[ "$(grep -c '^deploy_service=' "$RSTATE/rearm.meta")" = 1 ] || fail "re-arm duplicated deploy_service lines"
+[ "$(grep -c '^deploy_armed_at=' "$RSTATE/rearm.meta")" = 1 ] || fail "re-arm duplicated deploy_armed_at lines"
+assert_grep "project=/repos/mtmccarthy" "$RSTATE/rearm.meta" "re-arm preserves unrelated meta lines"
+[ -s "$RSTATE/rearm.check.sh" ] || fail "re-armed check.sh is empty"
+# The temp-then-mv writes leave no stray temp files behind (and their dotfile
+# names can never match the watcher's *.check.sh glob mid-write).
+if ls "$RSTATE"/.rearm.* >/dev/null 2>&1; then fail "arm left temp files behind"; fi
+pass "arm: atomic write + re-arm replaces meta lines"
+
 # --- merge-path wiring: fm-pr-check transitions merge -> deploy --------------
 
 # Fake gh: PR is MERGED, merge commit is a Live sha.
@@ -203,6 +242,8 @@ assert_present "$WSTATE/wtask.check.sh" "merge poll written"
 POLLOUT=$(FM_STATE_OVERRIDE="$WSTATE" FM_RENDER_SERVICES_MAP="$MAP" bash "$WSTATE/wtask.check.sh" 2>/dev/null)
 assert_contains "$POLLOUT" "verifying deploy" "merge poll hands off to deploy verify"
 assert_grep "--once" "$WSTATE/wtask.check.sh" "check.sh replaced by deploy probe"
+[ -s "$WSTATE/wtask.check.sh" ] || fail "handed-off check.sh is empty"
+if ls "$WSTATE"/.wtask.* >/dev/null 2>&1; then fail "handoff left temp files behind"; fi
 pass "wiring: merged PR with a mapped service transitions to deploy verify"
 
 # Same merge, but no service maps (empty map, services fixture lacks the name):

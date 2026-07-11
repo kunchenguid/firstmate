@@ -13,5 +13,5 @@
 # back to `render services -o json` and matches by name at runtime. Verify ids
 # against `render services -o text` before relying on them; Render ids drift.
 
-astroai      srv-d49b37c9c44c73bj0j70
-mtmccarthy   srv-d4v2k4ur433s73dti20g
+astroai      srv-xxxxxxxxxxxxxxxxxxxx
+mtmccarthy   srv-xxxxxxxxxxxxxxxxxxxx

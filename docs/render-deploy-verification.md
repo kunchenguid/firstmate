@@ -60,28 +60,28 @@ If any deploy for the sha reached a served state, the commit is Live even when a
 - `fm-deploy-check.sh --resolve <project>` - print the resolved service id.
 - `fm-deploy-check.sh --arm <id> <service|project> <sha>` - resolve once, record meta (including `deploy_armed_at=`), write the deploy probe check.sh wired with the arm time and disarm path.
 
-Cadence, timeout, and deadline are env-overridable: `FM_DEPLOY_POLL_INTERVAL` (default 15s), `FM_DEPLOY_TIMEOUT` (default 900s, the blocking poll's bound), `FM_DEPLOY_VERIFY_DEADLINE` (default 1800s, the wired watcher path's bound before a timed-out wake), `FM_DEPLOY_LOG_LINES` (default 50), `FM_RENDER_BIN` (default `render`).
+Cadence, timeout, and deadline are env-overridable: `FM_DEPLOY_POLL_INTERVAL` (default 15s), `FM_DEPLOY_TIMEOUT` (default 900s, the blocking poll's bound), `FM_DEPLOY_VERIFY_DEADLINE` (default 1800s, the wired watcher path's bound before a timed-out wake), `FM_DEPLOY_LOG_LINES` (default 50), `FM_RENDER_BIN` (default `render`), `FM_RENDER_SERVICES_TIMEOUT` (default 10s, the hard bound on the `render services` resolution fallback so a hanging CLI can never starve the merge poll's fallback wake inside the watcher's check budget).
 
 ## Evidence
 
 2026-07-11, Render CLI v2.5.0, logged in as captain, on macOS (Darwin 25.4.0).
 
-`render deploys list srv-d4v2k4ur433s73dti20g -o json --confirm` returned an array of deploys, each with `.commit.id`, `.status` (lowercase, e.g. `live`, `update_failed`, `inactive`), `.id` (`dep-...`), and `.createdAt`.
+`render deploys list srv-xxxx... -o json --confirm` (service id redacted; the real ids live only in the local gitignored `config/render-services.map`) returned an array of deploys, each with `.commit.id`, `.status` (lowercase, e.g. `live`, `update_failed`, `inactive`), `.id` (`dep-...`), and `.createdAt`.
 The mtmccarthy history showed the exact silent-failure shape: commit `c40669d3...` had both a `live` deploy (trigger `api`) and an `update_failed` deploy (trigger `new_commit`), and the surrounding history was a wall of `Update Failed`.
 
 `render services -o json --confirm` returned an array where each element wraps one resource under a type key (`service`, `postgres`, `project`, `environment`); web-service name and id live under `.service.name` / `.service.id`.
-Verified ids at runtime: `astroai` = `srv-d49b37c9c44c73bj0j70`, `mtmccarthy` = `srv-d4v2k4ur433s73dti20g`.
+Verified at runtime that both `astroai` and `mtmccarthy` resolved to their live `srv-xxxx... (redacted)` ids by name.
 
-Helper behavior verified against that live data (read-only):
+Helper behavior verified against that live data (read-only, service id redacted):
 
 ```
-$ fm-deploy-check.sh --once srv-d4v2k4ur433s73dti20g c40669d37b624e2d2cfae12b89902217ba849d8b
-deploy live: c40669d3... on srv-d4v2k4ur433s73dti20g
+$ fm-deploy-check.sh --once srv-xxxx... c40669d37b624e2d2cfae12b89902217ba849d8b
+deploy live: c40669d3... on srv-xxxx...
 
-$ FM_DEPLOY_LOG_OUT=/tmp/log fm-deploy-check.sh --once srv-d4v2k4ur433s73dti20g 5e2a4271103aac22b099d2ebb2695c3885afa3d6
-deploy FAILED: 5e2a4271... on srv-d4v2k4ur433s73dti20g (update_failed, dep-d92tq5favr4c73bhkjmg) - boot log: /tmp/log
+$ FM_DEPLOY_LOG_OUT=/tmp/log fm-deploy-check.sh --once srv-xxxx... 5e2a4271103aac22b099d2ebb2695c3885afa3d6
+deploy FAILED: 5e2a4271... on srv-xxxx... (update_failed, dep-d92tq5favr4c73bhkjmg) - boot log: /tmp/log
 
-$ fm-deploy-check.sh --once srv-d4v2k4ur433s73dti20g deadbeefdeadbeef
+$ fm-deploy-check.sh --once srv-xxxx... deadbeefdeadbeef
 $   # (silent: no deploy for that sha)
 ```
 

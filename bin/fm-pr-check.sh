@@ -40,7 +40,10 @@ if [ -f "$META" ]; then
   fi
 fi
 
-cat > "$STATE/$ID.check.sh" <<EOF
+# Written via temp-then-mv so a kill mid-write can never leave check.sh empty
+# or partial (an empty check silently loses the merged wake with no retry).
+TMPCHECK=$(mktemp "$STATE/.$ID.check.tmp.XXXXXX")
+cat > "$TMPCHECK" <<EOF
 state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] || exit 0
 # Merged. Hand off to deploy verification when this project maps to a Render
@@ -56,4 +59,5 @@ else
   echo "merged"
 fi
 EOF
+mv -f "$TMPCHECK" "$STATE/$ID.check.sh"
 echo "armed: state/$ID.check.sh polls $URL"
