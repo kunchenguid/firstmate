@@ -37,6 +37,7 @@ SH
 #!/usr/bin/env bash
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
+if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
 cat <<'JSON'
 [{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
@@ -231,6 +232,25 @@ test_partial_github_failure_degrades() {
   pass "a partial GitHub failure degrades gracefully"
 }
 
+test_perl_fallback_bounds_github_call() {
+  local home fakebin toolbin cmd json started elapsed
+  home=$(make_home perl-timeout); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  toolbin="$home/toolbin"
+  mkdir -p "$toolbin"
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+    ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  started=$(date +%s)
+  json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
+  printf '%s' "$json" | jq -e '.prs | test("unavailable")' >/dev/null \
+    || fail "timed-out gh call did not fail soft: $json"
+  pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
+}
+
 # The Lavish-103 defect, end to end: a COMPLETED scout that raised a decision and
 # then finished (done), whose report body reads like that decision, must surface as
 # a report POINTER only - never in decisions_open. Report prose must never open or
@@ -266,3 +286,4 @@ test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
+test_perl_fallback_bounds_github_call

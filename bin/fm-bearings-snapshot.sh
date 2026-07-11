@@ -43,6 +43,7 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
+case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 
 usage() {
   cat <<'EOF'
@@ -101,8 +102,10 @@ gh_bounded() {  # <args...>
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
   else
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+    return 124
   fi
 }
 
