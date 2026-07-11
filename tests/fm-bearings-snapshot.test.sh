@@ -28,7 +28,7 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%%1\n' ;;
+  display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane) printf 'all quiet\n> \n' ;;
 esac
 exit 0
@@ -251,6 +251,107 @@ test_perl_fallback_bounds_github_call() {
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
 }
 
+write_large_fixture() {  # <home> <count>
+  local home=$1 count=$2 i id
+  : > "$home/data/backlog.md"
+  printf '## Queued\n' >> "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    id="dead-$i"
+    mkdir -p "$home/projects/$id" "$home/data/$id"
+    printf '# Report\n' > "$home/data/$id/report.md"
+    printf -- '- [ ] gate-%s - Gate %s blocked-by: task-%s (repo: repo-%s) (kind: ship)\n' "$i" "$i" "$i" "$i" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id" \
+      "project=repo-$i" \
+      "harness=codex" \
+      "kind=scout" \
+      "mode=scout" \
+      "pr=https://github.com/acme/repo-$i/pull/$i"
+    printf 'needs-decision [key=q%s]: choose %s\n' "$i" "$i" > "$home/state/$id.status"
+    i=$((i + 1))
+  done
+}
+
+test_section_caps_and_expansion_flags() {
+  local home fakebin json expanded
+  home=$(make_home caps); write_large_fixture "$home" 5
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_IN_FLIGHT=2 FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 \
+    FM_BEARINGS_REPORTS=2 FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 \
+    run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight|length) == 2 and (.decisions_open|length) == 2 and (.gates|length) == 2
+    and (.reports|length) == 2 and (.recorded_prs|length) == 2 and (.unhealthy_endpoints|length) == 2
+    and ([.omitted[].surface] | index("in_flight showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("decisions_open showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("gates showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("reports showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("recorded_prs showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("unhealthy_endpoints showing 2 of 5") != null)
+  ' >/dev/null || fail "section caps or counted omissions are wrong: $json"
+  expanded=$(FM_BEARINGS_IN_FLIGHT=2 FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 \
+    FM_BEARINGS_REPORTS=2 FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 \
+    run "$home" "$fakebin" --json --all-in-flight --all-decisions --all-queued \
+      --all-reports --all-recorded-prs --all-unhealthy)
+  printf '%s' "$expanded" | jq -e '
+    (.in_flight|length) == 5 and (.decisions_open|length) == 5 and (.gates|length) == 5
+    and (.reports|length) == 5 and (.recorded_prs|length) == 5 and (.unhealthy_endpoints|length) == 5
+  ' >/dev/null || fail "section expansion flags did not reveal full sets: $expanded"
+  pass "all fleet-sized sections are capped with counted opt-in expansion"
+}
+
+test_pr_repository_cap_and_expansion() {
+  local home fakebin json expanded
+  home=$(make_home repo-caps); write_large_fixture "$home" 5
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --json)
+  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 2 ] || fail "default PR repository cap was not enforced"
+  printf '%s' "$json" | jq -e '
+    [.omitted[] | select(.surface == "PR repositories showing 2 of 5" and .reveal == "--all-pr-repos")] | length == 1
+  ' >/dev/null || fail "PR repository truncation was not recorded: $json"
+  : > "$home/net.log"
+  expanded=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --all-pr-repos --json)
+  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 5 ] || fail "--all-pr-repos did not reveal every repository"
+  printf '%s' "$expanded" | jq -e '.candidate_prs | length == 5' >/dev/null \
+    || fail "expanded PR repository set did not enrich every repository: $expanded"
+  pass "live PR enrichment caps repositories with counted expansion"
+}
+
+install_failing_jq() {  # <fakebin> <model|toon>
+  local fakebin=$1 phase=$2 real
+  real=$(command -v jq)
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'def trunc'*) [ "$phase" = model ] && exit 9 ;;
+  *'def q:'*) [ "$phase" = toon ] && exit 9 ;;
+esac
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
+test_projection_and_toon_fail_closed() {
+  local home fakebin out err rc
+  home=$(make_home fail-closed); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  install_failing_jq "$fakebin" model
+  err="$home/model.err"
+  out=$(run "$home" "$fakebin" --json 2> "$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "projection failure exited successfully"
+  [ -z "$out" ] || fail "projection failure emitted output"
+  grep -F 'projection failed' "$err" >/dev/null || fail "projection failure lacked a diagnostic"
+  install_failing_jq "$fakebin" toon
+  err="$home/toon.err"
+  out=$(run "$home" "$fakebin" 2> "$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "TOON rendering failure exited successfully"
+  [ -z "$out" ] || fail "TOON rendering failure emitted output"
+  grep -F 'TOON rendering failed' "$err" >/dev/null || fail "TOON failure lacked a diagnostic"
+  pass "projection and TOON rendering failures exit nonzero with diagnostics"
+}
+
 # The Lavish-103 defect, end to end: a COMPLETED scout that raised a decision and
 # then finished (done), whose report body reads like that decision, must surface as
 # a report POINTER only - never in decisions_open. Report prose must never open or
@@ -287,3 +388,6 @@ test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
+test_section_caps_and_expansion_flags
+test_pr_repository_cap_and_expansion
+test_projection_and_toon_fail_closed
