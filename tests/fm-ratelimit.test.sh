@@ -291,13 +291,11 @@ the model is overloaded right now
 please try again later' >/dev/null; then
     fail "tightened overload regex still matched generic retry phrasing"
   fi
-  match=$(fm_ratelimit_render_match 'ordinary line
+  if fm_ratelimit_render_match 'ordinary line
 another line
-API Error: 529')
-  case "$match" in
-    *"$(printf '\t')"overload) ;;
-    *) fail "API Error: 529 footer did not match as overload: $match" ;;
-  esac
+API Error: 529' >/dev/null; then
+    fail "bare API Error: 529 footer matched as overload"
+  fi
   # A realistic idle-529 render: claude draws the overload as a tool-result line
   # with a leading continuation glyph and trailing overloaded_error JSON. The
   # loosened default must still classify it as overload.
@@ -315,7 +313,7 @@ another line
 The previous outage was API Error: 529 in a log, not a live footer.' >/dev/null; then
     fail "mid-transcript API Error: 529 mention matched as overload"
   fi
-  pass "overload matcher fires only on API Error: 529, not generic retry text"
+  pass "overload matcher requires the real Claude 529 render shape"
 }
 
 # A transient API Error: 529 overload parks with the SHORT FM_OVERLOAD_FALLBACK
@@ -328,14 +326,14 @@ test_overload_uses_short_fallback_distinct_from_quota() {
   now=1000000000
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-API Error: 529' "$now")
+  ⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
-  [ "$kind" = overload ] || fail "529 footer did not classify as overload: $match"
+  [ "$kind" = overload ] || fail "glyph+JSON 529 render did not classify as overload: $match"
   [ "$reset" = "$((now + 120))" ] \
     || fail "overload used the wrong default fallback: reset=$reset, expected $((now + 120))"
-  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match 'API Error: 529' "$now")
+  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -372,11 +370,11 @@ EOF
   [ "$kind" = ratelimit ] || fail "reuse path did not classify footer as ratelimit: $match"
   [ "$reset" = 1234567890 ] || fail "render_match did not reuse the supplied quota reset: reset=$reset"
   # Overload reuse likewise pins the reset instead of sliding to now+120 each poll.
-  match=$(fm_ratelimit_render_match 'API Error: 529' "$now" 1111111111)
+  match=$(fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now" 1111111111)
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
-  [ "$kind" = overload ] || fail "reuse path did not classify 529 footer as overload: $match"
+  [ "$kind" = overload ] || fail "reuse path did not classify glyph+JSON 529 render as overload: $match"
   [ "$reset" = 1111111111 ] || fail "overload reuse did not pin the reset: reset=$reset"
   # A non-numeric reuse value is ignored: the footer is re-parsed (fallback here).
   match=$(fm_ratelimit_render_match 'ordinary line

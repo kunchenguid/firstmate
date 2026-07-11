@@ -60,12 +60,12 @@ FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+
 # Claude renders an idle overload as a tool-result line: a leading continuation
 # glyph (e.g. "⎿ ") before "API Error: 529", and often trailing JSON such as
 # {"type":"overloaded_error",...}. fm_ratelimit_footer_line_match full-line
-# anchors this, so the default allows only a non-alphanumeric prefix (glyph,
-# spaces, punctuation) before the literal and any trailing text after it: still
-# anchored near line start so a 529 merely mentioned mid-transcript (preceded by
-# words) does not match. Confirm this default against a real idle 529 render;
-# override via FM_OVERLOAD_REGEX if the actual footer differs.
-FM_OVERLOAD_REGEX_DEFAULT='[^[:alnum:]]*API Error: 529.*'
+# anchors this, so the default requires a visible non-alphanumeric prefix
+# (glyph/punctuation) before the literal and a trailing overloaded_error JSON
+# payload after it. That keeps bare transcript/log lines ending in
+# "API Error: 529" from being parked. Confirm this default against a real idle
+# 529 render; override via FM_OVERLOAD_REGEX if the actual footer differs.
+FM_OVERLOAD_REGEX_DEFAULT='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
 
 # FM_INJECT_MARK: the away-mode daemon's in-band sentinel (U+2063 INVISIBLE
 # SEPARATOR, UTF-8 e2 81 a3, untypable on a normal keyboard and - unlike the
