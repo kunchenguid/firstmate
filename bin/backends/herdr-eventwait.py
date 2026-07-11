@@ -26,11 +26,11 @@ from_status and builds the canonical shape):
   <pane_id>\t<workspace_id>\t<agent_status>\t<agent>
 
 Exit status:
-  0  streamed until the timeout elapsed (or the server closed) with no error -
-     a clean bounded wait; the caller treats this as "no fast escalation, poll
-     cadence preserved".
+  0  streamed until the timeout elapsed with no error - a clean bounded wait;
+     the caller treats this as "no fast escalation, poll cadence preserved".
   2  bad arguments, could not connect, or could not send the subscribe request.
   3  the subscribe request did not return a subscription_started ack.
+  4  the server closed the stream early or a receive operation failed.
 A non-zero exit tells the bash caller to fall back to plain polling for this
 cycle (the permanent fail-closed backstop), never to go silent.
 """
@@ -46,22 +46,24 @@ RECV_CHUNK = 65536
 
 def _read_line(sock, buf, deadline):
     """Read one newline-terminated chunk from sock, honoring an absolute
-    monotonic deadline. Returns (line_bytes_or_None, buf). None means the
-    deadline passed or the peer closed with no complete line left."""
+    monotonic deadline. Returns (line_bytes_or_None, buf, outcome), where
+    outcome is line, timeout, closed, or error."""
     while b"\n" not in buf:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None, buf
+            return None, buf, "timeout"
         sock.settimeout(remaining)
         try:
             chunk = sock.recv(RECV_CHUNK)
-        except (socket.timeout, OSError):
-            return None, buf
+        except socket.timeout:
+            return None, buf, "timeout"
+        except OSError:
+            return None, buf, "error"
         if not chunk:
-            return None, buf
+            return None, buf, "closed"
         buf += chunk
     line, buf = buf.split(b"\n", 1)
-    return line, buf
+    return line, buf, "line"
 
 
 def _clean(value):
@@ -107,7 +109,7 @@ def main(argv):
     # Bounded wait for the subscription_started ack (its own short budget, but
     # never past the overall deadline).
     ack_deadline = min(deadline, start + ACK_TIMEOUT)
-    line, buf = _read_line(sock, buf, ack_deadline)
+    line, buf, outcome = _read_line(sock, buf, ack_deadline)
     if line is None:
         return 2
     try:
@@ -120,9 +122,9 @@ def main(argv):
 
     # Stream projected events until the deadline or the server closes.
     while True:
-        line, buf = _read_line(sock, buf, deadline)
+        line, buf, outcome = _read_line(sock, buf, deadline)
         if line is None:
-            break
+            return 0 if outcome == "timeout" else 4
         try:
             message = json.loads(line.decode("utf-8", "replace"))
         except ValueError:
@@ -138,7 +140,6 @@ def main(argv):
         )
         sys.stdout.write("\t".join(fields) + "\n")
         sys.stdout.flush()
-    return 0
 
 
 if __name__ == "__main__":
