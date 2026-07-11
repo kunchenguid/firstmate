@@ -19,6 +19,11 @@
 # github.com is not reachable from the runner directly, so both tools are
 # pinned and fetched through the internal relay into /usr/local/bin (ahead of
 # /usr/bin on PATH). Bump the versions here, not in apt.
+#
+# The tests job also installs gawk: buster's default awk is mawk 1.3.3, which
+# predates POSIX character classes, so the [[:space:]] patterns in
+# bin/fm-backlog-handoff.sh never match and its malformed-continuation refusal
+# silently passes. Ubuntu's mawk 1.3.4 and macOS awk both handle it.
 name: MR CI
 
 trigger:
@@ -41,9 +46,9 @@ jobs:
             set -eu
             relay=http://sys-proxy-rd-relay.byted.org:8118
             https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/sc.tar.xz \
-              https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+              https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
             tar -xJf /tmp/sc.tar.xz -C /tmp
-            install -m 0755 /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+            install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
             shellcheck --version
       - name: Shellcheck
         commands:
@@ -58,13 +63,16 @@ jobs:
     # a hung watcher or tmux test instead of riding the 120-minute default.
     timeout: 15
     steps:
-      - name: Require tmux for e2e tests
+      - name: Install tmux and gawk
         commands:
           - |
             set -eu
             apt-get update
-            apt-get install -y --no-install-recommends tmux
+            apt-get install -y --no-install-recommends tmux gawk
             tmux -V
+            # gawk takes over the awk alternative; POSIX classes must work.
+            awk --version | head -1
+            printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
       - name: Install jq
         commands:
           - |
