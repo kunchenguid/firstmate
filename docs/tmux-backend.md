@@ -12,7 +12,12 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
+- A verified crew harness: `claude`, `codex`, `opencode`, `pi`, or `grok`.
+- `git` with GitHub auth (`gh auth login`).
+- `node`, required by firstmate's universal toolchain.
+- `treehouse` for pooling clean worktrees; `no-mistakes` for the validation pipeline; `gh-axi`, `chrome-devtools-axi`, and `lavish-axi` for GitHub, browser, and rich-review operations; `tasks-axi` 0.1.1 or newer with `update --archive-body` and atomic multi-ID `mv` from 0.2.2, plus `quota-axi` for bootstrap-managed backlog and dispatch support.
+
+The first mate detects missing tools at session start and offers to install them after you approve.
 
 ## Selecting it
 
@@ -109,7 +114,7 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
-Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
+Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=1`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
 ## Limitations
 
