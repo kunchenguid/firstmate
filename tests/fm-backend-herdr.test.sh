@@ -1725,7 +1725,7 @@ set -u
 if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
   : > "$FM_FAKE_READER_READY_FILE"
 fi
-printf '@subscribed\n'
+printf '%s\n' "${FM_FAKE_READER_ACK:-@subscribed}"
 if [ -n "${FM_FAKE_READER_LINES:-}" ] && [ -f "$FM_FAKE_READER_LINES" ]; then
   cat "$FM_FAKE_READER_LINES"
 fi
@@ -1839,18 +1839,19 @@ test_wait_transition_not_capable_returns_2() {
 }
 
 test_wait_transition_reconcile_blocked_returns_record() {
-  local dir state agent fb reader lines out rc marker
-  dir="$TMP_ROOT/wt-reconcile"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  local dir state agent temp fb reader lines out rc marker
+  dir="$TMP_ROOT/wt-reconcile"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" blocked
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
   marker="$state/.herdr-escalated-sess_wG_pQ"
-  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+  out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
   [ "$rc" = 0 ] || fail "reconcile of an already-blocked pane must return 0, got $rc"
   case "$out" in *blocked*) : ;; *) fail "reconcile must print the blocked record, got '$out'" ;; esac
   [ ! -e "$marker" ] || fail "reconcile must not mark a blocked pane before the caller durably handles it"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "actionable reconciliation must remove its private FIFO directory"
   pass "fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane"
 }
 
@@ -1935,17 +1936,36 @@ test_wait_transition_reader_failure_returns_2() {
   pass "fm_backend_herdr_wait_transition: a reader/subscribe failure falls back to polling (rc 2)"
 }
 
+test_wait_transition_bad_ack_returns_2_and_cleans_up() {
+  local dir state agent temp fb reader lines result rc fd_open
+  dir="$TMP_ROOT/wt-bad-ack"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  result=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_ACK=invalid \
+    /bin/bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; rc=$?; [ -e /dev/fd/9 ] && fd_open=yes || fd_open=no; printf "%s %s\n" "$rc" "$fd_open"' "$ROOT" "$state")
+  rc=${result%% *}; fd_open=${result#* }
+  [ "$rc" = 2 ] || fail "an invalid subscription acknowledgement must return 2, got $rc"
+  [ "$fd_open" = no ] || fail "an invalid subscription acknowledgement must close fixed fd 9"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "an invalid subscription acknowledgement must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: Bash 3.2-safe bad-ack path closes fd 9 and removes its FIFO"
+}
+
 test_wait_transition_clean_timeout_returns_1() {
-  local dir state agent fb reader lines rc
-  dir="$TMP_ROOT/wt-timeout"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  local dir state agent temp fb reader lines result rc fd_open
+  dir="$TMP_ROOT/wt-timeout"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" idle
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"   # no events, reader exits 0
-  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+  result=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+    /bin/bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; rc=$?; [ -e /dev/fd/9 ] && fd_open=yes || fd_open=no; printf "%s %s\n" "$rc" "$fd_open"' "$ROOT" "$state")
+  rc=${result%% *}; fd_open=${result#* }
   [ "$rc" = 1 ] || fail "a clean full-budget wait with no actionable edge must return 1, got $rc"
-  pass "fm_backend_herdr_wait_transition: a clean timeout with no blocked edge returns 1 (caller already waited)"
+  [ "$fd_open" = no ] || fail "a clean timeout must close fixed fd 9"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a clean timeout must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -2046,4 +2066,5 @@ test_wait_transition_reconcile_dedupes_when_marked
 test_wait_transition_stream_blocked_returns_record
 test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
+test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1

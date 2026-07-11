@@ -1245,7 +1245,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo fifo_fd reader_pid line ws status agent raw record hit rc=1
+  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -1254,33 +1254,34 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   fi
   "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
   reader_pid=$!
-  exec {fifo_fd}< "$fifo"
-  if ! IFS= read -r -u "$fifo_fd" line || [ "$line" != "@subscribed" ]; then
+  if ! exec 9< "$fifo"; then
+    kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
-    exec {fifo_fd}>&-
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
+  fi
+  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
+    rc=2
   fi
 
   # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
   # during the gap since the last subscription is returned now, once, while
   # newer edges accumulate in the active stream. `working` panes clear their
   # marker here too.
-  for w in "${windows[@]}"; do
-    pane_id=${w#*:}
-    [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
-    raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    [ -n "$raw" ] || continue
-    record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
-    if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
-      printf '%s' "$hit"
-      kill "$reader_pid" 2>/dev/null || true
-      wait "$reader_pid" 2>/dev/null || true
-      exec {fifo_fd}>&-
-      rm -rf "$fifo_dir" 2>/dev/null || true
-      return 0
-    fi
-  done
+  if [ "$rc" -ne 2 ]; then
+    for w in "${windows[@]}"; do
+      pane_id=${w#*:}
+      [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
+      raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+      [ -n "$raw" ] || continue
+      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
+      if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
+        printf '%s' "$hit"
+        rc=0
+        break
+      fi
+    done
+  fi
 
   # Drain stream edges until a fresh blocked edge or the timeout. The reader is
   # a subprocess of this call (NOT a second watcher), and is killed the instant
@@ -1289,7 +1290,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the
   # status into the wrong column. `cut` preserves empty fields.
-  while IFS= read -r line; do
+  while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
     [ -n "$line" ] || continue
     pane_id=$(printf '%s' "$line" | cut -f1)
     ws=$(printf '%s' "$line" | cut -f2)
@@ -1302,22 +1303,22 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       rc=0
       break
     fi
-  done <&"$fifo_fd"
+  done
   if [ "$rc" -eq 0 ]; then
     kill "$reader_pid" 2>/dev/null || true
-    wait "$reader_pid" 2>/dev/null || true
-    exec {fifo_fd}>&-
-    rm -rf "$fifo_dir" 2>/dev/null || true
-    return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    kill "$reader_pid" 2>/dev/null || true
   fi
   # No actionable edge: distinguish a clean full-budget wait (reader exit 0 ->
   # return 1, caller already waited) from a reader error (connect/subscribe
   # failure, exit non-zero -> return 2, caller sleeps and counts toward the
   # runtime-disable threshold).
-  local reader_rc=0
   wait "$reader_pid" 2>/dev/null || reader_rc=$?
-  exec {fifo_fd}>&-
+  exec 9<&-
   rm -rf "$fifo_dir" 2>/dev/null || true
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 2 ] && return 2
   [ "$reader_rc" -eq 0 ] && return 1
   return 2
 }
