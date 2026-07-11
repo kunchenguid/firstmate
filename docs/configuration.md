@@ -58,6 +58,11 @@ A zellij spawn additionally version-gates against the installed `zellij` binary'
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+Every spawn records a fresh 128-bit `generation=` value as 32 lowercase hexadecimal characters so a delayed metadata writer can distinguish the current task instance from an earlier same-id spawn.
+An ordinary crewmate or scout launched with the standard `--label <text>` also records the rendered `label=` value; Herdr displays that value on the live tab, while other backends retain their stable endpoint names.
+Spawn, label updates, X-mode link rewrites, promotion, PR recording, and teardown serialize task metadata through `state/.<id>.meta.lock` so a same-id replacement cannot be overwritten or deleted by an older lifecycle operation.
+Task-lock waits report the holder every 5 seconds and fail after `FM_TASK_LOCK_WAIT_SECONDS` seconds, which defaults to 120 and must be a positive integer.
+`fm-pr-check.sh` releases the lock during the GitHub lookup, then records the PR and arms its poll only if the same generation still owns the metadata; legacy metadata without `generation=` falls back to matching its worktree and endpoint fields.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.

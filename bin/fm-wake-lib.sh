@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+# Task-metadata writers use fm_task_lock_acquire_wait for bounded waits with
+# holder notices; FM_TASK_LOCK_WAIT_SECONDS is a positive integer (default 120).
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"

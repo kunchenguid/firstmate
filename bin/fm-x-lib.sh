@@ -46,6 +46,7 @@
 #                                followups to 0
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
+# The three task-meta rewrite helpers serialize through the shared per-task lock.
 # Callers must have FM_HOME set before calling fmx_load_config.
 
 FMX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

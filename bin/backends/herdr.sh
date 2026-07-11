@@ -44,8 +44,8 @@
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
 # default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate-crew" exactly like
-# pre-P3 behavior when a test does not care about home-specific labeling).
+# fm_backend_herdr_workspace_label falls through to the production primary-home
+# label "firstmate-crew" when a test does not care about home-specific labeling).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"

@@ -30,7 +30,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-continuity-command-policy.mjs` | Semantic owner of Claude continuity-gate fleet-command classification (docs/arm-pretool-check.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates with standard lifecycle labels |
+| `fm-spawn.sh`            | Spawn labeled tasks and secondmates while recording fresh generations under metadata locks |
 | `fm-label.sh`            | Update a live Herdr task's human-readable display label; other backends are a no-op  |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
@@ -63,7 +63,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation                  |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
-| `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
+| `fm-wake-lib.sh`         | Shared durable wake queue, bounded metadata locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
@@ -73,13 +73,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll and provenance publication |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR-poll sidecars              |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-check.sh`         | Record validated PR metadata and atomically arm its static poll only for the same spawn generation |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
-| `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-promote.sh`          | Promote a scout under its metadata lock to a protected ship task                     |
+| `fm-teardown.sh`         | Hold metadata locks through fail-closed task, child-state, and worktree cleanup      |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
-| `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
+| `fm-x-lib.sh`            | Shared X-mode config, relay, reply threading, and task-locked metadata links         |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
