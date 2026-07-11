@@ -1,6 +1,11 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: >-
+  Agent-only reference for firstmate harness operations. Use before spawning or
+  recovering a crewmate or secondmate, handling a trust dialog, sending a
+  harness-specific skill invocation, interrupting or exiting an agent, resuming
+  an exited agent, or verifying a new harness adapter. Contains verified facts
+  for claude, codex, opencode, pi, grok, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -86,6 +91,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <model>` or `--model 'model[effort=...]'` | folded into model brackets | Verified on cursor-agent 2026.07.09. Effort is a bracket override on `--model` (e.g. `'gpt-5[effort=high]'`); there is no separate effort flag. `max` is accepted in the bracket form. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -100,6 +106,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- cursor: `/<skill>`, for example `/no-mistakes` (slash commands are advertised in the TUI tips, e.g. `/plan`, `/config`). Treat slash-popup settle the same as claude/grok: `fm-send`'s retried Enter is the safety net. Natural language remains an acceptable fallback if a skill does not appear in the slash menu.
 
 ## claude (VERIFIED)
 
@@ -264,3 +271,36 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor (VERIFIED 2026-07-11, cursor-agent 2026.07.09)
+
+Cursor Agent CLI TUI (`cursor-agent`), installed as a shell wrapper that `exec`s the versioned Node CLI under `~/.local/share/cursor-agent/versions/`.
+Launch with a positional prompt: `cursor-agent --force "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (mid-turn hint on the follow-up composer row; absent when idle). The spinner line is a braille glyph + `Working` (e.g. `⠘⠤ Working`). Prefer the ASCII `ctrl+c to stop` regex. |
+| Exit command | `/quit` (slash popup needs the same settle + retried Enter as other slash harnesses; `fm-send` handles it). |
+| Interrupt | single `Ctrl+C` (footer shows `ctrl+c to stop` mid-turn). |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`); slash tips also advertise `/plan`, `/config`, `/debug`. Natural language is an acceptable fallback. |
+| Autonomy | `--force` (alias `--yolo`) force-allows commands unless explicitly denied; footer shows `Run Everything`. |
+| Env marker (primary) | `CURSOR_AGENT=1`, set for Cursor agent shells (also `CURSOR_CONVERSATION_ID`). |
+| Resume | `cursor-agent --resume <chatId>` (create a durable id up front with `cursor-agent create-chat` when recovery needs a handle) or `cursor-agent --continue` for the most recent session in the cwd. |
+
+Directory trust dialog on first run per worktree path: "Workspace Trust Required" with `[a] Trust this workspace` / `[q] Quit`.
+`--trust` is documented headless-only (`--print` mode) and does **not** suppress this interactive dialog.
+After every spawn, peek the pane within about 20 seconds.
+If the trust dialog is showing, accept with `bin/fm-send.sh <window> --key a` then Enter (or Enter alone when Trust is already highlighted), and verify the brief started processing.
+The decision persists per path, so later spawns in the same worktree slot skip it.
+
+Model / effort: `--model <name>` accepts bracket overrides such as `'claude-opus-4-8[effort=high]'`.
+`fm-spawn` folds a non-default effort into that bracket form; there is no separate effort flag.
+Effort-only (no model) is recorded in meta and omitted from the launch command.
+
+Turn-end hook: cursor-agent loads project `.cursor/hooks.json` at launch and fires the `stop` event at every turn boundary (verified live 2026-07-11: a worktree hook `touch`ed a marker after the turn completed).
+`fm-spawn` writes a minimal project hook that touches `state/<id>.turn-ended`, and gitignores it via `info/exclude` (same pattern as claude's `.claude/settings.local.json`).
+User-level `~/.cursor/hooks.json` is left alone (captain-owned).
+`fm-teardown` removes `.cursor/hooks.json` before returning a pooled worktree.
+
+Subscription premise (Gate B0): a Team-tier Cursor account can run `cursor-agent` for crew work without a separate API key (verified via `cursor-agent about` showing Subscription Tier Team on 2026-07-11).
+A free/plain plan may still require `CURSOR_API_KEY` metering - confirm per captain account before promising a Cursor-only fleet.

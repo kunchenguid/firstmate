@@ -15,10 +15,40 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Cursor matches both Cursor.app and "Cursor Helper (...)" process names.
+HARNESS_RE='claude|codex|opencode|grok|^pi$|Cursor|cursor-agent'
+
+# Cursor primary (CURSOR_AGENT=1): lock on the session-scoped extension-host
+# Helper when present, else the Cursor.app process. Verified 2026-07-11.
+cursor_harness_pid() {
+  local pid=$$ helper= app= comm args
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    if printf '%s %s' "$comm" "$args" | grep -qiE 'Cursor Helper.*extension-host|extension-host.*Cursor'; then
+      helper=$pid
+      echo "$pid"
+      return 0
+    fi
+    if printf '%s %s' "$comm" "$args" | grep -qE '/Cursor\.app/Contents/MacOS/Cursor([[:space:]]|$)|(^|[[:space:]])Cursor([[:space:]]|$)'; then
+      case "$comm $args" in
+        *Helper*) ;;
+        *) app=$pid ;;
+      esac
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  [ -n "$helper" ] && { echo "$helper"; return 0; }
+  [ -n "$app" ] && { echo "$app"; return 0; }
+  return 1
+}
 
 harness_pid() {
   local pid=$$ comm args
+  if [ "${CURSOR_AGENT:-}" = "1" ]; then
+    cursor_harness_pid && return 0
+  fi
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -29,6 +59,11 @@ harness_pid() {
     case "$comm" in
       *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
     esac
+    # Cursor Helper / Cursor.app may appear with a long ps comm that basename alone
+    # does not reduce to a simple token; also match the full comm/args string.
+    if printf '%s %s' "$comm" "$args" | grep -qE "$HARNESS_RE"; then
+      echo "$pid"; return 0
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -36,10 +71,11 @@ harness_pid() {
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm
+  local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  printf '%s' "$(basename "$comm") $comm $args" | grep -qE "$HARNESS_RE"
 }
 
 if [ "${1:-}" = "status" ]; then
