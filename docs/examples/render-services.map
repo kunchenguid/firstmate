@@ -1,0 +1,17 @@
+# render-services.map - project -> Render service id for deploy verification.
+#
+# Copy to config/render-services.map (local, gitignored) and edit for this
+# fleet. bin/fm-deploy-check.sh reads it to map a project name to the Render
+# web-service whose deploy verifies a merge actually reached Live.
+#
+# Format: one entry per line, "<project> <service-id>", '#' starts a comment.
+# The <project> key is the project directory name under projects/ (the basename
+# fm-spawn records in state/<id>.meta as project=). The <service-id> is a Render
+# web-service id (srv-...).
+#
+# This map is the override path. When a project is absent here, the helper falls
+# back to `render services -o json` and matches by name at runtime. Verify ids
+# against `render services -o text` before relying on them; Render ids drift.
+
+astroai      srv-d49b37c9c44c73bj0j70
+mtmccarthy   srv-d4v2k4ur433s73dti20g

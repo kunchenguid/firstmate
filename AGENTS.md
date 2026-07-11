@@ -509,6 +509,8 @@ bin/fm-teardown.sh <id>
 ```
 
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
+For a Render-deployed project the merge poll does not stop at `merged`: it wakes you with `merged, now verifying deploy ...`, then automatically watches the merge commit until it reaches Live, because a merge is not shipped until its deploy goes Live (`docs/render-deploy-verification.md`).
+Hold teardown until that deploy wake resolves: a `deploy live:` wake clears it for teardown, while a `deploy FAILED:` wake is a captain-facing blocker whose boot log is at the path named in the wake line.
 `bin/fm-teardown.sh`'s header owns the full landed-work definition (remote-reachable, merged-PR-head containment for the squash-merge-then-delete-branch flow, content already in the default branch, local-only merges) and the `pr=` discovery fallback for merges that skipped `bin/fm-pr-check.sh`.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 A successful PR-based teardown also refreshes that project's clone through `bin/fm-fleet-sync.sh`, best-effort.

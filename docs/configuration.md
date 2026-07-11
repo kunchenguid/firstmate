@@ -85,6 +85,14 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Render deploy verification (config/render-services.map)
+
+A merge is not shipped until its deploy reaches Live, and a Render service keeps serving its last good build when a new deploy fails, so a silent deploy failure looks like nothing is wrong.
+When a merged PR's project maps to a Render web-service, the merge poll hands its check slot to `bin/fm-deploy-check.sh`, which verifies the merge commit reaches Live and surfaces the boot log on failure.
+`config/render-services.map` (local, gitignored) maps a project name to its Render service id, one `<project> <service-id>` entry per non-comment line.
+It is the override path; a project absent from the map falls back to matching `render services -o json` by name at runtime.
+See [`render-deploy-verification.md`](render-deploy-verification.md) for the classification table and Render CLI evidence, and [`examples/render-services.map`](examples/render-services.map) for a copyable config.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
