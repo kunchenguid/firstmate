@@ -184,7 +184,11 @@ jobs:
             https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
               https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
             mkdir -p /opt/node22 && tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
+            if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+              git fetch --unshallow origin || git fetch --depth=1000 origin
+            fi
             git fetch origin "main:refs/remotes/origin/main"
+            git merge-base HEAD origin/main >/dev/null
       - name: Run teardown suite with temp dirs preserved
         commands:
           - |
