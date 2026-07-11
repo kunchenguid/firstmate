@@ -643,6 +643,35 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
   esac
 }
 
+# fm_backend_clear_composer: best-effort wipe of any unsubmitted text on the
+# composer/input row of <target>, exposed generically for the ONE caller that
+# needs it - the away-mode daemon's force-deliver path (bin/fm-supervise-daemon.sh,
+# afk + past max-defer + pane NOT busy). That path clears the daemon's OWN
+# swallowed-Enter injection, which otherwise reads as a 'pending' composer and
+# defers every future escalation forever. Returns 0 when the composer is
+# confirmed empty afterward, OR when it cannot be read (fails open toward
+# delivery, exactly as fm_tmux_clear_composer's unknown case does); returns
+# non-zero when readable text stubbornly remains OR the backend has no verified
+# clear primitive. In every non-zero case the caller declines to type over the
+# composer and defers so the wedge alarm fires, never concatenating a marked
+# digest onto foreign residue. Only tmux has a verified clear primitive today
+# (fm_tmux_clear_composer, bin/fm-tmux-lib.sh); herdr, zellij, orca, and cmux
+# report failure (decline) until a clear primitive is empirically verified for
+# them - the same conservative degradation fm_backend_busy_state and
+# fm_backend_agent_alive already use for unverified backends. The daemon only
+# injects into tmux and herdr supervisor panes today
+# (FM_SUPERVISOR_SUPPORTED_BACKENDS), and the backend-independent wedge alarm
+# still reaches the captain when a herdr force path declines.
+fm_backend_clear_composer() {  # <backend> <target> [settle]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_clear_composer "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

@@ -124,6 +124,40 @@ fm_pane_input_pending() {  # <target>
   [ "$(fm_tmux_composer_state "$1")" = pending ]
 }
 
+# fm_tmux_clear_composer: the tmux implementation of the backend-dispatched
+# composer-clear primitive (bin/fm-backend.sh's fm_backend_clear_composer). Used
+# ONLY by the away-mode daemon's force-deliver path (afk, past max-defer, pane
+# not busy). A swallowed-Enter injection leaves the daemon's OWN digest text
+# sitting in the composer; left in place it reads as "pending" (fm_tmux_composer_state)
+# and blocks every future injection — the afk wedge that stranded an escalation
+# for hours. Clearing it before a fresh type both breaks that wedge and prevents
+# two sentinel-prefixed digests from concatenating into one corrupted turn. Sends
+# standard line-editing keys — Ctrl-A (move to line start), Ctrl-K (kill to end),
+# Ctrl-U (kill to start) — which the claude/codex/opencode/pi/grok composers all
+# honor, retrying a few times and re-reading the composer between rounds. A
+# <settle> delay (default 0.3s) lets an async TUI process the clearing keys before
+# the composer is re-read, so a real composer is not falsely judged still-full by
+# a read that raced the keys; the sole caller threads its own submit-confirm sleep
+# through. Returns 0 when the composer reads empty afterward, OR when it cannot be
+# read (unknown): the force path's whole purpose is to stop deferring, so an
+# unreadable pane fails open toward delivery rather than re-wedging. Returns 1 only
+# when real text stubbornly remains after every round; the sole caller declines to
+# type over that confirmed content, deferring so the wedge alarm is raised instead
+# of concatenating a fresh digest onto the residue.
+fm_tmux_clear_composer() {  # <target> [settle-seconds]
+  local target=$1 settle=${2:-0.3} i state
+  for i in 1 2 3; do
+    tmux send-keys -t "$target" C-a 2>/dev/null || true
+    tmux send-keys -t "$target" C-k 2>/dev/null || true
+    tmux send-keys -t "$target" C-u 2>/dev/null || true
+    sleep "$settle"
+    state=$(fm_tmux_composer_state "$target")
+    case "$state" in empty|unknown) return 0 ;; esac
+  done
+  case "$(fm_tmux_composer_state "$target")" in empty|unknown) return 0 ;; esac
+  return 1
+}
+
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target>

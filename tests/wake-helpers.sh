@@ -216,12 +216,16 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   send-keys)
     shift
-    text=""; is_enter=0; lit=0
+    text=""; is_enter=0; lit=0; cleared=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -t) shift ;;
         -l) lit=1 ;;
         Enter) is_enter=1 ;;
+        # Line-editing keys the daemon's force-deliver path uses to wipe stale
+        # composer text (fm_tmux_clear_composer). Honoring them lets a test model
+        # a poisoned composer being cleared before a fresh inject.
+        C-a|C-k|C-u|C-w) cleared=1 ;;
         *) [ "$lit" = 1 ] && text="$1" ;;
       esac
       shift
@@ -237,6 +241,11 @@ case "${1:-}" in
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
       printf '│ > %s │\n' "$text" > "$COMPOSER"
+    elif [ "$cleared" = 1 ]; then
+      # Clearing keys empty the composer back to a bare bordered prompt, UNLESS
+      # FM_FAKE_NO_CLEAR is set: then they are no-ops and the residual text
+      # stubbornly remains, modeling a composer the clear cannot wipe.
+      [ -n "${FM_FAKE_NO_CLEAR:-}" ] || printf '│ > │\n' > "$COMPOSER"
     fi
     exit 0 ;;
 esac

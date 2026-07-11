@@ -1018,23 +1018,28 @@ test_max_defer_flushes_empty_idle_pane() {
   pass "max-defer flushes and clears the buffer on an empty bordered pane"
 }
 
-test_max_defer_pending_composer_alarms_without_typing() {
+test_max_defer_busy_pane_alarms_without_typing() {
+  # A GENUINELY BUSY supervisor pane (an agent mid-turn) must still defer + alarm
+  # without typing, even past max-defer and even on the force path: clobbering an
+  # active turn is never acceptable. (The force path only clears stale text on a
+  # NOT-busy pane; that positive case is covered in fm-afk-wedge.test.sh.)
   local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-pending-digest)
+  dir=$(make_bordered_case maxdefer-busy-pane)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > human draft │\n' > "$dir/composer"
+  # A busy footer on the pane → fm_pane_is_busy true → inject defers under force.
+  printf 'esc to interrupt\n' > "$dir/composer"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
-  [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
-  [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
-  grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  pass "max-defer on a pending composer alarms without typing"
+  [ ! -s "$sent" ] || fail "max-defer typed into a busy pane"
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "busy pane did not raise a wedge alarm marker"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while pane was busy"
+  grep -F 'esc to interrupt' "$dir/composer" >/dev/null || fail "busy pane content changed"
+  pass "max-defer on a genuinely busy pane alarms without typing (force still defers)"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -1710,7 +1715,7 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
-test_max_defer_pending_composer_alarms_without_typing
+test_max_defer_busy_pane_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm

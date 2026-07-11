@@ -45,10 +45,15 @@
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
-#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
-#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
-#     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     Buffered escalation delivery also has a max-defer ESCAPE: if a digest stays
+#     undelivered past FM_MAX_DEFER_SECS, the daemon FORCE-delivers - on a pane
+#     that is not genuinely busy it clears any stale self-injected composer text
+#     (a prior injection whose Enter was swallowed, which would otherwise read as
+#     'pending' and defer every future inject forever) and submits. Only if the
+#     pane is still genuinely busy/wedged, or its composer holds text that cannot
+#     be cleared, does it write state/.subsuper-inject-wedged and attempt a
+#     configurable active alert. So a wedged escalation reaches firstmate instead
+#     of silently deferring for the whole away period.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -99,9 +104,11 @@
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
-#                                   undelivered before one normal flush attempt;
-#                                   if that cannot confirm a submit, a wedge
-#                                   alarm fires (default 300; 0 disables)
+#                                   undelivered before the daemon force-delivers
+#                                   (clears stale self-injected composer text on a
+#                                   not-busy pane, then submits); if a busy pane
+#                                   or unclearable composer still blocks delivery,
+#                                   a wedge alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -182,9 +189,11 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
-# Max time a buffered escalation may sit undelivered before the daemon retries
-# the normal flush path and, if that cannot confirm a submit, raises a loud wedge
-# alarm. The escape hatch makes a guard false-positive visible instead of silent.
+# Max time a buffered escalation may sit undelivered before the daemon
+# force-delivers (clears stale self-injected composer text on a not-busy pane,
+# then submits) and, if a busy pane or unclearable composer still blocks
+# delivery, raises a loud wedge alarm. The escape makes a guard false-positive
+# visible - and, on a not-busy pane, actually delivered - instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
@@ -602,8 +611,12 @@ escalate_add() {  # <state> <distilled-item>
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
-escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+# A non-empty second arg requests the FORCE path (see inject_msg): used ONLY by
+# the max-defer escape, it clears stale self-injected composer text on a
+# not-busy pane so a wedged escalation is actually delivered instead of deferred
+# forever. The normal batch/immediate flush never forces.
+escalate_flush() {  # <state> [force]
+  local state=$1 force="${2:-}" buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -612,7 +625,7 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state" "$force"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
 
@@ -846,9 +859,11 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
-# Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
+# Raise a loud, rate-limited alarm when escalations cannot be delivered even by
+# the FORCE path after max-defer - i.e. the supervisor pane is genuinely busy (an
+# agent mid-turn), or its composer holds residual text the clearing keys cannot
+# wipe, since a not-busy pane's stale self-injected text is cleared and the digest
+# delivered. The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, flashes
 # the tmux supervisor client's status line when applicable, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
@@ -909,8 +924,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
-#     Never silently defer forever.
+#     FORCE-deliver on a not-busy pane (clear stale self-injected composer text,
+#     then submit); if delivery still cannot be confirmed - a busy pane, or
+#     residual text that won't clear - raise the wedge alarm. Never silently
+#     defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
@@ -934,18 +951,24 @@ housekeeping() {  # <state>
   fi
 
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
+  # FORCE-deliver: clear any stale self-injected composer text on a not-busy pane
+  # and submit. A normal (non-force) retry here would re-hit the composer guard -
+  # the daemon's own swallowed-Enter text reads as 'pending' - and defer forever,
+  # which is exactly the wedge that stranded an escalation overnight. The force
+  # path applies ONLY in afk (this block is afk-gated), so a human's half-typed
+  # line is never clobbered when afk is off. A genuinely busy mid-turn pane still
+  # defers inside inject_msg even under force; if delivery still cannot be
+  # confirmed, raise the loud wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    # as the throttle). A successful force-flush clears the buffer; a failed one
+    # alarms and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+      if escalate_flush "$state" force; then
+        log "inject recovered: max-defer force-flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
@@ -1060,6 +1083,16 @@ window_for_task() {  # <task-key> [state]
 # be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
+# A non-empty third arg requests the FORCE path. It is set ONLY by the max-defer
+# escape (housekeeping block 1b), and ONLY in afk on a pane that is NOT busy. On
+# that path, a 'pending' composer verdict is treated as the daemon's OWN
+# undelivered injection (safe to clear: in afk no human is typing, and a wedged
+# escalation MUST eventually reach firstmate) - it is cleared before typing
+# instead of deferring forever. A genuinely busy mid-turn pane still defers even
+# under force, an 'unknown' verdict (dead-shell prompt / unreadable pane) still
+# defers even under force, and the human-safety guard is fully preserved when afk
+# is OFF (block 1b never runs, so force is never set).
+#
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
@@ -1071,11 +1104,12 @@ window_for_task() {  # <task-key> [state]
 #     this strict daemon path.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer
+#     line, or a previous injection's unsent text), defer entirely (non-force) or
+#     clear it and proceed (force) - never blindly merge with existing text.
+inject_msg() {  # <message> [state] [force]
+  local msg=$1 state force target backend retries sleep_s verdict composer
   state="${2:-$(_state_root)}"
+  force="${3:-}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
@@ -1095,11 +1129,15 @@ inject_msg() {  # <message> [state]
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use pane.
-  #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
+  #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn). This
+  #      ALWAYS defers, even on the force path - an active agent turn (firstmate
+  #      itself mid-response) must not be clobbered.
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
+  retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
+  sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
@@ -1109,10 +1147,34 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
+  #
+  #      FORCE EXCEPTION (afk, past max-defer, pane NOT busy): a 'pending'
+  #      verdict is the daemon's OWN undelivered injection self-poisoning the
+  #      composer - a prior digest whose Enter was swallowed, which would
+  #      otherwise read as pending on every tick and defer every future inject
+  #      forever (the wedge this fixes). Under force, clear it and proceed so the
+  #      fresh digest is actually delivered. fm_backend_clear_composer returns 0
+  #      when the composer is confirmed empty OR unreadable (fails open toward
+  #      delivery) and non-zero only when readable text stubbornly remains (or
+  #      the backend cannot clear); in that case DON'T type over it - a marked
+  #      digest concatenated onto non-marker residue could corrupt the message so
+  #      firstmate reads an unmarked line and exits afk early - defer instead so
+  #      block 1b raises the visible wedge alarm. Only 'pending' is force-cleared:
+  #      an 'unknown' verdict (dead-shell prompt / unreadable pane) still defers
+  #      even under force, and force is NEVER set when afk is off, so a human's
+  #      half-typed line is never cleared.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
-    return 1
+    if [ "$composer" = pending ] && [ -n "$force" ]; then
+      log "inject force: clearing stale self-injected composer text past max-defer (afk, pane not busy)"
+      if ! fm_backend_clear_composer "$backend" "$target" "$sleep_s"; then
+        log "inject deferred: composer clear failed, readable text remains (declining to type over it)"
+        return 1
+      fi
+    else
+      log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+      return 1
+    fi
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
@@ -1121,8 +1183,6 @@ inject_msg() {  # <message> [state]
   # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
   # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
-  retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
-  sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.

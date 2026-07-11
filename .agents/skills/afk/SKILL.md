@@ -101,15 +101,16 @@ Either condition, or any composer verdict other than `empty`, defers the injecti
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
-If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
+If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon **force-delivers**.
+On a pane that is not genuinely busy (no agent mid-turn), a `pending` composer verdict is treated as its own undelivered injection - a prior digest whose Enter was swallowed - so it **clears** that stale text (via the backend-dispatched `fm_backend_clear_composer`) and submits the digest.
+This is the escape: without it, the daemon's own swallowed text reads as `pending` input and the composer guard would defer every future injection forever, stranding the escalation for the whole away period (the incident this fixes).
+Two cases still defer even past max-defer: a genuinely busy pane (an active turn is never clobbered) and an `unknown` verdict, and composer text the clearing keys cannot wipe (never typed over, so a marked digest is never concatenated onto foreign residue).
+If delivery still cannot be confirmed there, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
-So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+The force path is afk-only, so when afk is OFF a human's half-typed line is never cleared - the return-race guard is fully preserved.
 
 ## Submit model
 
@@ -174,13 +175,18 @@ the marker lets firstmate distinguish it from a real captain message.
   A ghost-only or idle bordered composer such as claude's `│ > ... │` therefore reads empty without allowing an unbordered shell prompt to do the same.
   `FM_COMPOSER_IDLE_RE` still overrides tmux empty-composer matching after shared ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
-  buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
-  cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
-  durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
-  composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon force-delivers: on
+  a not-busy pane it clears any stale self-injected composer text (a prior
+  injection whose Enter was swallowed, which would otherwise read as `pending`
+  input and defer every future inject forever) and submits the digest. Two cases
+  still defer: a genuinely busy pane (agent mid-turn) or an `unknown` verdict, and
+  readable composer text the clearing keys cannot wipe (never typed over, so a
+  marked digest is never concatenated onto foreign residue). Either raises a loud,
+  rate-limited wedge alarm: ERROR log, durable `state/.subsuper-inject-wedged`
+  marker, a tmux status-line flash when applicable, and a backend-independent
+  active alert. So a buffered escalation reaches firstmate instead of silently
+  stranding for the whole away period. The force path is afk-only; when afk is OFF
+  the composer guard still protects a human's half-typed line.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
