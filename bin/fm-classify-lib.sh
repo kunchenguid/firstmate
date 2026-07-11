@@ -128,8 +128,16 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  case "$1" in
-    *\[key=*\]*) local k=${1#*\[key=}; printf '%s' "${k%%\]*}" ;;
+  local prefix=${1%%:*} k
+  case "$prefix" in
+    *\[key=*\]*)
+      k=${prefix#*\[key=}
+      k=${k%%\]*}
+      case "$k" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+        *) printf '%s' "$k" ;;
+      esac
+      ;;
     *) printf 'default' ;;
   esac
 }
@@ -162,15 +170,17 @@ status_open_decisions() {  # <status-file>
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line")
+    key=$(_fm_decision_key "$line") || continue
     case "$verb" in
       needs-decision|blocked)
         note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
       "$resolve")
         open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
   done < "$f"
