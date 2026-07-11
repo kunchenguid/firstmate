@@ -1691,6 +1691,9 @@ case "$cmd $sub" in
     printf '{"sessions":[{"name":"%s","running":true,"default":false,"socket_path":"%s"}]}\n' \
       "${FM_FAKE_SESSION_NAME:-default}" "${FM_FAKE_SOCKET:-/tmp/fm-fake.sock}" ;;
   "agent get")
+    if [ -n "${FM_FAKE_READER_READY_FILE:-}" ] && [ ! -e "$FM_FAKE_READER_READY_FILE" ]; then
+      exit 9
+    fi
     pane=${3:-}
     key=$(printf '%s' "$pane" | tr ':/.' '___')
     f="${FM_FAKE_AGENT_DIR:-/tmp}/$key.status"
@@ -1719,6 +1722,10 @@ make_fake_reader() {  # <dir> -> echoes reader path
 #!/usr/bin/env bash
 set -u
 # argv: <sock> <timeout> <pane...> - ignored; behavior is env-driven.
+if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
+  : > "$FM_FAKE_READER_READY_FILE"
+fi
+printf '@subscribed\n'
 if [ -n "${FM_FAKE_READER_LINES:-}" ] && [ -f "$FM_FAKE_READER_LINES" ]; then
   cat "$FM_FAKE_READER_LINES"
 fi
@@ -1832,17 +1839,32 @@ test_wait_transition_not_capable_returns_2() {
 }
 
 test_wait_transition_reconcile_blocked_returns_record() {
-  local dir state agent fb out rc marker
+  local dir state agent fb reader lines out rc marker
   dir="$TMP_ROOT/wt-reconcile"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" blocked
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
   marker="$state/.herdr-escalated-sess_wG_pQ"
   out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
   [ "$rc" = 0 ] || fail "reconcile of an already-blocked pane must return 0, got $rc"
   case "$out" in *blocked*) : ;; *) fail "reconcile must print the blocked record, got '$out'" ;; esac
   [ ! -e "$marker" ] || fail "reconcile must not mark a blocked pane before the caller durably handles it"
   pass "fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane"
+}
+
+test_wait_transition_subscribes_before_reconcile() {
+  local dir state agent fb reader lines ready rc
+  dir="$TMP_ROOT/wt-subscribe-first"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; ready="$dir/subscribed"; : > "$lines"
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_READY_FILE="$ready" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 1 ] || fail "subscription must be acknowledged before reconciliation begins, got $rc"
+  pass "fm_backend_herdr_wait_transition: subscribes before reconnect level-reconcile"
 }
 
 test_wait_transition_reconcile_dedupes_when_marked() {
@@ -2019,6 +2041,7 @@ test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
 test_wait_transition_reconcile_blocked_returns_record
+test_wait_transition_subscribes_before_reconcile
 test_wait_transition_reconcile_dedupes_when_marked
 test_wait_transition_stream_blocked_returns_record
 test_wait_transition_stream_absorb_clears_then_timeout

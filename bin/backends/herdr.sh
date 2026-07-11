@@ -1236,35 +1236,16 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done
   [ "${#pane_ids[@]}" -gt 0 ] || return 2
 
-  # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
-  # during the gap since the last subscription is enqueued now, once, before
-  # streaming - the marker makes it idempotent. `working` panes clear their
-  # marker here too.
-  local raw record hit
-  for w in "${windows[@]}"; do
-    pane_id=${w#*:}
-    [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
-    raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    [ -n "$raw" ] || continue
-    record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
-    if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
-      printf '%s' "$hit"
-      return 0
-    fi
-  done
-
-  # Stream edges from the raw-socket reader until a fresh blocked edge or the
-  # timeout. The reader is a subprocess of this call (NOT a second watcher):
-  # spawned, read line-by-line through a FIFO, and killed the instant a blocked
-  # edge is found. A FIFO (not a pipe) lets us keep the reader's pid so it is
-  # reaped precisely.
+  # Start the raw-socket reader and wait for its subscription acknowledgement
+  # before level reconciliation, so edges occurring during reconciliation are
+  # already buffered in the live stream.
   local reader=()
   while IFS= read -r w; do
     reader+=("$w")
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent rc=1
+  local fifo_dir fifo fifo_fd reader_pid line ws status agent raw record hit rc=1
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -1273,6 +1254,37 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   fi
   "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
   reader_pid=$!
+  exec {fifo_fd}< "$fifo"
+  if ! IFS= read -r -u "$fifo_fd" line || [ "$line" != "@subscribed" ]; then
+    wait "$reader_pid" 2>/dev/null || true
+    exec {fifo_fd}>&-
+    rm -rf "$fifo_dir" 2>/dev/null || true
+    return 2
+  fi
+
+  # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
+  # during the gap since the last subscription is returned now, once, while
+  # newer edges accumulate in the active stream. `working` panes clear their
+  # marker here too.
+  for w in "${windows[@]}"; do
+    pane_id=${w#*:}
+    [ -n "$pane_id" ] && [ "$pane_id" != "$w" ] || continue
+    raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+    [ -n "$raw" ] || continue
+    record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
+    if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
+      printf '%s' "$hit"
+      kill "$reader_pid" 2>/dev/null || true
+      wait "$reader_pid" 2>/dev/null || true
+      exec {fifo_fd}>&-
+      rm -rf "$fifo_dir" 2>/dev/null || true
+      return 0
+    fi
+  done
+
+  # Drain stream edges until a fresh blocked edge or the timeout. The reader is
+  # a subprocess of this call (NOT a second watcher), and is killed the instant
+  # a blocked edge is found.
   # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent)
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the
@@ -1290,10 +1302,11 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       rc=0
       break
     fi
-  done < "$fifo"
+  done <&"$fifo_fd"
   if [ "$rc" -eq 0 ]; then
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
+    exec {fifo_fd}>&-
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 0
   fi
@@ -1303,6 +1316,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # runtime-disable threshold).
   local reader_rc=0
   wait "$reader_pid" 2>/dev/null || reader_rc=$?
+  exec {fifo_fd}>&-
   rm -rf "$fifo_dir" 2>/dev/null || true
   [ "$reader_rc" -eq 0 ] && return 1
   return 2

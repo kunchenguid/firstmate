@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import socket
 import time
 import unittest
@@ -41,6 +42,11 @@ class ClosingStreamSocket:
         return self.chunks.pop(0)
 
 
+class RejectedSubscriptionSocket(ClosingStreamSocket):
+    def __init__(self):
+        self.chunks = [b'{"result":{"type":"not_started"}}\n']
+
+
 class EventWaitReadLineTest(unittest.TestCase):
     def test_deadline_is_clean_timeout(self):
         left, right = socket.socketpair()
@@ -76,10 +82,24 @@ class EventWaitReadLineTest(unittest.TestCase):
         self.assertEqual(outcome, "error")
 
     def test_main_reports_early_stream_closure(self):
+        stdout = io.StringIO()
         with mock.patch.object(READER.socket, "socket", return_value=ClosingStreamSocket()):
-            result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
+            with mock.patch.object(READER.sys, "stdout", stdout):
+                result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
 
         self.assertEqual(result, 4)
+        self.assertEqual(stdout.getvalue(), "@subscribed\n")
+
+    def test_main_does_not_signal_readiness_before_valid_ack(self):
+        stdout = io.StringIO()
+        with mock.patch.object(
+            READER.socket, "socket", return_value=RejectedSubscriptionSocket()
+        ):
+            with mock.patch.object(READER.sys, "stdout", stdout):
+                result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ Usage: herdr-eventwait.py <socket_path> <timeout_seconds> <pane_id> [<pane_id> .
 Output (one line per pane.agent_status_changed event, TAB-separated, a raw
 projection - NOT the final normalized record; the bash normalizer adds the
 from_status and builds the canonical shape):
+  @subscribed
   <pane_id>\t<workspace_id>\t<agent_status>\t<agent>
 
 Exit status:
@@ -119,6 +120,9 @@ def main(argv):
     result = ack.get("result") or {}
     if result.get("type") != "subscription_started":
         return 3
+
+    sys.stdout.write("@subscribed\n")
+    sys.stdout.flush()
 
     # Stream projected events until the deadline or the server closes.
     while True:
