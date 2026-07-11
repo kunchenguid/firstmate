@@ -10,6 +10,9 @@ set -euo pipefail
 SELF=$(cd "$(dirname "$0")" && pwd)
 FM_ROOT=$(cd "$SELF/.." && pwd -P)          # the firstmate repo (primary checkout)
 
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+
 ID=${1:?usage: fm-self-fix.sh <task-id> [--harness <name>] [--model <m>] [--effort <e>]}
 shift || true
 
@@ -21,7 +24,7 @@ WT_ROOT="${FM_SELFFIX_ROOT:-$HOME/.firstmate-selffix}"
 WT="$WT_ROOT/$ID"
 BRANCH="fix/$ID"
 
-[ -f "$FM_ROOT/data/$ID/brief.md" ] || { echo "error: no brief at data/$ID/brief.md (author it first)" >&2; exit 1; }
+[ -f "$DATA/$ID/brief.md" ] || { echo "error: no brief at $DATA/$ID/brief.md (author it first)" >&2; exit 1; }
 [ ! -e "$WT" ] || { echo "error: worktree path already exists: $WT" >&2; exit 1; }
 if git -C "$FM_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
   echo "error: branch $BRANCH already exists; pick a fresh task id" >&2
