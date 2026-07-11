@@ -14,10 +14,14 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
-#   (i) Codebase MR URL is parsed to number + -R for bytedcli and records head
+#   (i) a Codebase MR is merged by internal --mr-id, never by its number, and
+#       never squashed by default
 #   (j) Codebase merge-method shims map onto bytedcli's actual flags
 #   (k) a lone --squash-commits does not suppress the default Codebase method
 #   (l) flag-like, traversing, or single-segment Codebase repo paths fail fast
+#   (r) an explicit squash of a merge-commit head is refused before bytedcli
+#   (s) an explicit squash of an ordinary head still goes through
+#   (t) an explicit squash is refused when the head commit cannot be read
 #   (m) the armed merge poll wakes once, not silently, when fm-scm-lib.sh is gone
 #   (n) an MR version with no head commit does not shift its source ref left
 #   (o) the armed merge poll increments failures before provider lookup
@@ -102,7 +106,46 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# bytedcli mock for MR 24 in platform/team/repo. The MR's user-visible number is
+# 24 but its internal id is 784897989989491, and only the internal id is a valid
+# `codebase mr merge` selector - so a mock that answered to number 24 would hide
+# exactly the bug this suite has to catch. Optional third arg is the head
+# commit's parent count; 2 makes the head a merge commit.
 add_bytedcli_mock() {
+  local case_dir=$1 head=$2 parents=${3:-1} parents_json
+  case "$parents" in
+    2) parents_json='["1111111111111111111111111111111111111111","2222222222222222222222222222222222222222"]' ;;
+    *) parents_json='["1111111111111111111111111111111111111111"]' ;;
+  esac
+  cat > "$case_dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_BYTEDCLI_LOG"
+case "\$*" in
+  "--json codebase mr get 24 -R platform/team/repo")
+    cat <<'JSON'
+{"status":"success","data":{"merge_request":{"Id":784897989989491,"Number":24,"Status":"merged"},"version":{"SourceCommitId":"$head","SourceRef":"refs/merge-requests/24/24/1"}},"error":null}
+JSON
+    exit 0
+    ;;
+  "--json codebase commit get -r $head -R platform/team/repo")
+    cat <<'JSON'
+{"status":"success","data":{"commit":{"Id":"$head","Parents":$parents_json}},"error":null}
+JSON
+    exit 0
+    ;;
+  codebase\\ mr\\ merge\\ --mr-id\\ 784897989989491\\ -R\\ platform/team/repo*)
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
+}
+
+# Same MR, but its head commit cannot be read - so firstmate cannot rule out a
+# merge commit and must refuse a squash rather than assume the head is ordinary.
+add_bytedcli_mock_commit_unreadable() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/bytedcli" <<SH
 #!/usr/bin/env bash
@@ -110,11 +153,15 @@ printf '%s\n' "\$*" >> "\$FM_TEST_BYTEDCLI_LOG"
 case "\$*" in
   "--json codebase mr get 24 -R platform/team/repo")
     cat <<'JSON'
-{"status":"success","data":{"merge_request":{"Number":24,"Status":"merged"},"version":{"SourceCommitId":"$head","SourceRef":"refs/merge-requests/24/24/1"}},"error":null}
+{"status":"success","data":{"merge_request":{"Id":784897989989491,"Number":24,"Status":"merged"},"version":{"SourceCommitId":"$head","SourceRef":"refs/merge-requests/24/24/1"}},"error":null}
 JSON
     exit 0
     ;;
-  codebase\\ mr\\ merge\\ 24\\ -R\\ platform/team/repo*)
+  "--json codebase commit get -r $head -R platform/team/repo")
+    echo "bytedcli: transient commit lookup failure" >&2
+    exit 1
+    ;;
+  codebase\\ mr\\ merge\\ --mr-id\\ 784897989989491\\ -R\\ platform/team/repo*)
     exit 0
     ;;
 esac
@@ -355,8 +402,12 @@ test_codebase_url_records_head_and_invokes_bytedcli_merge() {
     "codebase-merge: Codebase pr_head= was not recorded"
   grep -qxF -- '--json codebase mr get 24 -R platform/team/repo' "$case_dir/bytedcli.log" \
     || fail "codebase-merge: bytedcli MR get was not invoked from URL"
-  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method merge_commit --squash-commits true' "$case_dir/bytedcli.log" \
-    || fail "codebase-merge: bytedcli MR merge was not invoked with the default squash mapping"
+  grep -qxF 'codebase mr merge --mr-id 784897989989491 -R platform/team/repo --merge-method merge_commit --squash-commits false' "$case_dir/bytedcli.log" \
+    || fail "codebase-merge: bytedcli MR merge was not invoked with --mr-id <internal id> and a non-squash default"
+  assert_no_grep 'mr merge 24' "$case_dir/bytedcli.log" \
+    "codebase-merge: the user-visible MR number was passed as a selector, which bytedcli rejects"
+  assert_no_grep 'squash-commits true' "$case_dir/bytedcli.log" \
+    "codebase-merge: Codebase merges must never default to squash"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "codebase-merge: gh-axi was invoked for a Codebase MR"
   poll_out=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh")
   [ "$poll_out" = merged ] || fail "codebase-merge: merge poll did not read merged state via bytedcli"
@@ -374,7 +425,7 @@ test_codebase_merge_method_shims_map_to_bytedcli_flags() {
   run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --rebase --delete-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-methods: fm-pr-merge failed"
 
-  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method rebase_merge --squash-commits false --remove-source-branch true' "$case_dir/bytedcli.log" \
+  grep -qxF 'codebase mr merge --mr-id 784897989989491 -R platform/team/repo --merge-method rebase_merge --squash-commits false --remove-source-branch true' "$case_dir/bytedcli.log" \
     || fail "codebase-methods: Codebase merge-method shims did not map to bytedcli flags"
   pass "fm-pr-merge maps Codebase merge-method shims onto bytedcli flags"
 }
@@ -390,9 +441,69 @@ test_codebase_squash_commits_keeps_default_merge_method() {
   run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --squash-commits false \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-squash-commits: fm-pr-merge failed"
 
-  grep -qxF 'codebase mr merge 24 -R platform/team/repo --merge-method merge_commit --squash-commits false' "$case_dir/bytedcli.log" \
+  grep -qxF 'codebase mr merge --mr-id 784897989989491 -R platform/team/repo --merge-method merge_commit --squash-commits false' "$case_dir/bytedcli.log" \
     || fail "codebase-squash-commits: --squash-commits suppressed firstmate's default --merge-method"
   pass "fm-pr-merge keeps its default Codebase merge method when only --squash-commits is passed"
+}
+
+test_codebase_squash_of_merge_head_is_refused() {
+  local case_dir rc
+  case_dir=$(make_case codebase-squash-merge-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee 2
+  : > "$case_dir/bytedcli.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "codebase-squash-merge-head: squashing a merge-commit head must be refused"
+  assert_grep 'is a merge commit' "$case_dir/stderr" \
+    "codebase-squash-merge-head: refusal did not name the merge commit"
+  assert_no_grep 'mr merge' "$case_dir/bytedcli.log" \
+    "codebase-squash-merge-head: bytedcli merged an MR whose head is a merge commit"
+  pass "fm-pr-merge refuses to squash a Codebase MR whose head is a merge commit"
+}
+
+test_codebase_squash_of_ordinary_head_proceeds() {
+  local case_dir
+  case_dir=$(make_case codebase-squash-ordinary-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock "$case_dir" abcabcabcabcabcabcabcabcabcabcabcabcabca 1
+  : > "$case_dir/bytedcli.log"
+
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "codebase-squash-ordinary-head: fm-pr-merge failed"
+
+  grep -qxF 'codebase mr merge --mr-id 784897989989491 -R platform/team/repo --merge-method merge_commit --squash-commits true' "$case_dir/bytedcli.log" \
+    || fail "codebase-squash-ordinary-head: an explicitly requested squash of an ordinary head was not performed"
+  pass "fm-pr-merge still squashes a Codebase MR when the caller asks and the head is an ordinary commit"
+}
+
+test_codebase_squash_refused_when_head_unreadable() {
+  local case_dir rc
+  case_dir=$(make_case codebase-squash-unknown-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_bytedcli_mock_commit_unreadable "$case_dir" bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  : > "$case_dir/bytedcli.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://code.byted.org/platform/team/repo/merge_requests/24 -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "codebase-squash-unknown-head: an unreadable head must not be assumed ordinary"
+  assert_grep 'cannot rule out a merge commit' "$case_dir/stderr" \
+    "codebase-squash-unknown-head: refusal did not explain the unverifiable head"
+  assert_no_grep 'mr merge' "$case_dir/bytedcli.log" \
+    "codebase-squash-unknown-head: bytedcli squashed an MR whose head could not be verified"
+  pass "fm-pr-merge refuses a squash it cannot prove is safe"
 }
 
 test_rejects_unsafe_codebase_repo_paths() {
@@ -622,6 +733,9 @@ test_parses_pr_url_for_gh_axi
 test_codebase_url_records_head_and_invokes_bytedcli_merge
 test_codebase_merge_method_shims_map_to_bytedcli_flags
 test_codebase_squash_commits_keeps_default_merge_method
+test_codebase_squash_of_merge_head_is_refused
+test_codebase_squash_of_ordinary_head_proceeds
+test_codebase_squash_refused_when_head_unreadable
 test_rejects_unsafe_codebase_repo_paths
 test_merge_poll_reports_a_broken_scm_lib_once
 test_codebase_empty_head_does_not_shift_source_ref

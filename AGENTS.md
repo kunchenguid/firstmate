@@ -504,7 +504,10 @@ Tell the captain: the PR's full URL (always the complete `https://...` link, nev
 
 If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full PR/MR URL>` yourself; that instruction is the explicit approval.
 If `yolo=on`, merge a green/approved PR yourself the same way and post the required FYI.
-The helper defaults to `--squash`, accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and refuses `--repo` or `-R` overrides because the repository is derived from the URL.
+The helper accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and refuses `--repo` or `-R` overrides because the repository is derived from the URL.
+Its default merge method is per-provider: GitHub PRs squash, while Codebase MRs get a real merge commit and are never squashed by default.
+That split is not cosmetic - Codebase MRs are routinely upstream-merge MRs whose head is itself a merge commit, and squashing one of those flattens the merge and drops its second parent, destroying the merge base so the next merge from the same upstream replays every already-merged change as a conflict.
+For that reason `bin/fm-scm-lib.sh` refuses a Codebase squash whenever the MR's head is a merge commit, and refuses just as hard when it cannot read the head, because "unverifiable" must never be treated as "safe to squash".
 
 ### Ship teardown (only after merge is confirmed)
 
@@ -686,9 +689,12 @@ Update the backlog on every dispatch, completion, and decision for a work item.
 
 ## Done
 - [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)
+- [x] <id> - <one line> - <https://code.byted.org/repo/path/merge_requests/number> (merged <date>)
 - [x] <id> - <one line> - local main (merged <date>)
 - [x] <id> - <one line> - data/<id>/report.md (reported <date>)
 ```
+
+A GitHub PR link is filed with `tasks-axi done --pr`; a Codebase MR link is filed with `tasks-axi done --note`, because `--pr` only accepts `/pull/<number>` URLs (see the command mapping below).
 
 Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker is gone and whose time/date gate, if any, has arrived gets dispatched.
 
@@ -710,7 +716,10 @@ Map firstmate's real backlog operations to the approved commands:
 
 - File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
 - Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
-- Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
+- Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a GitHub PR, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
+  Record a **Codebase MR** with `tasks-axi done <id> --note <mr-url>`, not `--pr`.
+  `--pr` validates its argument as an http(s) URL ending in `/pull/<number>` and rejects a `.../merge_requests/<number>` URL outright (`Task pr link must be an http(s) pull request URL ending in /pull/<number>`, `VALIDATION_ERROR`), so a Codebase MR cannot go in that field at all.
+  tasks-axi is an external npm package, so this is a standing contract rather than a workaround waiting on a firstmate fix; `--note` takes the full `https://code.byted.org/...` URL and renders it under the Done entry, which keeps the Done line's link durable exactly as the format above requires.
 - Update task notes: inspect first with `tasks-axi show <id> --full`, then replace the considered body with `tasks-axi update <id> --body-file <path>`.
   Add `--archive-body` to that update command when superseding prior state should remain recoverable.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.

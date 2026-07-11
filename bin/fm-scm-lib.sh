@@ -263,6 +263,44 @@ fm_scm_codebase_mr_list_json() {
     --json codebase mr list -R "$repo" --state merged --head "$branch" -L 1
 }
 
+fm_scm_codebase_commit_json() {
+  local sha=$1 repo=$2
+  fm_scm_codebase_json "commit lookup" "$repo" "$sha" \
+    --json codebase commit get -r "$sha" -R "$repo"
+}
+
+# Echo the MR's internal Id, unit-separated from the head commit of its latest
+# version. `bytedcli codebase mr merge` takes neither the MR URL nor the
+# user-visible Number: --mr-id is its only selector and it wants this internal
+# Id, so every Codebase merge has to resolve one first.
+fm_scm_codebase_mr_merge_facts() {
+  local number=$1 repo=$2 json
+  json=$(fm_scm_codebase_mr_json "$number" "$repo") || return 1
+  printf '%s\n' "$json" | jq -r '
+    .data.merge_request as $mr
+    | (.data.version // (($mr.Versions // []) | last) // {}) as $version
+    | [
+        ((($mr.Id // $mr.id) // "") | tostring),
+        ($version.SourceCommitId // $mr.SourceCommitId // "")
+      ]
+    | join("\u001f")
+  '
+}
+
+# Echo how many parents a commit has, so a merge commit (2+) is distinguishable
+# from an ordinary one. Fails when the commit cannot be read, which callers must
+# treat as "unknown", never as "not a merge commit".
+fm_scm_codebase_commit_parents() {
+  local sha=$1 repo=$2 json parents
+  [ -n "$sha" ] || return 1
+  json=$(fm_scm_codebase_commit_json "$sha" "$repo") || return 1
+  parents=$(printf '%s\n' "$json" | jq -r '(.data.commit.Parents // []) | length') || return 1
+  case "$parents" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$parents"
+}
+
 # Echo provider<US>state<US>head-commit<US>source-ref, unit-separated so an empty
 # field (a Codebase MR version with no SourceCommitId) cannot shift the rest left.
 fm_scm_pr_info() {
@@ -472,6 +510,47 @@ fm_scm_github_merge() {
   gh-axi pr merge "$number" --repo "$repo" ${merge_args[@]+"${merge_args[@]}"} "$@"
 }
 
+# Echo the merge args' resolved --squash-commits value (last one wins), empty
+# when none was set. Read from the final arg list, so a caller shim such as
+# --squash and a raw --squash-commits=true both land here.
+fm_scm_codebase_resolved_squash() {
+  local arg val='' want_value=0
+  for arg in "$@"; do
+    if [ "$want_value" = 1 ]; then
+      val=$arg
+      want_value=0
+      continue
+    fi
+    case "$arg" in
+      --squash-commits) want_value=1 ;;
+      --squash-commits=*) val=${arg#--squash-commits=} ;;
+    esac
+  done
+  printf '%s\n' "$val" | tr '[:upper:]' '[:lower:]'
+}
+
+# Squashing an MR whose head is itself a merge commit flattens that merge and
+# drops its second parent, destroying the merge base with the branch it merged.
+# The next merge from that same upstream then replays every already-merged change
+# as a conflict. Refuse instead, and refuse just as hard when the head cannot be
+# read: "unknown" must never be treated as "not a merge commit".
+fm_scm_codebase_reject_squash_of_merge_head() {
+  local number=$1 repo=$2 head=$3 parents
+  if [ -z "$head" ]; then
+    echo "error: refusing to squash $repo!$number: firstmate could not resolve its head commit, so it cannot rule out a merge commit." >&2
+    return 1
+  fi
+  if ! parents=$(fm_scm_codebase_commit_parents "$head" "$repo"); then
+    echo "error: refusing to squash $repo!$number: firstmate could not read head commit $head, so it cannot rule out a merge commit." >&2
+    return 1
+  fi
+  [ "$parents" -ge 2 ] || return 0
+  echo "error: refusing to squash $repo!$number: its head commit $head is a merge commit ($parents parents)." >&2
+  echo "Squashing it would flatten that merge and drop the second parent, destroying the merge base; the next merge from the same upstream would then replay every already-merged change as a conflict." >&2
+  echo "Merge it with --merge instead, which keeps the merge commit." >&2
+  return 1
+}
+
 fm_scm_codebase_append_method() {
   local method=$1
   case "$method" in
@@ -487,15 +566,19 @@ fm_scm_codebase_append_method() {
 }
 
 fm_scm_codebase_merge() {
-  local number=$1 repo=$2 arg method
+  local number=$1 repo=$2 arg method facts mr_id head
   shift 2
   fm_scm_require_bytedcli || return 1
 
   local FM_SCM_CODEBASE_MERGE_ARGS=()
+  # Codebase's default is a real merge commit, never a squash: Codebase MRs are
+  # routinely upstream-merge MRs whose head is a merge commit, and squashing one
+  # of those destroys the merge base (see the reject helper above). GitHub's
+  # --squash default is unaffected.
   if ! fm_scm_caller_has_merge_method codebase "$@"; then
     FM_SCM_CODEBASE_MERGE_ARGS+=(--merge-method merge_commit)
     if ! fm_scm_codebase_caller_has_squash_commits "$@"; then
-      FM_SCM_CODEBASE_MERGE_ARGS+=(--squash-commits true)
+      FM_SCM_CODEBASE_MERGE_ARGS+=(--squash-commits false)
     fi
   fi
 
@@ -545,7 +628,22 @@ fm_scm_codebase_merge() {
     esac
   done
 
-  bytedcli codebase mr merge "$number" -R "$repo" ${FM_SCM_CODEBASE_MERGE_ARGS[@]+"${FM_SCM_CODEBASE_MERGE_ARGS[@]}"}
+  facts=$(fm_scm_codebase_mr_merge_facts "$number" "$repo") || return 1
+  IFS=$FM_SCM_FS read -r mr_id head <<EOF
+$facts
+EOF
+  if [ -z "$mr_id" ]; then
+    echo "error: could not resolve an internal MR id for $repo!$number; bytedcli codebase mr merge accepts no other selector." >&2
+    return 1
+  fi
+
+  case "$(fm_scm_codebase_resolved_squash ${FM_SCM_CODEBASE_MERGE_ARGS[@]+"${FM_SCM_CODEBASE_MERGE_ARGS[@]}"})" in
+    true|1|yes)
+      fm_scm_codebase_reject_squash_of_merge_head "$number" "$repo" "$head" || return 1
+      ;;
+  esac
+
+  bytedcli codebase mr merge --mr-id "$mr_id" -R "$repo" ${FM_SCM_CODEBASE_MERGE_ARGS[@]+"${FM_SCM_CODEBASE_MERGE_ARGS[@]}"}
 }
 
 fm_scm_merge_url() {
