@@ -336,6 +336,25 @@ test_worktree_create_refuses_existing_path() {
   pass "fm_backend_orca_worktree_create: refuses to clobber an existing worktree path"
 }
 
+test_worktree_create_git_failure_uses_private_stderr_file() {
+  fmod_case wt-create-git-fail-private-stderr
+  local repo out status tmp_files
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  git -C "$repo" branch fm/fm-test-git-fail HEAD
+  mkdir -p "$CASE_DIR/tmp"
+  out=$( TMPDIR="$CASE_DIR/tmp" PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-git-fail' "$ROOT" "$repo" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree_create should fail when git worktree add fails"
+  assert_contains "$out" "git worktree add failed" "worktree_create should label git worktree add failures"
+  assert_contains "$out" "already exists" "worktree_create should surface git worktree stderr"
+  assert_not_contains "$(sed -n '1,180p' "$ROOT/bin/backends/orca.sh")" "/tmp/fm-orca-wt.err" \
+    "worktree_create should not use a fixed stderr path"
+  tmp_files=$(find "$CASE_DIR/tmp" -type f -name 'fm-orca-wt.*' -print)
+  [ -z "$tmp_files" ] || fail "worktree_create should clean up private stderr files, left: $tmp_files"
+  pass "fm_backend_orca_worktree_create: captures git stderr with a private temp file"
+}
+
 test_worktree_create_cleans_up_on_fmod_failure() {
   fmod_case wt-create-fmod-fail
   local repo

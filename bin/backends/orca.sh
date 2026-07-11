@@ -106,7 +106,7 @@ fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
 # terminal created, please clean up" - that path is gone because the daemon
 # createOrAttach is atomic).
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 wt_path session_id create_out branch start_head current_head
+  local project=$1 name=$2 wt_path session_id create_out branch start_head current_head add_err
 
   fm_backend_orca_tool_check || return 1
 
@@ -129,13 +129,14 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   # stdout is silenced - git prints "HEAD is now at ..." to stdout on success,
   # which would corrupt the TAB-separated adapter contract on stdout.
   start_head=$(git -C "$project" rev-parse HEAD) || { echo "error: cannot resolve HEAD for $project" >&2; return 1; }
-  if ! git -C "$project" worktree add -b "$branch" "$wt_path" HEAD >/dev/null 2>/tmp/fm-orca-wt.err; then
+  add_err=$(mktemp "${TMPDIR:-/tmp}/fm-orca-wt.XXXXXX") || { echo "error: cannot create temporary file for git worktree diagnostics" >&2; return 1; }
+  if ! git -C "$project" worktree add -b "$branch" "$wt_path" HEAD >/dev/null 2>"$add_err"; then
     echo "error: git worktree add failed for $wt_path:" >&2
-    cat /tmp/fm-orca-wt.err >&2
-    rm -f /tmp/fm-orca-wt.err
+    cat "$add_err" >&2
+    rm -f "$add_err"
     return 1
   fi
-  rm -f /tmp/fm-orca-wt.err
+  rm -f "$add_err"
 
   session_id=$(fm_backend_orca_session_id_of "$name")
   if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
