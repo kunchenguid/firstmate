@@ -507,6 +507,30 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
+# All X-mode link keys, as one grep -E strip pattern shared by link_set and
+# link_clear. Includes the optional reply-platform context keys so a re-link or
+# clear drops them along with the core binding.
+FMX_META_LINK_KEYS='^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars='
+
+# _fmx_meta_rewrite <meta> <strip-pattern> [line ...]: atomically rewrite <meta>,
+# dropping every line matching <strip-pattern> (a grep -E alternation) and
+# appending the given literal lines, preserving all other lines. The temp file is
+# a sibling of <meta> so the final mv is atomic and TMPDIR-independent. Returns
+# non-zero on any rewrite failure. Callers own the <meta>-exists precheck, which
+# is where missing-file policy (hard error vs. no-op) differs between helpers.
+_fmx_meta_rewrite() {
+  local meta=$1 strip=$2 tmp line
+  shift 2
+  tmp=$(fmx_meta_tmp "$meta") || return 1
+  if ! { grep -vE "$strip" "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}
+
 # fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
@@ -515,37 +539,27 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-}
+  local -a lines
   [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
-  fi
-  printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  lines=("x_request=$rid" "x_request_ts=$ts" "x_followups=$followups")
   if [ -n "$platform" ]; then
-    printf 'x_platform=%s\n' "$platform" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    lines+=("x_platform=$platform")
   fi
   case "$reply_max" in
     ''|*[!0-9]*) ;;
-    *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    *) lines+=("x_reply_max_chars=$reply_max") ;;
   esac
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  _fmx_meta_rewrite "$meta" "$FMX_META_LINK_KEYS" "${lines[@]}"
 }
 
 # fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
 # line, preserving every other meta line including link and reply context.
 # Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_followups_set() {
-  local meta=$1 n=$2 tmp
+  local meta=$1 n=$2
   [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
-  fi
-  printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  _fmx_meta_rewrite "$meta" '^x_followups=' "x_followups=$n"
 }
 
 # fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
@@ -553,11 +567,7 @@ fmx_meta_followups_set() {
 # succeeds whether or not a link is present, and is a no-op when <meta> is
 # missing.
 fmx_meta_link_clear() {
-  local meta=$1 tmp
+  local meta=$1
   [ -f "$meta" ] || return 0
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
-  fi
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  _fmx_meta_rewrite "$meta" "$FMX_META_LINK_KEYS"
 }
