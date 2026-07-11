@@ -404,9 +404,72 @@ test_view_renders_dead_secondmate_agent_status() {
   pass "fleet view renders secondmate agent liveness"
 }
 
+# A still-open decision must survive a LATER, UNRELATED terminal event on the same
+# append-only stream. This is the fmdev masking bug: last-event-wins read the trailing
+# `done` and reported pending_decision=false while a needs-decision was still open. The
+# durable keyed fold (fm-classify-lib.sh) keeps it open until an explicit resolution.
+test_open_decision_survives_later_unrelated_event() {
+  local home fakebin out
+  home=$(make_home masking)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/masked-decision.meta" \
+    "window=firstmate:fm-masked-decision" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  # needs-decision opened, then two LATER unrelated events (no resolution).
+  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' > "$home/state/masked-decision.status"
+  printf 'working: implementing an unrelated subsystem\n' >> "$home/state/masked-decision.status"
+  printf 'done: an unrelated subtask finished\n' >> "$home/state/masked-decision.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "masked-decision")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "race"
+      and .hints.open_decisions[0].verb == "needs-decision"
+  ' >/dev/null || fail "later unrelated done must not mask an open needs-decision: $out"
+  pass "durable fold keeps an open decision past a later unrelated event"
+}
+
+# An open decision clears ONLY on an explicit resolution referencing its key, never
+# on an unrelated terminal line.
+test_open_decision_clears_on_keyed_resolution() {
+  local home fakebin out
+  home=$(make_home resolution)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/resolved-decision.meta" \
+    "window=firstmate:fm-resolved-decision" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' > "$home/state/resolved-decision.status"
+  printf 'done: an unrelated subtask finished\n' >> "$home/state/resolved-decision.status"
+  printf 'resolved [key=race]: captain chose subscribe-then-reconcile\n' >> "$home/state/resolved-decision.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "resolved-decision")
+    | .hints.pending_decision == false
+      and (.hints.open_decisions | length) == 0
+  ' >/dev/null || fail "keyed resolution must clear the open decision: $out"
+  pass "durable fold clears a decision only on a keyed resolution"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
+test_open_decision_survives_later_unrelated_event
+test_open_decision_clears_on_keyed_resolution
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

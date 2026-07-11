@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Behavior tests for the bearings projection wrapper over fm-fleet-snapshot.sh.
+# Covers the output/token bound, TOON/JSON parity, the local-only default (zero
+# GitHub/network calls), the --include-prs opt-in path, graceful degradation on a
+# partial PR-fetch failure, end-to-end unresolved-decision durability, and current
+# report pointers.
+set -u
+
+# shellcheck source=tests/lib.sh
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+TMP_ROOT=$(fm_test_tmproot fm-bearings)
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+
+# A fakebin that stubs the local tools the canonical snapshot may reach for, plus a
+# gh/gh-axi that RECORDS every call to $NET_LOG so a test can prove the default path
+# makes no network call. gh returns one fixture open PR keyed to the ship task.
+make_fakebin() {  # <dir>
+  local fb
+  fb=$(fm_fakebin "$1")
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$NET_LOG"
+if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
+cat <<'JSON'
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
+JSON
+SH
+  cat > "$fb/gh-axi" <<'SH'
+#!/usr/bin/env bash
+echo "gh-axi $*" >> "$NET_LOG"
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi"
+  printf '%s\n' "$fb"
+}
+
+make_home() {  # <name>
+  local home=$TMP_ROOT/$1
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config" "$home/secondmate-home"
+  printf '%s\n' "$home"
+}
+
+# Standard fixture: a ship task with a recorded PR, a scout task with a report, a
+# secondmate with a MASKED open decision (needs-decision then a later unrelated
+# done), and a backlog with a superseded queued item.
+write_fixture() {  # <home>
+  local home=$1
+  mkdir -p "$home/projects/ship-wt" "$home/data/scout-x"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] ship-task - Ship the thing (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] scout-x - Investigate the thing data/scout-x/report.md (repo: firstmate) (kind: scout) (since 2026-07-11)
+
+## Queued
+- [ ] live-gate - Real queued work blocked-by: ship-task (repo: firstmate) (kind: ship)
+- [ ] dead-gate - Old conditional work (repo: firstmate) (kind: scout)
+  NOT REQUIRED - superseded 2026-07-11; kept as reference only.
+
+## Done
+- [x] done-a - Landed thing https://github.com/kunchenguid/firstmate/pull/7 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+EOF
+  printf '# Scout X\n' > "$home/data/scout-x/report.md"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  printf 'working: building the thing\n' > "$home/state/ship-task.status"
+  fm_write_meta "$home/state/scout-x.meta" \
+    "window=firstmate:fm-scout-x" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  printf 'done: report ready\n' > "$home/state/scout-x.status"
+  fm_write_meta "$home/state/mate.meta" \
+    "window=firstmate:fm-mate" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=firstmate"
+  printf 'needs-decision [key=race]: pick subscribe order\n' > "$home/state/mate.status"
+  printf 'done: an unrelated subtask finished\n' >> "$home/state/mate.status"
+}
+
+run() {  # <home> <fakebin> <args...>
+  local home=$1 fakebin=$2; shift 2
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+test_default_is_bounded_and_local_only() {
+  local home fakebin toon json
+  home=$(make_home bounded); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  toon=$(run "$home" "$fakebin")
+  json=$(run "$home" "$fakebin" --json)
+  # Bound: well under the ~50 KB tool-display limit.
+  [ "${#toon}" -lt 50000 ] || fail "default TOON must stay under the display bound, got ${#toon}"
+  # TOON is materially smaller than the canonical snapshot it projects.
+  local canon; canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  [ "${#toon}" -lt "${#canon}" ] || fail "projection must be smaller than the canonical snapshot"
+  # Local-only: no GitHub/network call on the default path.
+  [ ! -s "$home/net.log" ] || fail "default run must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  # Definitive not-requested PR state, never a silent omission.
+  assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
+  assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
+  # Valid JSON, correct schema.
+  printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1"' >/dev/null || fail "json schema wrong"
+  pass "default output is bounded, local-only, and marks omitted surfaces"
+}
+
+test_toon_json_parity() {
+  local home fakebin toon json keys k
+  home=$(make_home parity); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  toon=$(run "$home" "$fakebin")
+  json=$(run "$home" "$fakebin" --json)
+  # Same top-level keys in both representations.
+  keys=$(printf '%s' "$json" | jq -r 'keys_unsorted[]')
+  for k in $keys; do
+    if printf '%s' "$json" | jq -e --arg k "$k" '.[$k] | type == "array"' >/dev/null; then
+      local n hdr
+      n=$(printf '%s' "$json" | jq --arg k "$k" '.[$k] | length')
+      if [ "$n" = 0 ]; then
+        assert_contains "$toon" "$k: []" "empty array $k must render as 'key: []'"
+      else
+        # Header must declare the same count and the same field set.
+        hdr=$(printf '%s' "$toon" | grep -E "^$k\[[0-9]+\]\{" || true)
+        [ -n "$hdr" ] || fail "TOON missing tabular header for $k"
+        assert_contains "$hdr" "[$n]" "TOON $k row count must equal JSON length $n"
+        local jfields tfields
+        jfields=$(printf '%s' "$json" | jq -r --arg k "$k" '.[$k][0] | keys_unsorted | join(",")')
+        tfields=$(printf '%s' "$hdr" | sed -E 's/^[^{]*\{//; s/\}:.*$//; s/"//g')
+        [ "$jfields" = "$tfields" ] || fail "TOON $k fields ($tfields) must equal JSON fields ($jfields)"
+      fi
+    else
+      # Scalar: the key must appear as a "key: value" line.
+      assert_contains "$toon" "$k: " "TOON must carry scalar field $k"
+    fi
+  done
+  pass "TOON and JSON are parity representations of the same model"
+}
+
+test_open_decision_surfaces_end_to_end() {
+  local home fakebin json
+  home=$(make_home e2e-decision); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open | any(.[]; .id == "mate" and .key == "race" and .verb == "needs-decision")
+  ' >/dev/null || fail "a still-open decision masked by a later done must surface in decisions_open: $json"
+  pass "an open decision masked by a later event surfaces end-to-end"
+}
+
+test_report_pointers_surface() {
+  local home fakebin json
+  home=$(make_home reports); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg p "$home/data/scout-x/report.md" '
+    .reports | any(.[]; .id == "scout-x" and .path == $p)
+  ' >/dev/null || fail "current scout report pointer must surface: $json"
+  pass "current report pointers surface"
+}
+
+test_superseded_queued_item_dropped_by_default() {
+  local home fakebin json
+  home=$(make_home superseded); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.[]; .id == "live-gate")) and (.gates | any(.[]; .id == "dead-gate") | not)
+  ' >/dev/null || fail "default gates must include live and drop superseded: $json"
+  json=$(run "$home" "$fakebin" --json --all-queued)
+  printf '%s' "$json" | jq -e '.gates | any(.[]; .id == "dead-gate")' >/dev/null \
+    || fail "--all-queued must restore the superseded item"
+  pass "superseded queued items are dropped by default and restored with --all-queued"
+}
+
+test_include_prs_is_the_only_fetch_path() {
+  local home fakebin json
+  home=$(make_home prs); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  # Now gh WAS called, exactly for pr list.
+  grep -q '^gh pr list ' "$home/net.log" || fail "--include-prs must call gh pr list"
+  printf '%s' "$json" | jq -e '
+    .prs | startswith("checked")
+  ' >/dev/null || fail "--include-prs must report checked PR state"
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
+  ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
+  pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+test_partial_github_failure_degrades() {
+  local home fakebin json rc
+  home=$(make_home partial); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_GH_FAIL=1 run "$home" "$fakebin" --include-prs --json); rc=$?
+  expect_code 0 "$rc" "a PR-fetch failure must not crash the view"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.candidate_prs | length) == 0
+      and (.prs | test("unavailable"))
+      and (.in_flight | length) > 0
+  ' >/dev/null || fail "on gh failure the view must still emit, with an unavailable note: $json"
+  pass "a partial GitHub failure degrades gracefully"
+}
+
+test_default_is_bounded_and_local_only
+test_toon_json_parity
+test_open_decision_surfaces_end_to_end
+test_report_pointers_surface
+test_superseded_queued_item_dropped_by_default
+test_include_prs_is_the_only_fetch_path
+test_partial_github_failure_degrades

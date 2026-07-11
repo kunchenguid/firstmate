@@ -19,6 +19,11 @@
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     hints.open_decisions is the DURABLE keyed open-decision set, folded from the
+#     whole status stream by fm-classify-lib.sh's status_open_decisions and
+#     reconciled against the authoritative current_state, so a later unrelated
+#     event cannot mask a still-open decision; hints.pending_decision and
+#     hints.blocked_event are booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
@@ -41,6 +46,9 @@ BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -274,7 +282,8 @@ backlog_json() {
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw last_event_verb current_state pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -306,12 +315,28 @@ task_json_lines() {
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    last_event_verb=$(printf '%s' "$event_json" | jq -r '.last_event.state // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    pending_decision=0
-    blocked_event=0
-    [ "$last_event_verb" = needs-decision ] && [ "$current_state" = parked ] && pending_decision=1
-    [ "$last_event_verb" = blocked ] && [ "$current_state" = blocked ] && blocked_event=1
+    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+
+    # Durable keyed open-decision set: fold the WHOLE status stream
+    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+    # never mask a still-open captain decision. Reconcile against the authoritative
+    # current state: an activity read (run-step or busy pane) showing the crew
+    # working/done/failed means it moved past any decision, so clear the set; a
+    # parked/blocked state, or a non-authoritative status-log/none read (as for a
+    # secondmate, which has no run-step to reconcile against) trusts the fold so the
+    # open decision keeps surfacing.
+    open_decisions_tsv=$(status_open_decisions "$status_log")
+    if { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+       && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; then
+      open_decisions_tsv=""
+    fi
+    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+      [ splits("\n") | select(length > 0)
+        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+        | select(. != null) ]')
+    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
+    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
     if [ -n "$target" ]; then
@@ -356,6 +381,7 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
@@ -381,6 +407,7 @@ task_json_lines() {
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
+          open_decisions:$open_decisions,
           scout_report_present:$report_present,
           last_event_text:$last_event_raw
         },
