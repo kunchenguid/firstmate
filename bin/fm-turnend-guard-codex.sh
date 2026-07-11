@@ -20,7 +20,7 @@ PAYLOAD=$(cat 2>/dev/null || true)
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-codex.XXXXXX") || exit 0
 trap 'rm -f "$ERR"' EXIT
 
-printf '%s' "$PAYLOAD" | "$GUARD" 2>"$ERR"
+printf '%s' "$PAYLOAD" | FM_CODEX_TURNEND_ADAPTER_ACTIVE=1 "$GUARD" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || exit 0
 

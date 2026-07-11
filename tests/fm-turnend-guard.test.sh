@@ -476,6 +476,55 @@ test_codex_hook_never_blocks_when_watcher_is_unhealthy() {
   pass ".codex/hooks.json: unhealthy watcher returns systemMessage JSON and queues durably without blocking Codex"
 }
 
+test_cached_codex_direct_guard_self_routes_without_blocking() {
+  local command dir payload out err status queue
+  command='bash -lc '\''payload=$(cat 2>/dev/null || true); [ -n "$payload" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x "$root/bin/fm-turnend-guard.sh" ] || exit 0; [ -f "$root/AGENTS.md" ] || exit 0; [ -f "$root/.codex/hooks.json" ] || exit 0; jq -e "any(.hooks.Stop[]?.hooks[]?.command?; type == \"string\" and contains(\"fm-turnend-guard.sh\"))" "$root/.codex/hooks.json" >/dev/null 2>&1 || exit 0; printf "%s" "$payload" | "$root/bin/fm-turnend-guard.sh"'\'''
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-cached-direct")
+  mkdir -p "$dir/.codex"
+  jq -cn --arg command "$command" \
+    '{hooks:{Stop:[{hooks:[{type:"command",command:$command}]}]}}' > "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","turn_id":"turn-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","model":"gpt-test","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  err="$dir/cached-codex.err"
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>"$err"); status=$?
+  expect_code 0 "$status" "a cached Codex hook that directly invokes the shared guard must fail open"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("openai/codex#20783"))' >/dev/null \
+    || fail "cached Codex direct guard must return valid non-blocking warning JSON: $out"
+  [ ! -s "$err" ] || fail "cached Codex direct guard must keep stderr clean: $(cat "$err")"
+  queue="$dir/state/.wake-queue"
+  [ -s "$queue" ] || fail "cached Codex direct guard must leave a durable wake"
+  assert_contains "$(cat "$queue")" "codex-turnend-guard" "cached Codex durable wake must identify its source"
+  pass "fm-turnend-guard: cached Codex direct command self-routes through the fail-open adapter"
+}
+
+test_cached_codex_direct_guard_ignores_adapter_failure() {
+  local dir payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-cached-adapter-failure")
+  cat > "$dir/bin/fm-turnend-guard-codex.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 2
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard-codex.sh"
+  payload='{"session_id":"session-test","turn_id":"turn-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","model":"gpt-test","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  out=$(printf '%s' "$payload" | bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cached Codex compatibility boundary must fail open even when its adapter exits 2"
+  [ -z "$out" ] || fail "failing Codex adapter stub unexpectedly produced output: $out"
+  pass "fm-turnend-guard: cached Codex compatibility route ignores adapter failure status"
+}
+
+test_claude_direct_guard_still_blocks_without_codex_turn_id() {
+  local dir payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/claude-hook-direct")
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "Claude direct Stop guard must retain blocking exit status"
+  assert_contains "$out" "TURN WOULD END BLIND" "Claude direct Stop guard must preserve its continuation reason"
+  assert_not_contains "$out" '"continue":true' "Claude direct Stop guard must not return the Codex fail-open result"
+  pass "fm-turnend-guard: Claude direct command still blocks without Codex's turn_id extension"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -765,6 +814,9 @@ test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
 test_codex_hook_never_blocks_when_watcher_is_unhealthy
+test_cached_codex_direct_guard_self_routes_without_blocking
+test_cached_codex_direct_guard_ignores_adapter_failure
+test_claude_direct_guard_still_blocks_without_codex_turn_id
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup

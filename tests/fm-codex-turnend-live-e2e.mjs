@@ -93,6 +93,17 @@ try {
     fs.chmodSync(path.join(project, "bin", name), 0o755);
   }
 
+  // Exercise the exact pre-adapter command shape a long-lived Codex session
+  // can retain after deployment. The shared guard must recognize Codex's
+  // turn_id extension and self-route without persisting a blocking hook prompt.
+  const legacyStopCommand = `bash -lc 'payload=$(cat 2>/dev/null || true); [ -n "$payload" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x "$root/bin/fm-turnend-guard.sh" ] || exit 0; [ -f "$root/AGENTS.md" ] || exit 0; [ -f "$root/.codex/hooks.json" ] || exit 0; jq -e "any(.hooks.Stop[]?.hooks[]?.command?; type == \\"string\\" and contains(\\"fm-turnend-guard.sh\\"))" "$root/.codex/hooks.json" >/dev/null 2>&1 || exit 0; printf "%s" "$payload" | "$root/bin/fm-turnend-guard.sh"'`;
+  fs.writeFileSync(
+    path.join(project, ".codex", "hooks.json"),
+    `${JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: legacyStopCommand, timeout: 30 }] }] },
+    })}\n`,
+  );
+
   const gitInit = spawnSync("git", ["init", "-q", project], { encoding: "utf8" });
   if (gitInit.error || gitInit.status !== 0) {
     throw new Error(`could not initialize the disposable project: ${gitInit.stderr.trim()}`);

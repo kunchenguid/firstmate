@@ -48,6 +48,7 @@ All verified primary harnesses have a tracked integration:
 Claude supports a direct blocking Stop hook, where exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
 Codex's blocking Stop path is disabled while openai/codex#20783 is unresolved because the generated continuation corrupts later Desktop follow-ups.
 The Codex adapter still runs the shared predicate, returns its warning as a valid `{continue:true,systemMessage:<warning>}` result, appends a durable `codex-turnend-guard` wake, and always exits 0 without spawning or resuming Codex.
+Long-lived Codex sessions may retain the former command that invokes the shared predicate directly. The shared guard recognizes Codex's required `turn_id` Stop-payload extension and self-routes those cached calls through the same fail-open adapter; Claude payloads do not carry that field and retain direct blocking semantics.
 Claude and Codex payloads include `stop_hook_active`; when it is true, the shared guard exits 0.
 
 OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
@@ -78,7 +79,7 @@ Current upstream source and the available `0.145` alpha remained unfixed on 2026
 The tracked Codex adapter therefore records the alarm durably and exits 0 until upstream fixes the item-id serialization path.
 Command run for the isolated live adapter regression on 2026-07-10 with `codex-cli 0.144.1`: `FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs`.
 Observed output: `FIRST_TURN_COMPLETED`, `SYSTEM_MESSAGE_WARNING_OBSERVED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`, and `SECOND_AGENT_MESSAGE_OBSERVED`.
-The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
+The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, the literal pre-adapter Stop command that calls `fm-turnend-guard.sh` directly, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
 It requires both turn notifications to report `status=completed` with no turn error, requires a nonempty agent message from each turn, and requires the Stop-hook notification to contain the openai/codex#20783 system warning.
 It never opens or modifies the live Codex session directory, and it deletes the temporary fixture on exit.
 The Stop payload included `cwd`.
