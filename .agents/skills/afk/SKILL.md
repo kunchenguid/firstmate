@@ -29,7 +29,7 @@ batched digest rather than per-wake injections.
    bin/fm-afk-start.sh
    ```
    The helper exits immediately (refreshing `state/.afk`) if the identity-backed daemon lock already names a live process; otherwise it first verifies an injectable supervisor target exists, then sets `state/.afk` and execs `bin/fm-supervise-daemon.sh` in the foreground.
-   If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, leaves `state/.afk` unset, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
+   If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, clears any pre-existing `state/.afk` flag so the fleet reverts to full per-wake supervision, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to

@@ -14,7 +14,8 @@
 #   FM_SUPERVISOR_TARGET override is set, there is no verifiable pane to deliver
 #   escalations to (the legacy firstmate:0 guess is a crewmate session, not
 #   firstmate's input). Rather than set state/.afk and let the daemon wedge
-#   silently overnight, this refuses immediately, leaves state/.afk unset, and
+#   silently overnight, this refuses immediately, clears any pre-existing
+#   state/.afk flag so the fleet reverts to full per-wake supervision, and
 #   exits non-zero with a clear message. The same guard, plus the supervisor
 #   discovery it shares, lives in bin/fm-supervisor-target-lib.sh.
 #
@@ -32,7 +33,7 @@ LOCK="$STATE/.supervise-daemon.lock"
 DAEMON="$SCRIPT_DIR/fm-supervise-daemon.sh"
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -114,17 +115,15 @@ fi
 if ! supervisor_target_is_trustworthy; then
   echo "afk: refusing to enter away mode - firstmate's own pane could not be verified as an escalation target." >&2
   echo "     firstmate is not running inside a tmux or herdr pane and no FM_SUPERVISOR_TARGET override is set, so away-mode escalations would be delivered to the wrong window and silently wedge." >&2
+  if [ -e "$STATE/.afk" ]; then
+    rm -f "$STATE/.afk"
+    echo "     Cleared the pre-existing away flag (state/.afk): the fleet is back in full per-wake supervision instead of deferring to a daemon that cannot start." >&2
+  fi
   echo "     Run firstmate inside tmux/herdr, or export FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) pointing at firstmate's own pane, then retry." >&2
   exit 1
 fi
 
-# Record the verified supervisor target/backend now, at activation time, and
-# hand them to the daemon explicitly so it injects into exactly this pane.
-FM_SUPERVISOR_TARGET=$(discover_supervisor_target) || true
-FM_SUPERVISOR_BACKEND=$(discover_supervisor_backend) || true
-export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND
-
 date '+%s' > "$STATE/.afk"
-echo "afk: supervisor target verified ($FM_SUPERVISOR_BACKEND:$FM_SUPERVISOR_TARGET)"
+echo "afk: supervisor target verified"
 echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
 exec "$DAEMON"

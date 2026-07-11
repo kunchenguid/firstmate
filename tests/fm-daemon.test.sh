@@ -118,6 +118,24 @@ test_afk_start_refuses_without_supervisor_target() {
   pass "fm-afk-start.sh fails fast and leaves the fleet in full per-wake mode when no supervisor target can be verified"
 }
 
+test_afk_start_refusal_clears_stale_afk_flag() {
+  local dir state out status
+  dir=$(make_supercase afk-start-stale-flag)
+  state="$dir/state"
+  mkdir -p "$state"
+  date '+%s' > "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse when no injectable supervisor target exists"
+  assert_contains "$out" "refusing to enter away mode" "fm-afk-start.sh did not print the fail-fast refusal"
+  assert_contains "$out" "Cleared the pre-existing away flag" "fm-afk-start.sh did not report clearing the stale away flag"
+  assert_absent "$state/.afk" "fm-afk-start.sh left the stale away flag in place, deferring triage to a daemon that cannot start"
+  pass "fm-afk-start.sh refusal clears a pre-existing away flag so the fleet reverts to full per-wake supervision"
+}
+
 test_daemon_refuses_blind_fallback_target() {
   local dir state out status
   dir=$(make_supercase daemon-blind-fallback)
@@ -1717,6 +1735,7 @@ test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_supervisor_target_is_trustworthy_predicate
 test_afk_start_refuses_without_supervisor_target
+test_afk_start_refusal_clears_stale_afk_flag
 test_daemon_refuses_blind_fallback_target
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
