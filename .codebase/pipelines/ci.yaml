@@ -189,28 +189,25 @@ jobs:
             fi
             git fetch origin "main:refs/remotes/origin/main"
             git merge-base HEAD origin/main >/dev/null
-      - name: Run teardown suite with temp dirs preserved
+      - name: Run full suite exactly like the tests job, keep case dirs
         commands:
           - |
             set -eu
-            # Neuter ONLY the EXIT-trap cleanup (line 56), not other rm -rf uses.
-            sed -n '53,58p' tests/lib.sh
-            sed -i '56s|.*|    [ -n "$d" ] \&\& echo "KEEPCASE $d"|' tests/lib.sh
+            # Neuter ONLY the EXIT-trap cleanup (line 56 of tests/lib.sh).
+            sed -i '56s|.*|    [ -n "$d" ] \&\& echo "KEEPCASE $d" >\&2|' tests/lib.sh
             sed -n '53,58p' tests/lib.sh
             id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
             chown -R ci:ci .
-            chmod 1777 /tmp
             set +e
-            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" TMPDIR=/tmp \
-              bash -c './tests/fm-teardown.test.sh' > /tmp/suite.out 2>&1
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" bash -c '
+              for t in tests/*.test.sh; do "$t" || exit 1; done
+            ' > /tmp/suite.out 2>&1
             echo "suite exit=$?"
             set -e
-            echo "############ SUITE OUTPUT (tail) ############"
+            echo "############ LAST 3 SUITE LINES ############"
             tail -3 /tmp/suite.out
-            echo "############ CASE TREE ############"
-            find /tmp/fm-teardown-tests.* -maxdepth 1 -type d 2>/dev/null | head -30
-            echo "############ STDERR OF EVERY CASE ############"
-            find /tmp/fm-teardown-tests.* -name stderr -size +0 2>/dev/null | while read -r f; do
+            echo "############ CASE STDERR (non-empty) ############"
+            find /tmp -maxdepth 3 -name stderr -size +0 2>/dev/null | while read -r f; do
               echo "=== $f ==="
               cat "$f"
             done
