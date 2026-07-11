@@ -1,0 +1,183 @@
+# Codebase CI (code.byted.org). This is the pipeline that actually runs on MRs.
+#
+# .github/workflows/ci.yml holds the same three jobs for the GitHub mirror,
+# which still owns releases and Pages. Neither file runs on the other's host,
+# so keep the two in step when you change one.
+#
+# Each job surfaces on the MR as a check run named
+# "[Pipeline] MR CI - <job name>", which is what no-mistakes reads through
+# `bytedcli codebase mr status`.
+#
+# TOOLCHAIN: the ci_nodejs_20 image is Debian 10 (buster), whose apt packages
+# are from 2018 and too old to trust:
+#   - shellcheck 0.5.0 still emits SC1117 (removed upstream in 0.7) and flags
+#     backticks inside single quotes, so it fails on code that is clean under
+#     any current shellcheck.
+#   - jq 1.5 exits 0 from `jq -e` on empty input instead of 4. cmux.sh's
+#     surface_exists is exactly that predicate, so an absent surface reads as
+#     present and tests/fm-backend-cmux.test.sh fails.
+# github.com is not reachable from the runner directly, so both tools are
+# pinned and fetched through the internal relay into /usr/local/bin (ahead of
+# /usr/bin on PATH). Bump the versions here, not in apt.
+#
+# The tests job also installs gawk: buster's default awk is mawk 1.3.3, which
+# predates POSIX character classes, so the [[:space:]] patterns in
+# bin/fm-backlog-handoff.sh never match and its malformed-continuation refusal
+# silently passes. Ubuntu's mawk 1.3.4 and macOS awk both handle it.
+name: MR CI
+
+trigger:
+  change:
+    branches: [main]
+    # create + push only, deliberately: `update` also fires on MR metadata edits,
+    # so editing the description would re-run the whole suite. This mirrors the
+    # GitHub workflow, which triggers on code changes rather than PR edits.
+    types: [create, push]
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint shell scripts
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    steps:
+      - name: Install shellcheck
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/sc.tar.xz \
+              https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+            tar -xJf /tmp/sc.tar.xz -C /tmp
+            install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+            shellcheck --version
+      - name: Shellcheck
+        commands:
+          - shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+
+  tests:
+    name: Behavior tests
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on
+    # a hung watcher or tmux test instead of riding the 120-minute default.
+    timeout: 15
+    steps:
+      - name: Install tmux and gawk
+        commands:
+          - |
+            set -eu
+            apt-get update
+            apt-get install -y --no-install-recommends tmux gawk
+            tmux -V
+            # gawk takes over the awk alternative; POSIX classes must work.
+            awk --version | head -1
+            printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
+      - name: Install jq
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/jq \
+              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            install -m 0755 /tmp/jq /usr/local/bin/jq
+            jq --version
+      - name: Install tasks-axi for backlog-handoff delegation
+        commands:
+          - |
+            set -eu
+            npm install -g tasks-axi
+            tasks-axi --version
+            # bin/fm-backlog-handoff.sh needs atomic multi-ID `mv`, added in 0.2.2.
+            have=$(tasks-axi --version | tr -d '[:space:]')
+            lowest=$(printf '%s\n0.2.2\n' "$have" | sort -V | head -n1)
+            if [ "$lowest" != "0.2.2" ]; then
+              echo "tasks-axi ${have} is older than the required 0.2.2"
+              exit 1
+            fi
+      - name: Install Node 22
+        commands:
+          # The image ships Node 20, but tests/fm-pi-watch-extension.test.sh
+          # imports the .ts extension directly, which needs Node's native
+          # TypeScript type stripping - default-on only from 22.18.
+          # It goes in its own prefix: unpacking over /usr/local would replace
+          # the image's npm and its internal-registry config, and the
+          # tasks-axi install above needs that npm.
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
+              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
+            mkdir -p /opt/node22
+            tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
+            /opt/node22/bin/node --version
+      - name: Fetch default-branch history
+        commands:
+          # tests/fm-backend.test.sh resolves a merge-base against main and
+          # hard-fails without it; the MR checkout does not carry that ref.
+          - |
+            set -eu
+            if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+              git fetch --unshallow origin || git fetch --depth=1000 origin
+            fi
+            git fetch origin "main:refs/remotes/origin/main"
+            git merge-base HEAD origin/main >/dev/null
+      - name: Run suite
+        commands:
+          # Two environment requirements, both learned the hard way:
+          #
+          # 1. NOT as root. tests/fm-daemon.test.sh chmods a state dir unwritable
+          #    and asserts the write fails; root ignores permission bits, so as
+          #    root that assertion silently inverts. GitHub's runner is non-root.
+          #
+          # 2. A hermetic git config. The runner ships a global
+          #    url.<...>.insteadOf rewrite for code.byted.org, and
+          #    `git remote get-url` APPLIES insteadOf - so fm-teardown.test.sh's
+          #    Codebase fixture reads back as gitlab@git.byted.org, the provider
+          #    parser stops recognizing it as Codebase, and teardown refuses work
+          #    the test says is landed. GIT_CONFIG_GLOBAL/SYSTEM=/dev/null drops
+          #    that rewrite (and any other runner-local git surprise); the GIT_*
+          #    identity then has to be supplied explicitly, because
+          #    commit_tree_from_wt_head calls git commit-tree without one.
+          - |
+            set -eu
+            id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+            chown -R ci:ci .
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" \
+              GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+              GIT_AUTHOR_NAME="firstmate ci" GIT_AUTHOR_EMAIL=ci@firstmate.invalid \
+              GIT_COMMITTER_NAME="firstmate ci" GIT_COMMITTER_EMAIL=ci@firstmate.invalid \
+              bash -c '
+                set -eu
+                [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
+                node --version
+                for test_script in tests/*.test.sh; do
+                  "$test_script"
+                done
+              '
+
+  invariants:
+    name: Repo invariants
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    steps:
+      - name: Symlinks must stay intact
+        commands:
+          - |
+            set -eu
+            [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+            [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo ".claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        commands:
+          - |
+            set -eu
+            tracked=$(git ls-files -- data state config projects .no-mistakes)
+            if [ -n "$tracked" ]; then
+              echo "Personal fleet paths are tracked in git:"
+              printf '%s\n' "$tracked"
+              exit 1
+            fi
