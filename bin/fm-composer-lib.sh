@@ -180,8 +180,25 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content nbsp
   plain_content=${5:-$content}
+  # claude (v2.1.x) draws its empty composer prompt as the agent
+  # glyph followed by a NON-BREAKING space (U+00A0) and then a regular space.
+  # bash's [:space:] class never matches U+00A0, so the caller's trim leaves a lone NBSP
+  # behind; after the leading glyph is stripped that stray NBSP survives and an
+  # empty composer misreads as pending real text - the false "Enter swallowed"
+  # steer failure (task fix-fmsend-falsefail). Fold every NBSP to a plain space
+  # and re-trim both inputs so NBSP-only spacing classifies as empty. This is a
+  # no-op for content that carries no NBSP, and real typed text around an NBSP
+  # still survives the fold (only pure whitespace collapses), so pending stays
+  # pending. Applied here, the ONE owner, so every backend adapter benefits.
+  nbsp=$(printf '\302\240')
+  content=${content//"$nbsp"/ }
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  plain_content=${plain_content//"$nbsp"/ }
+  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;

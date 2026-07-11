@@ -114,6 +114,38 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# --- claude's non-breaking-space empty composer -----------------------------
+
+test_nbsp_empty_composer_is_empty() {
+  local nbsp out row
+  nbsp=$(printf '\302\240')   # U+00A0 NON-BREAKING SPACE
+  # claude (v2.1.x) renders its EMPTY composer prompt as "❯" + NBSP + " ". The
+  # caller trims with bash's [:space:] class, which does NOT match NBSP, so it
+  # hands the classifier a value with a trailing (or lone, post-glyph-strip)
+  # NBSP. Every such empty shape must read empty, never pending - the false
+  # "Enter swallowed" steer failure (task fix-fmsend-falsefail).
+  for row in "❯${nbsp} " "❯${nbsp}" "❯${nbsp}${nbsp}" "${nbsp}❯${nbsp}"; do
+    out=$(classify 0 "$row")
+    [ "$out" = empty ] \
+      || fail "claude's NBSP empty composer '$(printf '%s' "$row" | od -An -tx1)' must read empty, got '$out'"
+  done
+  # A lone NBSP with no glyph is still just spacing, i.e. empty.
+  out=$(classify 0 "$nbsp"); [ "$out" = empty ] || fail "a lone NBSP should read empty, got '$out'"
+  pass "fm_composer_classify_content: claude's non-breaking-space empty composer reads empty, not pending"
+}
+
+test_nbsp_does_not_swallow_real_text() {
+  local nbsp out
+  nbsp=$(printf '\302\240')
+  # Folding NBSP to a space must not erase real typed content: a message that
+  # merely contains an NBSP is still unsubmitted text -> pending.
+  out=$(classify 0 "❯${nbsp}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "real text after an NBSP must stay pending, got '$out'"
+  out=$(classify 0 "deploy${nbsp}staging now")
+  [ "$out" = pending ] || fail "real text around an NBSP must stay pending, got '$out'"
+  pass "fm_composer_classify_content: an NBSP inside real typed text stays pending (fold collapses only pure whitespace)"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -126,6 +158,8 @@ test_real_text_is_pending() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_nbsp_empty_composer_is_empty
+test_nbsp_does_not_swallow_real_text
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty

@@ -236,6 +236,43 @@ test_dark_truecolor_bare_shell_prompt_is_unknown() {
   pass "fm_tmux_composer_state: dark truecolor shell prompts read unknown"
 }
 
+test_nbsp_empty_claude_composer_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/nbsp-composer"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact empty-composer row claude v2.1.x leaves on the cursor line right
+  # after a submit lands: the agent glyph, a NON-BREAKING space (U+00A0, the
+  # \xc2\xa0 bytes), then a regular space. bash's [:space:] trim does not match
+  # the NBSP, so before the fix an empty composer read as pending real text and
+  # fm-send falsely reported "Enter swallowed" on every claude steer
+  # (task fix-fmsend-falsefail). It must read NOT pending.
+  printf '\xe2\x9d\xaf\xc2\xa0 \n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "claude's NBSP empty composer falsely read as pending (the false Enter-swallowed steer failure)"
+  fi
+  # And the same row must classify as empty (the positive submit acknowledgement).
+  local st
+  st=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 fm_tmux_composer_state "fakepane")
+  [ "$st" = empty ] || fail "claude's NBSP empty composer should read empty, got '$st'"
+  pass "fm_pane_input_pending: claude's non-breaking-space empty composer is NOT pending (submit confirmed)"
+}
+
+test_nbsp_with_real_text_still_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/nbsp-real"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # Real typed text that merely contains an NBSP must still read pending - the
+  # NBSP fold collapses only pure whitespace, never real input.
+  printf '\xe2\x9d\xaf\xc2\xa0fix findings 1 and 3\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "real text following an NBSP was not detected as pending"
+  pass "fm_pane_input_pending: real typed text after an NBSP is still pending"
+}
+
 test_real_text_with_trailing_ghost_is_pending() {
   local dir fb capture
   dir="$TMP_ROOT/mixed"; mkdir -p "$dir"
@@ -286,5 +323,7 @@ test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
+test_nbsp_empty_claude_composer_is_not_pending
+test_nbsp_with_real_text_still_pending
 test_real_text_with_trailing_ghost_is_pending
 test_peek_output_is_escape_free
