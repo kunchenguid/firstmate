@@ -93,9 +93,14 @@ fm_backend_orca_worktree_dir() {  # <project-path> <name>
 # does NOT run `treehouse get` — the worktree IS the project — so this only
 # protects against a `command` injected at create time (currently unused).
 fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
-  local session_id=$1 cwd=$2 title=$3
+  local session_id=$1 cwd=$2 title=$3 actual_cwd
   fm_backend_orca_tool_check || return 1
-  fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null
+  fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null || return 1
+  actual_cwd=$(fmod get-cwd "$session_id") || return 1
+  if [ "$actual_cwd" != "$cwd" ]; then
+    echo "error: orca session $session_id attached at $actual_cwd, expected $cwd" >&2
+    return 1
+  fi
 }
 
 # fm_backend_orca_worktree_create: see header. Returns TAB-separated
@@ -106,7 +111,7 @@ fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
 # terminal created, please clean up" - that path is gone because the daemon
 # createOrAttach is atomic).
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 wt_path session_id create_out branch start_head current_head add_err
+  local project=$1 name=$2 wt_path session_id create_out actual_cwd branch start_head current_head add_err
 
   fm_backend_orca_tool_check || return 1
 
@@ -148,6 +153,49 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
       git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
     fi
     return 1
+  fi
+  if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
+    echo "error: fmod get-cwd failed for $session_id after create:" >&2
+    printf '%s\n' "$actual_cwd" >&2
+    git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+    current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+    if [ "$current_head" = "$start_head" ]; then
+      git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+  if [ "$actual_cwd" != "$wt_path" ]; then
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+    if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
+      echo "error: fmod recreate failed for $session_id at $wt_path after stale attach at $actual_cwd:" >&2
+      printf '%s\n' "$create_out" >&2
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
+    if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
+      echo "error: fmod get-cwd failed for $session_id after recreate:" >&2
+      printf '%s\n' "$actual_cwd" >&2
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
+    if [ "$actual_cwd" != "$wt_path" ]; then
+      echo "error: orca session $session_id attached at $actual_cwd, expected $wt_path" >&2
+      fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
   fi
 
   # Stash the session id in the worktree so remove can find the terminal.

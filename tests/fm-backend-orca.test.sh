@@ -289,8 +289,10 @@ expected_orca_wt() {  # <repo> <name>
 
 test_worktree_create_makes_git_worktree_and_fmod_session() {
   fmod_case wt-create-happy
-  local repo
+  local repo expected_wt
   repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test1)
+  printf '%s\n' "$expected_wt" > "$RESP/2.out"
   PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test1' "$ROOT" "$repo" > "$CASE_DIR/raw"
   local raw
@@ -314,6 +316,7 @@ US = b"\x1f"
 # Check substrings rather than full message to avoid coupling the test to
 # the random tmpdir path.
 assert b"fmod" + US + b"create" + US + b"fm-test1" + US + b"--cwd" + US in log, "no fmod create --cwd call"
+assert b"fmod" + US + b"get-cwd" + US + b"fm-test1" in log, "no fmod get-cwd verification call"
 assert b"--shell-ready" in log, "fmod create did not pass --shell-ready"
 assert b"--cols" + US + b"200" in log, "fmod create did not pass --cols 200"
 PY
@@ -376,6 +379,30 @@ test_worktree_create_cleans_up_on_fmod_failure() {
     fail "worktree_create should delete the just-created task branch when fmod fails"
   fi
   pass "fm_backend_orca_worktree_create: removes the worktree and branch when fmod create fails"
+}
+
+test_worktree_create_recreates_stale_attached_session() {
+  fmod_case wt-create-stale-session
+  local repo expected_wt
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-stale)
+  printf '%s\n' "$CASE_DIR/stale-worktree" > "$RESP/2.out"
+  printf '%s\n' "$expected_wt" > "$RESP/5.out"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-stale' "$ROOT" "$repo" > "$CASE_DIR/raw"
+  [ -d "$expected_wt" ] || fail "worktree path $expected_wt was not created after stale session recovery"
+  [ "$(cat "$expected_wt/.fm-orca-session")" = "fm-test-stale" ] || fail "marker should hold the recreated session id"
+  python3 - "$LOG" "$expected_wt" <<'PY' || fail "worktree_create should kill and recreate stale attached sessions"
+import sys
+log = open(sys.argv[1], "rb").read()
+wt = sys.argv[2].encode()
+US = b"\x1f"
+create = b"fmod" + US + b"create" + US + b"fm-test-stale" + US + b"--cwd" + US + wt
+assert log.count(create) == 2, log
+assert b"fmod" + US + b"get-cwd" + US + b"fm-test-stale" in log, log
+assert b"fmod" + US + b"kill" + US + b"fm-test-stale" in log, log
+PY
+  pass "fm_backend_orca_worktree_create: kills and recreates stale attached sessions"
 }
 
 test_remove_worktree_kills_session_and_removes_dir() {
@@ -462,10 +489,11 @@ test_spawn_excludes_orca_session_marker() {
   mkdir -p "$data/marker" "$state" "$config"
   printf 'brief\n' > "$data/marker/brief.md"
   repo=$(build_test_repo "$home" repo)
+  wt_path=$(expected_orca_wt "$repo" fm-marker)
+  printf '%s\n' "$wt_path" > "$RESP/3.out"
   PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-spawn.sh" marker "$repo" --backend orca --harness codex >/dev/null
-  wt_path=$(expected_orca_wt "$repo" fm-marker)
   exclude_file=$(git -C "$wt_path" rev-parse --git-path info/exclude)
   grep -qxF '.fm-orca-session' "$exclude_file" \
     || fail "fm-spawn should exclude .fm-orca-session from git status"
@@ -477,7 +505,7 @@ test_spawn_excludes_orca_session_marker() {
 
 test_spawn_abort_removes_unmodified_orca_branch() {
   fmod_case spawn-abort-branch-cleanup
-  local home data config state_file repo out status
+  local home data config state_file repo out status wt_path
   home="$CASE_DIR/home"
   data="$home/data"
   config="$home/config"
@@ -486,6 +514,8 @@ test_spawn_abort_removes_unmodified_orca_branch() {
   printf 'brief\n' > "$data/abort/brief.md"
   printf 'not a directory\n' > "$state_file"
   repo=$(build_test_repo "$home" repo)
+  wt_path=$(expected_orca_wt "$repo" fm-abort)
+  printf '%s\n' "$wt_path" > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state_file" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-spawn.sh" abort "$repo" --backend orca --harness codex 2>&1 )
@@ -495,7 +525,7 @@ test_spawn_abort_removes_unmodified_orca_branch() {
   if git -C "$repo" show-ref --verify --quiet refs/heads/fm/fm-abort; then
     fail "abort cleanup should delete the unmodified Orca task branch"
   fi
-  [ ! -d "$(expected_orca_wt "$repo" fm-abort)" ] || fail "abort cleanup should remove the Orca worktree"
+  [ ! -d "$wt_path" ] || fail "abort cleanup should remove the Orca worktree"
   rm -rf /tmp/fm-abort
   pass "fm-spawn.sh: abort cleanup removes unmodified Orca branch"
 }
