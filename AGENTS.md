@@ -95,8 +95,9 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
-  <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-deploy-check --arm appends deploy_service=, deploy_sha=, and deploy_armed_at= when a merged project maps to a Render service (docs/render-deploy-verification.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check, or the post-merge Render deploy-Live verification armed by fm-deploy-check)
+  <id>.deploy-log    boot log captured on a failed Render deploy by fm-deploy-check --once; read on a deploy-FAILED wake, removed by teardown
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -510,7 +511,8 @@ bin/fm-teardown.sh <id>
 
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
 For a Render-deployed project the merge poll does not stop at `merged`: it wakes you with `merged, now verifying deploy ...`, then automatically watches the merge commit until it reaches Live, because a merge is not shipped until its deploy goes Live (`docs/render-deploy-verification.md`).
-Hold teardown until that deploy wake resolves: a `deploy live:` wake clears it for teardown, while a `deploy FAILED:` wake is a captain-facing blocker whose boot log is at the path named in the wake line.
+That verification wakes you exactly once and then disarms: a `deploy live:` wake clears the task for teardown, a `deploy FAILED:` wake is a captain-facing blocker whose boot log is at the path named in the wake line, and a `deploy verification TIMED OUT:` wake (the deploy never appeared within the bounded window) means check the service by hand rather than holding teardown open indefinitely.
+Hold teardown until one of those three wakes arrives.
 `bin/fm-teardown.sh`'s header owns the full landed-work definition (remote-reachable, merged-PR-head containment for the squash-merge-then-delete-branch flow, content already in the default branch, local-only merges) and the `pr=` discovery fallback for merges that skipped `bin/fm-pr-check.sh`.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 A successful PR-based teardown also refreshes that project's clone through `bin/fm-fleet-sync.sh`, best-effort.

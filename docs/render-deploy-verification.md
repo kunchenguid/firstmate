@@ -13,9 +13,12 @@ This verification closes that gap by watching the deploy, not just the merge.
 ## What runs, and when
 
 When the merge poll (`state/<id>.check.sh`, written by `bin/fm-pr-check.sh`) detects the PR merged, it reads the merge commit and the task's project.
-If the project maps to a Render service, it calls `bin/fm-deploy-check.sh --arm <id> <project> <merge-sha>`, which rewrites `state/<id>.check.sh` to probe the deploy and records `deploy_service=`/`deploy_sha=` into the meta.
-The watcher then polls that probe on its normal check cadence: it stays silent while the deploy is pending and wakes firstmate once with `deploy live:` or `deploy FAILED:`.
+If the project maps to a Render service, it calls `bin/fm-deploy-check.sh --arm <id> <project> <merge-sha>`, which rewrites `state/<id>.check.sh` to probe the deploy and records `deploy_service=`/`deploy_sha=`/`deploy_armed_at=` into the meta.
+The watcher then polls that probe on its normal check cadence: it stays silent while the deploy is pending and wakes firstmate exactly once, with `deploy live:`, `deploy FAILED:`, or (if no deploy for the sha appears within the bounded deadline) `deploy verification TIMED OUT:`.
+That single wake is durable: after emitting it the probe disarms by removing its own `state/<id>.check.sh`, so a held-teardown failure never re-wakes firstmate every check interval.
+Removing the file mid-run is safe because the watcher captures and durably enqueues the emitted line before the next sweep.
 On failure the probe writes the recent service boot log to `state/<id>.deploy-log` and names it in the wake line.
+The bounded deadline (`FM_DEPLOY_VERIFY_DEADLINE`, default 1800s, measured from `deploy_armed_at`) exists so a deploy that is never created - autodeploy off, or superseded before creation - cannot hold teardown open forever.
 A project with no mapped service keeps the plain `merged` wake, unchanged.
 This transition fires for every merge path, because both a captain merge on GitHub and a `bin/fm-pr-merge.sh` self-merge are observed by the same merge poll.
 
@@ -42,20 +45,22 @@ A single commit can have several deploys (for example an `api`-triggered redeplo
 | Bucket | Render status | Meaning |
 | --- | --- | --- |
 | success (Live) | `live`, `inactive` | The commit built and served; `inactive` just means a newer deploy has since replaced it. |
-| failed | `build_failed`, `update_failed`, `pre_deploy_failed`, `canceled` | Newest deploy for the sha failed and none reached a served state. |
+| failed | `build_failed`, `update_failed`, `pre_deploy_failed` | Newest deploy for the sha failed and none reached a served state; a hard captain-facing blocker. |
 | pending | `created`, `queued`, `build_in_progress`, `update_in_progress`, `pre_deploy_in_progress`, or no deploy for the sha yet | Keep polling. |
-| other | anything else (e.g. `deactivated`) | Surfaced, never silently reported Live. |
+| other | `canceled`, `deactivated`, anything else | Surfaced, never silently reported Live, but not a hard failure. |
 
+`canceled` is deliberately not a failure: Render cancels a queued or in-progress deploy when a newer deploy supersedes it, so two merges landing close together on the same service would otherwise make the first task falsely report `deploy FAILED (canceled)` even though the newer live deploy contains the first merge's content.
+An `other`/`canceled` sha that never resolves is terminated by the bounded deadline's timed-out wake, not by a false failure.
 If any deploy for the sha reached a served state, the commit is Live even when an earlier deploy of the same commit failed.
 
 ## Modes
 
 - `fm-deploy-check.sh <service|project> <sha>` - blocking poll until Live (exit 0), failed (exit 3, prints boot log), or timeout (exit 2). For manual/direct use.
-- `fm-deploy-check.sh --once <service|project> <sha>` - single probe for the watcher check contract: one line iff terminal (Live or failed), silent otherwise, always exit 0.
+- `fm-deploy-check.sh --once <service|project> <sha>` - single probe for the watcher check contract: one line iff terminal (Live, failed, or timed out), silent otherwise, always exit 0. On the wired path it reads `FM_DEPLOY_ARMED_AT` (deadline reference) and `FM_DEPLOY_DISARM_PATH` (its own check.sh, removed after a terminal wake so it fires once).
 - `fm-deploy-check.sh --resolve <project>` - print the resolved service id.
-- `fm-deploy-check.sh --arm <id> <service|project> <sha>` - resolve once, record meta, write the deploy probe check.sh.
+- `fm-deploy-check.sh --arm <id> <service|project> <sha>` - resolve once, record meta (including `deploy_armed_at=`), write the deploy probe check.sh wired with the arm time and disarm path.
 
-Cadence and timeout are env-overridable: `FM_DEPLOY_POLL_INTERVAL` (default 15s), `FM_DEPLOY_TIMEOUT` (default 900s), `FM_DEPLOY_LOG_LINES` (default 50), `FM_RENDER_BIN` (default `render`).
+Cadence, timeout, and deadline are env-overridable: `FM_DEPLOY_POLL_INTERVAL` (default 15s), `FM_DEPLOY_TIMEOUT` (default 900s, the blocking poll's bound), `FM_DEPLOY_VERIFY_DEADLINE` (default 1800s, the wired watcher path's bound before a timed-out wake), `FM_DEPLOY_LOG_LINES` (default 50), `FM_RENDER_BIN` (default `render`).
 
 ## Evidence
 

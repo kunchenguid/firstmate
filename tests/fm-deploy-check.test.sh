@@ -23,7 +23,8 @@ cat > "$DEPLOYS_JSON" <<'JSON'
   {"commit":{"id":"1111111111111111"},"status":"update_failed","id":"dep-oldfail","createdAt":"2026-07-06T13:32:49Z"},
   {"commit":{"id":"1111111111111111"},"status":"live","id":"dep-livewin","createdAt":"2026-07-06T13:46:56Z"},
   {"commit":{"id":"2222222222222222"},"status":"update_failed","id":"dep-fail","createdAt":"2026-07-05T23:37:34Z"},
-  {"commit":{"id":"3333333333333333"},"status":"build_in_progress","id":"dep-pending","createdAt":"2026-07-07T10:00:00Z"}
+  {"commit":{"id":"3333333333333333"},"status":"build_in_progress","id":"dep-pending","createdAt":"2026-07-07T10:00:00Z"},
+  {"commit":{"id":"4444444444444444"},"status":"canceled","id":"dep-canceled","createdAt":"2026-07-07T11:00:00Z"}
 ]
 JSON
 
@@ -108,6 +109,42 @@ run 0 "once: unknown sha is silent" -- "$DEPLOY_CHECK" --once srv-x deadbeef
 [ -z "$OUT" ] || fail "no-deploy should be silent, got '$OUT'"
 pass "once: unknown sha is silent"
 
+# 'canceled' is a superseded deploy, not a hard failure: it must NOT emit a
+# 'deploy FAILED' blocker and stays silent (no deadline set here).
+run 0 "once: canceled is not a failure (silent)" -- "$DEPLOY_CHECK" --once srv-x 4444444444444444
+[ -z "$OUT" ] || fail "canceled should be silent (not FAILED), got '$OUT'"
+pass "once: canceled is not a failure (silent)"
+
+# --- --once bounded deadline + disarm ---------------------------------------
+
+# Past the deadline with no deploy for the sha, --once emits a timed-out wake
+# (so a never-created deploy cannot hold teardown open forever) and disarms.
+DISARM1="$TMP_ROOT/timeout.check.sh"
+touch "$DISARM1"
+FM_DEPLOY_ARMED_AT=1 FM_DEPLOY_VERIFY_DEADLINE=0 FM_DEPLOY_DISARM_PATH="$DISARM1" \
+  run 0 "once: deadline emits timed-out wake" -- "$DEPLOY_CHECK" --once srv-x deadbeef
+assert_contains "$OUT" "TIMED OUT" "deadline timed-out wake"
+assert_absent "$DISARM1" "timed-out wake disarms (removes check.sh)"
+pass "once: deadline emits timed-out wake and disarms"
+
+# Before the deadline, a pending sha stays silent and stays armed.
+DISARM2="$TMP_ROOT/pending.check.sh"
+touch "$DISARM2"
+FM_DEPLOY_ARMED_AT=9999999999 FM_DEPLOY_VERIFY_DEADLINE=1800 FM_DEPLOY_DISARM_PATH="$DISARM2" \
+  run 0 "once: pre-deadline pending stays armed" -- "$DEPLOY_CHECK" --once srv-x 3333333333333333
+[ -z "$OUT" ] || fail "pre-deadline pending should be silent, got '$OUT'"
+assert_present "$DISARM2" "pre-deadline pending stays armed (check.sh kept)"
+pass "once: pre-deadline pending stays silent and armed"
+
+# A terminal Live wake disarms the wired probe so it fires exactly once.
+DISARM3="$TMP_ROOT/live.check.sh"
+touch "$DISARM3"
+FM_DEPLOY_DISARM_PATH="$DISARM3" \
+  run 0 "once: terminal live disarms" -- "$DEPLOY_CHECK" --once srv-x 1111111111111111
+assert_contains "$OUT" "deploy live" "terminal live wake"
+assert_absent "$DISARM3" "live wake disarms (removes check.sh)"
+pass "once: terminal live wake disarms"
+
 # --- blocking poll ----------------------------------------------------------
 
 FM_DEPLOY_POLL_INTERVAL=0 FM_DEPLOY_TIMEOUT=0 run 0 "poll: live exits 0" -- "$DEPLOY_CHECK" srv-x 1111111111111111
@@ -130,11 +167,16 @@ FM_STATE_OVERRIDE="$STATE" FM_RENDER_SERVICES_MAP="$MAP" \
   run 0 "arm: resolves + writes check.sh" -- "$DEPLOY_CHECK" --arm armtask mtmccarthy 1111111111111111
 assert_grep "deploy_service=srv-frommap" "$STATE/armtask.meta" "arm records service"
 assert_grep "deploy_sha=1111111111111111" "$STATE/armtask.meta" "arm records sha"
+assert_grep "deploy_armed_at=" "$STATE/armtask.meta" "arm records the arm timestamp"
 assert_present "$STATE/armtask.check.sh" "arm wrote check.sh"
 assert_grep "--once" "$STATE/armtask.check.sh" "armed check.sh is a deploy probe"
-# The armed check.sh, run under the watcher contract, reports live for this sha.
+assert_grep "FM_DEPLOY_ARMED_AT=" "$STATE/armtask.check.sh" "armed check.sh carries the arm time"
+assert_grep "FM_DEPLOY_DISARM_PATH=" "$STATE/armtask.check.sh" "armed check.sh carries its disarm path"
+# The armed check.sh, run under the watcher contract, reports live for this sha
+# and then disarms itself so the terminal wake fires exactly once.
 ARMOUT=$(FM_STATE_OVERRIDE="$STATE" bash "$STATE/armtask.check.sh" 2>/dev/null)
 assert_contains "$ARMOUT" "deploy live" "armed check.sh probes the deploy"
+assert_absent "$STATE/armtask.check.sh" "armed probe disarms after the terminal wake"
 pass "arm: resolves + writes check.sh"
 
 # --- merge-path wiring: fm-pr-check transitions merge -> deploy --------------
