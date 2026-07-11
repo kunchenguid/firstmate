@@ -73,9 +73,15 @@ last_status_line() {
 
 # 0 if the given (last) status line matches a captain-relevant verb.
 status_is_captain_relevant() {
-  local line=$1
+  local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
+  if [ -z "${FM_CAPTAIN_RE+x}" ]; then
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      done|needs-decision|blocked|failed) return 0 ;;
+    esac
+  fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
@@ -86,9 +92,7 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=${line%%:*}
-  verb=${verb#"${verb%%[![:space:]]*}"}
-  verb=${verb%"${verb##*[![:space:]]}"}
+  verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
@@ -110,23 +114,23 @@ status_is_paused() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
-_fm_decision_verb() {  # <status-line> -> leading verb word
+status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  case "$1" in
+    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   case "$1" in
     *\[key=*\]*) local k=${1#*\[key=}; printf '%s' "${k%%\]*}" ;;
     *) printf 'default' ;;
-  esac
-}
-_fm_decision_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '' ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
@@ -157,11 +161,11 @@ status_open_decisions() {  # <status-file>
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(_fm_decision_verb "$line")
+    verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line")
     case "$verb" in
       needs-decision|blocked)
-        note=$(_fm_decision_note "$line")
+        note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;

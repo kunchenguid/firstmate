@@ -871,6 +871,21 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+test_no_run_idle_pane_uses_keyed_log() {
+  reset_fakes
+  local d; d=$(new_case keyed-idle)
+  make_repo_on_branch "$d/wt" fm/feat-keyed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-keyed.meta" "window=fm:fm-feat-keyed" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision [key=q1]: which database?\n' > "$d/state/feat-keyed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-keyed)
+  assert_contains "$out" "state: parked" "keyed needs-decision log -> parked"
+  assert_contains "$out" "which database?" "key token is excluded from status detail"
+  pass "no run + idle pane parses keyed status syntax"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -1115,6 +1130,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_dead_window_ignores_stale_status_log

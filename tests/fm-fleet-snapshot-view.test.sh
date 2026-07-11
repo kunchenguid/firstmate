@@ -42,7 +42,7 @@ case "${1:-}" in
     ;;
   capture-pane)
     case "$target" in
-      *ship-task*) printf 'work in progress\nesc to interrupt\n' ;;
+      *ship-task*|*active-secondmate*) printf 'work in progress\nesc to interrupt\n' ;;
       *) printf 'all quiet\n> \n' ;;
     esac
     ;;
@@ -437,6 +437,31 @@ test_open_decision_survives_later_unrelated_event() {
   pass "durable fold keeps an open decision past a later unrelated event"
 }
 
+test_secondmate_open_decision_survives_live_endpoint() {
+  local home fakebin out
+  home=$(make_home active-secondmate)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/active-secondmate.meta" \
+    "window=firstmate:fm-active-secondmate" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  printf 'needs-decision [key=race]: choose ordering\n' > "$home/state/active-secondmate.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "active-secondmate")
+    | .endpoint.agent_alive == "alive"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+  ' >/dev/null || fail "a live secondmate endpoint must not clear an unrelated keyed decision: $out"
+  pass "a live secondmate endpoint preserves unrelated open decisions"
+}
+
 # An open decision clears ONLY on an explicit resolution referencing its key, never
 # on an unrelated terminal line.
 test_open_decision_clears_on_keyed_resolution() {
@@ -531,6 +556,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
+test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending

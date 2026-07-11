@@ -87,24 +87,6 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
-line_verb() {  # <line>
-  local v=${1%%:*}
-  v="${v#"${v%%[![:space:]]*}"}"
-  v="${v%"${v##*[![:space:]]}"}"
-  printf '%s' "$v"
-}
-
-line_note() {  # <line>
-  local n
-  case "$1" in
-    *:*) n=${1#*:} ;;
-    *) n=$1 ;;
-  esac
-  n="${n#"${n%%[![:space:]]*}"}"
-  n="${n%"${n##*[![:space:]]}"}"
-  printf '%s' "$n"
-}
-
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
   raw=$(
@@ -141,8 +123,8 @@ status_event_json() {  # <status-log>
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
-    verb=$(line_verb "$raw")
-    note=$(line_note "$raw")
+    verb=$(status_line_verb "$raw")
+    note=$(status_line_note "$raw")
   fi
   jq -n \
     --arg path "$log" \
@@ -330,17 +312,16 @@ task_json_lines() {
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
     #     report POINTER, never as a reopened pending decision.
-    # Secondmates are excluded from the terminal case: they are persistent and
-    # multiplex many concerns onto one stream, so a per-concern done must never
-    # clear another concern's keyed decision - that exclusion is what keeps the
-    # unrelated-event masking fix intact. A parked/blocked state, or a
+    # Secondmates are excluded from lifecycle clearing: they are persistent and
+    # multiplex many concerns onto one stream, so activity on one concern must
+    # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+    if [ "$kind" != secondmate ] && \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-       || { [ "$kind" != secondmate ] \
-           && { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
