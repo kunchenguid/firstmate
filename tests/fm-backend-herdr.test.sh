@@ -1755,7 +1755,7 @@ test_escalation_marker_keys_like_watcher() {
   pass "fm_backend_herdr_escalation_marker keys the dedupe marker exactly like the watcher's .stale-<key>"
 }
 
-test_apply_transition_blocked_sets_marker_and_dedupes() {
+test_apply_transition_blocked_requires_commit_to_dedupe() {
   local dir state rec out rc marker
   dir="$TMP_ROOT/apply-blocked"; state="$dir/state"; mkdir -p "$state"
   rec=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
@@ -1763,12 +1763,14 @@ test_apply_transition_blocked_sets_marker_and_dedupes() {
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"); rc=$?
   [ "$rc" = 0 ] || fail "a fresh blocked edge must return 0 (actionable), got $rc"
   case "$out" in *blocked*) : ;; *) fail "apply_transition should print the record on a fresh actionable edge, got '$out'" ;; esac
-  [ -e "$marker" ] || fail "apply_transition must set the per-pane escalation marker on a fresh blocked edge"
+  [ ! -e "$marker" ] || fail "detecting a blocked edge must not commit its marker before durable handling"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_commit_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"
+  [ -e "$marker" ] || fail "commit_transition must set the marker after the caller handles the edge"
   # Second identical blocked edge (marker present) must NOT re-fire.
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"); rc=$?
   [ "$rc" = 1 ] || fail "an already-marked blocked pane must return 1 (deduped), got $rc"
   [ -z "$out" ] || fail "an already-marked blocked pane must print nothing, got '$out'"
-  pass "fm_backend_herdr_apply_transition: one wake per ->blocked edge (marker dedupes a repeat)"
+  pass "fm_backend_herdr_apply_transition: blocked dedupe starts only after explicit commit"
 }
 
 test_apply_transition_working_clears_marker() {
@@ -1777,8 +1779,8 @@ test_apply_transition_working_clears_marker() {
   marker="$state/.herdr-escalated-default_wG_pQ"
   blocked=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
   working=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" working claude' "$ROOT")
-  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$blocked" >/dev/null
-  [ -e "$marker" ] || fail "setup: blocked edge should have set the marker"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_commit_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$blocked"
+  [ -e "$marker" ] || fail "setup: committed blocked edge should have set the marker"
   bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$working"; rc=$?
   [ "$rc" = 1 ] || fail "a working (absorb) edge must return 1 (no wake), got $rc"
   [ ! -e "$marker" ] || fail "a working edge must CLEAR the escalation marker so a later re-block re-fires"
@@ -1829,8 +1831,8 @@ test_wait_transition_reconcile_blocked_returns_record() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
   [ "$rc" = 0 ] || fail "reconcile of an already-blocked pane must return 0, got $rc"
   case "$out" in *blocked*) : ;; *) fail "reconcile must print the blocked record, got '$out'" ;; esac
-  [ -e "$marker" ] || fail "reconcile of an already-blocked pane must set the marker"
-  pass "fm_backend_herdr_wait_transition: reconnect level-reconcile enqueues an already-blocked pane once"
+  [ ! -e "$marker" ] || fail "reconcile must not mark a blocked pane before the caller durably handles it"
+  pass "fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane"
 }
 
 test_wait_transition_reconcile_dedupes_when_marked() {
@@ -1863,7 +1865,7 @@ test_wait_transition_stream_blocked_returns_record() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
   [ "$rc" = 0 ] || fail "a streamed blocked edge must return 0, got $rc"
   case "$out" in *blocked*) : ;; *) fail "a streamed blocked edge must print the record, got '$out'" ;; esac
-  [ -e "$marker" ] || fail "a streamed blocked edge must set the marker"
+  [ ! -e "$marker" ] || fail "a streamed blocked edge must remain uncommitted until durable handling"
   pass "fm_backend_herdr_wait_transition: a streamed ->blocked edge returns the record sub-poll"
 }
 
@@ -1999,7 +2001,7 @@ test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
-test_apply_transition_blocked_sets_marker_and_dedupes
+test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
 test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2

@@ -1162,8 +1162,9 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
 # fm_backend_herdr_apply_transition: route one normalized record through the
 # shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
 # On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
-# it sets the marker, prints the record on stdout, and returns 0 (the caller
-# stops and hands the record up). `absorb` (working) clears the marker and
+# it prints the record on stdout and returns 0 (the caller stops and hands the
+# record up). The caller commits the marker only after handling the record.
+# `absorb` (working) clears the marker and
 # returns 1. `defer`/`fallback`, and an already-marked `actionable`, return 1
 # with no output. <session> reconstructs the window ("<session>:<pane_id>") for
 # the marker key, matching the watcher's own key scheme.
@@ -1178,7 +1179,6 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
   case "$action" in
     actionable)
       if [ ! -e "$marker" ]; then
-        : > "$marker" 2>/dev/null || true
         printf '%s' "$record"
         return 0
       fi
@@ -1188,6 +1188,15 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
       ;;
   esac
   return 1
+}
+
+fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
+  local state=$1 session=$2 record=$3 pane_id window marker
+  pane_id=$(fm_transition_pane_id "$record")
+  [ -n "$pane_id" ] || return 1
+  window="$session:$pane_id"
+  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
+  : > "$marker"
 }
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
@@ -1203,7 +1212,9 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   shift 3
   local windows=("$@")
   [ "${#windows[@]}" -gt 0 ] || return 2
-  fm_backend_herdr_events_capable "$session" || return 2
+  if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
+    fm_backend_herdr_events_capable "$session" || return 2
+  fi
   local sock
   sock=$(fm_backend_herdr_socket_path "$session")
   [ -n "$sock" ] || return 2

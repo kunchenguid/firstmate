@@ -521,7 +521,7 @@ event_wait_or_sleep() {
     return
   fi
 
-  rec=$(fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
   rc=$?
   case "$rc" in
     0)
@@ -562,10 +562,12 @@ handle_push_transition() {  # <backend> <session> <record>
   task=$(window_to_task "$window" "$STATE")
   if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
     triage_log "absorbed push $to (declared pause, awaiting external): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
+  fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status"
   wake "$reason"
 }

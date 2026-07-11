@@ -53,7 +53,17 @@ grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "the enqueued wake must be a st
 grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" || fail "the stale record must name the crew's window"
 grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
 [ -s "$WAKE_LOG" ] || fail "handle_push_transition must wake the supervisor for a blocked crew"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+(
+  fm_wake_append() { return 1; }
+  handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+) >/dev/null 2>&1 || true
+[ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"
+pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe marker"
 
 # --- handle_push_transition: absorb (no wake, no enqueue) for a declared pause -
 
@@ -80,6 +90,19 @@ PANES=$(cat "$TMP/panes" 2>/dev/null || true)
 case "$PANES" in *"default:wG:pQ"*) : ;; *) fail "the ship window must be in the event pane list, got '$PANES'" ;; esac
 case "$PANES" in *"default:wA:pS"*) fail "a kind=secondmate window must be EXCLUDED from the event pane list, got '$PANES'" ;; *) : ;; esac
 pass "event_wait_or_sleep: herdr windows go on the event pane list, but kind=secondmate endpoints are excluded"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+CAP_CALLS=0
+fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+fm_backend_wait_transition() {
+  [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
+  return 1
+}
+event_wait_or_sleep
+event_wait_or_sleep
+[ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
+pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
 # --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
 
