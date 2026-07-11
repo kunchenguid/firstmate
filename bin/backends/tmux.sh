@@ -77,6 +77,9 @@ fm_backend_tmux_container_ensure() {
 #   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
 #     at the next free index by targeting the session with a trailing colon
 #     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
+#     The trailing colon also forces session-name interpretation on both tmux
+#     calls, so a purely numeric session name (e.g. the default "0") is not
+#     misparsed as a window-index target ("index 0 in use").
 #   - PIN the window name by disabling automatic-rename and allow-rename on the
 #     new window: the captain's tmux may rename the window away from fm-<id> once
 #     treehouse cd's into the worktree, which would break name-based targeting.
@@ -84,7 +87,7 @@ fm_backend_tmux_container_ensure() {
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  if tmux list-windows -t "$ses:" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi

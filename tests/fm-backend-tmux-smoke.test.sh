@@ -137,5 +137,55 @@ fi
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
 
+# --- numeric session name (regression: fix/fm-tmux-numeric-session-t9) --------
+# When the session name is purely numeric (e.g. "0", the tmux default), a bare
+# `-t 0` is parsed as a window-index target, so `new-window -t 0` fails with
+# "index 0 in use". The fix appends a trailing colon (`-t "0:"`) to force tmux
+# to treat the target as a session name, which adds the window at the next free
+# index. Verify create works, a normal name still works, and the duplicate
+# refusal still fires.
+
+NUM_SES="0"
+NUM_WIN="fm-numeric-test"
+
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$NUM_SES" -x 80 -y 24 \
+  || fail "real tmux: new-session with numeric name $NUM_SES failed"
+
+if ! fm_backend_tmux_create_task "$NUM_SES" "$NUM_WIN" "$HOME"; then
+  fail "fm_backend_tmux_create_task failed to create a window in numeric session $NUM_SES (bare -t parsed as window index before fix)"
+fi
+
+# Confirm the window actually exists in the numeric session.
+tmux list-windows -t "${NUM_SES}:" -F '#{window_name}' | grep -qx "$NUM_WIN" \
+  || fail "created window is not visible in numeric session $NUM_SES"
+
+# Duplicate refusal must still fire for numeric session names.
+if fm_backend_tmux_create_task "$NUM_SES" "$NUM_WIN" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_create_task should refuse an existing window name in numeric session $NUM_SES"
+fi
+pass "real tmux: fm_backend_tmux_create_task works with a purely numeric session name and refuses a duplicate"
+
+# --- normal (non-numeric) session still works after fix -----------------------
+# Smoke-verify that a non-numeric session name was not broken by the fix.
+REG_SES="regular-smoke"
+REG_WIN="fm-regular-win"
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$REG_SES" -x 80 -y 24 \
+  || fail "real tmux: new-session with non-numeric name $REG_SES failed"
+
+fm_backend_tmux_create_task "$REG_SES" "$REG_WIN" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed for a non-numeric session name $REG_SES"
+
+tmux list-windows -t "${REG_SES}:" -F '#{window_name}' | grep -qx "$REG_WIN" \
+  || fail "created window is not visible in non-numeric session $REG_SES"
+
+if fm_backend_tmux_create_task "$REG_SES" "$REG_WIN" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_create_task should refuse an existing window name in non-numeric session $REG_SES"
+fi
+pass "real tmux: fm_backend_tmux_create_task still works and refuses a duplicate with a non-numeric session name"
+
+# Kill the extra sessions so they do not leak into cleanup_all.
+"$REAL_TMUX" -L "$SOCKET" kill-session -t "$NUM_SES" 2>/dev/null || true
+"$REAL_TMUX" -L "$SOCKET" kill-session -t "$REG_SES" 2>/dev/null || true
+
 cleanup_all
 trap - EXIT

@@ -115,3 +115,33 @@ Resolving this would need either a `pi`-specific env marker inspectable from out
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+
+## Empirical evidence
+
+### Numeric session-name targeting (2025-07-11, tmux 3.6a)
+
+When a tmux session has a purely numeric name (e.g. `0`, the default when firstmate is launched inside an unnamed tmux session), a bare `-t 0` is parsed by tmux as a window-index target, not a session name.
+`fm_backend_tmux_create_task` was changed to append a trailing colon (`-t "${ses}:"`) to force tmux to interpret the target as a session name on every session-targeted call (`list-windows` for the duplicate check, `new-window` for window creation).
+
+Reproduction (before fix, private socket):
+
+```
+$ tmux -L test new-session -d -s 0
+$ tmux -L test list-windows -t 0 -F '#{window_name}'
+tmux                                    # targets window index 0, not session 0
+$ tmux -L test new-window -d -t 0 -n test-win -c /tmp
+create window failed: index 0 in use     # BUG: 0 parsed as window index, already in use
+```
+
+After fix (`-t "0:"`):
+
+```
+$ tmux -L test new-window -d -t "0:" -n test-win -c /tmp
+# success - window created in session 0 at next free index
+$ tmux -L test list-windows -t "0:" -F '#{window_name}'
+tmux
+test-win                                # correct: session 0, both windows visible
+```
+
+Regression test: `tests/fm-backend-tmux-smoke.test.sh` "numeric session name" section.
+Non-numeric session names are unaffected by the fix because `-t "mysession:"` is a valid, unambiguous session target identical in behavior to `-t mysession`.
