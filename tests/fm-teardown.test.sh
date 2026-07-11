@@ -3,9 +3,9 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# OR - for a normal ship task whose commits are not so reachable - its PR/MR is
+# merged and the provider reports a head that contains the current local work,
+# or its content is already in the up-to-date default branch.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -29,7 +29,7 @@
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
-#   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
+#   (j) no-mistakes + GitHub lookup errors + content absent     -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
@@ -37,6 +37,10 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q2) Codebase MR merged and contains local work             -> ALLOW
+#   (q3) Codebase remote + NO pr= discovers merged MR by branch -> ALLOW
+#   (q4) Codebase lookup error + content absent                 -> REFUSE (fail-safe)
+#   (q5) Codebase lookup error + content already in default     -> ALLOW  (quiet fallback)
 #
 # Also covers backlog teardown-lock-race-l2: a stale git index.lock left in the
 # worktree by a killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -102,7 +106,12 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  cat > "$fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+echo "error: Codebase MR not found" >&2
+exit 1
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/bytedcli"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -268,6 +277,41 @@ echo "error: gh unavailable" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_codebase_mr_merged_for_head() {
+  local case_dir=$1 head=$2 source_ref=${3:-refs/merge-requests/7/7/1}
+  cat > "$case_dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/bytedcli.log"
+case "\$*" in
+  "--json codebase mr get 7 -R example/repo")
+    cat <<'JSON'
+{"status":"success","data":{"merge_request":{"Number":7,"Status":"merged"},"version":{"SourceCommitId":"$head","SourceRef":"$source_ref"}},"error":null}
+JSON
+    exit 0
+    ;;
+  "--json codebase mr list -R example/repo --state merged --head fm/task-x1 -L 1")
+    cat <<'JSON'
+{"status":"success","data":{"merge_requests":[{"Number":7,"Status":"merged","SourceBranchName":"fm/task-x1"}]},"error":null}
+JSON
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
+}
+
+add_codebase_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+echo "error: bytedcli unauthenticated" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
 }
 
 # Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
@@ -580,6 +624,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case no-pr-branch-discovery)
+  git -C "$case_dir/project" remote set-url origin https://github.com/example/repo.git
   write_meta "$case_dir" no-mistakes ship
   # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
   # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
@@ -607,6 +652,77 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+test_codebase_merged_mr_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case codebase-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://code.byted.org/example/repo/merge_requests/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_codebase_mr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codebase-merged: teardown should succeed when the MR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "codebase-merged: teardown printed a REFUSED line"
+  grep -qxF -- '--json codebase mr get 7 -R example/repo' "$case_dir/bytedcli.log" \
+    || fail "codebase-merged: bytedcli MR lookup was not used"
+  pass "Codebase merged MR containing local work is torn down"
+}
+
+test_codebase_no_pr_recorded_discovers_merged_mr_by_branch_allows() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case codebase-branch-discovery)
+  git -C "$case_dir/project" remote set-url origin https://code.byted.org/example/repo.git
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  git -C "$case_dir/project" update-ref refs/merge-requests/7/7/1 "$pr_head"
+  add_codebase_mr_merged_for_head "$case_dir" "$pr_head"
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "codebase-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codebase-branch-discovery: teardown should discover the merged Codebase MR from the branch name"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "codebase-branch-discovery: teardown printed a REFUSED line"
+  grep -qxF -- '--json codebase mr list -R example/repo --state merged --head fm/task-x1 -L 1' "$case_dir/bytedcli.log" \
+    || fail "codebase-branch-discovery: bytedcli MR list was not used for branch discovery"
+  grep -qxF -- '--json codebase mr get 7 -R example/repo' "$case_dir/bytedcli.log" \
+    || fail "codebase-branch-discovery: bytedcli MR get was not used after branch discovery"
+  pass "teardown discovers a merged Codebase MR by branch name when no pr= was recorded"
+}
+
+test_codebase_error_and_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case codebase-error)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://code.byted.org/example/repo/merge_requests/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_codebase_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "codebase-error: teardown should refuse when Codebase lookup errors and content is not landed"
+  grep -q REFUSED "$case_dir/stderr" || fail "codebase-error: no REFUSED line in stderr"
+  grep -q 'bytedcli Codebase MR lookup failed' "$case_dir/stderr" \
+    || fail "codebase-error: missing actionable bytedcli lookup error"
+  pass "Codebase lookup error with content not in default refuses (fail-safe)"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -727,6 +843,30 @@ test_content_in_default_fallback_allows() {
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_codebase_error_with_content_landed_allows_quietly() {
+  local case_dir rc
+  case_dir=$(make_case codebase-error-content-landed)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://code.byted.org/example/repo/merge_requests/7' >> "$case_dir/state/task-x1.meta"
+  # bytedcli cannot reach Codebase (missing binary, expired PAT), but the change
+  # already landed in the default branch, so the content fallback carries teardown.
+  # The provider's auth hint is a step of that fallback, not a failure to report.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_codebase_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codebase-error-content-landed: teardown should succeed via the content fallback"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "codebase-error-content-landed: teardown printed a REFUSED line"
+  ! grep -q 'bytedcli Codebase MR lookup failed' "$case_dir/stderr" \
+    || fail "codebase-error-content-landed: provider lookup error leaked on a successful teardown"
+  pass "Codebase lookup error stays quiet when the content fallback tears down successfully"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -1014,11 +1154,15 @@ test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_codebase_merged_mr_allows
+test_codebase_no_pr_recorded_discovers_merged_mr_by_branch_allows
+test_codebase_error_and_content_absent_refuses
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_codebase_error_with_content_landed_allows_quietly
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
