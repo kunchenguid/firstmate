@@ -57,8 +57,7 @@ test_ci_invokes_the_owner() {
 }
 
 test_nomistakes_invokes_the_owner() {
-  assert_grep 'bin/fm-lint.sh' "$NM" "no-mistakes commands.lint must invoke the one-owner script"
-  assert_grep 'lint:' "$NM" "no-mistakes config must set a commands.lint key"
+  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
   pass "no-mistakes pre-push lint calls the one-owner script"
 }
 
@@ -135,6 +134,30 @@ SH
   pass "fm-lint.sh catches a real lint defect the old no-op gate passed"
 }
 
+test_ignores_ambient_shellcheck_opts() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): ambient options regression check"
+    return
+  fi
+  local tmp bad out rc
+  tmp=$(fm_test_tmproot fm-lint-opts)
+  mkdir -p "$tmp"
+  bad="$tmp/bad.sh"
+  cat > "$bad" <<'SH'
+#!/usr/bin/env bash
+foo() {
+  local a= b=
+  echo "$a$b"
+}
+foo
+SH
+  rc=0
+  out=$(SHELLCHECK_OPTS='--exclude=SC1007' "$LINT" "$bad" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lint.sh allowed ambient SHELLCHECK_OPTS to hide a finding"$'\n'"$out"
+  assert_contains "$out" "SC1007" "fm-lint.sh did not neutralize ambient SHELLCHECK_OPTS"
+  pass "fm-lint.sh ignores ambient ShellCheck options"
+}
+
 test_clean_fixture_passes() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): clean fixture check"
@@ -165,4 +188,5 @@ test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
+test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes

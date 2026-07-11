@@ -57,6 +57,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     "$REQUIRED_SHELLCHECK" >&2
   exit 127
 fi
+unset SHELLCHECK_OPTS
 resolved=$(shellcheck --version | awk '/^version:/ {print $2; exit}')
 # Log the resolved version to stderr so both CI and local runs record it.
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
