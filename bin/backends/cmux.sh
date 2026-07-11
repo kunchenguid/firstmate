@@ -63,10 +63,11 @@
 #      herdr (auto-closes the workspace) nor zellij (leaves a ghost tab):
 #      `close-surface` REFUSES outright with a typed error
 #      (`invalid_state: Cannot close the last surface`), leaving both the
-#      surface and the workspace untouched. `close-workspace` cleanly removes
-#      the whole workspace (surface included) in one call with no ghost left
-#      behind. Kill therefore closes the whole workspace directly, which also
-#      reclaims any extra surfaces inside the task workspace.
+#      surface and the workspace untouched. `close-workspace` removes the
+#      whole workspace (surface included) only when it is not the last
+#      workspace in its window. `fm_backend_cmux_kill` handles the documented
+#      last-in-window exception below, while still reclaiming every surface in
+#      the task workspace.
 #   5. Workspace ids do NOT survive an app relaunch - verified via source
 #      (`Sources/Workspace.swift`'s only initializer unconditionally sets
 #      `self.id = UUID()`, with no restored-id parameter, unlike surfaces'
