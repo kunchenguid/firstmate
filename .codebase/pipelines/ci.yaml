@@ -29,7 +29,10 @@ name: MR CI
 trigger:
   change:
     branches: [main]
-    types: [create, push, update]
+    # create + push only, deliberately: `update` also fires on MR metadata edits,
+    # so editing the description would re-run the whole suite. This mirrors the
+    # GitHub workflow, which triggers on code changes rather than PR edits.
+    types: [create, push]
   push:
     branches: [main]
 
