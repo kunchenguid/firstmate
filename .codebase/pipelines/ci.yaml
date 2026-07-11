@@ -163,3 +163,48 @@ jobs:
               printf '%s\n' "$tracked"
               exit 1
             fi
+
+  probe_teardown:
+    name: PROBE teardown
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 15
+    steps:
+      - name: Setup
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            apt-get update && apt-get install -y --no-install-recommends tmux gawk
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/jq \
+              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            install -m 0755 /tmp/jq /usr/local/bin/jq
+            npm install -g tasks-axi
+            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
+              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
+            mkdir -p /opt/node22 && tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
+            git fetch origin "main:refs/remotes/origin/main"
+      - name: Run teardown suite with temp dirs preserved
+        commands:
+          - |
+            set -eu
+            sed -i 's|\[ -n "\$d" \] \&\& rm -rf "\$d"|[ -n "$d" ] \&\& echo "KEEPING $d"|' tests/lib.sh
+            grep -n 'KEEPING' tests/lib.sh
+            id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+            chown -R ci:ci .
+            chmod 1777 /tmp
+            set +e
+            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" TMPDIR=/tmp \
+              bash -c './tests/fm-teardown.test.sh' 2>&1 | tail -5
+            set -e
+            echo "############ CASE DIRS ############"
+            for d in /tmp/fm-teardown-tests.*/codebase-branch-discovery; do
+              echo "=== $d ==="
+              echo "--- stderr ---"; cat "$d/stderr" 2>/dev/null
+              echo "--- stdout ---"; cat "$d/stdout" 2>/dev/null
+              echo "--- bytedcli.log ---"; cat "$d/../bytedcli.log" 2>/dev/null || true
+              ls "$d" 2>/dev/null
+            done
+            echo "PROBE DONE"
+            exit 1
