@@ -50,8 +50,10 @@ caller_has_merge_method() {
 }
 
 parse_pr_url() {
-  local url=$1
-  if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
+  local url=$1 match_url
+  match_url=${url%%[\?#]*}
+  match_url=${match_url%/}
+  if [[ "$match_url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)$ ]]; then
     PR_OWNER="${BASH_REMATCH[1]}"
     PR_REPO="${BASH_REMATCH[2]}"
     PR_NUMBER="${BASH_REMATCH[3]}"

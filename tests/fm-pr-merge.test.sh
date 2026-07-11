@@ -281,18 +281,31 @@ test_method_equals_merge_method_not_overridden() {
 }
 
 test_parses_pr_url_for_gh_axi() {
-  local case_dir
-  case_dir=$(make_case url-parsing)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
-  : > "$case_dir/gh-axi.log"
+  local case_dir label url expected
 
-  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126/ \
-    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
+  for label in canonical trailing-slash query fragment; do
+    case "$label" in
+      canonical) url=https://github.com/my-org/my-repo/pull/126 ;;
+      trailing-slash) url=https://github.com/my-org/my-repo/pull/127/ ;;
+      query) url='https://github.com/my-org/my-repo/pull/128?notification_referrer_id=abc' ;;
+      fragment) url='https://github.com/my-org/my-repo/pull/129#issuecomment-1' ;;
+    esac
+    expected=${url%%[\?#]*}
+    expected=${expected%/}
+    expected=${expected##*/pull/}
 
-  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
-    || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
-  pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
+    case_dir=$(make_case "url-parsing-$label")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+    : > "$case_dir/gh-axi.log"
+
+    run_pr_merge "$case_dir" task-x1 "$url" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing-$label: fm-pr-merge failed"
+
+    grep -qxF "pr merge $expected --repo my-org/my-repo --squash" "$case_dir/gh-axi.log" \
+      || fail "url-parsing-$label: gh-axi pr merge was not invoked as number + --repo + default --squash"
+  done
+  pass "fm-pr-merge parses GitHub PR URLs into gh-axi number and --repo arguments"
 }
 
 test_records_pr_and_head_before_merging
