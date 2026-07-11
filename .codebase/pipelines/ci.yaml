@@ -127,4 +127,4 @@ jobs:
             printf '' | /tmp/jq -e '[.panes[]? | select(.surface_ids // [] | index("x"))] | length > 0'
             echo "jq1.7 -e empty exit=$? (want nonzero)"
             echo "PROBE DONE"
-            exit 0
+            exit 1
