@@ -62,8 +62,18 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 
 # --- send text + Enter -------------------------------------------------------
 
-tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
-sleep 0.3
+# Keystrokes typed before the pane's shell finishes starting can be flushed by
+# the line editor and never execute, so confirm shell readiness first: retype
+# the (idempotent) prompt setup until the custom prompt actually renders.
+ready=
+for _ in $(seq 1 25); do
+  tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
+  sleep 0.4
+  case "$(tmux capture-pane -p -t "$TARGET" 2>/dev/null)" in
+    *'smoke$'*) ready=1; break ;;
+  esac
+done
+[ -n "$ready" ] || fail "real tmux: pane shell never became interactive (no smoke\$ prompt)"
 tmux send-keys -t "$TARGET" -l "clear" ; tmux send-keys -t "$TARGET" Enter
 sleep 0.3
 
