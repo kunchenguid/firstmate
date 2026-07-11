@@ -229,12 +229,17 @@ On other harnesses, use their native equivalents; if no native feature exists, d
 Keep at most roughly six concurrent subagents unless this brief explicitly raises the cap.
 Never nest fan-outs: subagents do not spawn their own subagents.
 Do not fan out work that one focused pass can handle; parallelism is for independent subtasks, not ceremony.
-Subagents inherit ALL your rules: stay in the worktree, never push or merge, and never write outside the contract paths.
+Do not assume subagents inherit this brief.
+In every subagent prompt, repeat the applicable task, worktree, push/merge, allowed-path and output-path, status-file ownership, topology, and safety constraints.
 You remain the single point of status reporting, so subagents never touch the status file.
 Topology stays with firstmate: NEVER spawn additional crewmates or firstmate tasks yourself.
 When the work genuinely exceeds one session, append `needs-decision: split - <proposed split>` and firstmate will decide whether to spawn.
 EOF
 )
+if [ "$HERDR_LAB" -eq 1 ]; then
+  PARALLELISM_SECTION="${PARALLELISM_SECTION}
+For this \`--herdr-lab\` task, do not use subagents unless prompt inheritance is verified to place the complete Herdr safety contract above in every subagent prompt."
+fi
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF

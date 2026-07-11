@@ -218,13 +218,43 @@ test_parallelism_section_renders_in_isolated_ship_and_scout_briefs() {
     assert_grep "# Parallelism" "$brief" "$kind brief missing Parallelism section"
     assert_grep "Keep at most roughly six concurrent subagents" "$brief" \
       "$kind brief missing the concurrent-subagent cap"
+    assert_grep "Do not assume subagents inherit this brief" "$brief" \
+      "$kind brief assumes unverified subagent context inheritance"
+    assert_grep "repeat the applicable task, worktree, push/merge, allowed-path and output-path, status-file ownership, topology, and safety constraints" "$brief" \
+      "$kind brief missing explicit subagent-prompt safety propagation"
     assert_grep "subagents never touch the status file" "$brief" \
       "$kind brief missing single-owner status containment"
     assert_grep "NEVER spawn additional crewmates or firstmate tasks" "$brief" \
       "$kind brief missing firstmate topology containment"
+    assert_no_grep "Subagents inherit ALL your rules" "$brief" \
+      "$kind brief retained the unverified inheritance claim"
+    assert_no_grep "prompt inheritance is verified to place the complete Herdr safety contract" "$brief" \
+      "$kind unguarded brief gained Herdr-lab parallelism instructions"
   done
 
   pass "fm-brief.sh: isolated ship and scout briefs render the Parallelism contract"
+}
+
+test_herdr_lab_parallelism_guard_renders_for_ship_and_scout() {
+  local home kind id brief
+
+  home="$TMP_ROOT/herdr-parallelism-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-herdr-parallelism-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --herdr-lab >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1
+    fi
+
+    brief="$home/data/$id/brief.md"
+    assert_grep "do not use subagents unless prompt inheritance is verified to place the complete Herdr safety contract above in every subagent prompt" "$brief" \
+      "$kind Herdr-lab brief missing the subagent safety gate"
+  done
+
+  pass "fm-brief.sh: ship and scout Herdr-lab briefs gate subagent use"
 }
 
 test_secondmate_no_projects_charter() {
@@ -354,6 +384,7 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_parallelism_section_renders_in_isolated_ship_and_scout_briefs
+test_herdr_lab_parallelism_guard_renders_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
