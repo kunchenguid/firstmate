@@ -35,7 +35,7 @@ The script header owns the exact JSON schema.
 Optional X mode rides the same check path: the locked session-start bootstrap step drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
-That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
+That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi and OMP use their tracked primary extensions, and OpenCode uses its TUI plugin.
 `bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
 On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
@@ -115,7 +115,7 @@ The session-start bootstrap step surfaces either the active rule block or a conc
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and omp while preserving the requested profile for later audit.
 
 ## Optional secondmates
 

@@ -118,3 +118,4 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
+`FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` opts into the isolated interactive OMP regression recorded above.
