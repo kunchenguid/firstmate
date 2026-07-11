@@ -393,6 +393,35 @@ PY
   pass "fm_backend_orca_remove_worktree: derives session id from basename when marker file is absent"
 }
 
+test_remove_worktree_surfaces_git_failure_without_killing_session() {
+  fmod_case wt-remove-git-fails
+  local repo wt_path fake_git
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  wt_path="$CASE_DIR/fm-fail"
+  mkdir -p "$wt_path" "$CASE_DIR/fakegit"
+  printf 'gitdir: %s/.git/worktrees/fm-fail\n' "$repo" > "$wt_path/.git"
+  printf '%s\n' "fm-fail" > "$wt_path/.fm-orca-session"
+  fake_git="$CASE_DIR/fakegit/git"
+  cat > "$fake_git" <<'SH'
+#!/usr/bin/env bash
+printf 'git failed as requested\n' >&2
+exit 23
+SH
+  chmod +x "$fake_git"
+  local out status
+  out=$( PATH="$CASE_DIR/fakegit:$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "$1"' "$ROOT" "$wt_path" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "remove_worktree should fail when git worktree remove fails"
+  assert_contains "$out" "git failed as requested" \
+    "remove_worktree should surface git worktree remove stderr"
+  [ -f "$wt_path/.fm-orca-session" ] || fail "remove_worktree should leave the session marker when git removal fails"
+  if grep -q $'fmod\x1fkill\x1ffm-fail' "$LOG"; then
+    fail "remove_worktree should not kill the fmod session when git removal fails"
+  fi
+  pass "fm_backend_orca_remove_worktree: propagates git removal failure"
+}
+
 # ---- composer state -------------------------------------------------------
 
 test_composer_state_empty_when_bare_prompt() {
@@ -531,6 +560,44 @@ test_orca_adapter_sources_clean_under_set_e() {
   PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c 'set -eu; . "$0/bin/backends/orca.sh"; : >/dev/null' "$ROOT"
   pass "bin/backends/orca.sh: parses cleanly and sources under set -eu"
+}
+
+test_fmod_defaults_follow_home_and_xdg_config_home() {
+  fmod_case fmod-paths
+  local out
+  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME= python3 - "$ROOT/bin/fmod" <<'PY'
+import os
+import runpy
+import sys
+
+os.environ.pop("XDG_CONFIG_HOME", None)
+os.environ.pop("FMOD_SOCKET", None)
+os.environ.pop("FMOD_TOKEN", None)
+os.environ.pop("FMOD_PIDFILE", None)
+mod = runpy.run_path(sys.argv[1])
+print("\n".join(mod["daemon_paths"]()))
+PY
+)
+  [ "$out" = "$CASE_DIR/home/.config/orca/daemon/daemon-v18.sock
+$CASE_DIR/home/.config/orca/daemon/daemon-v18.token
+$CASE_DIR/home/.config/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under HOME, got: $out"
+
+  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME="$CASE_DIR/xdg" python3 - "$ROOT/bin/fmod" <<'PY'
+import os
+import runpy
+import sys
+
+os.environ.pop("FMOD_SOCKET", None)
+os.environ.pop("FMOD_TOKEN", None)
+os.environ.pop("FMOD_PIDFILE", None)
+mod = runpy.run_path(sys.argv[1])
+print("\n".join(mod["daemon_paths"]()))
+PY
+)
+  [ "$out" = "$CASE_DIR/xdg/orca/daemon/daemon-v18.sock
+$CASE_DIR/xdg/orca/daemon/daemon-v18.token
+$CASE_DIR/xdg/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
+  pass "fmod daemon_paths: defaults follow HOME and XDG_CONFIG_HOME"
 }
 
 # ---- test runner ---------------------------------------------------------

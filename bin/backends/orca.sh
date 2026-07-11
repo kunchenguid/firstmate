@@ -194,9 +194,6 @@ fm_backend_orca_remove_worktree() {  # <wt-id>
     # worktree, or a marker delete race).
     session_id="$(basename "$wt_path")"
   fi
-  fmod kill "$session_id" >/dev/null 2>&1 || true
-  rm -f "$wt_path/.fm-orca-session"
-
   # git worktrees carry their main-repo pointer in `<wt>/.git` (a file, not
   # a directory). Parse it; without that file we cannot find the main repo
   # from the worktree path alone.
@@ -206,11 +203,12 @@ fm_backend_orca_remove_worktree() {  # <wt-id>
     main_repo=$(printf '%s\n' "$gitdir_line" | sed -n 's|^gitdir: \(.*\)/.git/worktrees/[^/]*$|\1|p' | head -1)
   fi
   if [ -n "$main_repo" ] && [ -d "$main_repo" ]; then
-    git -C "$main_repo" worktree remove --force "$wt_path" 2>/dev/null || true
+    git -C "$main_repo" worktree remove --force "$wt_path" || return 1
+    fmod kill "$session_id" >/dev/null 2>&1 || true
     return 0
   fi
-  # Fallback: try from inside the worktree; harmless if git refuses.
-  git -C "$wt_path" worktree remove --force "$wt_path" 2>/dev/null || true
+  git -C "$wt_path" worktree remove --force "$wt_path" || return 1
+  fmod kill "$session_id" >/dev/null 2>&1 || true
 }
 
 # fm_backend_orca_worktree_path <wt-id>: the worktree IS its path. Kept for

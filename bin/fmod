@@ -72,9 +72,12 @@ ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 def daemon_paths() -> tuple[str, str, Optional[str]]:
     """Resolve socket path, token path, and pid path from env or defaults."""
-    sock = os.environ.get("FMOD_SOCKET", "/home/jd/.config/orca/daemon/daemon-v18.sock")
-    token = os.environ.get("FMOD_TOKEN", "/home/jd/.config/orca/daemon/daemon-v18.token")
-    pidfile = os.environ.get("FMOD_PIDFILE", "/home/jd/.config/orca/daemon/daemon-v18.pid")
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    daemon_dir = os.path.join(config_home, "orca", "daemon")
+    daemon_base = os.path.join(daemon_dir, f"daemon-v{PROTOCOL_VERSION}")
+    sock = os.environ.get("FMOD_SOCKET", f"{daemon_base}.sock")
+    token = os.environ.get("FMOD_TOKEN", f"{daemon_base}.token")
+    pidfile = os.environ.get("FMOD_PIDFILE", f"{daemon_base}.pid")
     return sock, token, pidfile
 
 
