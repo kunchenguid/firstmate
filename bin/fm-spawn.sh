@@ -279,7 +279,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|hermes)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +340,15 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # hermes (Hermes Agent over ACP): acpx is the headless ACP client; `hermes acp`
+    # is the agent server command (verified: `acpx --agent "hermes acp" ... exec`
+    # round-trips a prompt). Global acpx options MUST precede the `exec` subcommand.
+    # --approve-all is the autonomy equivalent of claude's
+    # --dangerously-skip-permissions; the brief rides in via `exec -f` so no shell
+    # quoting of the brief body is needed. acpx streams the turn then exits at
+    # end_turn, so a finished hermes crewmate pane returns to a shell prompt
+    # (exit-classified by the watcher) rather than idling in a TUI composer.
+    hermes) printf '%s' 'acpx --agent "hermes acp" --approve-all --format text --timeout 3600 exec -f __BRIEF__' ;;
     *) return 1 ;;
   esac
 }
