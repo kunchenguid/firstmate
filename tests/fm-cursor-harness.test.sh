@@ -179,6 +179,14 @@ SH
     bash -c '. "'"$ROOT"'/bin/fm-tmux-lib.sh"; fm_pane_is_busy win'; then
     fail "cursor idle footer '→ Add a follow-up' was wrongly seen as busy"
   fi
+  # A plain dev-server banner that happens to print "Press Ctrl+C to stop" must
+  # NOT be mis-classified as a busy cursor pane: the busy signature is anchored to
+  # cursor's composer footer, which also carries "Add a follow-up".
+  if PATH="$fakebin:$PATH" FM_FAKE_PANE_CONTENT='Web Server is available at http://localhost:1313/
+Press Ctrl+C to stop' \
+    bash -c '. "'"$ROOT"'/bin/fm-tmux-lib.sh"; fm_pane_is_busy win'; then
+    fail "dev-server banner 'Press Ctrl+C to stop' was wrongly seen as busy"
+  fi
   pass "cursor 'ctrl+c to stop' busy signature classifies busy vs idle panes"
 }
 

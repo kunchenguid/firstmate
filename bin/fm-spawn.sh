@@ -33,7 +33,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok|cursor; cursor is crewmate/scout-only)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -998,7 +999,7 @@ EOF
       # worktree is a clean checkout, so any pre-existing .cursor/hooks.json is
       # necessarily tracked project content; overwriting it would discard the
       # project's hooks AND dirty the worktree. In that case skip the hook and let
-      # fm-watch.sh's stale-pane detection (keyed on the `ctrl+c to stop` busy
+      # fm-watch.sh's stale-pane detection (keyed on cursor's composer-footer busy
       # signature) surface an idle crew instead. Documented gap: per-turn wake
       # precision is lost only for a project that ships its own .cursor/hooks.json.
       if [ -e "$WT/.cursor/hooks.json" ]; then
