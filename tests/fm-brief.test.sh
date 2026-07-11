@@ -14,6 +14,14 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# fm-brief.sh intentionally lets these explicit overrides take precedence over
+# FM_HOME, but they may be inherited from the primary session running this
+# suite. Clear them so each fixture proves FM_HOME isolation without creating
+# a colliding brief in the primary home or using primary-root helpers.
+unset FM_ROOT_OVERRIDE
+unset FM_DATA_OVERRIDE
+unset FM_STATE_OVERRIDE
+
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
 # The script itself must always parse. This is the direct regression test for
@@ -191,6 +199,34 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_parallelism_section_renders_in_isolated_ship_and_scout_briefs() {
+  local home kind id brief
+
+  for kind in ship scout; do
+    home="$TMP_ROOT/parallelism-$kind-home"
+    id="brief-parallelism-$kind-e1"
+    mkdir -p "$home/data"
+
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind parallelism brief was not isolated under FM_HOME"
+    assert_grep "# Parallelism" "$brief" "$kind brief missing Parallelism section"
+    assert_grep "Keep at most roughly six concurrent subagents" "$brief" \
+      "$kind brief missing the concurrent-subagent cap"
+    assert_grep "subagents never touch the status file" "$brief" \
+      "$kind brief missing single-owner status containment"
+    assert_grep "NEVER spawn additional crewmates or firstmate tasks" "$brief" \
+      "$kind brief missing firstmate topology containment"
+  done
+
+  pass "fm-brief.sh: isolated ship and scout briefs render the Parallelism contract"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -317,6 +353,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_parallelism_section_renders_in_isolated_ship_and_scout_briefs
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds

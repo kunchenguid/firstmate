@@ -221,6 +221,21 @@ EOF
 )
 fi
 
+PARALLELISM_SECTION=$(cat <<'EOF'
+# Parallelism
+Use the native parallel features of your harness whenever the task decomposes into genuinely independent parts.
+On Claude, use Agent-tool subagents for parallel research or implementation fan-out and the Workflow tool for deterministic multi-step orchestration.
+On other harnesses, use their native equivalents; if no native feature exists, decompose the work yourself sequentially.
+Keep at most roughly six concurrent subagents unless this brief explicitly raises the cap.
+Never nest fan-outs: subagents do not spawn their own subagents.
+Do not fan out work that one focused pass can handle; parallelism is for independent subtasks, not ceremony.
+Subagents inherit ALL your rules: stay in the worktree, never push or merge, and never write outside the contract paths.
+You remain the single point of status reporting, so subagents never touch the status file.
+Topology stays with firstmate: NEVER spawn additional crewmates or firstmate tasks yourself.
+When the work genuinely exceeds one session, append `needs-decision: split - <proposed split>` and firstmate will decide whether to spawn.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -229,6 +244,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$PARALLELISM_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -333,6 +350,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$PARALLELISM_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
