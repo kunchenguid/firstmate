@@ -102,90 +102,29 @@ jobs:
               exit 1
             fi
 
-  probe_ci_nodejs_22:
-    name: PROBE ci_nodejs_22
+  probe_egress:
+    name: PROBE egress
     runs-on:
       env: boe
-    image: hub.byted.org/codebase/ci_nodejs_22:latest
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
     steps:
-      - name: Report toolchain
+      - name: Can we reach github through the internal relay
         commands:
           - |
             set +e
-            echo "IMAGE=ci_nodejs_22"
-            grep PRETTY_NAME /etc/os-release
-            apt-get update >/dev/null 2>&1
-            echo "jq-installed: $(jq --version 2>/dev/null)"
-            echo "jq-candidate: $(apt-cache policy jq 2>/dev/null | grep Candidate)"
-            echo "shellcheck-candidate: $(apt-cache policy shellcheck 2>/dev/null | grep Candidate)"
-            echo "node: $(node --version 2>/dev/null)  npm: $(npm --version 2>/dev/null)"
-            echo "pip3: $(command -v pip3)"
-            pip3 install --quiet shellcheck-py 2>/dev/null && echo "pypi-shellcheck-py: OK $(shellcheck --version 2>/dev/null | grep '^version')" || echo "pypi-shellcheck-py: FAILED"
-            echo "PROBE DONE"
-            exit 0
-
-  probe_ci_nodejs_24:
-    name: PROBE ci_nodejs_24
-    runs-on:
-      env: boe
-    image: hub.byted.org/codebase/ci_nodejs_24:latest
-    steps:
-      - name: Report toolchain
-        commands:
-          - |
-            set +e
-            echo "IMAGE=ci_nodejs_24"
-            grep PRETTY_NAME /etc/os-release
-            apt-get update >/dev/null 2>&1
-            echo "jq-installed: $(jq --version 2>/dev/null)"
-            echo "jq-candidate: $(apt-cache policy jq 2>/dev/null | grep Candidate)"
-            echo "shellcheck-candidate: $(apt-cache policy shellcheck 2>/dev/null | grep Candidate)"
-            echo "node: $(node --version 2>/dev/null)  npm: $(npm --version 2>/dev/null)"
-            echo "pip3: $(command -v pip3)"
-            pip3 install --quiet shellcheck-py 2>/dev/null && echo "pypi-shellcheck-py: OK $(shellcheck --version 2>/dev/null | grep '^version')" || echo "pypi-shellcheck-py: FAILED"
-            echo "PROBE DONE"
-            exit 0
-
-  probe_ci_debian_bookworm:
-    name: PROBE ci_debian_bookworm
-    runs-on:
-      env: boe
-    image: hub.byted.org/codebase/ci_debian_bookworm:latest
-    steps:
-      - name: Report toolchain
-        commands:
-          - |
-            set +e
-            echo "IMAGE=ci_debian_bookworm"
-            grep PRETTY_NAME /etc/os-release
-            apt-get update >/dev/null 2>&1
-            echo "jq-installed: $(jq --version 2>/dev/null)"
-            echo "jq-candidate: $(apt-cache policy jq 2>/dev/null | grep Candidate)"
-            echo "shellcheck-candidate: $(apt-cache policy shellcheck 2>/dev/null | grep Candidate)"
-            echo "node: $(node --version 2>/dev/null)  npm: $(npm --version 2>/dev/null)"
-            echo "pip3: $(command -v pip3)"
-            pip3 install --quiet shellcheck-py 2>/dev/null && echo "pypi-shellcheck-py: OK $(shellcheck --version 2>/dev/null | grep '^version')" || echo "pypi-shellcheck-py: FAILED"
-            echo "PROBE DONE"
-            exit 0
-
-  probe_ci_debian_bullseye:
-    name: PROBE ci_debian_bullseye
-    runs-on:
-      env: boe
-    image: hub.byted.org/codebase/ci_debian_bullseye:latest
-    steps:
-      - name: Report toolchain
-        commands:
-          - |
-            set +e
-            echo "IMAGE=ci_debian_bullseye"
-            grep PRETTY_NAME /etc/os-release
-            apt-get update >/dev/null 2>&1
-            echo "jq-installed: $(jq --version 2>/dev/null)"
-            echo "jq-candidate: $(apt-cache policy jq 2>/dev/null | grep Candidate)"
-            echo "shellcheck-candidate: $(apt-cache policy shellcheck 2>/dev/null | grep Candidate)"
-            echo "node: $(node --version 2>/dev/null)  npm: $(npm --version 2>/dev/null)"
-            echo "pip3: $(command -v pip3)"
-            pip3 install --quiet shellcheck-py 2>/dev/null && echo "pypi-shellcheck-py: OK $(shellcheck --version 2>/dev/null | grep '^version')" || echo "pypi-shellcheck-py: FAILED"
+            P=http://sys-proxy-rd-relay.byted.org:8118
+            echo "=== shellcheck 0.10.0 static via relay ==="
+            https_proxy=$P http_proxy=$P curl -sSfL --max-time 60 -o /tmp/sc.tar.xz \
+              https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+            echo "curl exit=$?"
+            tar -xJf /tmp/sc.tar.xz -C /tmp 2>/dev/null && /tmp/shellcheck-v0.10.0/shellcheck --version | grep '^version'
+            echo "=== jq 1.7.1 static via relay ==="
+            https_proxy=$P http_proxy=$P curl -sSfL --max-time 60 -o /tmp/jq \
+              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+            echo "curl exit=$?"
+            chmod +x /tmp/jq 2>/dev/null && /tmp/jq --version
+            echo "=== does jq 1.7.1 fix the empty-input -e bug ==="
+            printf '' | /tmp/jq -e '[.panes[]? | select(.surface_ids // [] | index("x"))] | length > 0'
+            echo "jq1.7 -e empty exit=$? (want nonzero)"
             echo "PROBE DONE"
             exit 0
