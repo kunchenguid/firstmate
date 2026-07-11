@@ -92,6 +92,30 @@ bump_primary() {
 
 head_of() { git -C "$1" rev-parse HEAD; }
 
+# ignore_marker_commit <w>: land THE FIX in the primary - add the seed marker to
+# the tracked .gitignore and commit it on main. The marker (.fm-secondmate-home)
+# is firstmate-generic, written by bin/fm-home-seed.sh into every seeded home; once
+# a home fast-forwards past this commit the marker is git-ignored and can no longer
+# read as a dirty working tree to any `git status --porcelain` dirtiness check.
+ignore_marker_commit() {
+  local w=$1
+  printf '.fm-secondmate-home\n' >> "$w/main/.gitignore"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "gitignore seed marker"
+}
+
+# seed_marked_home <w> <id> <commit>: a secondmate home matching what
+# bin/fm-home-seed.sh actually lays down - a detached worktree at <commit>, the
+# seed marker, a live kind=secondmate meta, and the gitignored operational dirs
+# with a charter. The ONLY unignored extra file is the seed marker, which is
+# exactly what this fix must keep from dirtying the home.
+seed_marked_home() {
+  local w=$1 id=$2 commit=$3
+  add_sm_worktree "$w" "$id" "$commit"
+  mkdir -p "$w/$id/data" "$w/$id/state" "$w/$id/config" "$w/$id/projects"
+  printf 'charter\n' > "$w/$id/data/charter.md"
+}
+
 # run_ff <dir> <base>: drive the shared ff helper in THIS shell (output to a file,
 # not a subshell, so FF_STATUS / FF_INSTR propagate). Sets FF_OUT to the printed
 # status line. Uses allow_detached=yes, ignore_seed_marker=yes (the secondmate
@@ -549,6 +573,87 @@ SH
   pass "T11 spawn warns when pre-launch sync is skipped"
 }
 
+# --- T12: a freshly seeded home reads clean once the primary ignores the marker -
+# The seed marker used to leave every home permanently dirty: bin/fm-fleet-sync.sh
+# and any other plain `git status --porcelain` check counts the untracked marker,
+# so a seeded home reported STUCK/dirty forever. With the marker in .gitignore, a
+# home seeded from a primary that carries the fix reads clean to that exact signal.
+test_seed_marker_clean_when_gitignored() {
+  local w base
+  w=$(new_world marker-clean)
+  ignore_marker_commit "$w"                 # primary now ignores the marker
+  base=$(primary_head_commit "$w/main")
+  seed_marked_home "$w" sm "$base"          # fresh home at the post-fix HEAD
+
+  # The exact dirtiness signal bin/fm-fleet-sync.sh reads (its line: dirty=yes when
+  # `git status --porcelain | head -1` is non-empty).
+  [ -z "$(git -C "$w/sm" status --porcelain)" ] \
+    || fail "seed marker still dirties a fresh home: $(git -C "$w/sm" status --porcelain)"
+  # And the secondmate ff sweep sees no dirt: an at-HEAD home is a clean no-op.
+  run_ff "$w/sm" "$base"
+  [ "$FF_STATUS" = current ] || fail "fresh home not read as clean/current, got '$FF_STATUS': $FF_OUT"
+  pass "T12 gitignored marker: a freshly seeded home reads clean to fleet-sync and the ff sweep"
+}
+
+# --- T13: an existing marker-only-dirty home converges on the next sweep --------
+# The convergence chicken-and-egg: existing homes predate the fix, so their marker
+# is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
+# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
+# linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
+# Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
+# Once advanced, the now-ignored marker reads clean with no hand intervention.
+test_seed_marker_converges_existing_home() {
+  local w c0 base
+  w=$(new_world marker-converge)            # primary does NOT ignore the marker yet
+  c0=$(head_of "$w/main")
+  seed_marked_home "$w" sm "$c0"            # existing home predates the fix
+  [ -n "$(git -C "$w/sm" status --porcelain)" ] \
+    || fail "precondition: the untracked marker should dirty a pre-fix home"
+  ignore_marker_commit "$w"                 # THE FIX lands as a later commit
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"                     # the marker-tolerant convergence sweep
+
+  [ "$FF_STATUS" = updated ] || fail "existing marker-only home did not converge, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "home did not fast-forward to the fix commit"
+  [ -z "$(git -C "$w/sm" status --porcelain)" ] \
+    || fail "marker still dirty after convergence: $(git -C "$w/sm" status --porcelain)"
+  pass "T13 gitignored marker: an existing marker-only-dirty home converges, then reads clean"
+}
+
+# --- T14: marker tolerance does not mask a genuinely dirty home -----------------
+# The ff-skip only forgives the seed marker; a real uncommitted change alongside the
+# marker must still refuse the fast-forward and leave the work untouched, exactly as
+# before this fix.
+test_seed_marker_does_not_mask_real_dirt() {
+  local w c0 base before
+  w=$(new_world marker-real-dirt)
+  c0=$(head_of "$w/main")
+  seed_marked_home "$w" sm "$c0"
+  printf 'real local change\n' >> "$w/sm/AGENTS.md"   # genuine tracked-file edit + the marker
+  before=$(head_of "$w/sm")
+  ignore_marker_commit "$w"
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "a genuinely dirty home must skip, got '$FF_STATUS'"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" \
+    "a genuinely dirty home is skipped even with the marker present"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "genuinely dirty home HEAD moved (work at risk)"
+  grep -q 'real local change' "$w/sm/AGENTS.md" || fail "genuine local edit was discarded"
+  pass "T14 marker tolerance does not mask a genuinely dirty home"
+}
+
+# --- T15: the shipped firstmate repo gitignores the seed marker -----------------
+# Pins the actual fix so it cannot silently regress: without this .gitignore entry
+# every seeded home would read dirty again the moment it lands on this repo's HEAD.
+test_repo_gitignores_seed_marker() {
+  grep -qxF '.fm-secondmate-home' "$ROOT/.gitignore" \
+    || fail "the firstmate repo .gitignore must ignore the seed marker (.fm-secondmate-home)"
+  pass "T15 the firstmate repo gitignores the secondmate seed marker"
+}
+
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -561,5 +666,9 @@ test_nudge_selector_stable_after_herdr_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
+test_seed_marker_clean_when_gitignored
+test_seed_marker_converges_existing_home
+test_seed_marker_does_not_mask_real_dirt
+test_repo_gitignores_seed_marker
 
 echo "# all fm-secondmate-sync tests passed"

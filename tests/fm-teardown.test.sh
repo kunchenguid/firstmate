@@ -15,9 +15,10 @@
 #     main. Reachability alone false-refused this common GitHub flow; the check now
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
-#   - teardown-lock-race-l2: a killed crew process can leave a stale worktree
-#     git index.lock that blocks teardown. The cleanup path waits, retries, and only
-#     removes a provably stale lock before re-running safety checks.
+#   - teardown-lock-race: a killed crew process can leave a transient worktree
+#     git index.lock that blocks teardown. The return path retries on the lock
+#     error signature (even if the lock self-clears mid-check), then only removes a
+#     provably stale lock before re-running safety checks.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -38,17 +39,19 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
-# Also covers backlog teardown-lock-race-l2: a stale git index.lock left in the
-# worktree by a killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
+# Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
+# killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
 #   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
 #   (v) non-linked repo index.lock                            -> lock removed, ALLOW
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (x) transient lock cleared after first failed return      -> retry ALLOW
+#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -131,6 +134,17 @@ add_compatible_tasks_axi() {
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' '0.1.1'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
 fi
 exit 0
 SH
@@ -298,6 +312,85 @@ if [ "${1:-}" = return ]; then
     exit 128
   fi
   exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails once with the index.lock signature, then clears the lock
+# (simulating a dying crew git process finishing) so the next retry succeeds.
+# The first failure always reports the lock path even if the file is removed in
+# the same attempt - matching the production race where the lock self-clears
+# between the failed return and the supervisor's existence check.
+add_transient_lock_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    # Emit the real git signature, then drop the lock so a lock-existence-only
+    # recovery path would wrongly abort without retrying.
+    if [ -n "$lock" ]; then
+      echo "fatal: Unable to create '$lock': File exists." >&2
+      rm -f "$lock"
+    else
+      echo "fatal: Unable to create 'index.lock': File exists." >&2
+    fi
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return always fails with the lock signature while the lock file
+# remains; used to assert exhausted retries still refuse loudly.
+add_persistent_lock_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -z "$lock" ]; then
+    lock="index.lock"
+  fi
+  echo "fatal: Unable to create '$lock': File exists." >&2
+  exit 128
 fi
 exit 0
 SH
@@ -987,6 +1080,152 @@ test_index_lock_mtime_read_failure_refuses() {
   pass "lock mtime read failures leave worktree index.lock in place and refuse teardown"
 }
 
+test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
+  local case_dir rc lock attempt_file
+  case_dir=$(make_case transient-index-lock-retry)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_lock_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  # Fresh lock: not old enough for the force-remove path; patience must win.
+  touch "$lock"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-index-lock: teardown should succeed on retry after lock self-clears"
+  assert_grep "succeeded on retry" "$case_dir/stderr" \
+    "transient-index-lock: teardown did not report success on retry"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "transient-index-lock: teardown force-removed a lock that only needed patience"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "transient-index-lock: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  assert_absent "$lock" "transient-index-lock: lock should remain cleared after success"
+  pass "transient index.lock cleared after first failed return is retried successfully without force-remove"
+}
+
+test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
+  local case_dir rc lock
+  case_dir=$(make_case persistent-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_persistent_lock_treehouse "$case_dir"
+  # Fresh lock with a live holder: never provably stale, never force-removed.
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "persistent-index-lock: teardown should refuse when the lock never clears"
+  assert_grep "persisted across" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not mention the exhausted retry window"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "persistent-index-lock: teardown removed a non-stale lock"
+  [ -e "$lock" ] || fail "persistent-index-lock: lock file was removed"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "persistent-index-lock: teardown completed despite persistent lock"
+  pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
+}
+
+test_empty_retry_wait_uses_default_without_aborting() {
+  local case_dir rc lock attempt_file
+  case_dir=$(make_case empty-retry-wait)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_lock_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-retry-wait: teardown should fall back to the default wait"
+  assert_grep "waiting 1s and retrying" "$case_dir/stderr" \
+    "empty-retry-wait: teardown did not use the default retry wait"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "empty-retry-wait: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  pass "empty retry wait overrides use the default without aborting teardown"
+}
+
+test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
+  local case_dir rc lock
+  case_dir=$(make_case fractional-legacy-retry-wait)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_persistent_lock_treehouse "$case_dir"
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0.1 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fractional-legacy-retry-wait: teardown should fail only for the persistent lock"
+  assert_grep "waiting 0.1s each" "$case_dir/stderr" \
+    "fractional-legacy-retry-wait: teardown did not preserve the legacy fractional wait"
+  assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
+    "fractional-legacy-retry-wait: teardown hit an arithmetic error"
+  pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -1028,3 +1267,7 @@ test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
 test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
+test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
+test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_empty_retry_wait_uses_default_without_aborting
+test_fractional_legacy_retry_wait_refuses_without_arithmetic_error

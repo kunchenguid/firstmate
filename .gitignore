@@ -3,6 +3,7 @@ state/
 data/
 .no-mistakes/
 .lavish/
+.fm-secondmate-home
 .DS_Store
 .env
 config/crew-harness
@@ -12,3 +13,4 @@ config/backlog-backend
 config/backend
 config/x-mode.env
 config/cmux-socket-password
+config/wedge-alarm

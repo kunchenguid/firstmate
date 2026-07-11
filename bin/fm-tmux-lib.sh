@@ -20,132 +20,101 @@
 # capture cannot tell it apart from text a human typed, so the old reader saw an
 # idle pane as holding pending input and the daemon deferred injection / firstmate
 # misjudged the pane. The composer reader now captures just the cursor line WITH
-# ANSI styling (tmux capture-pane -e), drops dim/faint (SGR 2) runs, and decides on
-# what is left, so ghost/placeholder text never counts as real input. The styled
+# ANSI styling (tmux capture-pane -e) and extracts the real typed content with the
+# shared, fleet-wide fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops
+# every de-emphasised run - dim/faint (SGR 2) AND a dark/muted truecolor
+# foreground - so ghost/placeholder text never counts as real input. The styled
 # capture is consumed internally and parsed into a boolean here; it is NEVER
 # surfaced (fm-peek and every human/LLM-facing path stay plain), and only the
 # single composer row is captured, so no escape-laden pane bulk is produced. This
-# is harness-generic: any harness that dims placeholder/ghost text benefits.
+# is harness-generic: any harness that de-emphasises placeholder/ghost text
+# benefits, and the herdr adapter routes through the same owner (task
+# afk-herdr-false-pending), so the two backends cannot drift.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
-# dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
+# ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
 # footer set (mirrors fm-watch.sh / the daemon).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
+#
+# Composer-content classification (empty|pending|unknown, and the fleet-wide
+# rule that a BARE shell prompt glyph is a dead shell, not an empty agent
+# composer) is NOT owned here: it is the shared bin/fm-composer-lib.sh, sourced
+# below and reused by every backend adapter so the decision cannot drift.
+
+# shellcheck source=bin/fm-composer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
-# fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
-# composer line, then drop any remaining escape sequences, leaving only the plain,
-# normal-intensity text, the text a human actually typed. Dim/faint runs are
-# ghost/placeholder text (e.g. claude's predicted-next-prompt suggestion) that
-# fills an otherwise-empty composer and must never read as pending input. Reads the
-# styled line on stdin (from `tmux capture-pane -e`) and prints plain text on
-# stdout. LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and dim runs
-# alike pass through or drop intact without locale-dependent character classes.
-# A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run; codes are processed
-# left to right within a sequence so "ESC[0;2m" (reset then dim) reads as dim.
-fm_tmux_strip_ghost() {
-  LC_ALL=C awk '
-    function sgr_code(v, b) {
-      b = v
-      sub(/:.*/, "", b)
-      if (b == "") b = "0"
-      return b
-    }
-    function skip_color_payload(a, p, k, mode, code) {
-      if (index(a[p], ":") > 0) return p
-      if (p >= k) return p
-      mode = a[p + 1]
-      code = sgr_code(mode)
-      if (index(mode, ":") > 0) return p + 1
-      if (code == "5") return p + 2
-      if (code == "2") return p + 4
-      return p + 1
-    }
-    {
-      line = $0; out = ""; dim = 0; n = length(line); i = 1
-      while (i <= n) {
-        c = substr(line, i, 1)
-        if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
-          j = i + 1
-          if (substr(line, j, 1) == "[") {
-            j++; params = ""
-            while (j <= n) {
-              cc = substr(line, j, 1)
-              if (cc ~ /[@-~]/) break
-              params = params cc; j++
-            }
-            if (j <= n && substr(line, j, 1) == "m") {   # SGR: update dim/faint state
-              if (params == "") params = "0"
-              k = split(params, a, ";")
-              for (p = 1; p <= k; p++) {
-                v = a[p]; code = sgr_code(v)
-                if (code == "38" || code == "48" || code == "58") {
-                  p = skip_color_payload(a, p, k)
-                } else if (code == "2") dim = 1
-                else if (code == "0" || code == "22") dim = 0
-              }
-            }
-            if (j <= n) { i = j + 1; continue }
-          }
-          i = i + 1; continue          # lone/other ESC: drop the ESC byte only
-        }
-        if (dim == 0) out = out c        # keep only normal-intensity bytes
-        i++
-      }
-      print out
-    }
-  '
-}
+# fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
+# fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
+# ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's ghost) AND a
+# dark/muted truecolor foreground (grok's placeholder) - from one captured,
+# styled composer line and prints the plain, real-typed text. Kept as a named
+# tmux entry point (and for existing callers/tests) but owns no logic of its own,
+# so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
+fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
-#   empty   - no pending input (blank, a bare prompt, a busy footer, or only dim
-#             ghost/placeholder text). Safe to inject; also the positive
+#   empty   - no pending input (blank, a busy footer, an empty agent composer, or
+#             only de-emphasised ghost/placeholder text). Safe to inject; also the positive
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error). The caller decides.
+#   unknown - the pane could not be read (tmux error), OR the cursor line is a
+#             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
+#             composer, so NOT a safe injection target. The caller decides.
 #
 # The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
-# the single composer row (-S/-E), then run through fm_tmux_strip_ghost so dim/faint
-# ghost text drops out before classification. The styled capture is internal only,
-# never surfaced. The detector then strips the harness's box-drawing composer
-# borders ("│ … │", heavy "┃", or a plain ASCII "|") using literal-string
-# substitution (bash 3.2 safe, locale-independent — no \u escapes, no multibyte
-# character classes), and asks whether anything real is left.
+# the single composer row (-S/-E). The bordered flag (a genuine composer box) is
+# read from the PLAIN row (fm_composer_strip_ansi keeps ghost text so the box
+# border is still visible), while the real-typed CONTENT is extracted with the
+# shared fm_composer_strip_ghost so dim/faint AND dark-truecolor ghost text drops
+# out before classification (grok's dark box border drops with the ghost, which
+# is why the bordered flag is read from the plain row, not the ghost-stripped
+# one). Both are internal only, never surfaced. The detector strips the harness's
+# box-drawing composer borders ("│ … │", heavy "┃", or a plain ASCII "|") using
+# literal-string substitution (bash 3.2 safe, locale-independent - no \u escapes,
+# no multibyte character classes), and delegates the empty/pending/unknown
+# decision to the shared owner fm_composer_classify_content
+# (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
+# (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
+# prompt reads unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw line stripped
+  local target=$1 cy raw plain stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
-  line=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
-  # Strip the composer box borders (literal glyphs — no character classes).
-  stripped=${line//│/}      # U+2502 light vertical (claude)
-  stripped=${stripped//┃/}  # U+2503 heavy vertical
-  stripped=${stripped//|/}  # ASCII pipe
-  # Trim surrounding whitespace.
+  # bordered: from the plain row (borders survive an all-ANSI strip).
+  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  plain="${plain#"${plain%%[![:space:]]*}"}"
+  plain="${plain%"${plain##*[![:space:]]}"}"
+  case "$plain" in
+    '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
+  esac
+  # content: from the ghost-stripped row (real typed text only).
+  stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # Nothing left inside the box = empty composer.
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \
-     && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  # Just a bare prompt glyph = empty composer (idle).
   case "$stripped" in
-    '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
+    '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
+    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
   esac
-  # A busy footer landing on the cursor line is not pending input.
-  if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  # A busy footer landing on the cursor line is not pending input (tmux-specific:
+  # only tmux captures the raw cursor row, which may BE the footer).
+  if [ -n "$stripped" ] \
+     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  printf 'pending'; return 0
+  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
