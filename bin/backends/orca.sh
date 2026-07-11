@@ -23,6 +23,10 @@
 # The id is also the daemon session id, so reattach is automatic.
 
 fm_backend_orca_tool_check() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: backend=orca selected but 'python3' is not installed" >&2
+    return 1
+  fi
   if ! command -v fmod >/dev/null 2>&1; then
     # Fall back to firstmate's own bin/fmod if it isn't on PATH. The adapter
     # is sourced from bin/backends/orca.sh, so ../fmod from that location is
@@ -52,7 +56,7 @@ fm_backend_orca_runtime_check() {
     echo "error: backend=orca selected but 'fmod info' failed; is the orca daemon running?" >&2
     return 1
   fi
-  if ! printf '%s' "$info" | grep -q '"daemon_reachable": true'; then
+  if ! printf '%s' "$info" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("daemon_reachable") is True else 1)' 2>/dev/null; then
     echo "error: backend=orca selected but the orca daemon is not reachable (fmod info said: $info)" >&2
     return 1
   fi
@@ -99,7 +103,7 @@ fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
 # terminal created, please clean up" - that path is gone because the daemon
 # createOrAttach is atomic).
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 wt_path session_id create_out
+  local project=$1 name=$2 wt_path session_id create_out branch start_head current_head
 
   fm_backend_orca_tool_check || return 1
 
@@ -109,6 +113,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   fi
 
   wt_path=$(fm_backend_orca_worktree_dir "$project" "$name")
+  branch="fm/$name"
   if [ -e "$wt_path" ]; then
     echo "error: orca backend refused to create $wt_path: already exists" >&2
     return 1
@@ -120,7 +125,8 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   # the branch so the crewmate commits land on something addressable.
   # stdout is silenced - git prints "HEAD is now at ..." to stdout on success,
   # which would corrupt the TAB-separated adapter contract on stdout.
-  if ! git -C "$project" worktree add -b "fm/$name" "$wt_path" HEAD >/dev/null 2>/tmp/fm-orca-wt.err; then
+  start_head=$(git -C "$project" rev-parse HEAD) || { echo "error: cannot resolve HEAD for $project" >&2; return 1; }
+  if ! git -C "$project" worktree add -b "$branch" "$wt_path" HEAD >/dev/null 2>/tmp/fm-orca-wt.err; then
     echo "error: git worktree add failed for $wt_path:" >&2
     cat /tmp/fm-orca-wt.err >&2
     rm -f /tmp/fm-orca-wt.err
@@ -133,6 +139,10 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
     echo "error: fmod create failed for $session_id at $wt_path:" >&2
     printf '%s\n' "$create_out" >&2
     git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+    current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+    if [ "$current_head" = "$start_head" ]; then
+      git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
     return 1
   fi
 

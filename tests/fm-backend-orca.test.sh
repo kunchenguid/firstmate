@@ -345,7 +345,10 @@ test_worktree_create_cleans_up_on_fmod_failure() {
   local expected_wt
   expected_wt="$(dirname "$repo")/_orca-wt/fm-test3"
   [ ! -d "$expected_wt" ] || fail "worktree_create should clean up the git worktree when fmod fails"
-  pass "fm_backend_orca_worktree_create: removes the worktree when fmod create fails"
+  if git -C "$repo" show-ref --verify --quiet refs/heads/fm/fm-test3; then
+    fail "worktree_create should delete the just-created task branch when fmod fails"
+  fi
+  pass "fm_backend_orca_worktree_create: removes the worktree and branch when fmod create fails"
 }
 
 test_remove_worktree_kills_session_and_removes_dir() {
