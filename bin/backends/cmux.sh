@@ -63,10 +63,11 @@
 #      herdr (auto-closes the workspace) nor zellij (leaves a ghost tab):
 #      `close-surface` REFUSES outright with a typed error
 #      (`invalid_state: Cannot close the last surface`), leaving both the
-#      surface and the workspace untouched. `close-workspace` cleanly removes
-#      the whole workspace (surface included) in one call with no ghost left
-#      behind. Kill therefore closes the whole workspace directly, which also
-#      reclaims any extra surfaces inside the task workspace.
+#      surface and the workspace untouched. `close-workspace` removes the
+#      whole workspace (surface included) only when it is not the last
+#      workspace in its window. `fm_backend_cmux_kill` handles the documented
+#      last-in-window exception below, while still reclaiming every surface in
+#      the task workspace.
 #   5. Workspace ids do NOT survive an app relaunch - verified via source
 #      (`Sources/Workspace.swift`'s only initializer unconditionally sets
 #      `self.id = UUID()`, with no restored-id parameter, unlike surfaces'
@@ -111,6 +112,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"
+
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_CMUX_ROOT/bin/fm-composer-lib.sh"
 
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
 FM_BACKEND_CMUX_MIN_MAJOR=0
@@ -521,16 +528,17 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 }
 
 # fm_backend_cmux_composer_state: classify the composer's own row as
-# empty|pending|unknown. Adapted directly from herdr's structural border-row
-# classifier (fm_backend_herdr_composer_state, bin/backends/herdr.sh:598-665)
-# per the build task's explicit direction - this is the highest-risk piece of
-# a new backend's send-and-verify logic, and cmux's `read-screen` gives the
-# same kind of plain-text capture with no cursor-row primitive that herdr's
-# `pane read` does, so the same structural approach applies unchanged: locate
-# the composer row as the only captured line whose TRIMMED content both
-# STARTS and ENDS with the same border glyph (│, ┃, or a plain ASCII |),
-# scanning forward and keeping the LAST match so an earlier border-shaped line
-# (scrollback, a popup) never outranks the real bottom-anchored composer row.
+# empty|pending|unknown. Adapted from the bordered-row branch of herdr's
+# structural classifier (fm_backend_herdr_composer_state) per the build task's
+# explicit direction - this is the highest-risk piece of a new backend's
+# send-and-verify logic, and cmux's `read-screen` gives plain-text capture
+# with no cursor-row primitive and no ANSI style channel like herdr's newer
+# `pane read --format ansi` path. The cmux classifier intentionally remains
+# border-row based: locate the
+# composer row as the only captured line whose TRIMMED content both STARTS and
+# ENDS with the same border glyph (│, ┃, or a plain ASCII |), scanning forward
+# and keeping the LAST match so an earlier border-shaped line (scrollback, a
+# popup) never outranks the real bottom-anchored composer row.
 FM_BACKEND_CMUX_COMPOSER_LINES=${FM_BACKEND_CMUX_COMPOSER_LINES:-20}
 FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-'^Type a message\.\.\.$'}
 
@@ -554,31 +562,25 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   stripped=${stripped//|/}
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  case "$stripped" in
-    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_CMUX_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'
+  # A row was found only by the bordered shape above, so content came from a
+  # genuine composer box - delegate to the shared owner with bordered=1. A bare
+  # dead-shell prompt has no bordered row and already returned 'unknown' above.
+  fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_CMUX_IDLE_RE"
 }
 
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until the composer's own row reads empty.
-# Mirrors fm_backend_herdr_send_text_submit's verification strategy exactly:
-# a slash-command popup's first Enter can close the popup and fill an
-# argument-hint placeholder into the composer rather than submitting, which a
-# raw-diff check would misread as "submitted" - classifying the composer row
-# specifically avoids that false positive, so the retry loop correctly sends
-# a second Enter when needed. Echoes empty|pending|unknown|send-failed, the
+# Mirrors fm_backend_herdr_send_text_submit's ORIGINAL (composer-row)
+# verification strategy: a slash-command popup's first Enter can close the
+# popup and fill an argument-hint placeholder into the composer rather than
+# submitting, which a raw-diff check would misread as "submitted" -
+# classifying the composer row specifically avoids that false positive, so
+# the retry loop correctly sends a second Enter when needed. Herdr's adapter
+# has since moved its own confirmation to a native agent-state read instead
+# (docs/herdr-backend.md "Native agent-state submit confirmation"); cmux has
+# no analogous native primitive, so this composer-row approach remains
+# cmux's own confirmation strategy. Echoes empty|pending|unknown|send-failed, the
 # SAME vocabulary every existing backend already speaks.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} i=0 state
@@ -595,17 +597,59 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   done
 }
 
+# fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for
+# the window that contains <workspace_id>, or nothing if it is not found live.
+# `workspace list --json` with no `--window` is scoped to the CURRENT window
+# only (verified live), so the containing window is found by walking every
+# window from `list-windows --json` and asking each for its own scoped list.
+# The count comes from the same scoped workspace list that confirms membership.
+fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count>"
+  local wsid=$1 wins wid wss count
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 0
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || continue
+    count=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '
+      (.workspaces // []) as $workspaces
+      | select(any($workspaces[]?; .id == $id))
+      | ($workspaces | length)
+    ' 2>/dev/null) || continue
+    printf '%s %s' "$wid" "$count"
+    return 0
+  done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
+}
+
 # fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
 # every other backend's `kill` `|| true` contract). A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
+#
+# The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
+# workspace in a window"): cmux keeps every window at >=1 workspace, so
+# `close-workspace` on the ONLY workspace in its window silently no-ops - it
+# still returns `OK`, but the workspace stays, which is exactly what left a
+# selected task workspace open at teardown (the last workspace in a window is
+# always the selected one). `close-window`/`window.close` cannot rescue it
+# either: a window holding a live terminal session cannot be closed over the
+# control socket (verified: returns success-shaped output, closes nothing).
+# The reliable primitive is close-workspace on a NON-last workspace, so when the
+# target is the last one in its window a throwaway sibling is created first,
+# leaving that window a fresh default workspace (never an fm-<home>- title, so
+# recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-}
+  local expected_label=${3:-} wsid wininfo win count
   if [ -n "$expected_label" ]; then
     fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
   else
     fm_backend_cmux_parse_target "$1" || return 0
   fi
-  fm_backend_cmux_cli close-workspace --workspace "$FM_BACKEND_CMUX_WORKSPACE" >/dev/null 2>&1 || true
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  if [ -n "$win" ] && [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

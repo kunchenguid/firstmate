@@ -6,7 +6,8 @@ It is the cmux equivalent of the tmux facts recorded in the `harness-adapters` s
 cmux is [a Ghostty-based macOS terminal](https://cmux.com) built for AI coding agents, with vertical tabs, notifications, and a CLI/socket JSON-RPC control API (`cmux <verb> ...`).
 Verified against the real installed app: cmux 0.64.17 (build 97), macOS aarch64.
 The feasibility investigation that preceded this build (`data/cmux-backend-feasibility-c7/report.md`) verified the app's CLI surface from source only, flagging a live install-and-poke pass as the remaining gate; that pass is what this document and `tests/fm-backend-cmux-smoke.test.sh` record.
-All real-cmux verification here and in the smoke test creates only `fm-test-`-prefixed workspaces, touches and closes only what it created, never enumerates-and-closes, and never quits or relaunches the app - the same discipline `tests/herdr-test-safety.sh`/`tests/zellij-test-safety.sh` established for their backends, adapted in `tests/cmux-test-safety.sh` to cmux's shape (there is no isolated, throwaway session to spin up - cmux is one shared, GUI-first app instance, the same posture as Orca).
+All real-cmux verification here and in the smoke test creates only `fm-test-`-prefixed task workspaces, with one documented exception: the manual last-in-window verification also creates the unnamed default sibling cmux requires to close that task workspace.
+It never enumerates-and-closes, touches no existing workspace, closes only its own `fm-test-` task workspaces, and never quits or relaunches the app - the same discipline `tests/herdr-test-safety.sh`/`tests/zellij-test-safety.sh` established for their backends, adapted in `tests/cmux-test-safety.sh` to cmux's shape (there is no isolated, throwaway session to spin up - cmux is one shared, GUI-first app instance, the same posture as Orca).
 
 ## Setup
 
@@ -17,7 +18,7 @@ Prerequisites:
 
 - The cmux app itself, installed from [cmux.com](https://cmux.com) or `brew install --cask cmux`, version 0.64.17 or newer.
 - `jq`, required to parse cmux's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, and lavish-axi); treehouse still provides the worktree, cmux only provides the session.
+- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, cmux only provides the session.
 - The cmux CLI binary is not guaranteed to be on `PATH` after a plain app install (see "CLI is not on PATH by default" below) - the adapter falls back to the well-known bundle path automatically, so this is not a blocker, just something to be aware of if you want to run `cmux` yourself from a shell.
 
 **One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all.
@@ -55,8 +56,8 @@ A cmux spawn refuses loudly, with an actionable message pointing back to this do
 No first-run provisioning beyond the socket-access setup above and having `jq` installed; firstmate creates the workspace it needs on first spawn, launching the app itself (`open -a cmux`) if it is not already running.
 
 Watching and attaching: firstmate uses one workspace per task in whatever cmux window is currently open.
-Callers still use firstmate's universal `fm-<id>` selector vocabulary, while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
-You do not need to bring the window forward for routine supervision: `bin/fm-peek.sh fm-<id>` reads a task's surface without focusing it, and `bin/fm-send.sh fm-<id> "<text>"` steers it - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
+Task selectors resolve through the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend"), while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
+You do not need to bring the window forward for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
 
 Verify it works by spawning a trivial task with `--backend cmux` and confirming the task's meta records `backend=cmux` plus `cmux_workspace_id=` and `cmux_surface_id=`.
 The cmux sidebar should show a new `fm-firstmate-<8hex>-<id>` workspace in the primary home.
@@ -179,7 +180,7 @@ No session field is needed - unlike herdr/zellij there is no session layer to re
 | Bounded capture | `cmux read-screen --workspace <id> --surface <id> --scrollback --lines <N> --json`, trimmed locally with `tail` | No herdr-style small-N empty-result bug: N=1..10 all verified to return correctly-clamped, non-empty content on an already-interacted-with surface. A single call is still bounded by the surface's actual current viewport height regardless of the requested `--lines` value (verified: capped at 16 rows in a headless/no-attached-window test run), so "fetch generous, trim locally" is kept for consistency even though the specific herdr bug does not reproduce. |
 | Worktree-path discovery | marked active cwd probe + capture-scrape (`fm_backend_cmux_current_path`), NOT `current_directory` | `current_directory` DOES reflect a `cd` run directly in the surface's own top-level shell, but stays FROZEN at wherever that shell was when it launched a foreground subshell (exactly what `treehouse get` does) - zellij-shape, not herdr-shape. See "Worktree-path discovery: current_directory does not track a subshell" below. |
 | Busy state | *(no native primitive)* | cmux has agent-awareness elsewhere (Claude Code hooks integration, session-resume tokens) but exposes nothing over the socket API for generic busy/idle classification; `surface.health`/`surface-health` is render health, not agent status. `fm_backend_busy_state`'s dispatcher (`bin/fm-backend.sh`) falls through to `unknown` for cmux via its wildcard case, exactly like tmux/zellij/Orca - the watcher's existing pane-hash + regex path is the only busy-state source for this backend. |
-| Kill | `cmux close-workspace --workspace <id>` | See "Closing the last surface: a third shape" below. The backend owns the whole task workspace, so kill closes the whole workspace directly, best-effort (`\|\| true`), matching every other backend's `kill` contract. |
+| Kill | `cmux close-workspace --workspace <id>`, preceded by a throwaway `new-workspace --window <win> --focus false --id-format uuids` when the target is the only workspace in its window | See "Closing the last workspace in a window" below. The backend owns the whole task workspace; kill closes it best-effort (`\|\| true`), but cmux silently refuses to close the LAST workspace in a window, so kill first detects that case (`fm_backend_cmux_window_of_workspace`) and adds a throwaway sibling before closing, matching every other backend's `kill` contract. |
 | Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and `FM_ROOT` hash. |
 
 ## Socket control modes: the full matrix (default `cmuxOnly` rejects external CLIs)
@@ -234,11 +235,73 @@ Verified against the real binary in both shapes: a direct `cd` in the surface's 
 The design sketch anticipated two possibilities for closing a workspace's last surface - herdr-shape (auto-closes the whole workspace) or zellij-shape (leaves an empty "ghost" workspace) - and planned to verify which one live.
 Neither turned out to be correct: cmux implements a **third** shape.
 Verified live: `cmux close-surface --workspace <id> --surface <id>` against a workspace's LAST remaining surface **refuses outright** with a typed error, `Error: invalid_state: Cannot close the last surface`, leaving both the surface and the workspace completely untouched - no partial state, no ghost.
-`cmux close-workspace --workspace <id>` against that same workspace succeeds cleanly, removing the whole workspace (surface included) in one call, verified with no ghost left behind afterward.
+`cmux close-workspace --workspace <id>` against that same workspace succeeds cleanly, removing the whole workspace (surface included) in one call, only when it is not the last workspace in its window.
 
-Since every firstmate cmux task uses exactly one owned workspace, `close-workspace` is the correct teardown primitive.
-The no-mistakes review gate follow-up was captain-directed here too: `fm_backend_cmux_kill` now calls `close-workspace` directly and best-effort, reclaiming the whole task workspace and any surfaces inside it.
-That matches the backend ownership invariant more closely than preserving user-added surfaces in a task workspace that firstmate is about to forget.
+Since every firstmate cmux task uses exactly one owned workspace, `close-workspace` remains the correct teardown primitive.
+The next section ("Closing the last workspace in a window") owns the last-in-window exception and `fm_backend_cmux_kill`'s best-effort workaround, which still reclaims every surface in the task workspace.
+
+## Closing the last workspace in a window (the selected-workspace teardown fix)
+
+Verified live 2026-07-10 against the installed cmux 0.64.17 (build 97), macOS aarch64, socket in `automation` mode; the captain's app was not modified, relaunched, or reconfigured, and only `fm-test-` task workspaces and throwaway default workspaces were touched.
+
+The incident this fixes: a cmux-backed task's teardown left its workspace open because it was the currently selected workspace, and the crew closed it by hand.
+`close-workspace` cleanly removes a workspace ONLY when that workspace is not the last one in its window.
+cmux keeps every window at one or more workspaces, so `close-workspace` against the ONLY workspace in a window silently no-ops: it still prints `OK`, but the workspace stays.
+The last workspace in a window is always the selected one, so from the outside this reads as "the selected task workspace would not close" - but being selected is not itself the trigger.
+A workspace that is selected while sharing its window with another workspace closes normally (verified); being the last workspace in its window is the actual trigger.
+
+Evidence (workspace refs are session-relative, shown as observed):
+
+```
+# control: a NON-last workspace (its window holds another workspace too) closes cleanly
+$ cmux close-workspace --workspace <ws-A>
+OK workspace:2
+# -> <ws-A> gone from `workspace list`
+
+# the bug: the LAST/ONLY workspace in its window
+$ cmux close-workspace --workspace <ws-B>
+OK workspace:7
+# -> <ws-B> STILL PRESENT; its window still reports workspace_count=1 (silent no-op)
+```
+
+Neither window-closing primitive rescues it, because a window holding a live terminal session cannot be closed over the control socket:
+
+```
+$ cmux close-window --window <win>
+OK
+# -> <win> and its workspace STILL PRESENT
+
+$ cmux rpc window.close '{"window_id":"<win>"}'
+{ "window_id" : "<win>", "window_ref" : "window:2" }
+# -> STILL PRESENT
+```
+
+Exiting the surface's shell does not help either: cmux immediately respawns a fresh shell in a new surface (the surface id changes), so the last workspace/window is never left empty to collapse on its own.
+
+The reliable primitive is `close-workspace` on a workspace that is NOT the last in its window, so `fm_backend_cmux_kill` makes the target non-last first.
+`fm_backend_cmux_window_of_workspace` walks `list-windows --json` and each window's own `workspace list --json --window <id>` to find the target's window and count the membership-confirming workspace-list response.
+When the count is one (last in window), kill creates a throwaway sibling in that same window - `new-workspace --window <win> --focus false --id-format uuids`, an unnamed default that never carries an `fm-<home>-` title, so recovery and `list_live` ignore it - and only then closes the target.
+When the count is greater than one, kill closes the target directly, exactly as before, with no sibling.
+
+```
+# the fix, end to end: real fm_backend_cmux_kill on a SELECTED, last-in-window fm-test task workspace
+$ fm_backend_cmux_window_of_workspace <ws-B>
+<win> 1
+$ cmux new-workspace --window <win> --focus false --id-format uuids
+OK workspace:9
+$ cmux close-workspace --workspace <ws-B>
+OK workspace:8
+# -> <ws-B> GONE; <win> survives with a fresh default workspace (title "zsh"/"~", never fm-*)
+```
+
+The window keeping a fresh default workspace is cmux's own "closed the last tab" outcome, not extra firstmate state; it is the closest reachable result to removing the task's workspace, given a window cannot be socket-closed.
+The helper and both branches are pinned in `tests/fm-backend-cmux.test.sh` by `test_window_of_workspace_finds_window_and_count`, `test_window_of_workspace_empty_when_not_found`, `test_kill_closes_workspace_directly_when_not_last`, and `test_kill_adds_sibling_when_last_in_window`.
+The live `window_of_workspace` window/count detection is pinned in `tests/fm-backend-cmux-smoke.test.sh`.
+The last-in-window path is not driven end to end in the automated smoke suite because closing the last workspace inherently leaves a window cmux cannot close over the socket, so a live end-to-end run cannot self-clean; the manual run recorded above is its empirical proof instead.
+
+Related current-window scoping, observed during this work and left out of scope for this fix: `workspace list --json` WITHOUT `--window` is scoped to the CURRENT window only (verified live).
+`fm_backend_cmux_window_of_workspace` passes `--window` per window and is unaffected, but `fm_backend_cmux_workspace_id_for_label` and `fm_backend_cmux_list_live` see only the current window's workspaces, and `fm_backend_cmux_target_ready`'s label recovery inherits that scope.
+That is correct for the selected-workspace teardown case (a selected workspace is in the current window) but is a known limitation for a task workspace parked in a non-current window.
 
 ## Workspace ids do not survive a relaunch (verified from source, not a live restart)
 
@@ -266,11 +329,12 @@ Verified live: two workspaces created with the identical title `fm-test-dup` bot
 
 ## Composer verification: structural border-row classification (adapted from herdr)
 
-cmux's `read-screen` gives plain-text capture with no cursor-row/ANSI-only primitive, the same shape herdr's `pane read` has (unlike tmux's `#{cursor_y}`).
+cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and herdr's `--format ansi` path for ANSI-aware ghost/placeholder classification.
 Per this build task's explicit direction, `fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural border-row classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach: it locates the composer's own row as the only captured line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain ASCII `|`), scanning forward and keeping the LAST match so an earlier border-shaped line can never outrank the real bottom-anchored composer row.
+After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt with no boxed composer row reads `unknown`, not empty.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
 `tests/fm-backend-cmux.test.sh` pins this exact regression shape (`test_send_text_submit_popup_autocomplete_requires_second_enter`), verifying the adapter retries a genuine second Enter rather than declaring victory after the first one closes a popup.
-All four backends (tmux, herdr, zellij, cmux) expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
+All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
 
 ## Test safety
 
@@ -284,10 +348,10 @@ Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CL
 
 1. `FM_HOME=<scratch> bin/fm-spawn.sh cmux-e2e-t1 projects/scratch-e2e-project --backend cmux claude` - spawned successfully, printing `window=<workspace_uuid>:<surface_uuid>` in the summary and writing `backend=cmux`, `cmux_workspace_id=`, `cmux_surface_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-marker-probe workaround (finding #2), exactly as designed.
 2. `bin/fm-peek.sh fm-cmux-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
-3. `bin/fm-send.sh fm-cmux-e2e-t1 --key Enter` - accepted the trust dialog; `send_key`'s Escape/Enter path confirmed live against the real claude TUI, not just a plain shell.
+3. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 --key Enter` - accepted the trust dialog; `send_key`'s Escape/Enter path confirmed live against the real claude TUI, not just a plain shell.
 4. `bin/fm-peek.sh fm-cmux-e2e-t1` again - showed claude actively working through the brief (confirming worktree isolation, writing `hello.txt`, committing).
-5. `bin/fm-send.sh fm-cmux-e2e-t1 "captain says: proceed as planned, this is a trivial verification task"` - a plain-text steer sent after the crewmate had already finished and stopped; `fm-send` reported no `pending`/`send-failed` error, and the message was confirmed landed and acknowledged in the next peek. This is the first live proof of `fm_backend_cmux_composer_state`'s structural border-row classifier against a REAL claude TUI composer box (every Phase 1 empirical test used a plain shell prompt, which has no bordered composer at all).
-6. `bin/fm-send.sh fm-cmux-e2e-t1 "/compact"` - the popup-placeholder/second-Enter regression class, tested live: `fm-send` reported success with no error, and the next peek confirmed `/compact` had genuinely EXECUTED ("Compacting conversation... 25%", later "Compacted"), not merely sat typed-but-unsubmitted in the composer. This directly confirms `fm_backend_cmux_send_text_submit` correctly retries past a popup-closing first Enter and lands a genuine second Enter against the real app, the same incident class herdr hit on 2026-07-03.
+5. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 "captain says: proceed as planned, this is a trivial verification task"` - a plain-text steer sent after the crewmate had already finished and stopped; `fm-send` reported no `pending`/`send-failed` error, and the message was confirmed landed and acknowledged in the next peek. This is the first live proof of `fm_backend_cmux_composer_state`'s structural border-row classifier against a REAL claude TUI composer box (every Phase 1 empirical test used a plain shell prompt, which has no bordered composer at all).
+6. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 "/compact"` - the popup-placeholder/second-Enter regression class, tested live: `fm-send` reported success with no error, and the next peek confirmed `/compact` had genuinely EXECUTED ("Compacting conversation... 25%", later "Compacted"), not merely sat typed-but-unsubmitted in the composer. This directly confirms `fm_backend_cmux_send_text_submit` correctly retries past a popup-closing first Enter and lands a genuine second Enter against the real app, the same incident class herdr hit on 2026-07-03.
 7. The crewmate's commit (`add hello.txt`, message `add hello.txt`) was confirmed present on branch `fm/cmux-e2e-t1` in the scratch project's git history, with `hello.txt` containing exactly the expected line, and the status file ending in `done: ready in branch fm/cmux-e2e-t1`.
 8. `bin/fm-teardown.sh cmux-e2e-t1` **REFUSED**, exactly as required: `REFUSED: local-only worktree ... has work not yet merged into main and not on any remote.`
 9. `bin/fm-merge-local.sh cmux-e2e-t1` - fast-forwarded the scratch project's local `main` to the crewmate's commit (`e99f00a -> f064d41`).
@@ -306,5 +370,6 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
   The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.
 - **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no per-home container design (a herdr-style workspace-per-home split, or similar) has been designed or verified for cmux yet.
 - **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
-- **`bin/fm-bootstrap.sh`'s required-tools list is unchanged** - it does not conditionally add `cmux`/`jq` when a backend selection resolves to cmux, mirroring the same accepted gap already documented for herdr/zellij; the version/tool/reachability gate happens at spawn time instead and refuses loudly.
+- **Backend-specific bootstrap detection is absent** - `bin/fm-bootstrap.sh` does not conditionally add `cmux` and `jq` when a backend selection resolves to cmux, mirroring the same accepted gap already documented for herdr/zellij; the version/tool/reachability gate happens at spawn time instead and refuses loudly.
 - **A surface can still die in the brief window between `target_ready` succeeding and the operation's own call running.** That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out, `fm_backend_cmux_send_text_submit`'s retry loop (which reports `send-failed`/`pending`/`unknown` rather than a false "sent"), or the watcher's stale-pane detection.
+- **Windows cannot be closed over the control socket, and label lookup is current-window scoped** - both owned by "Closing the last workspace in a window" above. Teardown of a last-in-window task workspace therefore leaves that window a fresh default workspace rather than closing it, and `fm_backend_cmux_workspace_id_for_label`/`fm_backend_cmux_list_live` only see the current window, so a task workspace parked in a non-current window is a known blind spot for label-based recovery.

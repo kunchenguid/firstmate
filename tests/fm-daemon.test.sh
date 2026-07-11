@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
+AFK_START="$ROOT/bin/fm-afk-start.sh"
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
 # via a BASH_SOURCE guard, so only classify_*/housekeeping/escalate_*/afk_* and the
 # pane/submit helpers become defined.
@@ -22,6 +23,57 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+test_afk_start_refuses_when_flag_cannot_be_written() {
+  local dir state out status
+  dir=$(make_supercase afk-start-flag-unwritable)
+  state="$dir/state"
+  mkdir -p "$state/.afk"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
+  assert_not_contains "$out" "starting supervise daemon" "fm-afk-start.sh continued into daemon startup after .afk write failure"
+  assert_absent "$state/.supervise-daemon.log" "fm-afk-start.sh started the daemon after .afk write failure"
+  pass "fm-afk-start.sh fails before daemon startup when the afk flag cannot be written"
+}
+
+test_afk_start_ignores_stale_pidfile_without_lock() {
+  local dir state out status
+  dir=$(make_supercase afk-start-stale-pidfile)
+  state="$dir/state"
+  printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale pidfile-only live pid"
+  pass "fm-afk-start.sh ignores stale pidfile-only live pids"
+}
+
+test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
+  local dir state out status lock
+  dir=$(make_supercase afk-start-stale-lock-reused-pid)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
+  printf '%s\n' "$$" > "$lock/pid"
+  printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup after rejecting the stale lock"
+  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation after stale lock cleanup"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale daemon lock with a reused pid"
+  assert_not_contains "$out" "another fm-supervise-daemon is already running" "daemon singleton lock still trusted the reused pid"
+  pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
+}
 
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
@@ -98,6 +150,219 @@ test_stale_terminal_escalates() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "default:w1:p2" "$state")
   case "$out" in escalate\|*) ;; *) fail "terminal herdr stale did not escalate through metadata: $out" ;; esac
   pass "stale + terminal status escalates immediately"
+}
+
+# A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
+# escalation: classify_stale returns the `pause` action so handle_wake records a
+# pause marker (long re-surface cadence) rather than a wedge stale marker.
+test_stale_paused_classifies_pause() {
+  local dir state out pause_reason
+  dir=$(make_supercase stale-paused)
+  state="$dir/state"
+  pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
+  status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
+  printf '%s\n' "$pause_reason" > "$state/held-w9.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
+  case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
+  pass "paused reasons with captain phrases remain pause-classified"
+}
+
+# handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
+# marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
+# on the wake itself - the recheck is housekeeping's job on the long cadence.
+test_handle_wake_paused_records_pause_marker() {
+  local dir state key win
+  dir=$(make_supercase handle-paused)
+  state="$dir/state"
+  win="sess:fm-held-w10"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10.status"
+  key=$(printf '%s' "held-w10" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker not recorded by handle_wake"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared when the crew declared a pause"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause escalated on the wake itself (should defer to the long recheck)"
+  pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
+}
+
+test_handle_wake_paused_signal_records_pause_marker() {
+  local dir state key win
+  dir=$(make_supercase handle-paused-signal)
+  state="$dir/state"
+  win="sess:fm-held-w10-signal"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
+  key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
+  pass "handle_wake records a declared pause from a routine signal for long-cadence rechecks"
+}
+
+test_handle_wake_terminal_signal_clears_pause_tracking() {
+  local dir state key watcher_key win
+  dir=$(make_supercase handle-terminal-signal)
+  state="$dir/state"
+  win="sess:fm-held-w10-terminal"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-terminal.meta"
+  printf 'done: upstream landed\n' > "$state/held-w10-terminal.status"
+  key=$(printf '%s' "held-w10-terminal" | tr '.:/' '___')
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-stale-$key"
+  : > "$state/.paused-$watcher_key"
+  : > "$state/.stale-$watcher_key"
+  : > "$state/.wedge-escalations-$watcher_key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-terminal.status" "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "terminal signal retained the daemon pause marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal signal retained daemon stale tracking"
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "terminal signal retained watcher pause tracking"
+  [ ! -e "$state/.stale-$watcher_key" ] || fail "terminal signal retained watcher stale tracking"
+  [ ! -e "$state/.wedge-escalations-$watcher_key" ] || fail "terminal signal retained watcher wedge tracking"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal stale dedupe restored daemon stale tracking"
+  pass "a terminal signal clears pause and stale tracking across both supervisors"
+}
+
+test_housekeeping_migrates_watcher_pause_marker() {
+  local dir state key win
+  dir=$(make_supercase migrate-watcher-pause)
+  state="$dir/state"
+  win="sess:fm-held-w10-migrate"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-w10-migrate.status"
+  key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$key"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  key=$(printf '%s' "held-w10-migrate" | tr '.:/' '___')
+  [ -e "$state/.subsuper-paused-$key" ] || fail "watcher pause marker was not migrated into daemon tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "watcher pause migration left a wedge marker behind"
+  pass "housekeeping migrates a normal-watcher's declared pause into daemon tracking"
+}
+
+test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
+  local dir state key watcher_key win
+  dir=$(make_supercase migrate-watcher-unpaused)
+  state="$dir/state"
+  win="sess:fm-held-w10-migrate-unpaused"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate-unpaused.meta"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "stale watcher pause marker was not cleared after resume"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused watcher handoff created a daemon pause marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "unpaused watcher handoff retained daemon stale tracking"
+  [ ! -e "$state/.stale-$watcher_key" ] || fail "unpaused watcher handoff retained watcher stale tracking"
+  pass "housekeeping clears an already-resumed watcher pause across both supervisors"
+}
+
+test_housekeeping_seeds_pause_marker_from_status() {
+  local dir state key win
+  dir=$(make_supercase seed-paused-status)
+  state="$dir/state"
+  win="sess:fm-held-w10-seed"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-seed.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-w10-seed.status"
+  key=$(printf '%s' "held-w10-seed" | tr '.:/' '___')
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "paused status did not seed daemon pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "paused status seeded wedge tracking"
+  pass "housekeeping seeds pause tracking from status without a watcher marker"
+}
+
+# housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
+# as an awaiting-external recheck (never a wedge), and RESETS the marker so the
+# window repeats rather than firing once.
+test_housekeeping_paused_resurfaces_and_resets() {
+  local dir state fakebin win pane key age
+  dir=$(make_supercase paused-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-w11.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w11" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "declared pause was not re-surfaced as an awaiting-external recheck"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "declared pause was mislabeled a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker cleared instead of reset for the next window"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "pause marker was not reset to now on re-surface (age ${age}s)"
+  pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
+}
+
+# A pause whose pane became busy again (the crew resumed) drops its marker without
+# escalating, exactly like a resumed wedge.
+test_housekeeping_paused_resumed_cleared() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase paused-resumed)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w12"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-w12.status"
+  printf 'Working...\n' > "$pane"
+  key=$(printf '%s' "held-w12" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] && fail "resumed (busy) pause marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a resumed pause was escalated"
+  pass "housekeeping clears a paused marker whose pane became busy again, without escalating"
+}
+
+# A pane still idle but whose status is no longer a pause (the crew changed state
+# without becoming busy) drops the marker - the signal path owns the new state, so
+# the pause recheck must not re-surface a stale pause reason.
+test_housekeeping_paused_unpaused_cleared() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase paused-unpaused)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w13"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream release\nworking: resumed, upstream landed\n' > "$state/held-w13.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w13" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] && fail "no-longer-paused marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a crew that left its pause was re-surfaced as a pause"
+  pass "housekeeping clears a paused marker once the crew is no longer declaring the pause"
+}
+
+test_housekeeping_stale_marker_transitions_to_pause() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-to-paused)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w14"; pane="$dir/pane.txt"
+  printf 'paused: awaiting the upstream tool release\n' > "$state/held-w14.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w14" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "existing stale marker did not move to paused state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "existing stale marker remained wedge-aged after pause"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a newly declared pause was escalated as a possible wedge"
+  pass "housekeeping moves an existing stale marker to pause before wedge escalation"
+}
+
+test_housekeeping_pause_marker_transitions_to_clear() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase paused-to-stale)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w15"; pane="$dir/pane.txt"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w15.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w15" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "pause marker remained after the crew resumed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "resume retained normal stale tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "resuming from pause escalated immediately"
+  pass "housekeeping clears tracking when a crew leaves pause"
 }
 
 test_housekeeping_persistent_stale_escalates() {
@@ -183,6 +448,8 @@ test_housekeeping_herdr_idle_busy_footer_clears_stale() {
       [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
       printf 'idle'
     }
+    fm_backend_capture herdr default:w1:p4 40 >/dev/null
+    [ "$(fm_backend_busy_state herdr default:w1:p4)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr idle busy-footer housekeeping failed"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle+busy-footer herdr stale marker was not cleared"
@@ -237,6 +504,8 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
       [ "$2" = "term-orca-w8" ] || fail "expected Orca busy target, got $2"
       printf 'idle'
     }
+    fm_backend_capture orca term-orca-w8 40 >/dev/null
+    [ "$(fm_backend_busy_state orca term-orca-w8)" = idle ] || fail "Orca busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "Orca persistent stale housekeeping failed"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent Orca stale was not escalated"
@@ -535,6 +804,61 @@ test_pane_input_pending_idle_prompt_not_pending() {
   pass "pane_input_pending: bare prompts are not pending (idle)"
 }
 
+# The safety fix at the tmux classifier (task fm-composer-shellglyph-safety): a
+# bare, unbordered shell prompt is a dead shell (the agent exited to its login
+# shell), NOT an empty agent composer. It must read `unknown` (unsafe target),
+# never `empty`. Before this fix a dead-shell pane read `empty` and the away-mode
+# injector could type (and a shell could execute) an escalation there.
+test_tmux_composer_state_bare_shell_is_unknown() {
+  local dir fakebin capture g out
+  dir=$(make_supercase composer-bare-shell)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  for g in '$' '%' '#' '>'; do
+    printf 'output\noutput\n%s \n' "$g" > "$capture"
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = unknown ] \
+      || fail "bare shell prompt '$g' must classify unknown (dead shell, unsafe), got '$out'"
+  done
+  pass "fm_tmux_composer_state: a bare shell prompt (\$/%/#/>) reads unknown, never empty (dead-shell injection safety)"
+}
+
+# The other side of the fix: a bordered composer box (the harness draws its own
+# prompt glyph inside it) and a bare AGENT prompt glyph (claude ❯, codex ›) are
+# genuine empty agent composers and must still read `empty`.
+test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
+  local dir fakebin capture out
+  dir=$(make_supercase composer-empty-agent)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '%s\n' "│ >                     │" > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bordered '│ > │' composer should read empty, got '$out'"
+  printf '%s\n' "❯ " > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bare claude '❯' composer should read empty, got '$out'"
+  printf '%s\n' "› " > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bare codex '›' composer should read empty, got '$out'"
+  pass "fm_tmux_composer_state: a bordered composer box and bare agent glyphs (❯/›) still read empty"
+}
+
+test_tmux_composer_state_requires_matching_box_borders() {
+  local dir fakebin capture line out
+  dir=$(make_supercase composer-decorated-shell)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  for line in '| $ ' '$ |' '│ % ' '# ┃'; do
+    printf '%s\n' "$line" > "$capture"
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" != empty ] \
+      || fail "a decorated shell prompt '$line' must not read as an empty composer"
+  done
+  pass "fm_tmux_composer_state: only matching edge borders form a composer box"
+}
+
 test_pane_input_pending_honors_idle_override_after_border_strip() {
   local dir state fakebin capture
   dir=$(make_supercase pending-custom-idle)
@@ -759,6 +1083,340 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
   pass "max-defer does not flush or alarm while afk is inactive"
 }
 
+# --- backend-independent active wedge alert ---------------------------------
+# These cover the 2026-07-10 overnight-incident fix: the max-defer wedge alarm's
+# ACTIVE alert channel must reach the captain even when the wedged pane and its
+# backend status-line are unreadable (a claude-on-herdr primary that night).
+#
+# NO test here EVER posts a real notification. Every notifier routes through
+# the FM_WEDGE_ALARM_EXEC seam, which tests/wake-helpers.sh forces to a recorder
+# ($FM_WEDGE_ALARM_LOG logs "<channel>\t<summary>"); the daemon also defaults
+# that seam to "discard" whenever it is sourced. Assertions read the recorder
+# log, so they verify channel SELECTION and summary propagation; the real
+# osascript/herdr argv is verified once by the bounded manual evidence in
+# docs/wedge-alarm.md, never from a suite.
+make_wedge_case() {  # <name> -> echoes dir; creates state/, fakebin/{uname,osascript,herdr}, alert.log
+  local name=$1 dir fakebin
+  dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/state" "$fakebin"
+  # Fake uname so `auto` platform resolution is deterministic on any CI host.
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_UNAME:-Darwin}"
+SH
+  # Fakes keep command discovery deterministic on any CI host.
+  cat > "$fakebin/osascript" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' osascript >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+exit 0
+SH
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
+  : > "$dir/alert.log"
+  printf '%s\n' "$dir"
+}
+
+test_wedge_alarm_library_mode_defaults_to_discard() {
+  # The structural guarantee: sourcing the daemon with NO seam configured defaults
+  # FM_WEDGE_ALARM_EXEC to "discard", so a sourced context (every test) cannot
+  # fire a real notification even if it forgets to stub. Checked in a clean
+  # subshell that first unsets this harness's recorder.
+  local out
+  # shellcheck disable=SC2016  # $1/$FM_WEDGE_ALARM_EXEC must expand in the child, not here
+  out=$(env -u FM_WEDGE_ALARM_EXEC bash -c '. "$1"; printf "%s" "${FM_WEDGE_ALARM_EXEC:-UNSET}"' _ "$DAEMON")
+  [ "$out" = discard ] \
+    || fail "sourcing the daemon did not default the notifier seam to discard (got: $out)"
+  pass "library mode: sourcing the daemon defaults FM_WEDGE_ALARM_EXEC to discard (no test can fire a real notification)"
+}
+
+test_wake_helpers_replace_inherited_notifier_override() {
+  local dir unsafe_log alert_log unsafe
+  dir=$(make_wedge_case wedge-inherited-override)
+  unsafe_log="$dir/unsafe.log"
+  alert_log="$dir/alert.log"
+  unsafe="$dir/unsafe-override"
+  cat > "$unsafe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' invoked >> "${FM_WEDGE_ALARM_UNSAFE_LOG:?}"
+SH
+  chmod +x "$unsafe"
+  FM_WEDGE_ALARM_EXEC="$unsafe" FM_WEDGE_ALARM_UNSAFE_LOG="$unsafe_log" \
+    FM_WEDGE_ALARM_LOG="$alert_log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    bash -c '. "$1"; . "$2"; wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"' \
+      _ "$ROOT/tests/wake-helpers.sh" "$DAEMON"
+  [ ! -s "$unsafe_log" ] || fail "wake helpers preserved an inherited notifier override"
+  grep -F 'osascript' "$alert_log" >/dev/null \
+    || fail "wake helpers did not install the safe notifier recorder"
+  pass "wake helpers replace inherited notifier overrides with the safe recorder"
+}
+
+test_wedge_alarm_discard_seam_fires_nothing() {
+  local dir log command_output channel
+  dir=$(make_wedge_case wedge-discard); log="$dir/alert.log"
+  command_output="$dir/command-output"
+  channel="command: printf '%s' \"\$1\" > '$command_output'"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_EXEC=discard \
+    FM_WEDGE_ALARM_CHANNEL=$'osascript\nherdr\n'"$channel" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ ! -s "$log" ] || fail "the discard seam still fired a notifier: $(cat "$log")"
+  [ ! -e "$command_output" ] || fail "the discard seam still fired a command: notifier"
+  pass "the discard seam suppresses every notifier, including command: (fires nothing)"
+}
+
+test_wedge_alarm_direct_notifiers_honor_discard_seam() {
+  local dir real_log command_output command
+  dir=$(make_wedge_case wedge-direct-discard); real_log="$dir/real.log"
+  command_output="$dir/command-output"
+  command="printf '%s' \"\$1\" > '$command_output'"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_REAL_LOG="$real_log" FM_WEDGE_ALARM_EXEC=discard \
+    wedge_alarm_via_osascript "away-mode WEDGED 900s"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_REAL_LOG="$real_log" FM_WEDGE_ALARM_EXEC=discard \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  FM_WEDGE_ALARM_EXEC=discard wedge_alarm_via_command "$command" "away-mode WEDGED 900s"
+  [ ! -s "$real_log" ] || fail "direct notifier helpers bypassed the discard seam: $(cat "$real_log")"
+  [ ! -e "$command_output" ] || fail "direct command helper bypassed the discard seam"
+  pass "direct notifier helpers honor the discard seam, including command:"
+}
+
+test_wedge_alarm_osascript_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-osascript); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    wedge_alarm_notify "away-mode escalations WEDGED 600s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "osascript channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 600s undelivered' "$log" >/dev/null || fail "osascript channel did not carry the summary"
+  grep -F 'herdr' "$log" >/dev/null && fail "osascript-only config also selected herdr"
+  pass "osascript channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+test_wedge_alarm_herdr_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-herdr); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=herdr \
+    wedge_alarm_notify "away-mode escalations WEDGED 800s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'herdr' "$log" >/dev/null || fail "herdr channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
+  pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+test_wedge_alarm_command_channel_receives_summary() {
+  local dir out_argv out_stdin chan
+  dir=$(make_wedge_case wedge-command)
+  out_argv="$dir/argv.txt"; out_stdin="$dir/stdin.txt"
+  chan="command: printf '%s' \"\$1\" > '$out_argv'; cat > '$out_stdin'"
+  FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="$chan" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ "$(cat "$out_argv" 2>/dev/null)" = "away-mode WEDGED 900s" ] || fail "command channel did not receive the summary on \$1"
+  grep -F 'away-mode WEDGED 900s' "$out_stdin" >/dev/null || fail "command channel did not receive the summary on stdin"
+  pass "command channel runs the captain command with the summary on \$1 and on stdin"
+}
+
+test_wedge_alarm_command_failure_hides_configured_command() {
+  local dir daemon_log secret rc
+  dir=$(make_wedge_case wedge-command-redaction); daemon_log="$dir/daemon.log"
+  secret="https://alerts.example.invalid/hook?token=private-wedge-token"
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="command:exit 73 # $secret" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a failed command channel made wedge_alarm_notify return non-zero ($rc)"
+  grep -F 'command channel exited 73 (command redacted)' "$daemon_log" >/dev/null \
+    || fail "command channel failure did not log its exit status: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F "$secret" "$daemon_log" >/dev/null \
+    && fail "command channel failure leaked its configured command: $(cat "$daemon_log")"
+  pass "command channel failures redact configured commands while logging their exit status"
+}
+
+test_wedge_alarm_unknown_channel_hides_configured_directive() {
+  local dir daemon_log secret rc
+  dir=$(make_wedge_case wedge-unknown-redaction); daemon_log="$dir/daemon.log"
+  secret="https://alerts.example.invalid/hook?token=private-wedge-token"
+  LOG="$daemon_log" FM_WEDGE_ALARM_CHANNEL="webhook:$secret" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an unknown channel made wedge_alarm_notify return non-zero ($rc)"
+  grep -F 'unrecognized active-alert channel directive (redacted); marker still written' "$daemon_log" >/dev/null \
+    || fail "an unknown channel did not log the redacted directive category: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F "$secret" "$daemon_log" >/dev/null \
+    && fail "an unknown channel leaked its configured directive: $(cat "$daemon_log")"
+  pass "unknown channel directives are redacted while the alarm keeps running"
+}
+
+test_wedge_alarm_off_disables_active_alert_regardless_of_position() {
+  local dir log directives
+  dir=$(make_wedge_case wedge-off); log="$dir/alert.log"
+  for directives in $'osascript\noff' $'off\nosascript'; do
+    : > "$log"
+    FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL="$directives" \
+      wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+    [ ! -s "$log" ] || fail "off did not disable a preceding or following active alert: $(cat "$log")"
+  done
+  pass "off disables every active alert regardless of directive position (marker and tmux flash are unaffected)"
+}
+
+test_wedge_alarm_auto_darwin_selects_osascript() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-darwin); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "auto did not resolve to osascript on Darwin: $(cat "$log")"
+  pass "auto resolves to the macOS osascript notifier on Darwin (default-on)"
+}
+
+test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
+  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+}
+
+test_wedge_alarm_config_file_multi_channel() {
+  local dir cfgdir log
+  dir=$(make_wedge_case wedge-config); log="$dir/alert.log"
+  cfgdir="$dir/config"; mkdir -p "$cfgdir"
+  printf '# active alert channels\n\nosascript\nherdr\n' > "$cfgdir/wedge-alarm"
+  FM_WEDGE_ALARM_LOG="$log" FM_CONFIG_OVERRIDE="$cfgdir" \
+    wedge_alarm_notify "away-mode WEDGED 700s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "config/wedge-alarm osascript line was not selected"
+  grep -F 'herdr' "$log" >/dev/null || fail "config/wedge-alarm herdr line was not selected"
+  pass "config/wedge-alarm selects every configured channel and skips comment and blank lines"
+}
+
+test_wedge_alarm_failing_channel_degrades_gracefully() {
+  local dir log rc
+  dir=$(make_wedge_case wedge-degrade); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_FAIL=osascript \
+    FM_WEDGE_ALARM_CHANNEL=$'osascript\nherdr' \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a failing channel made wedge_alarm_notify return non-zero ($rc)"
+  grep -F 'osascript' "$log" >/dev/null || fail "the failing osascript channel was not even attempted"
+  grep -F 'herdr' "$log" >/dev/null || fail "a failing earlier channel prevented the herdr channel from firing"
+  pass "a failing channel logs and falls back to the next channel, never crashing the alarm"
+}
+
+test_wedge_alarm_hung_channel_times_out_and_falls_through() {
+  local dir daemon_log output channel start elapsed
+  dir=$(make_wedge_case wedge-timeout); daemon_log="$dir/daemon.log"; output="$dir/fallback-output"
+  channel="command: printf '%s' \"\$1\" > '$output'"
+  start=$SECONDS
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_TIMEOUT_SECS=1 \
+    FM_WEDGE_ALARM_CHANNEL=$'command:sleep 30\n'"$channel" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -lt 5 ] || fail "a hung wedge notifier blocked the alarm for ${elapsed}s"
+  grep -F 'command notifier timed out' "$daemon_log" >/dev/null \
+    || fail "a hung wedge notifier did not log its timeout: $(cat "$daemon_log" 2>/dev/null)"
+  [ "$(cat "$output" 2>/dev/null)" = "away-mode WEDGED 900s" ] \
+    || fail "a timed-out command notifier prevented the next channel"
+  pass "a hung notifier is bounded, logged, and falls through to the next channel"
+}
+
+test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant() {
+  local dir daemon_log child_file child command
+  dir=$(make_wedge_case wedge-backgrounded-timeout)
+  daemon_log="$dir/daemon.log"
+  child_file="$dir/notifier-child"
+  command="sleep 30 & printf '%s' \"\$!\" > '$child_file'"
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_TIMEOUT_SECS=1 \
+    wedge_alarm_via_command "$command" "away-mode WEDGED 900s"
+  [ -s "$child_file" ] || fail "the backgrounded notifier did not record its descendant"
+  child=$(cat "$child_file")
+  grep -F 'command notifier timed out' "$daemon_log" >/dev/null \
+    || fail "a backgrounded command notifier bypassed its timeout: $(cat "$daemon_log" 2>/dev/null)"
+  if is_live_non_zombie "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+    fail "a timed-out command notifier left its descendant running (pid $child)"
+  fi
+  pass "a backgrounded command notifier remains bounded until its process group is reaped"
+}
+
+test_wedge_alarm_hung_override_times_out_and_falls_through() {
+  local dir blocker daemon_log start elapsed
+  dir=$(make_wedge_case wedge-override-timeout)
+  blocker="$dir/blocker"; daemon_log="$dir/daemon.log"
+  cat > "$blocker" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$blocker"
+  start=$SECONDS
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC="$blocker" FM_WEDGE_ALARM_TIMEOUT_SECS=1 \
+    FM_WEDGE_ALARM_CHANNEL=$'osascript\nherdr' \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -lt 6 ] || fail "a hung wedge notifier override blocked the alarm for ${elapsed}s"
+  grep -F 'osascript notifier timed out' "$daemon_log" >/dev/null \
+    || fail "a hung notifier override did not log its timeout: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'herdr notifier timed out' "$daemon_log" >/dev/null \
+    || fail "a hung notifier override prevented the next channel: $(cat "$daemon_log" 2>/dev/null)"
+  pass "a hung notifier override is bounded, logged, and proceeds to the next channel"
+}
+
+test_wedge_alarm_shutdown_stops_active_notifier_group() {
+  local dir child_file pid child
+  dir=$(make_wedge_case wedge-shutdown)
+  child_file="$dir/notifier-child"
+  (
+    set -m
+    sh -c 'sleep 30 & printf "%s" "$!" > "$1"; wait' sh "$child_file" &
+    pid=$!
+    while [ ! -s "$child_file" ]; do sleep 0.05; done
+    child=$(cat "$child_file")
+    WEDGE_ALARM_NOTIFIER_PID=$pid
+    wedge_alarm_stop_active_notifier
+    if kill -0 "$child" 2>/dev/null; then
+      fail "shutdown left a notifier descendant running (pid $child)"
+    fi
+  ) || fail "notifier shutdown cleanup helper failed"
+  pass "daemon shutdown stops and reaps the active notifier process group"
+}
+
+test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
+  # The whole incident: a non-tmux (herdr) primary gets NO tmux status-line
+  # flash, so inject_wedge_alarm must still emit the backend-independent alert
+  # alongside the durable marker.
+  local dir state log
+  dir=$(make_wedge_case wedge-integration); state="$dir/state"; log="$dir/alert.log"
+  escalate_add "$state" "needs-decision: pick A"
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_WEDGE_ALARM_LOG="$log" FM_STATE_OVERRIDE="$state" \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 30600
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "inject_wedge_alarm did not write the durable marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "inject_wedge_alarm did not emit the active alert on a non-tmux backend: $(cat "$log")"
+  grep -F 'WEDGED 30600s' "$log" >/dev/null || fail "active alert missing the age and summary"
+  pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
+}
+
+test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
+  local dir state log daemon_log alerts errors
+  dir=$(make_wedge_case wedge-unwritable-marker)
+  state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
+  escalate_add "$state" "needs-decision: pick A"
+  chmod u-w "$state"
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 30600
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 30615
+  chmod u+w "$state"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker unexpectedly persisted in an unwritable state directory"
+  alerts=$(grep -c 'osascript' "$log" 2>/dev/null || true)
+  [ "$alerts" -eq 1 ] || fail "unwritable marker emitted $alerts active alerts instead of one"
+  errors=$(grep -c 'ERROR: away-mode escalation undelivered' "$daemon_log" 2>/dev/null || true)
+  [ "$errors" -eq 1 ] || fail "unwritable marker logged $errors wedge errors instead of one"
+  pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
+}
+
 test_fm_send_exits_nonzero_on_confirmed_swallow() {
   # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
   # (text left in the composer), so firstmate learns the instruction did not land
@@ -767,13 +1425,13 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
   dir=$(make_bordered_case send-swallow)
   fakebin="$dir/fakebin"; err="$dir/send.err"
   # Clean submit -> exit 0.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
   # Persistent swallow -> exit non-zero with a clear message.
   printf '│ > │\n' > "$dir/composer"
   touch "$dir/.swallow"
-  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:win 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
     fail "fm-send exited zero despite a swallowed Enter (silent unsubmitted instruction)"
@@ -786,7 +1444,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   local dir fakebin err
   dir=$(make_bordered_case send-type-failure)
   fakebin="$dir/fakebin"; err="$dir/send.err"
-  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err"; then
     fail "fm-send exited zero despite initial tmux send-keys failure"
@@ -968,14 +1626,52 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+# Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
+# must NEVER type an escalation into a dead-shell pane. A bare shell prompt
+# classifies `unknown` (not `pending`), and inject_msg now defers on anything
+# that is not affirmatively `empty`, so a dead shell (or an unreadable pane) can
+# never be mistaken for a safe empty agent composer and typed into.
+test_inject_msg_defers_on_dead_shell_unknown() {
+  local dir state
+  dir=$(make_supercase inject-dead-shell)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf '$ \n'; }
+    fm_backend_composer_state() { printf 'unknown'; }
+    fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer (never inject) when the composer reads unknown (dead shell / unreadable)"
+    fi
+  ) || fail "dead-shell inject_msg subshell failed"
+  pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
+}
+
+test_afk_start_refuses_when_flag_cannot_be_written
+test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
+test_stale_paused_classifies_pause
+test_handle_wake_paused_records_pause_marker
+test_handle_wake_paused_signal_records_pause_marker
+test_handle_wake_terminal_signal_clears_pause_tracking
+test_housekeeping_migrates_watcher_pause_marker
+test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_paused_resumed_cleared
+test_housekeeping_paused_unpaused_cleared
+test_housekeeping_stale_marker_transitions_to_pause
+test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_footer_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
@@ -998,6 +1694,9 @@ test_strip_injection_marker
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
+test_tmux_composer_state_bare_shell_is_unknown
+test_tmux_composer_state_bordered_and_agent_rows_are_empty
+test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
@@ -1011,6 +1710,26 @@ test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
+test_wedge_alarm_library_mode_defaults_to_discard
+test_wake_helpers_replace_inherited_notifier_override
+test_wedge_alarm_discard_seam_fires_nothing
+test_wedge_alarm_direct_notifiers_honor_discard_seam
+test_wedge_alarm_osascript_channel_selected
+test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_command_channel_receives_summary
+test_wedge_alarm_command_failure_hides_configured_command
+test_wedge_alarm_unknown_channel_hides_configured_directive
+test_wedge_alarm_off_disables_active_alert_regardless_of_position
+test_wedge_alarm_auto_darwin_selects_osascript
+test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_config_file_multi_channel
+test_wedge_alarm_failing_channel_degrades_gracefully
+test_wedge_alarm_hung_channel_times_out_and_falls_through
+test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
+test_wedge_alarm_hung_override_times_out_and_falls_through
+test_wedge_alarm_shutdown_stops_active_notifier_group
+test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_discover_supervisor_backend_precedence
@@ -1024,3 +1743,4 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_defers_on_dead_shell_unknown

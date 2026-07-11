@@ -10,12 +10,17 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
-# Every secondmate home is a worktree of this same repo, so it already holds the
-# primary's commit in the shared object store; the local-HEAD sync is therefore a
-# purely local fast-forward that never touches the network. A tracked-files
-# fast-forward never touches the gitignored operational dirs (data/, state/,
-# config/, projects/, .no-mistakes/), so a secondmate's backlog, projects, and
-# in-flight work are never disturbed. Homes are leased at a detached HEAD on the
+# A linked-worktree secondmate home already holds the primary's commit in the
+# shared object store, so its local-HEAD sync is a purely local fast-forward that
+# never touches the network. A standalone clone moves through that path only when
+# it already has the target; otherwise it is skipped until the origin path updates it.
+# A tracked-files fast-forward never touches the gitignored operational dirs
+# (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
+# secondmate's backlog, projects, or in-flight work.
+# The seeded .fm-secondmate-home identity marker is gitignored too; the local
+# sync tolerates only that marker during the one-time upgrade of pre-ignore
+# linked-worktree homes.
+# Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
 
@@ -372,8 +377,9 @@ ff_target() {
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 
-# Validate and fast-forward one secondmate home, accumulating its window into
-# FF_NUDGE_WINDOWS when it should be live-converged. Args:
+# Validate and fast-forward one secondmate home, accumulating its stable
+# fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
+# Args:
 #   id home window base_mode nudge_requires_instr
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
@@ -403,7 +409,7 @@ process_secondmate() {
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
     fi
-    FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
+    FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
   fi
 }
 

@@ -22,7 +22,7 @@
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
-# selector that is neither "session:window" nor a bare "fm-<id>" routed
+# selector that is neither an explicit target nor a task selector routed
 # through meta - an ad hoc window name with no recorded task. Mirrors the
 # `tmux list-windows -a ... | grep` pipeline that used to live inline in
 # fm-send.sh's and fm-peek.sh's own (until now duplicated) resolve().
@@ -39,8 +39,10 @@ fm_backend_tmux_capture() {  # <target> <lines>
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
+# `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
 fm_backend_tmux_send_key() {  # <target> <key>
+  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
   tmux send-keys -t "$1" "$2"
 }
 
@@ -68,14 +70,28 @@ fm_backend_tmux_container_ensure() {
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
-# (session:window, matching how fm-spawn.sh composed its own $T).
-fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
-  local ses=$1 wname=$2 proj_abs=$3
+# (session:window, matching how fm-spawn.sh composed its own $T). Prints the
+# created window's stable window id on stdout for the caller to target.
+#
+# Robustness (fm-spawn tmux window handling under a non-default captain config):
+#   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
+#     at the next free index by targeting the session with a trailing colon
+#     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
+#   - PIN the window name by disabling automatic-rename and allow-rename on the
+#     new window: the captain's tmux may rename the window away from fm-<id> once
+#     treehouse cd's into the worktree, which would break name-based targeting.
+# The returned window id lets callers target the window even if its name is ever
+# lost, so worktree discovery cannot fall back to the active client's window.
+fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
+  local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf '%s\n' "$wid"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or
@@ -105,4 +121,47 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
 fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "$1" 2>/dev/null || true
+}
+
+# fm_backend_tmux_current_command: <target>'s live foreground process name -
+# tmux's own `#{pane_current_command}`, already resolved from the pty's
+# foreground process group (verified empirically with real tmux 3.6a: a
+# harness invoked interactively stays the reported command even while it
+# shells out to subcommands that do not take over the pty - e.g. `bash -c
+# "sleep 30"` alone reports "sleep" because bash execs directly into it, but
+# a persisting parent script running `sleep` as a child reports the PARENT's
+# own name throughout; the value reverts to the shell's own name only once
+# the foreground command actually exits). Empty on any tmux error.
+fm_backend_tmux_current_command() {  # <target>
+  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
+}
+
+# fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
+# PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
+# pane-PRESENCE-only check (a pane that still exists but is sitting at a bare
+# idle shell passes THAT check as "alive" - the secondmate-liveness gap
+# AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
+# "Agent liveness probe" for the empirical basis. Prints one of:
+#   alive   - the foreground command is one of the verified harness binaries
+#             (claude, codex, opencode, grok - each confirmed to run as its
+#             own process name, never wrapped by a generic interpreter).
+#   dead    - the foreground command is a bare shell: nothing is running in
+#             the pane, so a prior agent process has exited.
+#   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
+#             name (pi's own launcher execs into a generic "node" process
+#             with no reliable way to attribute it back to pi from outside
+#             the pane - docs/tmux-backend.md "Known gaps"), or an unreadable
+#             pane. Callers must never treat unknown as a confirmed-dead
+#             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
+#             respawn on `dead` only).
+fm_backend_tmux_agent_alive() {  # <target>
+  local target=$1 comm
+  comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
+  comm=${comm#-}
+  case "$comm" in
+    '') printf 'unknown' ;;
+    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
 }

@@ -83,8 +83,8 @@
 #     target. Mitigated: send/capture/cwd ops verify session liveness first
 #     (fm_backend_zellij_session_exists, a passive list-sessions query, never
 #     auto-creating), verify the specific pane still appears in list-panes JSON,
-#     and, for metadata-routed fm-<id> operations, verify the pane's tab still
-#     matches the expected caller-facing task label through the home-scoped or
+#     and, for metadata-routed task selector operations, verify the pane's tab
+#     still matches the expected caller-facing task label through the home-scoped or
 #     unambiguous legacy title before use. Kill verifies the session and, when
 #     teardown supplies an expected tab label, verifies a tab id still matches
 #     that label before closing it. Output-SHAPE validation (a bare integer tab
@@ -491,8 +491,9 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until the pane visibly changes. Unlike herdr's
-# current structural composer-row verifier, zellij still uses a content-diff
-# strategy because its CLI has no cursor-row/ANSI capture primitive exposed:
+# current native agent-state idle-baseline verifier and composer-state
+# fallback, zellij still uses a content-diff strategy because its CLI has no
+# cursor-row/ANSI capture primitive exposed:
 # capture the pane right after typing (before any Enter) as the TYPED baseline,
 # then after each Enter attempt capture again - unchanged means Enter was
 # swallowed (retry); changed means submitted. This content-diff approach is
@@ -594,8 +595,8 @@ fm_backend_zellij_list_live() {  # <session>
 # posture. Rare path in practice (zellij tasks normally carry meta);
 # best-effort. Not wired into fm_backend_resolve_selector's dispatcher
 # (bin/fm-backend.sh), mirroring herdr: that bare-selector fallback stays
-# tmux-only by design, and zellij/herdr tasks are targeted via fm-<id> meta or
-# an explicit recorded target.
+# tmux-only by design, and zellij/herdr tasks are targeted via task-selector
+# meta or an explicit recorded target.
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")

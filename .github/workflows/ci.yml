@@ -35,6 +35,11 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Install tasks-axi for backlog-handoff delegation
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do

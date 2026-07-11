@@ -12,8 +12,12 @@
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
-      "use": { "harness": "codex", "model": "gpt-5.5", "effort": "high" },
-      "why": "Use a stronger coding profile for broad design and implementation work."
+      "use": [
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+      ],
+      "select": "quota-balanced",
+      "why": "Use a strong coding profile for broad design and implementation work."
     }
   ],
   "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }

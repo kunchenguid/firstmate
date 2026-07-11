@@ -17,7 +17,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its three mutating
+# bootstrap running its detect-only diagnostics without its four mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -26,10 +26,10 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - detect-only diagnostics always run. The three
-#                       MUTATING sweeps (secondmate fast-forward, X-mode
-#                       artifact writes, fleet sync) run only when this
-#                       session actually holds the lock.
+#   2. bootstrap      - detect-only diagnostics always run. The four
+#                       MUTATING sweeps (secondmate fast-forward, secondmate
+#                       liveness, X-mode artifact writes, fleet sync) run only
+#                       when this session actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -38,7 +38,12 @@
 #                       state/*.status tail, state/.afk, and a cheap
 #                       per-task endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
-#                       script deliberately never arms the watcher itself.
+#                       script points back to the emitted harness supervision
+#                       block and deliberately never arms the watcher itself.
+#
+# On a Pi primary, the supervision-block step also checks whether Pi's two
+# tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
+# reminder line when one is missing.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
@@ -52,9 +57,11 @@
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
 # mode) for its read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
-# tasks-axi availability - none of which mutate shared state and all of which
-# are safe to compute from a second session. Only the three mutating sweeps
-# and the wake-queue drain are skipped. The context and fleet-state digests
+# tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
+# which mutate shared state and all of which are safe to compute from a second
+# session.
+# Only the four mutating sweeps and the wake-queue drain are skipped.
+# The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
 # Usage: fm-session-start.sh
@@ -70,6 +77,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -107,6 +115,28 @@ print_status_tail() {
   local status=$1
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
   tail -n "$STATUS_TAIL" "$status"
+}
+
+hash_file() {
+  local file=$1
+  [ -f "$file" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print "sha256:" $1}'
+  else
+    cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
+  fi
+}
+
+pi_extension_loaded() {
+  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
+  marker_version=$(sed -n '1p' "$marker")
+  marker_pid=$(sed -n '2p' "$marker")
+  lock_pid=$(sed -n '1p' "$lock")
+  [ -n "$marker_pid" ] || return 1
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
 section "SESSION START - $FM_HOME"
@@ -170,6 +200,31 @@ else
   fi
 fi
 
+# --- 4. supervision operating instructions ----------------------------------
+AFK_PRESENT=0
+[ -e "$STATE/.afk" ] && AFK_PRESENT=1
+X_MODE_PRESENT=0
+[ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+
+if [ "$PRIMARY_HARNESS" = pi ]; then
+  PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+  PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  PI_WATCH_MARKER="$STATE/.pi-watch-extension-loaded"
+  PI_TURNEND_MARKER="$STATE/.pi-turnend-extension-loaded"
+  PI_LOCK="$STATE/.lock"
+  PI_WATCH_VERSION=$(hash_file "$PI_EXT" || printf '')
+  PI_TURNEND_VERSION=$(hash_file "$PI_TURNEND_EXT" || printf '')
+  if ! pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
+    || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
+    printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart plain pi so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+fi
+"$SCRIPT_DIR/fm-supervision-instructions.sh" \
+  --harness "$PRIMARY_HARNESS" \
+  --read-only "$READ_ONLY" \
+  --afk "$AFK_PRESENT" \
+  --x-mode "$X_MODE_PRESENT"
+
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
@@ -225,9 +280,7 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-AFK_PRESENT=0
 if [ -e "$STATE/.afk" ]; then
-  AFK_PRESENT=1
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
@@ -244,27 +297,22 @@ holding the lock owns mutable follow-up.
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
-Away mode is active. Do not arm the normal watcher directly; load /afk and
-ensure the daemon is running, because the daemon owns watcher supervision.
+Away mode is active. Follow the supervision operating instructions block above:
+load /afk and ensure the daemon is running, because the daemon owns watcher
+supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
   cat <<EOF
-Arm the watcher yourself as your harness's own tracked background task with
-the X-mode cadence sourced first - this script never arms it itself.
-
-  [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
-  bin/fm-watch-arm.sh
+Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+X mode is active, so the emitted block's cadence instruction applies.
+This script never starts supervision itself.
 
 EOF
 else
-cat <<'EOF'
-Arm the watcher yourself as your harness's own tracked background task - this
-script never does, and never should: a fire-and-forget arm from inside a
-script that then exits would be reaped immediately, silently dropping
-supervision (AGENTS.md section 8).
-
-  bin/fm-watch-arm.sh
+cat <<EOF
+Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+This script never starts supervision itself.
 
 EOF
 fi

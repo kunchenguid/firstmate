@@ -24,7 +24,7 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
-#   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
+#   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
 # Usage: fm-update.sh [--help]
 set -eu

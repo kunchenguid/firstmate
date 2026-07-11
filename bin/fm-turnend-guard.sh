@@ -1,47 +1,49 @@
 #!/usr/bin/env bash
-# Claude Code "Stop" hook for the firstmate PRIMARY session only.
+# Primary turn-end guard for the firstmate PRIMARY session only.
 #
 # fm-guard.sh (bin/fm-guard.sh) is pull-based: it only warns when some other
 # supervision script happens to run. A primary session that ends a turn without
-# re-arming the watcher, and then never runs another fleet-touching command
-# itself, can sit blind for hours - see docs/turnend-guard.md for the 2026-07-04
-# incident this backstops (a parked no-mistakes gate sat unwatched all night).
-# This hook is push-based: Claude Code invokes it every time the primary is
-# about to end a turn, and it can force the turn to continue instead by exiting
-# 2 with a reason on stderr. That mechanism, the stdin payload schema, and the
-# stop_hook_active loop-guard field are all verified empirically - see
-# docs/turnend-guard.md.
-# The tracked settings command invokes this script as
-# "$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh because Claude Code runs hook
-# commands via /bin/sh from the session's current cwd, not necessarily the repo
-# root.
+# resuming its harness supervision protocol, and then never runs another
+# fleet-touching command itself, can sit blind for hours.
+# This script is push-based: verified harness turn-end hooks invoke it every time
+# the primary is about to end a turn.
+# Claude and codex can block directly by preserving exit status 2 and stderr.
+# OpenCode, pi, and grok adapters use the same predicate and force one bounded
+# follow-up because their turn-end events are passive.
+# See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
+# and fail-open tradeoffs.
 #
-# Ships as the TRACKED .claude/settings.json at the repo root, so this file is
+# Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, any
 # crewmate/scout task worktree spawned to work on firstmate itself (the
 # recursive "firstmate improving itself" case), and every secondmate home
 # (treehouse-leased or git-cloned). It must therefore scope itself to the
 # PRIMARY at runtime and stay a silent, fast no-op everywhere else.
 #
-# Loop-guard: never block twice in the same turn. Claude Code's stdin payload
-# carries stop_hook_active=true when the CURRENT stop attempt was itself already
-# forced by an earlier block this turn; on that signal we always allow the stop,
-# whether or not the watcher actually got re-armed. That bounds this to at most
-# one forced continuation per turn - never a wedged, un-endable session - while
-# still nagging again on a later turn if the problem persists.
+# Loop-guard: never block twice in the same turn. Claude Code and codex Stop
+# payloads carry stop_hook_active=true when the CURRENT stop attempt was itself
+# already forced by an earlier block this turn; on that signal we always allow
+# the stop, whether or not watcher supervision actually got resumed. Passive
+# harness adapters provide their own one-follow-up guard before calling this
+# script.
+# That bounds this to at most one forced continuation per turn - never a wedged,
+# un-endable session - while still nagging again on a later turn if the problem
+# persists.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
-# Read the whole Stop hook payload once; never block on unreadable/absent stdin.
+# Read the whole turn-end hook payload once; never block on unreadable/absent
+# stdin.
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
@@ -78,7 +80,12 @@ fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
-REASON='tasks in flight, no live watcher - run bin/fm-watch-arm.sh as a background task before ending the turn'
+afk=0
+[ -e "$STATE/.afk" ] && afk=1
+x_mode=0
+[ -f "$CONFIG/x-mode.env" ] && x_mode=1
+REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"

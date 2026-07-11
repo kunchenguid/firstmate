@@ -2,7 +2,7 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/failed)
+# Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -51,6 +51,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -111,9 +113,17 @@ log_note_of() {  # <line>
     *)   printf '%s' "$1" ;;
   esac
 }
-# Map a status-log verb onto a canonical state for the fallback path.
-map_log_state() {  # <verb>
-  case "$1" in
+# Map a status-log verb onto a canonical state for the fallback path. `paused` is
+# the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
+# a crew with no active run and an idle pane that declared a known external wait
+# reports `paused` distinctly, so a supervisor reading this sees a declared pause
+# and its reason rather than a wedge-suspect idle.
+map_log_state() {  # <line>
+  if status_is_paused "$1"; then
+    echo paused
+    return
+  fi
+  case "$(log_verb_of "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
@@ -557,7 +567,7 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
 fi
 
 if [ -n "$LOG_VERB" ]; then
-  emit "$(map_log_state "$LOG_VERB")" status-log "$(log_note_of "$LOG_LINE")"
+  emit "$(map_log_state "$LOG_LINE")" status-log "$(log_note_of "$LOG_LINE")"
 fi
 
 emit unknown none "no current-state source available"
