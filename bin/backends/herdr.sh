@@ -1464,7 +1464,7 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # is '^(❯|›)'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
