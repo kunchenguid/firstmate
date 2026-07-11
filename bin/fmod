@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""fmod - firstmate orca daemon client.
+
+Talks directly to the orca terminal daemon over its NDJSON-on-Unix-socket
+protocol so firstmate can manage crewmate terminals through the daemon
+while the orca GUI is running. Avoids the orca CLI, which cannot run when
+the GUI holds the single-instance lock.
+
+Protocol: see /home/jd/Desktop/orca/src/main/daemon/types.ts and
+daemon-server.ts. We open TWO sockets per invocation: a control socket
+for RPC, and a stream socket for server-pushed events. The hello handshake
+is the same on both, with role=control / role=stream.
+
+Each fmod invocation is short-lived: connect, hello, do one or more RPCs,
+disconnect. The stream socket is opened so the daemon accepts the
+control socket (per daemon-server.ts:177-186), but is unused unless the
+caller asks to subscribe to events.
+
+Subcommands (stable contract; bin/backends/orca.sh relies on these):
+  info                                Show socket/token/pid paths and liveness
+  ping                                Send `ping`, expect `{pong: true}`
+  list                                Send `listSessions`, print JSON array
+  create <session-id>                 createOrAttach; prints {isNew, pid, shellState}
+        [--cwd PATH]
+        [--command CMD]
+        [--cols N] [--rows N]
+        [--shell-ready]               set shellReadySupported: true
+        [--shell-ready-timeout MS]
+  write <session-id>                  fire-and-forget write
+        --data STR | --hex HEX | --stdin
+  resize <session-id>                 fire-and-forget resize
+        --cols N --rows N
+  snapshot <session-id>               getSnapshot; prints snapshotAnsi to stdout
+        [--strip-ansi]                strip ANSI escapes before printing
+        [--lines N]                   truncate to last N non-empty lines
+  get-cwd <session-id>                getCwd; prints cwd string
+  get-foreground <session-id>         getForegroundProcess; prints string
+  kill <session-id>                   kill session (graceful)
+        [--immediate]                 kill immediate
+
+Exit codes:
+  0  success
+  1  usage error (bad args, missing fields)
+  2  daemon hello rejected (bad token / wrong version / bad socket)
+  3  RPC returned ok:false (daemon-side error)
+  4  RPC timed out
+  5  socket / connection error
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import sys
+import time
+import uuid
+from typing import Any, Iterable, Optional
+
+
+PROTOCOL_VERSION = 18
+HELLO_TIMEOUT_S = 5.0
+RPC_TIMEOUT_S = 30.0
+SOCKET_CHMOD = 0o600
+
+# ANSI strip: ESC [ ... <final-byte> sequences (CSI). Same shape awk would.
+# Used only for `snapshot --strip-ansi`. Box-drawing / line drawing glyphs
+# pass through untouched.
+ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def daemon_paths() -> tuple[str, str, Optional[str]]:
+    """Resolve socket path, token path, and pid path from env or defaults."""
+    sock = os.environ.get("FMOD_SOCKET", "/home/jd/.config/orca/daemon/daemon-v18.sock")
+    token = os.environ.get("FMOD_TOKEN", "/home/jd/.config/orca/daemon/daemon-v18.token")
+    pidfile = os.environ.get("FMOD_PIDFILE", "/home/jd/.config/orca/daemon/daemon-v18.pid")
+    return sock, token, pidfile
+
+
+def read_token(token_path: str) -> str:
+    with open(token_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _connect(sock_path: str, timeout: float) -> socket.socket:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(sock_path)
+    except OSError as e:
+        raise DaemonConnError(f"connect to {sock_path} failed: {e}") from e
+    return s
+
+
+class DaemonConnError(RuntimeError):
+    pass
+
+
+class DaemonHelloError(RuntimeError):
+    pass
+
+
+class DaemonRpcError(RuntimeError):
+    def __init__(self, message: str, error: Optional[str] = None):
+        super().__init__(message)
+        self.error = error
+
+
+class DaemonRpcTimeout(RuntimeError):
+    pass
+
+
+class DaemonClient:
+    """A short-lived control+stream pair to the orca daemon."""
+
+    def __init__(self, sock_path: Optional[str] = None, token_path: Optional[str] = None):
+        self.sock_path = sock_path or daemon_paths()[0]
+        self.token_path = token_path or daemon_paths()[1]
+        self.client_id = str(uuid.uuid4())
+        self._ctrl: Optional[socket.socket] = None
+        self._ctrl_buf = b""
+        self._stream: Optional[socket.socket] = None
+        self._stream_buf = b""
+
+    def __enter__(self) -> "DaemonClient":
+        self.connect()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def connect(self) -> None:
+        token = read_token(self.token_path)
+        # Stream socket first (daemon accepts control only after a paired stream).
+        # Per daemon-server.ts:177-186, a control socket needs a stream socket
+        # with the same clientId; the daemon destroys orphan stream sockets.
+        self._stream = _hello(self.sock_path, self.client_id, token, "stream", HELLO_TIMEOUT_S)
+        self._ctrl = _hello(self.sock_path, self.client_id, token, "control", HELLO_TIMEOUT_S)
+
+    def close(self) -> None:
+        for s in (self._ctrl, self._stream):
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+        self._ctrl = None
+        self._stream = None
+
+    def _send(self, sock: socket.socket, payload: dict) -> None:
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        sock.sendall(data)
+
+    def _readline(self, sock: socket.socket, buf_attr: str, timeout: float) -> Optional[bytes]:
+        """Read one NDJSON line from sock, growing the per-socket buffer.
+        Returns None on EOF. Preserves UTF-8 across chunk boundaries.
+        """
+        buf: bytes = getattr(self, buf_attr)
+        while True:
+            nl = buf.find(b"\n")
+            if nl >= 0:
+                line = buf[:nl]
+                setattr(self, buf_attr, buf[nl + 1 :])
+                return line
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout as e:
+                raise DaemonRpcTimeout(f"daemon read timed out after {timeout}s") from e
+            if not chunk:
+                return None
+            buf += chunk
+            setattr(self, buf_attr, buf)
+
+    def rpc(self, method: str, params: Optional[dict] = None, timeout: float = RPC_TIMEOUT_S) -> Any:
+        """Send a request, return the result payload. Raises on error/timeout."""
+        assert self._ctrl is not None, "client not connected"
+        req_id = f"fmod-{uuid.uuid4().hex[:12]}"
+        msg: dict[str, Any] = {"id": req_id, "type": method}
+        if params is not None:
+            msg["payload"] = params
+        self._send(self._ctrl, msg)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DaemonRpcTimeout(f"RPC {method} timed out after {timeout}s")
+            # Per-socket timeout so we don't hang past deadline.
+            self._ctrl.settimeout(remaining)
+            line = self._readline(self._ctrl, "_ctrl_buf", remaining)
+            if line is None:
+                raise DaemonConnError(f"daemon closed control socket mid-RPC {method}")
+            try:
+                resp = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise DaemonConnError(f"daemon sent non-JSON: {e}: {line!r}") from e
+            if resp.get("id") != req_id:
+                # Unexpected - not our response; could be a server event on
+                # control socket (shouldn't happen) or a stale reply.
+                continue
+            if resp.get("ok"):
+                return resp.get("payload")
+            err = resp.get("error", "unknown")
+            raise DaemonRpcError(f"RPC {method} failed: {err}", error=err)
+
+    def notify(self, method: str, params: Optional[dict] = None) -> None:
+        """Fire-and-forget. Per types.ts:388 + daemon-server.ts:243-261, ids
+        starting with `notify_` elicit no response.
+        """
+        assert self._ctrl is not None, "client not connected"
+        req_id = f"notify_{uuid.uuid4().hex[:12]}"
+        msg: dict[str, Any] = {"id": req_id, "type": method}
+        if params is not None:
+            msg["payload"] = params
+        self._send(self._ctrl, msg)
+
+
+def _hello(
+    sock_path: str, client_id: str, token: str, role: str, timeout: float
+) -> socket.socket:
+    s = _connect(sock_path, timeout)
+    s.settimeout(timeout)
+    hello = {"type": "hello", "version": PROTOCOL_VERSION, "token": token, "clientId": client_id, "role": role}
+    s.sendall((json.dumps(hello) + "\n").encode("utf-8"))
+    try:
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                raise DaemonHelloError(f"daemon closed during hello (role={role})")
+            buf += chunk
+        line = buf.split(b"\n", 1)[0]
+    except socket.timeout as e:
+        s.close()
+        raise DaemonHelloError(f"hello ({role}) timed out after {timeout}s") from e
+    try:
+        resp = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        s.close()
+        raise DaemonHelloError(f"daemon sent non-JSON during hello: {e}") from e
+    if not resp.get("ok"):
+        s.close()
+        raise DaemonHelloError(f"hello rejected (role={role}): {resp.get('error') or resp}")
+    return s
+
+
+# ---------- subcommand handlers ----------
+
+def cmd_info(args: argparse.Namespace) -> int:
+    sock, token, pidfile = daemon_paths()
+    out = {
+        "socket": sock,
+        "socket_exists": os.path.exists(sock),
+        "token_path": token,
+        "token_exists": os.path.exists(token),
+        "pid_file": pidfile,
+    }
+    if pidfile and os.path.exists(pidfile):
+        try:
+            with open(pidfile, "r", encoding="utf-8") as f:
+                out["pid_record"] = json.loads(f.read())
+                pid = out["pid_record"].get("pid")
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                        out["pid_alive"] = True
+                    except OSError:
+                        out["pid_alive"] = False
+        except (OSError, json.JSONDecodeError) as e:
+            out["pid_record_error"] = str(e)
+    try:
+        with DaemonClient(args.sock, args.token) as c:
+            pong = c.rpc("ping", timeout=2.0)
+            out["daemon_reachable"] = True
+            out["daemon_pong"] = pong
+    except (DaemonHelloError, DaemonConnError, DaemonRpcError, DaemonRpcTimeout) as e:
+        out["daemon_reachable"] = False
+        out["daemon_error"] = str(e)
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_ping(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        pong = c.rpc("ping", timeout=2.0)
+    json.dump(pong, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        result = c.rpc("listSessions")
+    sessions = (result or {}).get("sessions") or []
+    json.dump(sessions, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    params: dict[str, Any] = {
+        "sessionId": args.session_id,
+        "cols": args.cols,
+        "rows": args.rows,
+    }
+    if args.cwd:
+        params["cwd"] = args.cwd
+    if args.command:
+        params["command"] = args.command
+    if args.shell_ready:
+        params["shellReadySupported"] = True
+        if args.shell_ready_timeout is not None:
+            params["shellReadyTimeoutMs"] = args.shell_ready_timeout
+    with DaemonClient(args.sock, args.token) as c:
+        result = c.rpc("createOrAttach", params)
+    json.dump(result or {}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _read_write_data(args: argparse.Namespace) -> str:
+    n = sum(bool(x) for x in (args.data, args.hex_data, args.stdin))
+    if n == 0:
+        raise SystemExit("error: --data, --hex, or --stdin required")
+    if n > 1:
+        raise SystemExit("error: --data, --hex, and --stdin are mutually exclusive")
+    if args.data is not None:
+        return args.data
+    if args.hex_data is not None:
+        try:
+            return bytes.fromhex(args.hex_data).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as e:
+            raise SystemExit(f"error: --hex invalid: {e}")
+    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    return sys.stdin.read()
+
+
+def cmd_write(args: argparse.Namespace) -> int:
+    data = _read_write_data(args)
+    with DaemonClient(args.sock, args.token) as c:
+        c.notify("write", {"sessionId": args.session_id, "data": data})
+    return 0
+
+
+def cmd_resize(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        c.notify("resize", {"sessionId": args.session_id, "cols": args.cols, "rows": args.rows})
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        result = c.rpc("getSnapshot", {"sessionId": args.session_id})
+    snap = (result or {}).get("snapshot") or {}
+    text = snap.get("snapshotAnsi") or ""
+    if args.strip_ansi:
+        text = ANSI_CSI_RE.sub("", text)
+    if args.lines and args.lines > 0:
+        # Last N non-empty lines, mirroring tmux capture-pane -S -N.
+        all_lines = text.split("\n")
+        kept: list[str] = []
+        for line in reversed(all_lines):
+            if not kept and line == "":
+                continue
+            kept.append(line)
+            if len(kept) >= args.lines:
+                break
+        text = "\n".join(reversed(kept))
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def cmd_get_cwd(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        result = c.rpc("getCwd", {"sessionId": args.session_id})
+    cwd = (result or {}).get("cwd") or ""
+    sys.stdout.write(cwd + "\n")
+    return 0
+
+
+def cmd_get_foreground(args: argparse.Namespace) -> int:
+    with DaemonClient(args.sock, args.token) as c:
+        result = c.rpc("getForegroundProcess", {"sessionId": args.session_id})
+    fg = (result or {}).get("foregroundProcess") or ""
+    sys.stdout.write(fg + "\n")
+    return 0
+
+
+def cmd_kill(args: argparse.Namespace) -> int:
+    params: dict[str, Any] = {"sessionId": args.session_id}
+    if args.immediate:
+        params["immediate"] = True
+    with DaemonClient(args.sock, args.token) as c:
+        c.rpc("kill", params)
+    return 0
+
+
+# ---------- arg parser ----------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="fmod", description=__doc__.splitlines()[1])
+    p.add_argument("--sock", help="Override daemon socket path (default: FMOD_SOCKET env or ~/.config/orca/daemon/daemon-v18.sock)")
+    p.add_argument("--token", help="Override daemon token path (default: FMOD_TOKEN env or ~/.config/orca/daemon/daemon-v18.token)")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("info", help="Show daemon paths and liveness as JSON").set_defaults(func=cmd_info)
+    sub.add_parser("ping", help="Health check").set_defaults(func=cmd_ping)
+    sub.add_parser("list", help="List live sessions as JSON").set_defaults(func=cmd_list)
+
+    pc = sub.add_parser("create", help="Create or attach a terminal session")
+    pc.add_argument("session_id")
+    pc.add_argument("--cwd")
+    pc.add_argument("--command")
+    pc.add_argument("--cols", type=int, default=120)
+    pc.add_argument("--rows", type=int, default=40)
+    pc.add_argument("--shell-ready", action="store_true")
+    pc.add_argument("--shell-ready-timeout", type=int)
+    pc.set_defaults(func=cmd_create)
+
+    pw = sub.add_parser("write", help="Write data to a session (fire-and-forget)")
+    pw.add_argument("session_id")
+    pw.add_argument("--data", help="UTF-8 text to send")
+    pw.add_argument("--hex", dest="hex_data", help="Hex bytes to decode and send as UTF-8")
+    pw.add_argument("--stdin", action="store_true", help="Read UTF-8 from stdin")
+    pw.set_defaults(func=cmd_write)
+
+    pr = sub.add_parser("resize", help="Resize a session PTY (fire-and-forget)")
+    pr.add_argument("session_id")
+    pr.add_argument("--cols", type=int, required=True)
+    pr.add_argument("--rows", type=int, required=True)
+    pr.set_defaults(func=cmd_resize)
+
+    ps = sub.add_parser("snapshot", help="Get current screen content of a session")
+    ps.add_argument("session_id")
+    ps.add_argument("--strip-ansi", action="store_true", help="Strip CSI escape sequences")
+    ps.add_argument("--lines", type=int, help="Truncate to last N non-empty lines")
+    ps.set_defaults(func=cmd_snapshot)
+
+    p_cwd = sub.add_parser("get-cwd", help="Print session cwd")
+    p_cwd.add_argument("session_id")
+    p_cwd.set_defaults(func=cmd_get_cwd)
+    p_fg = sub.add_parser("get-foreground", help="Print session foreground process name")
+    p_fg.add_argument("session_id")
+    p_fg.set_defaults(func=cmd_get_foreground)
+
+    pk = sub.add_parser("kill", help="Terminate a session")
+    pk.add_argument("session_id")
+    pk.add_argument("--immediate", action="store_true")
+    pk.set_defaults(func=cmd_kill)
+
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except DaemonHelloError as e:
+        sys.stderr.write(f"fmod: daemon hello rejected: {e}\n")
+        return 2
+    except DaemonConnError as e:
+        sys.stderr.write(f"fmod: connection error: {e}\n")
+        return 5
+    except DaemonRpcError as e:
+        sys.stderr.write(f"fmod: {e}\n")
+        return 3
+    except DaemonRpcTimeout as e:
+        sys.stderr.write(f"fmod: {e}\n")
+        return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main())
