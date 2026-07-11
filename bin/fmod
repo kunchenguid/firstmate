@@ -343,7 +343,7 @@ def _read_write_data(args: argparse.Namespace) -> str:
 def cmd_write(args: argparse.Namespace) -> int:
     data = _read_write_data(args)
     with DaemonClient(args.sock, args.token) as c:
-        c.notify("write", {"sessionId": args.session_id, "data": data})
+        c.rpc("write", {"sessionId": args.session_id, "data": data})
     return 0
 
 

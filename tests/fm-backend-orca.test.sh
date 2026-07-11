@@ -540,6 +540,21 @@ test_composer_state_empty_when_opencode_placeholder_only() {
   pass "fm_backend_orca_composer_state: empty for opencode's 'Ask anything...' placeholder"
 }
 
+test_composer_state_skips_opencode_footer_after_empty_spacer() {
+  fmod_case composer-opencode-footer-spacer
+  printf '%s\n' \
+    '             ┃' \
+    '             ┃  Ask anything...' \
+    '             ┃' \
+    '             ┃  Build · tab agents · ctrl+p commands' \
+    '             ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' > "$RESP/1.out"
+  local out
+  out=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$ROOT" )
+  [ "$out" = "empty" ] || fail "opencode footer after empty spacer should not mask idle composer, got '$out'"
+  pass "fm_backend_orca_composer_state: skips opencode footer after empty spacer"
+}
+
 # Bottom-border-shaped rows like the opencode "╹▀▀▀..." underline must NOT
 # be mistaken for the composer's content row.
 test_composer_state_ignores_horizontal_underline_row() {
@@ -653,6 +668,43 @@ PY
 $CASE_DIR/xdg/orca/daemon/daemon-v18.token
 $CASE_DIR/xdg/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
   pass "fmod daemon_paths: defaults follow HOME and XDG_CONFIG_HOME"
+}
+
+test_fmod_write_uses_rpc_not_notify() {
+  fmod_case fmod-write-rpc
+  python3 - "$ROOT/bin/fmod" <<'PY' || fail "fmod write should use acknowledged RPC"
+import argparse
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+calls = []
+
+class FakeClient:
+    def __init__(self, sock, token):
+        self.sock = sock
+        self.token = token
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def rpc(self, method, params):
+        calls.append(("rpc", method, params))
+        return {}
+
+    def notify(self, method, params):
+        calls.append(("notify", method, params))
+
+mod["cmd_write"].__globals__["DaemonClient"] = FakeClient
+args = argparse.Namespace(sock="sock", token="token", session_id="fm-x", data="hi", hex_data=None, stdin=False)
+rc = mod["cmd_write"](args)
+assert rc == 0
+assert calls == [("rpc", "write", {"sessionId": "fm-x", "data": "hi"})], calls
+PY
+  pass "fmod write: waits for daemon RPC acknowledgement"
 }
 
 # ---- test runner ---------------------------------------------------------

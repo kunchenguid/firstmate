@@ -296,7 +296,7 @@ FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Ask a
 # "▀", "═", "─", "╼", "╾" are explicitly skipped so the bottom of the
 # opencode composer is never mistaken for a content row.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
-  local terminal=$1 cap line trimmed stripped="" found=0
+  local terminal=$1 cap line trimmed stripped="" found=0 empty_bordered="__fm_orca_empty_bordered__"
   fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
   cap=$(fmod snapshot "$terminal" --strip-ansi --lines "$FM_BACKEND_ORCA_COMPOSER_LINES" 2>/dev/null) || { printf 'unknown'; return 0; }
   # Pass 1: collect bordered content rows so we can pick the right one.
@@ -322,14 +322,14 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
         inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
         inside="${inside#"${inside%%[![:space:]]*}"}"
         inside="${inside%"${inside##*[![:space:]]}"}"
-        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=(""); fi
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=("$empty_bordered"); fi
         ;;
       '│'*|'┃'*)
         inside=$trimmed
         inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
         inside="${inside#"${inside%%[![:space:]]*}"}"
         inside="${inside%"${inside##*[![:space:]]}"}"
-        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=(""); fi
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=("$empty_bordered"); fi
         ;;
       *) bordered+=("") ;;
     esac
@@ -337,6 +337,7 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   local i n=${#bordered[@]}
   for ((i = n - 1; i >= 0; i--)); do
     [ -n "${bordered[$i]:-}" ] || continue
+    [ "${bordered[$i]}" != "$empty_bordered" ] || continue
     # Does the NEXT line also have a bordered content row? If yes, this
     # is the composer (the line above is also bordered because the box
     # has decorative empty ┃ rows around the content). If no, the next
@@ -354,6 +355,7 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   else
     for ((i = n - 1; i >= 0; i--)); do
       [ -n "${bordered[$i]:-}" ] || continue
+      [ "${bordered[$i]}" != "$empty_bordered" ] || continue
       stripped=${bordered[$i]}
       found=1
       break
@@ -390,7 +392,7 @@ fm_backend_orca_send_text_submit() {  # <terminal> <text> <retries> <enter-sleep
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   while :; do
-    fm_backend_orca_send_key "$terminal" Enter || true
+    fm_backend_orca_send_key "$terminal" Enter || { printf 'send-failed'; return 0; }
     sleep "$sleep_s"
     state=$(fm_backend_orca_composer_state "$terminal")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
