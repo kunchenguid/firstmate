@@ -27,6 +27,9 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --worktree <path> is the tmux-only self-fix path (bin/fm-self-fix.sh): reuse a
+#   pre-created isolated git worktree of the firstmate repo instead of running
+#   treehouse get, start the window directly in it, and record selffix=1 in meta.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
