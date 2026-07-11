@@ -1008,16 +1008,21 @@ EOF
           # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Decided once per distinct stale hash (the costly state reads run only
-          # on first sight, never every poll) via pause_state_class, which returns:
+          # Decided via pause_state_class, which revalidates authoritative state
+          # before returning an absorb class:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #   - merge-wait: checks are green and the run is monitoring the PR for
+          #     merge or close, so use the same bounded idle cadence;
+          #   - live-hold: an ordinary crew still has a live or inconclusive agent,
+          #     so surface its first stale sighting before using the bounded cadence;
+          #   - none: no running pipeline, idle pane, no busy signature, and no
+          #     legitimate idle wait - the crew has STOPPED. Surface immediately so
+          #     firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
