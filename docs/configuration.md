@@ -71,7 +71,8 @@ It currently supports only `tmux` and `herdr` supervisor panes.
 Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
 Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr.
+When none of those resolve - firstmate is not itself a tmux or herdr pane and no override is set - the only candidate left is the legacy `firstmate:0` guess, which is the crewmate tmux session rather than firstmate's own input; both `/afk` (before it sets `state/.afk`) and the daemon refuse loudly and abort on that blind fallback instead of injecting escalations into the wrong window and wedging silently.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)

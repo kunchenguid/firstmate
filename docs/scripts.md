@@ -46,6 +46,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
+| `fm-supervisor-target-lib.sh` | Shared away-mode supervisor-pane discovery and the trustworthy-target predicate the daemon and `fm-afk-start.sh` refuse on |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |

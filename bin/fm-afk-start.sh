@@ -3,10 +3,20 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk, checks state/.supervise-daemon.lock, and:
-#     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
-#       lock is held by a live daemon;
-#     - otherwise execs bin/fm-supervise-daemon.sh in the foreground.
+#   Checks state/.supervise-daemon.lock, and:
+#     - prints "afk: daemon already running pid=<pid>", refreshes state/.afk,
+#       then exits 0 when that lock is held by a live daemon;
+#     - otherwise verifies an injectable supervisor target exists (so away-mode
+#       escalations can actually reach firstmate), then sets state/.afk and
+#       execs bin/fm-supervise-daemon.sh in the foreground.
+#
+#   Fail-fast: when firstmate is NOT running inside a tmux or herdr pane and no
+#   FM_SUPERVISOR_TARGET override is set, there is no verifiable pane to deliver
+#   escalations to (the legacy firstmate:0 guess is a crewmate session, not
+#   firstmate's input). Rather than set state/.afk and let the daemon wedge
+#   silently overnight, this refuses immediately, leaves state/.afk unset, and
+#   exits non-zero with a clear message. The same guard, plus the supervisor
+#   discovery it shares, lives in bin/fm-supervisor-target-lib.sh.
 #
 # Run this command as its own tracked background terminal/session.
 # Do not wrap it in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
@@ -32,10 +42,14 @@ case "${1:-}" in
 esac
 
 mkdir -p "$STATE"
-date '+%s' > "$STATE/.afk"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+# Supervisor-target discovery + the trustworthy-target predicate, shared with
+# the daemon so /afk refuses fast on exactly the targets the daemon would.
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 
 daemon_lock_owner() {
   local owner
@@ -83,6 +97,9 @@ daemon_lock_held_by_live_daemon() {
 
 pid=$(daemon_lock_pid 2>/dev/null || true)
 if daemon_lock_held_by_live_daemon; then
+  # A live daemon already verified its own supervisor target at startup, so a
+  # re-invocation only refreshes the away flag - never re-checks or resets it.
+  date '+%s' > "$STATE/.afk"
   echo "afk: daemon already running pid=$pid"
   exit 0
 fi
@@ -91,5 +108,23 @@ if fm_pid_alive "$pid" && [ -n "$pid" ]; then
   fm_lock_remove_path "$LOCK" 2>/dev/null || true
 fi
 
+# Fail-fast BEFORE setting state/.afk: with no injectable supervisor target,
+# entering away mode would only arm a daemon that cannot deliver escalations and
+# wedges silently. Refuse loudly and leave the fleet in full per-wake mode.
+if ! supervisor_target_is_trustworthy; then
+  echo "afk: refusing to enter away mode - firstmate's own pane could not be verified as an escalation target." >&2
+  echo "     firstmate is not running inside a tmux or herdr pane and no FM_SUPERVISOR_TARGET override is set, so away-mode escalations would be delivered to the wrong window and silently wedge." >&2
+  echo "     Run firstmate inside tmux/herdr, or export FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) pointing at firstmate's own pane, then retry." >&2
+  exit 1
+fi
+
+# Record the verified supervisor target/backend now, at activation time, and
+# hand them to the daemon explicitly so it injects into exactly this pane.
+FM_SUPERVISOR_TARGET=$(discover_supervisor_target) || true
+FM_SUPERVISOR_BACKEND=$(discover_supervisor_backend) || true
+export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND
+
+date '+%s' > "$STATE/.afk"
+echo "afk: supervisor target verified ($FM_SUPERVISOR_BACKEND:$FM_SUPERVISOR_TARGET)"
 echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
 exec "$DAEMON"

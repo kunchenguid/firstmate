@@ -29,7 +29,7 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -44,7 +44,7 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   state="$dir/state"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
@@ -64,7 +64,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   printf '%s\n' "$$" > "$lock/pid"
   printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
@@ -73,6 +73,69 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale daemon lock with a reused pid"
   assert_not_contains "$out" "another fm-supervise-daemon is already running" "daemon singleton lock still trusted the reused pid"
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
+}
+
+# --- supervisor-target fail-fast (out-of-tmux wedge fix) ---------------------
+# When firstmate's own CLI runs OUTSIDE tmux (no TMUX_PANE) with no override and
+# no herdr markers, the only supervisor target left is the blind firstmate:0
+# guess - which is the crewmate session, not firstmate's input. Injecting there
+# wedged the away-mode daemon silently. These cover the shared trustworthiness
+# predicate, /afk's fail-fast refusal, and the daemon's own startup backstop.
+
+test_supervisor_target_is_trustworthy_predicate() {
+  # Blind fallback: no override, no TMUX_PANE, no herdr markers -> untrustworthy.
+  if FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+     supervisor_target_is_trustworthy; then
+    fail "supervisor_target_is_trustworthy accepted the blind firstmate:0 fallback"
+  fi
+  # Any real source makes it trustworthy.
+  FM_SUPERVISOR_TARGET='sup:0' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    supervisor_target_is_trustworthy \
+    || fail "explicit FM_SUPERVISOR_TARGET override was not trusted"
+  FM_SUPERVISOR_TARGET='' TMUX_PANE='%7' HERDR_ENV='' HERDR_PANE_ID='' \
+    supervisor_target_is_trustworthy \
+    || fail "TMUX_PANE was not trusted"
+  FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='1' HERDR_PANE_ID='w1:p1' \
+    supervisor_target_is_trustworthy \
+    || fail "herdr markers were not trusted"
+  pass "supervisor_target_is_trustworthy: blind fallback untrusted; override/TMUX_PANE/herdr trusted"
+}
+
+test_afk_start_refuses_without_supervisor_target() {
+  local dir state out status
+  dir=$(make_supercase afk-start-no-target)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse when no injectable supervisor target exists"
+  assert_contains "$out" "refusing to enter away mode" "fm-afk-start.sh did not print the fail-fast refusal"
+  assert_not_contains "$out" "starting supervise daemon" "fm-afk-start.sh proceeded into daemon startup without a target"
+  assert_absent "$state/.afk" "fm-afk-start.sh set the away flag despite refusing to activate"
+  assert_absent "$state/.supervise-daemon.log" "fm-afk-start.sh started the daemon despite no supervisor target"
+  pass "fm-afk-start.sh fails fast and leaves the fleet in full per-wake mode when no supervisor target can be verified"
+}
+
+test_daemon_refuses_blind_fallback_target() {
+  local dir state out status
+  dir=$(make_supercase daemon-blind-fallback)
+  state="$dir/state"
+
+  # backend=tmux is supported, so the daemon passes the backend gate and reaches
+  # target discovery, where the blind firstmate:0 fallback must be refused rather
+  # than probed (firstmate:0 would resolve to the crewmate session).
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=tmux \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse to start on the blind firstmate:0 fallback target"
+  assert_contains "$out" "supervisor pane could not be verified" "daemon did not print the blind-fallback refusal"
+  assert_present "$state/.supervise-daemon.log" "daemon did not log its startup failure"
+  assert_grep "no trustworthy supervisor target" "$state/.supervise-daemon.log" "daemon log missing the startup-failed reason"
+  assert_absent "$state/.supervise-daemon.pid" "daemon left its pidfile behind after refusing to start"
+  pass "daemon refuses the blind firstmate:0 fallback at startup instead of wedging on a crewmate pane"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1652,6 +1715,9 @@ test_inject_msg_defers_on_dead_shell_unknown() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_supervisor_target_is_trustworthy_predicate
+test_afk_start_refuses_without_supervisor_target
+test_daemon_refuses_blind_fallback_target
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

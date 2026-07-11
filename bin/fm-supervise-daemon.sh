@@ -63,9 +63,13 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
-#                                   tmux target or a herdr "<session>:<pane-id>"
+#                                   $HERDR_PANE_ID under herdr). With no override
+#                                   and neither marker present, only the blind
+#                                   firstmate:0 guess (a crewmate session) is
+#                                   left, so the daemon REFUSES to start rather
+#                                   than inject escalations into the wrong window
+#                                   (fm-supervisor-target-lib.sh). Accepts either
+#                                   a tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
 #          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
@@ -160,13 +164,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# Supervisor-pane resolution (discover_supervisor_target/backend, the fallback
+# defaults, and the supervisor_target_is_trustworthy predicate) is shared with
+# bin/fm-afk-start.sh so /afk can refuse fast when no injectable target exists.
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
-FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
-# Fallback BACKEND paired with the fallback target above: "firstmate:0" is a
-# tmux session:window name, so the bare fallback (nothing configured, nothing
-# detected) assumes tmux - matching this daemon's pre-herdr-support behavior
-# byte-for-byte when run outside both tmux and herdr.
-FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
+# FM_SUPERVISOR_TARGET_DEFAULT / FM_SUPERVISOR_BACKEND_DEFAULT come from
+# fm-supervisor-target-lib.sh (sourced above).
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
 # daemon has no verified composer/busy primitives wired up for them yet - see
@@ -302,65 +308,9 @@ _collapse_newlines() {  # <text>
   printf '%s' "$s"
 }
 
-# Auto-discover the supervisor pane at startup. Priority:
-#   1. FM_SUPERVISOR_TARGET env (explicit override) — caller passes it in;
-#      may be a tmux target or a herdr "<session>:<pane-id>" target (paired
-#      with discover_supervisor_backend, below, to know which).
-#   2. $TMUX_PANE — tmux sets this in every pane's environment; inherited by
-#      the daemon when the /afk skill launches it from firstmate's own pane.
-#   3. $HERDR_ENV=1 + $HERDR_PANE_ID — herdr injects both into every process
-#      it manages a pane for (docs/herdr-backend.md); the daemon composes the
-#      "<session>:<pane-id>" target string the herdr adapter expects from
-#      $HERDR_SESSION (defaulting to "default", mirroring
-#      bin/backends/herdr.sh's fm_backend_herdr_session) and $HERDR_PANE_ID.
-#      Checked after $TMUX_PANE so a tmux pane nested inside herdr still
-#      resolves to tmux, matching fm_backend_detect's innermost-first rule.
-#   4. firstmate:0 — legacy tmux fallback (may not resolve if the session is
-#      named differently). The caller logs a warning in that case.
-# Returns the resolved target on stdout; returns 1 if only the fallback is left
-# AND the fallback does not resolve to a live pane.
-discover_supervisor_target() {
-  if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
-    printf '%s' "$FM_SUPERVISOR_TARGET"
-    return 0
-  fi
-  if [ -n "${TMUX_PANE:-}" ]; then
-    printf '%s' "$TMUX_PANE"
-    return 0
-  fi
-  if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
-    return 0
-  fi
-  printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
-  return 1
-}
-
-# Auto-discover the supervisor's BACKEND at startup - independent of the
-# target string above, so an explicit FM_SUPERVISOR_TARGET override still
-# needs to know which primitives (tmux vs herdr) to dispatch through. Priority
-# mirrors discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
-#   1. FM_SUPERVISOR_BACKEND env (explicit override).
-#   2. $TMUX_PANE set — tmux.
-#   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) — herdr.
-#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) — matches the target fallback above.
-# Returns the resolved backend on stdout; returns 1 if only the fallback is left.
-discover_supervisor_backend() {
-  if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
-    printf '%s' "$FM_SUPERVISOR_BACKEND"
-    return 0
-  fi
-  if [ -n "${TMUX_PANE:-}" ]; then
-    printf 'tmux'
-    return 0
-  fi
-  if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    printf 'herdr'
-    return 0
-  fi
-  printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
-  return 1
-}
+# Supervisor-pane discovery (discover_supervisor_target /
+# discover_supervisor_backend) lives in fm-supervisor-target-lib.sh, sourced at
+# the top of this file and shared with bin/fm-afk-start.sh.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
@@ -1379,10 +1329,19 @@ fm_super_main() {
       target_source="FALLBACK(firstmate:0)"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
-  else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+  # Refuse the blind fallback instead of proceeding. When discovery returns
+  # non-zero, firstmate is not itself a tmux/herdr pane and no override was
+  # given, so the only candidate is the legacy "firstmate:0" guess - which in
+  # the reproduced wedge is the CREWMATE tmux session, not firstmate's input.
+  # A target-exists probe cannot catch this: firstmate:0 resolves to a real
+  # (wrong) pane, so escalations inject into a crewmate and the daemon wedges
+  # silently. Fail loud and early here rather than overnight.
+  if ! discovered=$(discover_supervisor_target); then
+    echo "error: cannot start away-mode daemon: firstmate's own supervisor pane could not be verified (not running inside a tmux or herdr pane, and no FM_SUPERVISOR_TARGET override). Away-mode escalations would be delivered to the wrong window (e.g. the '$discovered' crewmate session) and silently wedge. Set FM_SUPERVISOR_TARGET to firstmate's own pane, or run firstmate inside tmux/herdr." >&2
+    log "startup failed: no trustworthy supervisor target (would blind-fall back to '$discovered'; target_source=$target_source)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"

@@ -28,7 +28,8 @@ batched digest rather than per-wake injections.
    ```sh
    bin/fm-afk-start.sh
    ```
-   The helper sets or refreshes `state/.afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
+   The helper exits immediately (refreshing `state/.afk`) if the identity-backed daemon lock already names a live process; otherwise it first verifies an injectable supervisor target exists, then sets `state/.afk` and execs `bin/fm-supervise-daemon.sh` in the foreground.
+   If firstmate is not itself running inside a tmux or herdr pane and no `FM_SUPERVISOR_TARGET` override is set, there is no verifiable pane to deliver escalations to, so the helper refuses immediately, leaves `state/.afk` unset, and exits non-zero with a clear message rather than arming a daemon that would wedge silently (see "Auto-discovered supervisor pane" below).
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
@@ -190,9 +191,16 @@ the marker lets firstmate distinguish it from a real captain message.
   `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
   `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr. When none of those
+  resolve - firstmate is not itself a tmux or herdr pane and no override is set -
+  the only candidate left is the legacy `firstmate:0` guess, which is the
+  crewmate tmux session rather than firstmate's input; injecting there wedged the
+  daemon silently overnight. Both `/afk` (before it ever sets `state/.afk`) and
+  the daemon now refuse loudly and abort on that blind fallback instead of
+  proceeding, so the failure is immediate and visible. Set `FM_SUPERVISOR_TARGET`
+  to firstmate's own pane, or run firstmate inside tmux/herdr, to activate. Both
+  resolution sources are logged at startup so a wrong-but-resolving target is
+  detectable. Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
