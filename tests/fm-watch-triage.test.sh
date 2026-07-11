@@ -229,9 +229,10 @@ test_status_is_paused_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
-  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  local dir state fakebin
+  dir=$(make_case absorb-class); state="$dir/state"; fakebin="$dir/fakebin"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
@@ -241,14 +242,26 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  printf 'paused: waiting out upstream capacity\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run cancelled'
+  [ "$(crew_absorb_class a)" = paused ] || fail "terminal cancelled run masked a trailing pause"
+  printf 'done: PR checks green\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  [ "$(crew_absorb_class a)" = merge-wait ] || fail "checks-green merge monitoring not classed as an idle wait"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · PR checks green · run still monitoring PR'
+  [ "$(crew_absorb_class a)" = merge-wait ] || fail "coarse checks-green merge monitoring not classed as an idle wait"
+  printf 'failed: validation failed\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class a)" = none ] || fail "real terminal failure was classed absorbable"
+  rm -f "$state/a.status"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
-  unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: active work, terminal pauses, merge waits, and failures preserve the safety boundary"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -727,6 +740,107 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   [ "$wakes" -eq 1 ] || fail "live external-decision gate should surface once, got $wakes wakes"
   [ "$bare" -eq 1 ] || fail "live external-decision gate lost its immediate bare stale surface"
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+}
+
+test_paused_terminal_run_absorbs_without_wedge_churn() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case paused-terminal-run); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-terminal"
+  printf 'idle after cancelled validation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-terminal.meta"
+  printf 'paused: waiting out upstream capacity\n' > "$state/paused-terminal.status"
+  sig=$(seen_sig "$state/paused-terminal.status"); printf '%s' "$sig" > "$state/.seen-paused-terminal_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after cancelled validation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '83\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run cancelled'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced a declared pause because its matching run was terminal: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "terminal-run pause did not enter idle tracking"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "terminal-run pause retained a wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "terminal-run pause retained accumulated wedge escalations"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "terminal-run pause enqueued an immediate stale wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a trailing paused verb absorbs a stale pane even when its matching run is terminal"
+}
+
+test_checks_green_merge_wait_absorbs_then_rechecks() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case checks-green-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/merge-wait.status"
+  window="test:fm-merge-wait"
+  printf 'checks green, monitoring merge\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-wait.meta"
+  printf 'done: PR checks green, monitoring for merge/close\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "checks green, monitoring merge")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '83\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced a fresh checks-green merge wait: $(cat "$out")"
+  fi
+  [ "$(cat "$state/.paused-$key" 2>/dev/null || true)" = merge-wait ] || { reap "$pid"; fail "merge wait did not enter bounded idle tracking"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "merge wait retained a wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "merge wait retained accumulated wedge escalations"; }
+  reap "$pid"
+
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-wait_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not recheck a checks-green merge wait on the bounded cadence"
+  grep -F "merge-wait" "$out" >/dev/null || fail "merge-wait recheck omitted its classification"
+  grep -F "possible wedge" "$out" >/dev/null && fail "merge wait was mislabeled a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "merge-wait recheck started a wedge timer"
+  unset FM_FAKE_CREW_STATE
+  pass "checks-green merge monitoring absorbs stale churn and re-surfaces only on the bounded long cadence"
+}
+
+test_real_terminal_failure_still_surfaces() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case real-terminal-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-real-failure"
+  printf 'validation failed\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/real-failure.meta"
+  printf 'failed: no-mistakes validation failed\n' > "$state/real-failure.status"
+  sig=$(seen_sig "$state/real-failure.status"); printf '%s' "$sig" > "$state/.seen-real-failure_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "validation failed")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a real terminal failure"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "real terminal failure did not surface as stale"
+  [ ! -e "$state/.paused-$key" ] || fail "real terminal failure entered idle tracking"
+  unset FM_FAKE_CREW_STATE
+  pass "a real terminal failure still surfaces immediately"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1257,6 +1371,9 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_paused_terminal_run_absorbs_without_wedge_churn
+test_checks_green_merge_wait_absorbs_then_rechecks
+test_real_terminal_failure_still_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

@@ -293,26 +293,41 @@ signal_reason_is_actionable() {  # <file> ...
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#   paused  - the status log's trailing verb declares an external wait, and no
+#             active run or busy pane supersedes it;
+#   merge-wait - checks are green and the run is terminal-done only because it
+#             is monitoring the PR for merge/close;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# authoritatively is what keeps active-work precedence: a crew that appended
+# paused: but then STARTED a run reports working, while a terminal run no longer
+# masks the trailing pause declaration.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src status_dir last
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  status_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+  if [ -n "$status_dir" ]; then
+    last=$(last_status_line "$status_dir/$id.status")
+    if status_is_paused "$last"; then printf 'paused'; return; fi
+  fi
+  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = "done" ]; then
+    src=${line#*source: }; src=${src%% *}
+    case "$src:$line" in
+      run-step:*"checks green: PR ready for review"*) printf 'merge-wait'; return ;;
+      status-log:*"checks green"*"run still monitoring PR"*) printf 'merge-wait'; return ;;
+    esac
   fi
   printf 'none'
 }
