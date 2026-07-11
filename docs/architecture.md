@@ -117,6 +117,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Within either task shape, the generated brief directs the crewmate to use harness-native parallelism only for genuinely independent subtasks while preserving firstmate's topology and single status-file ownership; `bin/fm-brief.sh` owns the detailed guardrails.
 
 ## Dispatch profiles
 
