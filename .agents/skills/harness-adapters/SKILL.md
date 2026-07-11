@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -264,3 +264,34 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor (VERIFIED 2026-07-10, cursor-agent 2026.07.09-a3815c0)
+
+Cursor Agent CLI from Anysphere; the binary is `agent`, also symlinked `cursor-agent`.
+It is wired as a CREWMATE/scout adapter only.
+Launch with a positional prompt: `agent --force --approve-mcps "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (the footer stop hint, shown iff a turn is running; the idle footer shows only `→ Add a follow-up`. The spinner line is a braille glyph + `Working`, e.g. `⠿ Working`. The ASCII `ctrl+c to stop` is the busy regex, avoiding the locale fragility of matching the braille spinner - mirrors codex's `esc to interrupt` approach). |
+| Exit command | `/quit` (alias `/exit`; both labelled "Exit"). Cleanly exits the TUI back to the shell, printing no resume hint. Opens a slash-autocomplete popup like codex/grok, so give it a short settle before Enter; `fm_tmux_submit_core`'s cursor-row retry lands it. NOT `Ctrl+C` (that only interrupts the turn). |
+| Interrupt | single `Ctrl+C` (cancels the current turn; the busy footer clears and the composer is restored). |
+| Skill invocation | `/<skill>` (slash-command popup, same form as claude/grok). Natural language is acceptable if uncertain. |
+| Autonomy | `--force` (alias `--yolo`; footer shows "Run Everything"), auto-approves every command/tool execution - verified fully unattended. `--approve-mcps` additionally auto-approves any MCP server so an unattended crewmate never blocks on an MCP-trust prompt. |
+| Model flag | `--model <model>`. Reasoning effort is NOT a separate flag: it rides parameterized model brackets, e.g. `--model 'claude-opus-4-8[effort=high]'`. `fm-spawn` passes `--model` but omits any cursor effort flag (records the requested effort in meta only). |
+| Env marker | `CURSOR_INVOKED_AS` (value `agent` or `cursor-agent`), set for child/tool processes; unset outside a cursor session (no collision with a non-cursor shell). cursor also sets `CURSOR_AGENT=1`, but `CURSOR_INVOKED_AS` is preferred as CLI-specific. Process args always carry the `.../cursor-agent/versions/...` install path for layer-2 ancestry detection. |
+| Resume | `agent --resume [chatId]` or `agent --continue` (most recent for the cwd). |
+
+Workspace trust dialog on first launch per untrusted directory: a box titled "Workspace Trust Required" with `[a] Trust this workspace` / `[q] Quit`.
+Accept it from an active firstmate session by sending the key `a` (the dialog says "press the key shown"), then verify the brief started processing.
+Trust persists per-path (a re-launch in the same worktree slot skips the dialog, verified), so each new treehouse worktree needs the dialog accepted once via the post-spawn peek.
+
+Turn-end hook: cursor fires a `stop` hook at every turn boundary (verified), the clean equivalent of claude's Stop hook.
+cursor loads PROJECT hooks from `<worktree>/.cursor/hooks.json` once the workspace is trusted (the same trust that gates code execution), so the hook fires only after the trust dialog above is accepted.
+Unlike grok, cursor has NO separate firstmate-owned GLOBAL hook file: user hooks live in the single shared `~/.cursor/hooks.json` that other tools co-manage, so editing it would be a high-blast-radius write.
+`fm-spawn` therefore installs a per-task in-worktree `.cursor/hooks.json` with a `stop` hook that `touch`es `state/<id>.turn-ended` (mirroring claude's `.claude/settings.local.json`), gitignored via `git info/exclude`.
+GUARD: `fm-spawn` refuses to overwrite a pre-existing `.cursor/hooks.json` (in a fresh worktree that means tracked project hooks); it skips the hook and falls back to stale-pane detection (keyed on the `ctrl+c to stop` busy signature) for that task, so per-turn wake precision is lost only for a project that ships its own `.cursor/hooks.json`.
+Headless `-p` mode does not fire the project `stop` hook, but firstmate launches the interactive path, where it fires reliably.
+
+Primary-session and secondmate support are deliberately OUT OF SCOPE here (no turn-end guard, PreToolUse seatbelt, or watcher supervision protocol for a cursor PRIMARY, and no `bin/backends/tmux.sh` agent-liveness classification, which is only consulted for `kind=secondmate`).
+Treat cursor as a verified crewmate/scout adapter; verify the primary/secondmate hooks empirically before running firstmate itself or a secondmate on cursor.

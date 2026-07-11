@@ -279,7 +279,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +340,19 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI, binary `agent`, symlinked `cursor-agent`): a
+    # positional prompt starts the supervised interactive session. --force
+    # auto-approves every command/tool execution (footer shows "Run Everything";
+    # verified fully unattended) - the targeted equivalent of claude's
+    # --dangerously-skip-permissions. --approve-mcps auto-approves any MCP server
+    # so an unattended crewmate is never blocked on an MCP-trust prompt. cursor has
+    # no separate reasoning-effort flag (effort rides parameterized model brackets),
+    # so __EFFORTFLAG__ is intentionally absent here (effort_flag_for_harness emits
+    # nothing for cursor). Like grok, cursor's turn-end signal does NOT ride the
+    # launch command - it is a `stop`-event hook installed below into a per-task
+    # in-worktree .cursor/hooks.json, so the template is identical for
+    # ship/scout/secondmate.
+    cursor) printf '%s' 'agent --force --approve-mcps __MODELFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -427,7 +440,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -468,6 +481,11 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # cursor has no separate reasoning-effort flag either: its `agent` CLI carries
+    # effort inside parameterized model brackets
+    # (e.g. --model 'claude-opus-4-8[effort=high]'), not a standalone flag, so
+    # fm-spawn omits a cursor effort flag and records the requested effort in meta
+    # only (verified cursor-agent 2026.07.09).
   esac
 }
 
@@ -962,6 +980,36 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    cursor*)
+      # cursor (Cursor Agent CLI) fires a `stop` hook at every turn boundary
+      # (verified cursor-agent 2026.07.09), the clean equivalent of claude's Stop
+      # hook. cursor reads project hooks from <worktree>/.cursor/hooks.json once the
+      # workspace is trusted (the "Workspace Trust Required" dialog, accepted with
+      # key `a`; trust then persists per-path, so a re-launch in the same worktree
+      # slot skips it). Unlike grok, cursor has NO separate firstmate-owned GLOBAL
+      # hook file: user hooks live in the single shared ~/.cursor/hooks.json that
+      # other tools co-manage, so editing it would be a high-blast-radius write. The
+      # firstmate-owned, non-invasive path is therefore a per-task in-worktree
+      # .cursor/hooks.json (mirroring claude's .claude/settings.local.json),
+      # gitignored via info/exclude so it never dirties teardown or leaks into a
+      # commit.
+      # GUARD: never clobber a project's own committed hooks. A fresh treehouse
+      # worktree is a clean checkout, so any pre-existing .cursor/hooks.json is
+      # necessarily tracked project content; overwriting it would discard the
+      # project's hooks AND dirty the worktree. In that case skip the hook and let
+      # fm-watch.sh's stale-pane detection (keyed on the `ctrl+c to stop` busy
+      # signature) surface an idle crew instead. Documented gap: per-turn wake
+      # precision is lost only for a project that ships its own .cursor/hooks.json.
+      if [ -e "$WT/.cursor/hooks.json" ]; then
+        echo "warning: $WT/.cursor/hooks.json already exists (tracked project hooks); skipping firstmate turn-end hook for $ID - falling back to stale-pane detection" >&2
+      else
+        mkdir -p "$WT/.cursor"
+        cat > "$WT/.cursor/hooks.json" <<EOF
+{"version":1,"hooks":{"stop":[{"command":"touch '$TURNEND'"}]}}
+EOF
+        exclude_path '.cursor/hooks.json'
+      fi
       ;;
   esac
 fi

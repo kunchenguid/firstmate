@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|cursor|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,6 +35,14 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # cursor (Cursor Agent CLI, binary `agent`, symlinked `cursor-agent`) sets
+  # CURSOR_INVOKED_AS (value "agent" or "cursor-agent", reflecting the invoking
+  # symlink) for its child/tool processes (verified cursor-agent 2026.07.09). It is
+  # unset outside a cursor-agent session (no collision with a non-cursor shell),
+  # so any non-empty value is unambiguous. cursor also sets CURSOR_AGENT=1, but
+  # CURSOR_INVOKED_AS is preferred: it is specific to the CLI agent invocation,
+  # whereas a CURSOR_* boolean could also leak from the Cursor IDE's terminal.
+  [ -n "${CURSOR_INVOKED_AS:-}" ] && { echo cursor; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -44,7 +52,13 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *cursor-agent*) echo cursor; return ;;
       pi) echo pi; return ;;
+      agent)
+        # cursor's binary is the generic name `agent`; disambiguate by its args,
+        # which always carry the cursor-agent install path (.../cursor-agent/...).
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        case "$args" in *cursor-agent*) echo cursor; return ;; esac ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -53,6 +67,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *cursor-agent*) echo cursor; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
