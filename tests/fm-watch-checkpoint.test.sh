@@ -33,6 +33,7 @@ test_signal_passes_through_and_exits_zero() {
   home=$(make_home signal)
   out="$home/out.txt"
   err="$home/err.txt"
+  fm_write_meta "$home/state/demo.meta" "window=test:fm-demo" "kind=ship"
   (
     sleep 1
     printf 'done: synthetic wake\n' > "$home/state/demo.status"
@@ -51,6 +52,7 @@ test_check_uses_preserved_watcher_environment() {
   home=$(make_home check-env)
   out="$home/out.txt"
   err="$home/err.txt"
+  fm_write_meta "$home/state/env-check.meta" "window=test:fm-env-check" "kind=ship"
   cat > "$home/state/env-check.check.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
