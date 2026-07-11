@@ -67,9 +67,9 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 if [ "$#" -gt 0 ]; then
-  exec shellcheck "$@"
+  exec shellcheck --norc "$@"
 fi
 
 # Canonical file set: the ONE authoritative definition. Callers reference this
 # script; they never re-spell these globs.
-exec shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+exec shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh
