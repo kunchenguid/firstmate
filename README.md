@@ -56,7 +56,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- A verified agent harness: Claude Code, Grok, Pi, Codex, OpenCode, or Hermes (crewmate/scout only).
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - tmux, for the reference session backend.
 
@@ -70,6 +70,8 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+Hermes is verified for crewmate and scout tasks only; a hermes primary is unverified and secondmates are refused.
 
 ### Install and launch
 
