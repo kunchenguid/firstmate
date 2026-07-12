@@ -27,6 +27,12 @@
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   secondmate_landed: {records[],truncated[],unreadable[]} - a bounded, read-only
+#     roll-up of DONE backlog records from this home's registered secondmate homes,
+#     so landed-work views see merges a secondmate managed (recorded in ITS OWN
+#     backlog, not the main one). Per-home count is capped; homes with an existing
+#     but unparseable backlog are disclosed in unreadable[]. Home paths come from the
+#     one secondmate-home enumerator (meta home= with data/secondmates.md fallback).
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -48,6 +54,9 @@ BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-ff-lib.sh"  # live_secondmate_meta_records: the one secondmate-home enumerator
 
 usage() {
   cat <<'EOF'
@@ -139,14 +148,15 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() {
-  if [ ! -f "$BACKLOG" ]; then
-    jq -n --arg path "$BACKLOG" '{path:$path,present:false,records:[]}'
+backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
+  local backlog=${1:-$BACKLOG}
+  if [ ! -f "$backlog" ]; then
+    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$BACKLOG" '
+  jq -Rn --arg path "$backlog" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -257,7 +267,7 @@ backlog_json() {
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | del(.section,.order)
-  ' < "$BACKLOG"
+  ' < "$backlog"
 }
 
 task_json_lines() {
@@ -417,6 +427,47 @@ task_json_lines() {
   done | jq -s 'sort_by(.id)'
 }
 
+# Bounded, deterministic roll-up of DONE records from this home's registered
+# secondmate homes. A merge a secondmate managed is recorded in ITS OWN backlog,
+# never the main one, so landed-work views miss it without this. Reuses the single
+# backlog parser (backlog_json) against each home's data/backlog.md - a pure Markdown
+# read, no per-task crew-state and no network - and the one secondmate-home enumerator
+# (fm-ff-lib.sh's live_secondmate_meta_records: meta home= with data/secondmates.md
+# fallback). Per-home Done is capped here so the canonical snapshot stays bounded
+# regardless of the view; bearings applies its own tighter view caps and omitted[]
+# disclosure. A home with no backlog file yet contributes nothing and is NOT flagged
+# (a fresh secondmate is normal); only an existing backlog that fails to parse is
+# reported unreadable. Records are sorted most-recent-first by completion date, id.
+FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=${FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME:-10}
+case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*|0) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
+secondmate_landed_json() {
+  local reg="$DATA/secondmates.md" id home backlog bj rows n
+  local records='[]' truncated='[]' unreadable='[]'
+  while IFS='|' read -r id home _; do
+    [ -n "$id" ] || continue
+    [ -n "$home" ] || continue
+    backlog="$home/data/backlog.md"
+    [ -f "$backlog" ] || continue
+    bj=$(backlog_json "$backlog") \
+      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+    rows=$(printf '%s' "$bj" | jq --arg home "$home" --arg id "$id" '
+      [ .records[] | select(.state == "done" and .structured)
+        | {id, title, pr_url, report_path, local_note, completion, home:$home, home_id:$id} ]
+      | sort_by([(.completion.date // ""), .id]) | reverse') \
+      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+    n=$(printf '%s' "$rows" | jq 'length')
+    if [ "$n" -gt "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" ]; then
+      truncated=$(jq -n --argjson a "$truncated" --arg h "$home" '$a + [$h]')
+    fi
+    records=$(jq -n --argjson a "$records" --argjson b "$rows" \
+      --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" '$a + ($b[:$cap])')
+  done <<EOF
+$(live_secondmate_meta_records "$STATE" "$reg")
+EOF
+  jq -n --argjson records "$records" --argjson truncated "$truncated" --argjson unreadable "$unreadable" \
+    '{records:$records, truncated:$truncated, unreadable:$unreadable}'
+}
+
 scout_report_lines() {
   local report id
   if [ ! -d "$DATA" ]; then
@@ -435,6 +486,7 @@ scout_report_lines() {
 BACKLOG_JSON=$(backlog_json)
 TASKS_JSON=$(task_json_lines)
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+SECONDMATE_LANDED_JSON=$(secondmate_landed_json)
 
 jq -n \
   --arg fm_home "$FM_HOME" \
@@ -446,6 +498,7 @@ jq -n \
   --argjson backlog "$BACKLOG_JSON" \
   --argjson tasks "$TASKS_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
+  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -456,6 +509,7 @@ jq -n \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     secondmate_landed:$secondmate_landed,
      secondmate_guidance:{
        note:"For kind=secondmate, send marked supervisor requests with fm-send and read the status/doc return channel; do not routinely fm-peek the secondmate chat for answers."
      }

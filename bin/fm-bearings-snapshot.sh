@@ -22,6 +22,12 @@
 # This wrapper consumes the canonical snapshot's hints.open_decisions field.
 # fm-classify-lib.sh owns the durable keyed-decision contract.
 #
+# The landed section merges this home's Done with the canonical snapshot's
+# secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
+# recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
+# a per-home cap and an overall cap, with omitted[] disclosure of both and of any
+# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+#
 # Flags:
 #   (default)        compact projection, TOON, local-only
 #   --json           the same projected model as JSON (machine/debug; parity form)
@@ -29,6 +35,7 @@
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
+#   --all-landed     include every landed record from every home (default: bounded)
 #   --all-reports    include the full scout-report inventory (default: relevant only)
 #   --all-queued     include superseded/held queued items (default: dropped)
 #   --all-recorded-prs include every locally recorded PR
@@ -44,6 +51,7 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
+FM_BEARINGS_LANDED_PER_HOME=${FM_BEARINGS_LANDED_PER_HOME:-$FM_BEARINGS_LANDED}
 FM_BEARINGS_IN_FLIGHT=${FM_BEARINGS_IN_FLIGHT:-20}
 FM_BEARINGS_DECISIONS=${FM_BEARINGS_DECISIONS:-20}
 FM_BEARINGS_GATES=${FM_BEARINGS_GATES:-20}
@@ -58,6 +66,7 @@ validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
 }
 validate_bound FM_BEARINGS_LANDED "$FM_BEARINGS_LANDED"
+validate_bound FM_BEARINGS_LANDED_PER_HOME "$FM_BEARINGS_LANDED_PER_HOME"
 validate_bound FM_BEARINGS_IN_FLIGHT "$FM_BEARINGS_IN_FLIGHT"
 validate_bound FM_BEARINGS_DECISIONS "$FM_BEARINGS_DECISIONS"
 validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
@@ -70,7 +79,7 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
-                               [--all-in-flight] [--all-decisions]
+                               [--all-in-flight] [--all-decisions] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
                                [--all-pr-repos]
@@ -82,8 +91,11 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   decisions_open{id,key,verb,summary}, landed{id,what,artifact},
   gates{id,title,blocked_by,reason}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+landed merges this home's Done with registered secondmate homes' Done, bounded by
+  a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
+  with omitted[] disclosure; --all-landed reveals the full set.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions, --all-reports, --all-queued, --all-recorded-prs,
+  --all-decisions, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
@@ -95,6 +107,7 @@ ALL_REPORTS=0
 ALL_QUEUED=0
 ALL_IN_FLIGHT=0
 ALL_DECISIONS=0
+ALL_LANDED=0
 ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
 ALL_PR_REPOS=0
@@ -107,6 +120,7 @@ while [ $# -gt 0 ]; do
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
     --all-decisions) ALL_DECISIONS=1 ;;
+    --all-landed) ALL_LANDED=1 ;;
     --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
     --all-unhealthy) ALL_UNHEALTHY=1 ;;
     --all-pr-repos) ALL_PR_REPOS=1 ;;
@@ -229,6 +243,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --arg prs "$PR_STATUS" \
   --arg fields "$FIELDS" \
   --argjson landed_n "$FM_BEARINGS_LANDED" \
+  --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
   --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
   --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
   --argjson gates_n "$FM_BEARINGS_GATES" \
@@ -238,6 +253,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
   --argjson all_decisions "$ALL_DECISIONS" \
+  --argjson all_landed "$ALL_LANDED" \
   --argjson all_reports "$ALL_REPORTS" \
   --argjson all_queued "$ALL_QUEUED" \
   --argjson all_recorded_prs "$ALL_RECORDED_PRS" \
@@ -254,7 +270,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured) ][:$landed_n]) as $done
+  | ([ .backlog.records[] | select(.state == "done" and .structured)
+       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ((.secondmate_landed.records) // []) as $mate_done
+  | ($main_done + $mate_done) as $all_landed_rows
+  | ([ $all_landed_rows | group_by(.home_id)[]
+       | sort_by([(.completion.date // ""), .id]) | reverse
+       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ] | add // []) as $per_home_capped
+  | ([ $all_landed_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length) as $home_cap_dropped
+  | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_sorted
+  | (if $all_landed == 1 then $landed_sorted else $landed_sorted[:$landed_n] end) as $done
   | ($done | map(.id)) as $done_ids
   | (.tasks | map(.id)) as $live_ids
   | ($live_ids + $done_ids) as $rel_ids
@@ -309,6 +334,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
         (if $all_queued == 1 then empty else {surface:"superseded/held queued items", reveal:"--all-queued"} end),
+        (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
+        (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
+        (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
+        (if (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),

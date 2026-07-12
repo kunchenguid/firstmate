@@ -111,6 +111,14 @@ EOF
     "projects=firstmate"
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$home/state/mate.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/mate.status"
+  # The secondmate's OWN home backlog records a merge it managed. This lands in the
+  # secondmate home, never the main backlog, so landed-work views only see it via the
+  # bounded cross-home Done roll-up.
+  mkdir -p "$home/secondmate-home/data"
+  cat > "$home/secondmate-home/data/backlog.md" <<'EOF'
+## Done
+- [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
+EOF
 }
 
 run() {  # <home> <fakebin> <args...>
@@ -400,8 +408,95 @@ test_completed_scout_report_not_pending() {
   pass "a completed scout with decision-like report prose is a pointer, not pending"
 }
 
+# Recently Landed must include merges a secondmate managed. Those completion records
+# live in the secondmate home's OWN backlog, not the main one, so the projection must
+# roll them up. Local, deterministic, no GitHub call.
+test_landed_includes_secondmate_home_merges() {
+  local home fakebin json
+  home=$(make_home mate-landed); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.[]; .id == "mate-landed" and (.artifact | test("/pull/50"))))
+      and (.landed | any(.[]; .id == "done-a"))
+  ' >/dev/null || fail "landed must merge secondmate-home Done with main-home Done: $json"
+  # Still zero network on this default path.
+  [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  pass "landed includes secondmate-managed merges alongside main-home merges"
+}
+
+# The roll-up stays bounded: a per-home cap and an overall cap, both disclosed in
+# omitted[], with --all-landed as the counted expansion knob. This also covers the
+# previously-silent main-home landed truncation.
+test_landed_bounded_and_disclosed() {
+  local home fakebin json
+  home=$(make_home mate-landed-caps); write_fixture "$home"
+  # Give the secondmate home a second, older Done row so a cap of 1 truncates it.
+  cat >> "$home/secondmate-home/data/backlog.md" <<'EOF'
+- [x] mate-landed-2 - Another secondmate fix https://github.com/kunchenguid/firstmate/pull/51 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+EOF
+  fakebin=$(make_fakebin "$home")
+  # Overall cap 1 (per-home also defaults to 1): main + two mate rows exist; one shown, disclosed.
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 1
+      and ([.omitted[].surface] | any(test("^landed showing 1 of")))
+      and ([.omitted[].surface] | any(test("^landed per-home capped")))
+  ' >/dev/null || fail "landed caps must bound and disclose overall + per-home: $json"
+  # --all-landed reveals the full set with no landed omission.
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
+  printf '%s' "$json" | jq -e '
+    (.landed | length) >= 3
+      and ([.omitted[].surface] | any(test("^landed showing")) | not)
+  ' >/dev/null || fail "--all-landed must reveal the full landed set: $json"
+  pass "landed stays bounded with per-home + overall caps and omitted[] disclosure"
+}
+
+# Captain's Call is populated only from the durable keyed open-decision set. The
+# anti-leak guard: action-free highlights - a working task, a completed scout,
+# queued/gated items, landed work - must never surface as an open decision, so they
+# cannot leak into Captain's Call. The standard fixture has exactly one genuine open
+# decision (the secondmate's masked needs-decision).
+test_captains_call_anti_leak() {
+  local home fakebin json
+  home=$(make_home anti-leak); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[].id] | unique) == ["mate"]
+      and (.decisions_open | all(.[]; .verb == "needs-decision" or .verb == "blocked"))
+  ' >/dev/null || fail "only genuine open decisions may feed Captain's Call: $json"
+  pass "action-free items (working/done/queued/landed) do not leak into Captain's Call"
+}
+
+# The /bearings skill is the one owner of the four-section chat-response contract.
+# Assert it states exactly the four fixed sections in order, each with its explicit
+# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
+# materially shorter than and links to the report file.
+test_chat_contract_four_sections() {
+  local skill body order expected
+  skill="$ROOT/.agents/skills/bearings/SKILL.md"
+  [ -f "$skill" ] || fail "bearings SKILL.md missing at $skill"
+  body=$(cat "$skill")
+  order=$(printf '%s\n' "$body" | grep -oE "Captain's Call|Recently Landed|Underway|Charted Next" | awk '!seen[$0]++')
+  expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
+  [ "$order" = "$expected" ] || fail "chat contract sections must appear in the fixed order, got: $order"
+  assert_contains "$body" "Nothing needs your action right now" "Captain's Call empty-state sentence"
+  assert_contains "$body" "Nothing has landed since your last report" "Recently Landed empty-state sentence"
+  assert_contains "$body" "Nothing is underway" "Underway empty-state sentence"
+  assert_contains "$body" "Nothing is queued" "Charted Next empty-state sentence"
+  assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
+  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
+  assert_contains "$body" "links to" "the chat must link to the report file"
+  pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
+}
+
 test_default_is_bounded_and_local_only
 test_toon_json_parity
+test_landed_includes_secondmate_home_merges
+test_landed_bounded_and_disclosed
+test_captains_call_anti_leak
+test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
