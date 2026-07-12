@@ -15,6 +15,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+: "${ROOT:?}"
 
 # make_fmod_fakebin: writes a fmod stub that logs every invocation with US
 # separators between args, returns canned stdout from $RESP/$N.out, and
