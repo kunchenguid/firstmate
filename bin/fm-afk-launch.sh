@@ -122,8 +122,11 @@ fm_afk_launch_entry_cmd() {
 }
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
+  local pending
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$FM_AFK_LAUNCH_RECORD"
+  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal.pending.XXXXXX") || return 1
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$FM_AFK_LAUNCH_RECORD" || { rm -f "$pending"; return 1; }
 }
 
 fm_afk_launch_flag_write() {
@@ -136,11 +139,23 @@ fm_afk_launch_flag_write() {
 # field (a herdr workspace id, kept for the record's own documentation) is not
 # needed to close by id, so it is discarded. Returns 1 when no record exists.
 fm_afk_launch_record_read() {
-  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""
+  local extra record
+  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; extra=""
   [ -f "$FM_AFK_LAUNCH_RECORD" ] || return 1
-  IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET _ \
-    < "$FM_AFK_LAUNCH_RECORD"
-  [ -n "$FM_AFK_REC_BACKEND" ] && [ -n "$FM_AFK_REC_TARGET" ]
+  record=$(cat "$FM_AFK_LAUNCH_RECORD" 2>/dev/null) || record=""
+  IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra \
+    < "$FM_AFK_LAUNCH_RECORD" || true
+  if ! printf '%s\n' "$record" | awk -F '\t' 'NF != 3 { bad=1 } END { exit !(NR == 1 && !bad) }' \
+    || [ -z "$FM_AFK_REC_BACKEND" ] || [ -z "$FM_AFK_REC_TARGET" ]; then
+    fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
+    return 2
+  fi
+  case "$FM_AFK_REC_BACKEND" in
+    herdr) [ -n "$extra" ] ;;
+    tmux) : ;;
+    none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
+    *) return 2 ;;
+  esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
 }
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
@@ -200,7 +215,8 @@ fm_afk_launch_close_recorded() {
   fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || close_result=$?
   if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
     rm -f "$FM_AFK_LAUNCH_RECORD" || return 1
-    return "$close_result"
+    [ "$close_result" -eq 0 ] || fm_afk_launch_log "terminal close command failed, but exact absence was confirmed"
+    return 0
   fi
   fm_afk_launch_log "recorded terminal teardown is unconfirmed; preserving exact id"
   return 1
@@ -284,13 +300,40 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
 # Reconcile a recorded-but-dead terminal: if a record exists and no live daemon
 # owns it, close the leaked terminal by exact id and drop the record.
 fm_afk_launch_reconcile() {
+  local read_result
   if daemon_lock_held_by_live_daemon; then
     return 0
   fi
-  if fm_afk_launch_record_read; then
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_log "reconciling leaked daemon terminal ${FM_AFK_REC_BACKEND}:${FM_AFK_REC_TARGET}"
     fm_afk_launch_close_recorded
+  elif [ "$read_result" -eq 2 ]; then
+    return 1
   fi
+}
+
+fm_afk_launch_restore_backup() {  # <backup> <had-afk>
+  local backup=$1 had_afk=$2 artifact result=0
+  rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+  if [ "$had_afk" -eq 1 ]; then
+    cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
+  fi
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+    if [ -e "$backup/$artifact" ]; then
+      cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
+    fi
+  done
+  if [ "$result" -eq 0 ]; then
+    rm -rf "$backup" || return 1
+  else
+    fm_afk_launch_log "rollback restoration incomplete; backup retained at $backup"
+  fi
+  return "$result"
 }
 
 # Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
@@ -421,14 +464,10 @@ fm_afk_launch_start() {
     esac
   fi
   if [ "$result" -ne 0 ]; then
-    rm -f "$FM_AFK_LAUNCH_STATE/.afk" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
-      "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
-    [ "$had_afk" -eq 1 ] && cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk"
-    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-      [ -e "$backup/$artifact" ] && cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact"
-    done
+    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
+  else
+    rm -rf "$backup" || result=1
   fi
-  rm -rf "$backup"
   return "$result"
 }
 
@@ -459,15 +498,10 @@ fm_afk_launch_start_native() {
     fm_afk_launch_record_write none - native || result=1
   fi
   if [ "$result" -ne 0 ]; then
-    rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
-      "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-      "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
-    [ "$had_afk" -eq 1 ] && cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk"
-    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-      [ -e "$backup/$artifact" ] && cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact"
-    done
+    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
+  else
+    rm -rf "$backup" || result=1
   fi
-  rm -rf "$backup"
   return "$result"
 }
 

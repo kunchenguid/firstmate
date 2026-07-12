@@ -465,7 +465,7 @@ unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
   mkdir -p "$st/state"
-  printf 'tmux\texact-session\t\n' > "$st/state/.afk-daemon-terminal"
+  printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_afk_launch_close_terminal() { return 1; }
@@ -476,6 +476,80 @@ unit_close_failure_preserves_record() {
     pass "teardown failure: exact terminal record is preserved"
   else
     fail "teardown failure: exact terminal record was discarded"
+  fi
+  rm -rf "$st"
+}
+
+unit_record_publication_atomic() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-atomic.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'tmux\told-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    mv() { return 1; }
+    ! fm_afk_launch_record_write tmux new-session owned
+  ' _ "$LAUNCH" \
+    && [ "$(cat "$st/state/.afk-daemon-terminal")" = $'tmux\told-session\towned' ] \
+    && ! find "$st/state" -name '.afk-daemon-terminal.pending.*' -print -quit | grep -q .; then
+    pass "record publication: failed atomic rename preserves the complete prior record"
+  else
+    fail "record publication: failed write truncated or replaced the prior record"
+  fi
+  rm -rf "$st"
+}
+
+unit_malformed_record_fails_closed() {
+  local st acted
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-malformed.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
+  acted="$st/acted"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" ACTED="$acted" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { : > "$ACTED"; }
+    ! fm_afk_launch_reconcile
+  ' _ "$LAUNCH" \
+    && [ ! -e "$acted" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "record read: malformed record fails closed without acting on a partial id"
+  else
+    fail "record read: malformed record was acted on or discarded"
+  fi
+  rm -rf "$st"
+}
+
+unit_confirmed_absence_succeeds() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 1; }
+    fm_afk_launch_terminal_absent() { return 0; }
+    fm_afk_launch_reconcile
+  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "confirmed absence: cleanup succeeds and removes the stale record"
+  else
+    fail "confirmed absence: close error incorrectly failed reconciliation"
+  fi
+  rm -rf "$st"
+}
+
+unit_incomplete_restore_retains_backup() {
+  local st backup
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restore-fail.XXXXXX")
+  mkdir -p "$st/state"
+  backup=$(mktemp -d "$st/state/.afk-launch-backup.XXXXXX")
+  printf 'prior\n' > "$backup/.afk"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    cp() { return 1; }
+    ! fm_afk_launch_restore_backup "$2" 1
+  ' _ "$LAUNCH" "$backup" && [ -d "$backup" ] && [ -e "$backup/.afk" ]; then
+    pass "rollback restore: incomplete restoration retains its recovery backup"
+  else
+    fail "rollback restore: incomplete restoration discarded its backup"
   fi
   rm -rf "$st"
 }
@@ -612,6 +686,10 @@ unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
+unit_record_publication_atomic
+unit_malformed_record_fails_closed
+unit_confirmed_absence_succeeds
+unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux
