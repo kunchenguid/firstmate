@@ -52,8 +52,11 @@ fi
 
 if [ "$FORGE" = gitea ]; then
   cat > "$STATE/$ID.check.sh" <<EOF
-state=\$(cd "$WT" 2>/dev/null && tea pulls "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" -o json 2>/dev/null | jq -r '.hasMerged // false')
-[ "\$state" = "true" ] && echo "merged"
+WT=\$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "\$WT" ] && [ -d "\$WT" ]; then
+  state=\$(cd "\$WT" 2>/dev/null && tea pulls "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" -o json 2>/dev/null | jq -r '.hasMerged // false')
+  [ "\$state" = "true" ] && echo "merged"
+fi
 EOF
 else
   cat > "$STATE/$ID.check.sh" <<EOF

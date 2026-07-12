@@ -13,6 +13,9 @@
 #   (d) Gitea check.sh reports "merged" when tea reports hasMerged true
 #   (e) Gitea check.sh stays silent when tea reports hasMerged false
 #   (f) no worktree on disk: pr= is still recorded, pr_head= is skipped (both forges)
+#   (g) Gitea check.sh re-reads the worktree from meta at poll time, so a
+#       worktree that appears after arming (not just at arm time) still lets
+#       the merge poll succeed instead of silently failing forever
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -183,9 +186,49 @@ test_no_worktree_records_pr_without_head() {
   pass "fm-pr-check records pr= without pr_head= when the task's worktree is missing"
 }
 
+test_gitea_check_polls_worktree_recorded_after_arming() {
+  local case_dir out
+  case_dir="$TMP_ROOT/gitea-late-worktree"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  # Mirrors real tea: only succeeds when invoked with cwd inside the recorded
+  # worktree (tea auto-discovers login/host from the worktree's origin
+  # remote), so this fails unless the generated check.sh actually cd's there.
+  local expected_wt
+  expected_wt=$(cd "$case_dir" && mkdir -p wt && cd wt && pwd -P)
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pulls "*)
+    [ "\$(pwd -P)" = "$expected_wt" ] || exit 1
+    printf '{"headSha":"%s","hasMerged":%s}\n' '5555555555555555555555555555555555555555' 'true' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tea"
+
+  run_pr_check "$case_dir" task-x1 https://git.example.com/example/repo/pulls/15 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-late-worktree: fm-pr-check failed"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "gitea-late-worktree: pr_head= should not be recorded before the worktree is known"
+
+  mkdir -p "$case_dir/wt"
+  echo "worktree=$case_dir/wt" >> "$case_dir/state/task-x1.meta"
+  out=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh") || true
+  assert_contains "$out" "merged" \
+    "gitea-late-worktree: armed check.sh should poll a worktree recorded after arming, not stay silent forever"
+  pass "fm-pr-check's armed check.sh re-reads the worktree from meta at poll time and still detects merge"
+}
+
 test_github_records_pr_head_and_arms_check
 test_github_check_reports_merged
 test_gitea_records_pr_head_and_arms_check
 test_gitea_check_reports_merged
 test_gitea_check_stays_silent_when_not_merged
 test_no_worktree_records_pr_without_head
+test_gitea_check_polls_worktree_recorded_after_arming
