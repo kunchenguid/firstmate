@@ -47,6 +47,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_LAUNCH_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
+FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 
 # shellcheck source=bin/fm-backend.sh
@@ -62,6 +63,40 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+fm_afk_launch_lock_owned() {
+  local pid expected actual
+  [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
+  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
+  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
+  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$expected" ] && [ "$actual" = "$expected" ]
+}
+
+fm_afk_launch_lock_acquire() {
+  local i
+  mkdir -p "$FM_AFK_LAUNCH_STATE"
+  for i in $(seq 1 200); do
+    if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+      printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"
+      fm_pid_identity "$$" > "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null || true
+      return 0
+    fi
+    if ! fm_afk_launch_lock_owned; then
+      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.05
+  done
+  fm_afk_launch_log "timed out waiting for launcher lock"
+  return 1
+}
+
+fm_afk_launch_lock_release() {
+  local pid
+  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
+  [ "$pid" = "$$" ] && rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
+}
 
 fm_afk_launch_usage() {
   sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -179,35 +214,48 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 }
 
 fm_afk_launch_start() {
-  local captain_target captain_backend
+  local captain_target captain_backend backup artifact had_afk=0 result
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
 
-  # Away mode is active immediately and deterministically.
   mkdir -p "$FM_AFK_LAUNCH_STATE"
-  date '+%s' > "$FM_AFK_LAUNCH_STATE/.afk"
 
   if daemon_lock_held_by_live_daemon; then
+    date '+%s' > "$FM_AFK_LAUNCH_STATE/.afk"
     fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
     return 0
   fi
 
-  # Fresh entry: reconcile a leaked prior terminal, then clear the previous
-  # away session's stale artifacts before a new daemon can surface them.
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  [ -f "$FM_AFK_LAUNCH_STATE/.afk" ] && had_afk=1 && cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk"
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+    [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ] && cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact"
+  done
   fm_afk_launch_reconcile
   fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
+  date '+%s' > "$FM_AFK_LAUNCH_STATE/.afk"
 
   case "$captain_backend" in
-    herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend" ;;
-    tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend" ;;
+    herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
+    tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
     *)
       fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
-      return 1
+      result=1
       ;;
   esac
+  if [ "$result" -ne 0 ]; then
+    rm -f "$FM_AFK_LAUNCH_STATE/.afk" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
+      "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
+    [ "$had_afk" -eq 1 ] && cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk"
+    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+      [ -e "$backup/$artifact" ] && cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact"
+    done
+  fi
+  rm -rf "$backup"
+  return "$result"
 }
 
 fm_afk_launch_stop() {
@@ -215,8 +263,11 @@ fm_afk_launch_stop() {
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+  pid=""
+  if daemon_lock_held_by_live_daemon; then
+    pid=$(daemon_lock_pid 2>/dev/null || true)
+  fi
+  if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
     for i in $(seq 1 40); do
       fm_pid_alive "$pid" || break
@@ -234,6 +285,8 @@ fm_afk_launch_stop() {
 }
 
 fm_afk_launch_main() {
+  fm_afk_launch_lock_acquire || return 1
+  trap fm_afk_launch_lock_release EXIT INT TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     stop) fm_afk_launch_stop ;;
@@ -241,6 +294,10 @@ fm_afk_launch_main() {
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
+  local result=$?
+  fm_afk_launch_lock_release
+  trap - EXIT INT TERM
+  return "$result"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then

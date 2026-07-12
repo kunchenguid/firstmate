@@ -118,6 +118,7 @@ unit_stop_ordering() {
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   # A recorded terminal (harmless: a non-existent tmux session name -> no-op close).
   printf 'tmux\tfm-afk-nonexistent-%s\t\n' "$$" > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
@@ -138,6 +139,73 @@ unit_stop_ordering() {
   fi
   kill "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_rejects_reused_pid() {
+  local st lock sleeper_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  sleep 600 &
+  sleeper_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleeper_pid" > "$lock/pid"
+  printf 'different-process-identity' > "$lock/pid-identity"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if kill -0 "$sleeper_pid" 2>/dev/null; then
+    pass "stop identity: stale lock cannot signal an unrelated live process"
+  else
+    fail "stop identity: stale lock signaled an unrelated live process"
+  fi
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_failed_start_rolls_back_state() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-start.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'pending\n' > "$st/state/.subsuper-escalations"
+  printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    fail "failed start: unsupported backend unexpectedly succeeded"
+  elif [ ! -e "$st/state/.afk" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
+    && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
+    pass "failed start: away flag and delivery artifacts roll back"
+  else
+    fail "failed start: left false away state or discarded delivery artifacts"
+  fi
+  rm -rf "$st"
+}
+
+unit_concurrent_start_serialized() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (concurrent start)"; return 0; }
+  local st cap_session cap_pane first second rec count
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-concurrent.XXXXXX")
+  cap_session="fm-afk-concurrent-cap-$$"
+  tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "concurrent start: captain session creation failed"; rm -rf "$st"; return 0; }
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
+  cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & first=$!
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & second=$!
+  wait "$first"; wait "$second"
+  rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
+  count=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v expected="$rec" '$0 == expected {n++} END{print n+0}')
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  if [ -n "$rec" ] && tmux has-session -t "$rec" 2>/dev/null && [ "$count" -eq 1 ]; then
+    pass "concurrent start: one serialized daemon terminal remains tracked"
+  else
+    fail "concurrent start: leaked or lost daemon terminal (count $count, record $rec)"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  tmux kill-session -t "$cap_session" 2>/dev/null || true
   rm -rf "$st"
 }
 
@@ -241,6 +309,9 @@ e2e_tmux() {
 unit_clear_stale
 unit_fresh_vs_refresh
 unit_stop_ordering
+unit_stop_rejects_reused_pid
+unit_failed_start_rolls_back_state
+unit_concurrent_start_serialized
 e2e_herdr
 e2e_tmux
 
