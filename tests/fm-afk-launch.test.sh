@@ -374,6 +374,7 @@ unit_readiness_failure_rolls_back_terminal() {
     . "$1"
     fm_afk_launch_wait_ready() { return 1; }
     fm_afk_launch_close_terminal() { printf "%s:%s" "$1" "$2" > "$CLOSED"; }
+    fm_afk_launch_terminal_absent() { [ -e "$CLOSED" ]; }
     ! fm_afk_launch_commit_terminal tmux exact-session ""
   ' _ "$LAUNCH"
   if [ "$(cat "$closed" 2>/dev/null || true)" = "tmux:exact-session" ] \
