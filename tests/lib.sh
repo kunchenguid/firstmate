@@ -44,28 +44,41 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. A test file that needs extra teardown (e.g. killing a daemon) should
+# define its own EXIT trap and call fm_test_cleanup from inside it so registered
+# dirs are still removed.
+#
+# Callers use it as TMP_ROOT=$(fm_test_tmproot ...), so the registration happens
+# in a command-substitution subshell: an in-memory array would be discarded with
+# that subshell, and a trap installed there would fire on subshell exit and wipe
+# the dir the caller just asked for. So registrations go to a file, and the EXIT
+# trap is installed here, at source time, in the sourcing shell - bash resets
+# caught traps in subshells, so it fires exactly once, when the test process
+# exits.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
 
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
 }
 
-# fm_test_register_cleanup <dir>: record <dir> for removal on EXIT, installing
-# the trap on the first registration. Call it from the shell that must own the
-# cleanup - a registration made inside a command-substitution subshell is
-# discarded with that subshell.
+trap fm_test_cleanup EXIT
+
+# fm_test_register_cleanup <dir>: record <dir> for removal on EXIT. Safe to call
+# from a subshell: the record is appended to the registry file the sourcing
+# shell's trap reads.
 fm_test_register_cleanup() {
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$1")
+  printf '%s\n' "$1" >> "$FM_TEST_CLEANUP_REGISTRY"
 }
 
 fm_test_tmproot() {
@@ -117,13 +130,12 @@ SH
 # executables EXCEPT the tools these suites control through their own fakebin,
 # and sets FM_TEST_BASE_PATH_DIR to it. It writes that variable instead of
 # echoing a path so the caller invokes it directly (NOT in a command
-# substitution): a subshell would discard both the cache and fm_test_tmproot's
-# cleanup registration, leaking the mirror dir and rebuilding its ~2000 symlinks
-# on every call. The ambient machine therefore can never satisfy a firstmate tool
-# probe, so a case that omits a tool genuinely runs without it and the assertion
-# tests what it was written to test. Everything else - git, jq, and the coreutils
-# the scripts really call - is mirrored through untouched, because the suites
-# need real ones. The dir is built once per test process and cached.
+# substitution): a subshell would discard the cache, rebuilding the mirror's
+# ~2000 symlinks on every call. The ambient machine therefore can never satisfy a
+# firstmate tool probe, so a case that omits a tool genuinely runs without it and
+# the assertion tests what it was written to test. Everything else - git, jq, and
+# the coreutils the scripts really call - is mirrored through untouched, because
+# the suites need real ones. The dir is built once per test process and cached.
 #
 # FM_TEST_BASE_PATH still overrides the whole thing, unchanged.
 
@@ -134,22 +146,44 @@ SH
 # bootstrap's lists. `git` is deliberately exempt: the suites need a real git, and
 # their missing-git case shadows it with a shell function instead of relying on
 # PATH.
+#
+# The derivation only understands literal `TOOLS="a b c"` assignments. It is
+# validated before use against FM_TEST_TOOL_REQUIRED - the names the missing-tool
+# suites actually shadow through their own fakebin - and a derivation that cannot
+# be trusted FAILS the suite loudly rather than falling back to a partial
+# blocklist, because a partial blocklist means a green suite that tests nothing.
 FM_TEST_TOOL_EXEMPT="git"
 FM_TEST_TOOL_EXTRA="herdr zellij cmux"
+FM_TEST_TOOL_REQUIRED="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi orca"
 FM_TEST_TOOL_BLOCKLIST=""
 FM_TEST_BASE_PATH_DIR=""
 
 fm_test_tool_blocklist() {
-  local declared name
+  local declared name missing=""
   [ -z "$FM_TEST_TOOL_BLOCKLIST" ] || return 0
   declared=$(grep -o 'TOOLS="[^"]*"' "$ROOT/bin/fm-bootstrap.sh" | sed -e 's/^TOOLS="//' -e 's/"$//')
-  [ -n "$declared" ] || fail "tests/lib.sh: could not derive the tool list from bin/fm-bootstrap.sh"
+  [ -n "$declared" ] || fail "tests/lib.sh: could not derive the tool list from bin/fm-bootstrap.sh; its TOOLS shape changed and fm_test_tool_blocklist must be updated"
+  case "$declared" in
+    *'$'* | *'`'*)
+      fail "tests/lib.sh: bin/fm-bootstrap.sh's TOOLS list is no longer a literal name list (it contains a substitution); fm_test_tool_blocklist must be updated or the missing-tool suites will be satisfied by the ambient toolchain"
+      ;;
+  esac
   for name in $declared $FM_TEST_TOOL_EXTRA; do
     case " $FM_TEST_TOOL_EXEMPT " in *" $name "*) continue ;; esac
     case " $FM_TEST_TOOL_BLOCKLIST " in *" $name "*) continue ;; esac
     FM_TEST_TOOL_BLOCKLIST="$FM_TEST_TOOL_BLOCKLIST $name"
   done
   FM_TEST_TOOL_BLOCKLIST=${FM_TEST_TOOL_BLOCKLIST# }
+  for name in $FM_TEST_TOOL_REQUIRED; do
+    case " $FM_TEST_TOOL_BLOCKLIST " in
+      *" $name "*) ;;
+      *) missing="$missing $name" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    FM_TEST_TOOL_BLOCKLIST=""
+    fail "tests/lib.sh: tool blocklist derived from bin/fm-bootstrap.sh is missing:$missing - its TOOLS shape changed and fm_test_tool_blocklist must be updated; refusing to run the missing-tool suites against a partial blocklist"
+  fi
 }
 
 fm_test_base_path() {
@@ -158,11 +192,7 @@ fm_test_base_path() {
     return 0
   fi
   fm_test_tool_blocklist
-  # mktemp directly, then register in THIS shell: fm_test_tmproot echoes its dir,
-  # so calling it in a command substitution would strand the registration (and the
-  # dir) in the subshell.
-  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-base-path.XXXXXX")
-  fm_test_register_cleanup "$root"
+  root=$(fm_test_tmproot fm-base-path)
   dir="$root/bin"
   mkdir -p "$dir"
   for src in /usr/bin /bin /usr/sbin /sbin; do
