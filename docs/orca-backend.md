@@ -1,7 +1,7 @@
 # Orca Backend
 
 Orca is an experimental runtime backend for firstmate.
-It is distinct from the crewmate harness: the harness is the agent process firstmate launches (`claude`, `codex`, `opencode`, `pi`, or `grok`), while Orca owns the task worktree and terminal endpoint underneath that process.
+It is distinct from the crewmate harness: the harness is the agent process firstmate launches (`claude`, `codex`, `opencode`, `pi`, or `grok`), while the Orca backend creates the task git worktree and attaches an Orca daemon terminal underneath that process.
 
 ## Setup
 
@@ -113,8 +113,8 @@ Why this matters:
 
 ### Resilience knobs
 
-- `FMOD_PROTOCOL_VERSION=<int>` — pin a specific version (no discovery).
-- `FMOD_SOCKET`, `FMOD_TOKEN`, `FMOD_PIDFILE` — pin socket/token/pid paths explicitly (escape hatch for non-default install layouts).
+- `FMOD_PROTOCOL_VERSION=<int>` - pin a specific version (no discovery).
+- `FMOD_SOCKET`, `FMOD_TOKEN`, `FMOD_PIDFILE` - pin socket/token/pid paths explicitly (escape hatch for non-default install layouts).
 - Hardcoded default is bumped when the installed AppImage outruns the source; discovery is the safety net for the next bump.
 
 ## Daemon supervision
@@ -123,11 +123,11 @@ The orca GUI is a single-instance AppImage. On Linux without a desktop session, 
 
 `bin/fm-supervise-orca.sh` is firstmate's firstmate-owned daemon keeper. It is intentionally separate from `fm-watch.sh` (per-task supervision) so a flaky daemon never widens into per-task noise:
 
-- `bin/fm-supervise-orca.sh once` — single health check (returns 0 if reachable, non-zero otherwise; no relaunch).
-- `bin/fm-supervise-orca.sh start` — background the supervisor (writes pid to `state/.orca-supervisor.pid`).
-- `bin/fm-supervise-orca.sh stop` — stop a running supervisor.
-- `bin/fm-supervise-orca.sh status` — print supervisor liveness and daemon reachability.
-- `bin/fm-supervise-orca.sh --follow` — foreground loop (harness-tracked background).
+- `bin/fm-supervise-orca.sh once` - single health check (returns 0 if reachable, non-zero otherwise; no relaunch).
+- `bin/fm-supervise-orca.sh start` - background the supervisor (writes pid to `state/.orca-supervisor.pid`).
+- `bin/fm-supervise-orca.sh stop` - stop a running supervisor.
+- `bin/fm-supervise-orca.sh status` - print supervisor liveness and daemon reachability.
+- `bin/fm-supervise-orca.sh --follow` - foreground loop (harness-tracked background).
 
 `bin/fm-bootstrap.sh` integrates the supervisor: when `config/backend=orca` (or `FM_BACKEND=orca`), bootstrap calls `once` and reports `ORCA: daemon reachable`. In a mutating bootstrap it will additionally call `start` to relaunch a dead daemon and report `ORCA: daemon recovered`. In `FM_BOOTSTRAP_DETECT_ONLY=1` it only reports; the lock holder's next bootstrap can recover.
 

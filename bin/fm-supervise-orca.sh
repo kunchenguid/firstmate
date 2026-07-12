@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/fm-supervise-orca.sh — keep the orca terminal daemon alive.
+# bin/fm-supervise-orca.sh - keep the orca terminal daemon alive.
 #
 # The orca GUI process is a single-instance AppImage; on Linux without a
 # desktop session it can die (X server disconnect, single-instance lock left

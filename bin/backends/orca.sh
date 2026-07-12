@@ -11,13 +11,13 @@
 # detection all see the same adapter contract they saw before, so they did not
 # need to change.
 #
-# Orca owns both the task worktree and the terminal endpoint. The worktree is
-# acquired through `git worktree add` (the daemon has no worktree primitive and
-# the broken `orca worktree create` CLI is what drove this rewrite); the
-# terminal is acquired through the daemon's `createOrAttach` RPC. Escape key
-# support remains unsupported because the daemon's write primitive cannot
-# distinguish Escape from any other byte sequence without a key-encoder the
-# daemon does not expose.
+# The Orca backend owns both the git worktree path and the terminal endpoint.
+# The worktree is acquired through `git worktree add` (the daemon has no
+# worktree primitive and the broken `orca worktree create` CLI is what drove
+# this rewrite); the terminal is acquired through the daemon's `createOrAttach`
+# RPC. Escape key support remains unsupported because the daemon's write
+# primitive cannot distinguish Escape from any other byte sequence without a
+# key-encoder the daemon does not expose.
 #
 # Target string shape: a stable Orca terminal id of the form `fm-<task-name>`.
 # The id is also the daemon session id, so reattach is automatic.
@@ -90,7 +90,7 @@ fm_backend_orca_worktree_dir() {  # <project-path> <name>
 # passes --shell-ready so the daemon's shell-ready barrier (bash/zsh rcfile
 # load) blocks until the prompt is actually visible, which keeps the post-
 # create `treehouse get` race out of the harness path. Note: the orca backend
-# does NOT run `treehouse get` — the worktree IS the project — so this only
+# does NOT run `treehouse get` - the worktree IS the project - so this only
 # protects against a `command` injected at create time (currently unused).
 fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
   local session_id=$1 cwd=$2 title=$3 actual_cwd
