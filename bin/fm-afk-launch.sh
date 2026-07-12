@@ -540,7 +540,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid result=0 read_result
+  local pid pid_identity current_identity result=0 read_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -551,8 +551,10 @@ fm_afk_launch_stop() {
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
+  pid_identity=""
   if daemon_lock_held_by_live_daemon; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
+    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
@@ -564,9 +566,15 @@ fm_afk_launch_stop() {
       sleep 0.25
     done
   fi
-  if daemon_lock_held_by_live_daemon; then
-    fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
-    return 1
+  if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+      fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
+      return 1
+    }
+    if [ "$current_identity" = "$pid_identity" ]; then
+      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+      return 1
+    fi
   fi
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then

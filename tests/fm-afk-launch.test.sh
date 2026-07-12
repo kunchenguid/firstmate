@@ -650,12 +650,19 @@ unit_stop_confirms_daemon_exit() {
     . "$1"
     seq() { printf "1\n"; }
     sleep() { :; }
+    kill() {
+      command kill "$@"
+      if [ "$1" = -TERM ]; then
+        rm -rf "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      fi
+    }
     ! fm_afk_launch_stop
   ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.supervise-daemon.lock" ] \
     && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "stop liveness: live daemon preserves lifecycle state and fails closed"
+    pass "stop liveness: captured live daemon preserves lifecycle state after lock release"
   else
-    fail "stop liveness: live daemon was reported stopped or lost lifecycle state"
+    fail "stop liveness: lock release was mistaken for captured daemon exit"
   fi
   kill -KILL "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
