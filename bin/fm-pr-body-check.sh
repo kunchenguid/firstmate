@@ -44,6 +44,12 @@ case "${1:-}" in
   '') usage >&2; exit 2 ;;
 esac
 
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-body-check.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+TMP="$WORK/text"
+HITS="$WORK/hits"
+GH_ERR="$WORK/gh-err"
+
 TARGET=""
 SOURCE=""
 if [ "$1" = --file ]; then
@@ -63,8 +69,10 @@ else
   REPO=${BASH_REMATCH[2]}
   NUMBER=${BASH_REMATCH[3]}
   SOURCE="live PR $URL"
-  if ! TEXT=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER" --jq '.title + "\n" + (.body // "")' 2>&1); then
-    echo "error: could not fetch the live PR body: $TEXT" >&2
+  # gh's stderr stays OUT of $TEXT: a deprecation notice folded into the body
+  # would be scanned and printed back as if the PR had published it.
+  if ! TEXT=$(gh api "repos/$OWNER/$REPO/pulls/$NUMBER" --jq '.title + "\n" + (.body // "")' 2>"$GH_ERR"); then
+    echo "error: could not fetch the live PR body: $(cat "$GH_ERR")" >&2
     exit 2
   fi
 fi
@@ -83,39 +91,39 @@ PATTERNS=(
   $'agent co-author\tco-authored-by:.*(claude|opus|sonnet|haiku|gpt|codex|copilot|agent|bot)'
 )
 
-TMP=$(mktemp "${TMPDIR:-/tmp}/fm-pr-body-check.XXXXXX")
-trap 'rm -f "$TMP"' EXIT
 printf '%s\n' "$TEXT" > "$TMP"
 
-# A line matching several patterns is still one line to read, so labels are
-# collected per line number and the line is printed once, in file order.
-declare -A LABELS=()
-declare -A TEXTS=()
+# Every hit is recorded as "<line number>\t<label>"; associative arrays would
+# pin this script to bash 4, and stock macOS ships bash 3.2.
+: > "$HITS"
 for entry in "${PATTERNS[@]}"; do
   label=${entry%%$'\t'*}
   regex=${entry#*$'\t'}
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    lineno=${hit%%:*}
-    case " ${LABELS[$lineno]:-} " in
-      *" $label "*) : ;;
-      *) LABELS[$lineno]="${LABELS[$lineno]:+${LABELS[$lineno]} }$label" ;;
-    esac
-    TEXTS[$lineno]=${hit#*:}
+    printf '%s\t%s\n' "${hit%%:*}" "$label" >> "$HITS"
   done < <(grep -n -i -E -- "$regex" "$TMP" || true)
 done
 
-flagged=0
-for lineno in $(printf '%s\n' "${!TEXTS[@]}" | sort -n); do
-  if [ "$flagged" -eq 0 ]; then
-    printf 'FLAGGED (%s) - read each line below and judge it; a hit is not a verdict.\n\n' "$SOURCE"
-    flagged=1
-  fi
-  printf '  line %s [%s]: %s\n' "$lineno" "${LABELS[$lineno]}" "${TEXTS[$lineno]}"
-done
+if [ ! -s "$HITS" ]; then
+  printf 'clean (%s): nothing flagged.\n' "$SOURCE"
+  exit 0
+fi
 
-if [ "$flagged" -eq 1 ]; then
-  cat <<'EOF'
+printf 'FLAGGED (%s) - read each line below and judge it; a hit is not a verdict.\n\n' "$SOURCE"
+# A line matching several patterns is still one line to read, so labels are
+# collected per line number and the line is printed once, in file order.
+awk -F'\t' '
+  NR == FNR {
+    if (!seen[$1 SUBSEP $2]++) {
+      labels[$1] = ($1 in labels) ? labels[$1] " " $2 : $2
+    }
+    next
+  }
+  FNR in labels { printf "  line %s [%s]: %s\n", FNR, labels[FNR], $0 }
+' "$HITS" "$TMP"
+
+cat <<'EOF'
 
 These lines are PUBLIC: a maintainer who knows nothing about how this change was
 produced will read them. Some matches are legitimate (a PR about firstmate names
@@ -125,7 +133,4 @@ To rewrite a dirty body, do NOT use `gh pr edit --body`: it can silently NO-OP.
   gh api -X PATCH repos/OWNER/REPO/pulls/<n> -F body=@<file>
 Then re-run this check against the live PR.
 EOF
-  exit 1
-fi
-
-printf 'clean (%s): nothing flagged.\n' "$SOURCE"
+exit 1

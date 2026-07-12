@@ -135,6 +135,9 @@ test_public_pr_contract_on_pr_opening_modes() {
       "$id: brief lost the gh pr edit no-op trap"
     assert_grep 'gh api -X PATCH repos/OWNER/REPO/pulls/{n} -F body=@{file}' "$brief" \
       "$id: brief lost the REST API repair command"
+    # shellcheck disable=SC2016 # Literal backticks must reach the brief text unexpanded.
+    assert_grep 'This one repair intentionally bypasses `gh-axi`, which exposes no `api` subcommand' "$brief" \
+      "$id: brief does not say the raw gh api repair is a sanctioned exception to the gh-axi rule"
   done
 
   assert_grep "rendered VERBATIM into the \`## Intent\` section" "$home/data/brief-public-nm-e1/brief.md" \

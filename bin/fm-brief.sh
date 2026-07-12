@@ -298,6 +298,7 @@ It prints the live body's suspicious lines. READ each flagged line and judge it;
 If the body is dirty, rewrite it and re-verify before appending \`done:\`.
 Do NOT rewrite it with \`gh pr edit --body\`: that can silently NO-OP (it has failed with "GraphQL: Projects (classic) is being deprecated", changing nothing while reporting success, which then looks like something else clobbering your edit). Use the REST API:
 \`gh api -X PATCH repos/OWNER/REPO/pulls/{n} -F body=@{file}\`
+This one repair intentionally bypasses \`gh-axi\`, which exposes no \`api\` subcommand, so raw \`gh api\` is the correct and sanctioned tool for it; every other GitHub operation still goes through \`gh-axi\`.
 Reporting \`done\` on a public body you have not read back live is not acceptable.
 EOF
 }

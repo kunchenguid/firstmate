@@ -130,6 +130,30 @@ SH
   pass "fm-pr-body-check.sh: the live PR body is fetched from the API and scanned"
 }
 
+# gh writes deprecation and auth notices to stderr while still succeeding. Folded
+# into the body, such a notice reads as PUBLISHED text and flags a clean PR.
+test_gh_stderr_never_becomes_body_text() {
+  local fakebin out code=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh: warning: the captain must not use this deprecated crewmate endpoint" >&2
+printf 'Retry transient upload failures\n\nThe uploader now retries three times with backoff.\n'
+SH
+  chmod +x "$fakebin/gh"
+
+  out=$(PATH="$fakebin:$PATH" "$CHECK" https://github.com/owner/repo/pull/12 2>/dev/null) || code=$?
+  expect_code 0 "$code" "a gh stderr warning was scanned as if it were published body text"
+  assert_contains "$out" "clean" "a clean live body did not report clean"
+  pass "fm-pr-body-check.sh: gh's stderr is never folded into the scanned body"
+}
+
+# Stock macOS ships bash 3.2, so the script must not need bash 4 features.
+test_no_bash4_only_constructs() {
+  assert_no_grep 'declare -A' "$CHECK" "the check uses associative arrays, which bash 3.2 cannot run"
+  pass "fm-pr-body-check.sh: runs on bash 3.2 (no associative arrays)"
+}
+
 test_bad_url_and_fetch_failure_exit_2() {
   local fakebin out code=0
   out=$("$CHECK" https://example.com/not-a-pr 2>&1) || code=$?
@@ -156,4 +180,6 @@ test_output_demands_reading_not_counting
 test_output_carries_the_gh_pr_edit_noop_workaround
 test_second_person_and_agent_coauthor_are_flagged
 test_live_pr_body_is_read_from_the_api
+test_gh_stderr_never_becomes_body_text
+test_no_bash4_only_constructs
 test_bad_url_and_fetch_failure_exit_2
