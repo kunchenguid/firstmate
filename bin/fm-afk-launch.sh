@@ -26,6 +26,9 @@
 #                              record it. Idempotent: an already-running daemon
 #                              just refreshes state/.afk; a recorded-but-dead
 #                              terminal is reconciled (closed by id) first.
+#   fm-afk-launch.sh start-native
+#                              Prepare lifecycle state for a harness-native
+#                              background job and record that no terminal exists.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -123,6 +126,12 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$FM_AFK_LAUNCH_RECORD"
 }
 
+fm_afk_launch_flag_write() {
+  local pending="$FM_AFK_LAUNCH_STATE/.afk.pending.$$"
+  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$FM_AFK_LAUNCH_STATE/.afk" || { rm -f "$pending"; return 1; }
+}
+
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
 # field (a herdr workspace id, kept for the record's own documentation) is not
 # needed to close by id, so it is discarded. Returns 1 when no record exists.
@@ -134,27 +143,63 @@ fm_afk_launch_record_read() {
   [ -n "$FM_AFK_REC_BACKEND" ] && [ -n "$FM_AFK_REC_TARGET" ]
 }
 
-# Close a recorded terminal by EXACT id (never a broad sweep). Best-effort. The
+# Close a recorded terminal by EXACT id (never a broad sweep). The
 # recorded workspace id (herdr) needs no separate close: closing the pane takes
 # its single-tab dedicated workspace with it.
 fm_afk_launch_close_terminal() {  # <backend> <target>
   local backend=$1 target=$2
   case "$backend" in
     herdr)
-      fm_backend_source herdr || return 0
-      # pane close removes the pane; its tab (and this daemon's dedicated
-      # single-tab workspace) go with it. Exact pane id only.
-      fm_backend_herdr_kill "$target"
+      fm_backend_source herdr || return 1
+      local session=${target%%:*} pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
       ;;
     tmux)
       # target is the dedicated daemon session name - kill exactly it.
-      tmux kill-session -t "$target" 2>/dev/null || true
+      tmux kill-session -t "$target" 2>/dev/null
+      ;;
+    none)
+      return 0
       ;;
     *)
       fm_afk_launch_log "cannot close unknown recorded backend '$backend'"
-      return 0
+      return 1
       ;;
   esac
+}
+
+fm_afk_launch_terminal_absent() {  # <backend> <target>
+  local backend=$1 target=$2 session pane out result code
+  case "$backend" in
+    herdr)
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>&1)
+      result=$?
+      [ "$result" -ne 0 ] || return 1
+      code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || return 1
+      [ "$code" = pane_not_found ]
+      ;;
+    tmux)
+      ! tmux has-session -t "$target" 2>/dev/null
+      ;;
+    none)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_afk_launch_close_recorded() {
+  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+  if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+    rm -f "$FM_AFK_LAUNCH_RECORD"
+    return 0
+  fi
+  fm_afk_launch_log "recorded terminal teardown is unconfirmed; preserving exact id"
+  return 1
 }
 
 fm_afk_launch_terminal_alive() {  # <backend> <target>
@@ -239,8 +284,7 @@ fm_afk_launch_reconcile() {
   fi
   if fm_afk_launch_record_read; then
     fm_afk_launch_log "reconciling leaked daemon terminal ${FM_AFK_REC_BACKEND}:${FM_AFK_REC_TARGET}"
-    fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"
-    rm -f "$FM_AFK_LAUNCH_RECORD" 2>/dev/null || true
+    fm_afk_launch_close_recorded
   fi
 }
 
@@ -262,7 +306,12 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   create_result=$?
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ "$create_result" -ne 0 ] || [ -z "$wsid" ] || [ -z "$pane" ]; then
+  if [ "$create_result" -ne 0 ] && [ -n "$wsid" ] && [ -n "$pane" ]; then
+    fm_afk_launch_log "herdr create failed after returning exact ids; closing $session:$pane"
+    fm_backend_herdr_kill "$session:$pane"
+    return 1
+  fi
+  if [ -z "$wsid" ] || [ -z "$pane" ]; then
     recovered=$(fm_afk_launch_herdr_recover_created "$session" "$label") || {
       fm_afk_launch_log "herdr create did not yield a recoverable exact workspace/pane id"
       return 1
@@ -312,7 +361,10 @@ fm_afk_launch_start() {
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
   if daemon_lock_held_by_live_daemon; then
-    date '+%s' > "$FM_AFK_LAUNCH_STATE/.afk"
+    if ! fm_afk_launch_flag_write; then
+      fm_afk_launch_log "failed to refresh away-mode flag"
+      return 1
+    fi
     fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
     return 0
   fi
@@ -322,18 +374,29 @@ fm_afk_launch_start() {
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
     [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ] && cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact"
   done
-  fm_afk_launch_reconcile
-  fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
-  date '+%s' > "$FM_AFK_LAUNCH_STATE/.afk"
-
-  case "$captain_backend" in
-    herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
-    tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
-    *)
-      fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+  if ! fm_afk_launch_reconcile; then
+    result=1
+  else
+    fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
+    result=0
+  fi
+  if [ "$result" -eq 0 ]; then
+    if ! fm_afk_launch_flag_write; then
+      fm_afk_launch_log "failed to write away-mode flag"
       result=1
-      ;;
-  esac
+    fi
+  fi
+
+  if [ "$result" -eq 0 ]; then
+    case "$captain_backend" in
+      herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
+      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      *)
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+        result=1
+        ;;
+    esac
+  fi
   if [ "$result" -ne 0 ]; then
     rm -f "$FM_AFK_LAUNCH_STATE/.afk" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
       "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
@@ -346,8 +409,42 @@ fm_afk_launch_start() {
   return "$result"
 }
 
+fm_afk_launch_start_native() {
+  local backup artifact had_afk=0 result=0
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_flag_write || return 1
+    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
+    return 0
+  fi
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  [ -f "$FM_AFK_LAUNCH_STATE/.afk" ] && had_afk=1 && cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk"
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+    [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ] && cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact"
+  done
+  fm_afk_launch_reconcile || result=1
+  if [ "$result" -eq 0 ]; then
+    fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
+    fm_afk_launch_flag_write || result=1
+  fi
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_record_write none - native || result=1
+  fi
+  if [ "$result" -ne 0 ]; then
+    rm -f "$FM_AFK_LAUNCH_STATE/.afk" "$FM_AFK_LAUNCH_RECORD" \
+      "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
+      "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
+    [ "$had_afk" -eq 1 ] && cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk"
+    for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+      [ -e "$backup/$artifact" ] && cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact"
+    done
+  fi
+  rm -rf "$backup"
+  return "$result"
+}
+
 fm_afk_launch_stop() {
-  local pid i
+  local pid result=0
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
@@ -357,19 +454,23 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
-    for i in $(seq 1 40); do
+    for _ in $(seq 1 40); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done
   fi
   # (2) Close the daemon's own terminal by exact id.
   if fm_afk_launch_record_read; then
-    fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"
-    rm -f "$FM_AFK_LAUNCH_RECORD" 2>/dev/null || true
+    fm_afk_launch_close_recorded || result=1
   fi
   # (3) Clear the away-mode flag LAST.
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true
-  fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
+  else
+    fm_afk_launch_log "away mode stopped; terminal teardown remains recorded for retry"
+  fi
+  return "$result"
 }
 
 fm_afk_launch_main() {
@@ -380,6 +481,7 @@ fm_afk_launch_main() {
   trap 'exit 143' TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
+    start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
     -h|--help|help) fm_afk_launch_usage ;;

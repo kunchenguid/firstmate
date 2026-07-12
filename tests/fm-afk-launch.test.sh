@@ -293,6 +293,32 @@ unit_herdr_partial_create_recovery() {
   rm -rf "$st"
 }
 
+unit_herdr_error_with_exact_ids_closes_exact() {
+  local st closed
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-error-exact.XXXXXX")
+  closed="$st/closed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
+        return 1
+      fi
+      return 1
+    }
+    fm_backend_herdr_kill() { printf "%s" "$1" > "$CLOSED"; }
+    ! fm_afk_launch_create_herdr lab:captain herdr
+  ' _ "$LAUNCH"
+  if [ "$(cat "$closed" 2>/dev/null || true)" = "lab:pane-exact" ]; then
+    pass "herdr create error: returned exact id is retained for cleanup"
+  else
+    fail "herdr create error: exact cleanup id was discarded"
+  fi
+  rm -rf "$st"
+}
+
 unit_record_failure_closes_terminal() {
   local st closed
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX")
@@ -326,6 +352,83 @@ unit_readiness_failure_rolls_back_terminal() {
     pass "readiness failure: exact terminal and durable record roll back"
   else
     fail "readiness failure: terminal or record survived"
+  fi
+  rm -rf "$st"
+}
+
+unit_native_lifecycle() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.subsuper-escalations"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.subsuper-escalations" ]; then
+    pass "native lifecycle: launcher owns state with no terminal"
+  else
+    fail "native lifecycle: state preparation or no-terminal record failed"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "native lifecycle: uniform stop clears state without closing a terminal"
+  else
+    fail "native lifecycle: uniform stop retained state"
+  fi
+  rm -rf "$st"
+}
+
+unit_native_entry_preserves_prepared_state() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  : > "$st/state/.subsuper-escalations"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 bash -c '
+    . "$1"
+    FM_AFK_DAEMON=/bin/true
+    fm_afk_start_main
+  ' _ "$START" >/dev/null 2>&1
+  if [ -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
+    pass "native entry: launcher-prepared lifecycle state is not rewritten"
+  else
+    fail "native entry: launcher-prepared lifecycle state was mutated"
+  fi
+  rm -rf "$st"
+}
+
+unit_close_failure_preserves_record() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'tmux\texact-session\t\n' > "$st/state/.afk-daemon-terminal"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 1; }
+    fm_afk_launch_terminal_absent() { return 1; }
+    ! fm_afk_launch_reconcile
+  ' _ "$LAUNCH"
+  if [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "teardown failure: exact terminal record is preserved"
+  else
+    fail "teardown failure: exact terminal record was discarded"
+  fi
+  rm -rf "$st"
+}
+
+unit_flag_write_failure_aborts() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_flag_write() { return 1; }
+    ! fm_afk_launch_start_native
+  ' _ "$LAUNCH"
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "flag failure: lifecycle aborts without active state"
+  else
+    fail "flag failure: lifecycle reported active state"
   fi
   rm -rf "$st"
 }
@@ -436,8 +539,13 @@ unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
+unit_herdr_error_with_exact_ids_closes_exact
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
+unit_native_lifecycle
+unit_native_entry_preserves_prepared_state
+unit_close_failure_preserves_record
+unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux
 

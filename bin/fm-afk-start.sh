@@ -111,7 +111,11 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
-  date '+%s' > "$FM_AFK_STATE/.afk"
+  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
+    [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
+  else
+    date '+%s' > "$FM_AFK_STATE/.afk"
+  fi
 
   local pid
   pid=$(daemon_lock_pid 2>/dev/null || true)
@@ -126,7 +130,9 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
+  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
+    fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
+  fi
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
   exec "$FM_AFK_DAEMON"
