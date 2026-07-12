@@ -1142,7 +1142,7 @@ test_spawn_per_id_pins_codex_fast() {
   w="$TMP_ROOT/spawn-perid-fast"
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config/secondmate-harness.d"
-  printf 'claude claude-opus-4-8 max\n' > "$w/home/config/secondmate-harness"
+  printf 'claude claude-opus-4-8 max fast\n' > "$w/home/config/secondmate-harness"
   printf 'codex gpt-5.6-sol xhigh fast\n' > "$w/home/config/secondmate-harness.d/smtools"
 
   # smtools: per-id override -> codex/gpt-5.6-sol/xhigh/fast.
@@ -1158,7 +1158,8 @@ test_spawn_per_id_pins_codex_fast() {
   assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" "perid-fast: launch missing effort override"
   assert_contains "$launch" "-c 'service_tier=\"fast\"'" "perid-fast: launch missing Codex fast-mode override"
 
-  # A different id (no override) resolves the global claude pin, no fast flag.
+  # A different id (no override) resolves the global claude pin; its unsupported
+  # fast token is ignored in both the launch and applied-state metadata.
   make_seeded_home "$w/spellmerchant" spellmerchant
   : > "$launchlog"
   spawn_secondmate_capture "$w" spellmerchant "$w/spellmerchant" "$launchlog" >/dev/null 2>&1

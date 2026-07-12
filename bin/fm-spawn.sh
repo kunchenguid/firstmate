@@ -1026,7 +1026,7 @@ META_WINDOW=$T
   # other task stays byte-identical (absent fast= means off). It is informational
   # only: recovery/liveness respawn re-resolve fast from the per-id config, never
   # from this line.
-  [ "$FAST" = fast ] && echo "fast=on"
+  [ "$FAST" = fast ] && [ "$HARNESS" = codex ] && echo "fast=on"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
