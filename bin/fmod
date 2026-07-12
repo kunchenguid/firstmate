@@ -120,16 +120,24 @@ def discover_protocol_version() -> int:
             ordered.append(v)
 
     for v in ordered:
+        sockets: list[socket.socket] = []
         try:
             sock = os.path.join(daemon_dir, f"daemon-v{v}.sock")
             tok = os.path.join(daemon_dir, f"daemon-v{v}.token")
             token = read_token(tok)
-            s = _hello(sock, str(uuid.uuid4()), token, "control", HELLO_TIMEOUT_S, version=v)
-            s.close()
+            client_id = str(uuid.uuid4())
+            sockets.append(_hello(sock, client_id, token, "stream", HELLO_TIMEOUT_S, version=v))
+            sockets.append(_hello(sock, client_id, token, "control", HELLO_TIMEOUT_S, version=v))
             _DISCOVERED_VERSION = v
             return v
-        except (DaemonHelloError, FileNotFoundError, OSError):
+        except (DaemonHelloError, DaemonConnError, FileNotFoundError, OSError):
             continue
+        finally:
+            for s in sockets:
+                try:
+                    s.close()
+                except OSError:
+                    pass
     raise DaemonHelloError(
         f"no reachable orca daemon (tried protocol versions {ordered} at {daemon_dir})"
     )

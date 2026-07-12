@@ -877,7 +877,8 @@ mod = runpy.run_path(sys.argv[1])
 case_dir = sys.argv[2]
 daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
 os.makedirs(daemon_dir, exist_ok=True)
-for version in (22, 23):
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
     with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
         f.write("")
     with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
@@ -890,7 +891,7 @@ class FakeSocket:
         pass
 
 def fake_hello(sock_path, client_id, token, role, timeout, version=None):
-    sent.append((os.path.basename(sock_path), token, version))
+    sent.append((os.path.basename(sock_path), client_id, token, role, version))
     if version == 23:
         return FakeSocket()
     raise mod["DaemonHelloError"]("Protocol version mismatch")
@@ -902,10 +903,60 @@ mod["discover_protocol_version"].__globals__["_DISCOVERED_VERSION"] = None
 
 discovered = mod["discover_protocol_version"]()
 assert discovered == 23, discovered
-assert ("daemon-v23.sock", "token-23", 23) in sent, sent
-assert all(sock == f"daemon-v{version}.sock" for sock, token, version in sent), sent
+assert ("daemon-v23.sock", "token-23", "stream", 23) in [(sock, token, role, version) for sock, client_id, token, role, version in sent], sent
+assert ("daemon-v23.sock", "token-23", "control", 23) in [(sock, token, role, version) for sock, client_id, token, role, version in sent], sent
+by_version = {}
+for sock, client_id, token, role, version in sent:
+    by_version.setdefault(version, []).append((sock, client_id, token, role))
+assert by_version[23][0][1] == by_version[23][1][1], sent
+assert [role for sock, client_id, token, role in by_version[23]] == ["stream", "control"], sent
+assert all(sock == f"daemon-v{version}.sock" for sock, client_id, token, role, version in sent), sent
 PY
   pass "fmod discovery: sends candidate protocol version in hello"
+}
+
+test_fmod_protocol_discovery_skips_stale_socket() {
+  fmod_case fmod-discovery-stale
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod discovery should skip stale socket files"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+attempts = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    attempts.append((version, role))
+    if version == protocol:
+        raise mod["DaemonConnError"]("connect failed")
+    return FakeSocket()
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["discover_protocol_version"].__globals__["_hello"] = fake_hello
+mod["discover_protocol_version"].__globals__["_DISCOVERED_VERSION"] = None
+
+discovered = mod["discover_protocol_version"]()
+assert discovered == 23, discovered
+assert (protocol, "stream") in attempts, attempts
+assert (23, "stream") in attempts, attempts
+assert (23, "control") in attempts, attempts
+PY
+  pass "fmod discovery: skips stale socket candidates"
 }
 
 # ---- test runner ---------------------------------------------------------
