@@ -16,23 +16,34 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
-1. **Set the durable away-mode flag:**
-   ```sh
-   date '+%s' > state/.afk
-   ```
-   This file survives a firstmate restart: recovery re-enters afk if the
-   flag is present.
+1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
+   This owns the durable state write, session-scoped stale-artifact clearing,
+   terminal record, and rollback.
+   The flag survives a firstmate restart, so recovery re-enters afk when it is present.
 
-2. **Ensure the sub-supervisor daemon is running.** Start the helper as its own
-   tracked background terminal/session:
-   ```sh
-   bin/fm-afk-start.sh
-   ```
-   The helper sets or refreshes `state/.afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
-   Do not wrap this in `nohup ... &`.
-   Codex/herdr can reap fire-and-forget shell children after a tool call
-   returns; a tracked background terminal/session keeps the daemon attached to
-   the harness lifecycle and survived the real incident reproduction.
+2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
+   Its hosting differs by harness.
+   Pick the right path:
+   - **Harness WITH a native in-pane tracked-background tool** (e.g. claude's
+     background bash, grok's background tool): first run
+     `bin/fm-afk-launch.sh start-native`, then run
+     `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
+     This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
+     The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
+     If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
+     Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
+   - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
+     the single owner of the daemon terminal: it creates a NON-VISIBLE tracked
+     terminal for the current backend (a herdr dedicated `--no-focus` workspace,
+     a detached tmux session), records its exact id, and passes the captain pane
+     in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its
+     own new pane. **Never manufacture a terminal by splitting the captain's
+     active pane** (`herdr pane split`): a split co-tenants the tab and visibly
+     shrinks the captain's pane (docs/herdr-backend.md "Away-mode daemon terminal
+     launch").
+   Both paths share `bin/fm-afk-start.sh` as the daemon entry.
+   The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
+   It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
@@ -47,7 +58,8 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
-  Clear `state/.afk`, stop the daemon, flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
+  Run `bin/fm-afk-launch.sh stop`: it stops the daemon in the correct order - it SIGTERMs the daemon so its shutdown flush runs **while `state/.afk` is still present** (clearing the flag first makes that flush a no-op via the daemon's presence gate, stranding undelivered escalations), then closes the daemon's own terminal by exact id, then clears `state/.afk` last.
+  Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
   is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
@@ -197,6 +209,13 @@ the marker lets firstmate distinguish it from a real captain message.
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
   (docs/herdr-backend.md "Away-mode daemon: herdr supervisor-pane support").
+
+## Stale-artifact lifecycle
+
+Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
+Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
+`docs/herdr-backend.md` "Stale-artifact lifecycle fix" owns the mechanism and verification evidence.
 
 ## Reliability properties
 

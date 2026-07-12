@@ -59,6 +59,11 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# The resolution verb that CLOSES a keyed decision opened by needs-decision or
+# blocked. See status_open_decisions below for the full durable-decision contract;
+# this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
+FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -68,9 +73,15 @@ last_status_line() {
 
 # 0 if the given (last) status line matches a captain-relevant verb.
 status_is_captain_relevant() {
-  local line=$1
+  local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
+  if [ -z "${FM_CAPTAIN_RE+x}" ]; then
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      done|needs-decision|blocked|failed) return 0 ;;
+    esac
+  fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
@@ -81,10 +92,99 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=${line%%:*}
-  verb=${verb#"${verb%%[![:space:]]*}"}
-  verb=${verb%"${verb##*[![:space:]]}"}
+  verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# --- durable keyed decisions ------------------------------------------------
+#
+# The status stream is an append-only EVENT log. Reading it last-event-wins
+# (last_status_line above) cannot represent "an earlier decision is still open
+# after a later, unrelated event": a subsequent done/paused/working line silently
+# masks a still-open needs-decision. status_open_decisions is the ONE authoritative
+# statement of the contract that fixes this - a needs-decision/blocked line OPENS a
+# keyed decision, and ONLY an explicit resolution referencing that key CLOSES it; a
+# later unrelated terminal line never clears an open captain decision.
+#
+# Decision key grammar (backward-compatible with the existing "<verb>: <note>"
+# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+#   needs-decision [key=api-shape]: <summary>
+#   resolved       [key=api-shape]: <how it was decided>
+# A line with no token uses the key "default", preserving the historical
+# one-open-decision-per-task behavior (a bare "resolved:" closes "default").
+# The three parsers are pure reads of a single line; the verb parser strips any
+# key token before the colon so the leading word is recovered cleanly.
+status_line_verb() {  # <status-line> -> leading verb word
+  local v=${1%%:*}
+  v=${v%%\[key=*}
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  printf '%s' "$v"
+}
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  case "$1" in
+    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+  local prefix=${1%%:*} k
+  case "$prefix" in
+    *\[key=*\]*)
+      k=${prefix#*\[key=}
+      k=${k%%\]*}
+      case "$k" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+        *) printf '%s' "$k" ;;
+      esac
+      ;;
+    *) printf 'default' ;;
+  esac
+}
+# Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
+# Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
+_fm_decision_drop() {  # <open-set> <key>
+  local set=$1 key=$2 line out=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'*) : ;;
+      *) out="${out}${line}"$'\n' ;;
+    esac
+  done <<EOF
+$set
+EOF
+  printf '%s' "$out"
+}
+# Fold the WHOLE status stream into the set of decisions still open. Prints one
+# TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
+# most-recently-opened-last order; prints nothing when none are open. Pure read of
+# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
+# is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# instead of trusting the last status line.
+status_open_decisions() {  # <status-file>
+  local f=$1 line verb key note resolve open='' stripped
+  [ -f "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    case "$verb" in
+      needs-decision|blocked)
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      "$resolve")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done < "$f"
+  printf '%s' "$open"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped
