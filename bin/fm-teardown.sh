@@ -26,8 +26,9 @@
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# declared scratch and the report at data/<task-id>/report.md plus optional artifacts
+# under data/<task-id>/evidence/ are the work products - teardown proceeds once the
+# report exists, and refuses without it.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.

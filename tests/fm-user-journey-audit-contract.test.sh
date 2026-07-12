@@ -52,6 +52,7 @@ test_evidence_and_report_requirements() {
   assert_grep 'reproduction steps' "$SKILL" "skill does not require reproduction steps"
   assert_grep 'Avoid capturing secrets' "$SKILL" "skill does not require avoiding secret capture"
   assert_grep 'data/<id>/report.md' "$SKILL" "skill does not write the report to the scout report path"
+  assert_grep 'data/<id>/evidence/' "$SKILL" "skill does not preserve supporting evidence outside the disposable worktree"
   # Three separated finding classes with the scoring fields.
   assert_grep 'Defects' "$SKILL" "report does not separate defects"
   assert_grep 'UX improvements' "$SKILL" "report does not separate UX improvements"
@@ -75,6 +76,16 @@ test_captain_approval_gate_before_task_creation() {
   pass "task creation is gated behind explicit captain approval"
 }
 
+test_completed_scout_is_torn_down_before_approval_wait() {
+  local teardown_line approval_line
+  teardown_line=$(grep -n 'tear the scout down' "$SKILL" | head -1 | cut -d: -f1)
+  approval_line=$(grep -n '^## 11\. Captain approval gate' "$SKILL" | cut -d: -f1)
+  [ -n "$teardown_line" ] || fail "skill does not tear down the completed scout"
+  [ -n "$approval_line" ] || fail "skill is missing the captain approval gate"
+  [ "$teardown_line" -lt "$approval_line" ] || fail "completed scout remains alive while waiting for implementation approval"
+  pass "completed scout is torn down before waiting for implementation approval"
+}
+
 test_idle_not_recurring() {
   assert_grep 'never schedule, repeat, or self-initiate an audit' "$SKILL" "skill does not forbid recurring or self-directed audits"
   pass "skill stays idle and never self-schedules"
@@ -88,4 +99,5 @@ test_local_instance_default
 test_evidence_and_report_requirements
 test_feature_ideas_are_grounded
 test_captain_approval_gate_before_task_creation
+test_completed_scout_is_torn_down_before_approval_wait
 test_idle_not_recurring

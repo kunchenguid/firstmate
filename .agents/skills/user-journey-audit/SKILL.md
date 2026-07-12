@@ -9,7 +9,7 @@ metadata:
 # user-journey-audit
 
 Produce an evidence-backed audit of how a real person experiences an app, from two isolated vantage points: a genuinely new user meeting the product for the first time, and a returning user with established history who is trying to continue their work.
-The deliverable is knowledge, not a code change, so this runs as a scout task (`AGENTS.md` section 7): its output is a report at `data/<id>/report.md`, a rendered HTML review surface, and a concise chat summary, never a PR.
+The deliverable is knowledge, not a code change, so this runs as a scout task (`AGENTS.md` section 7): its output is a report at `data/<id>/report.md`, durable evidence and a rendered HTML review surface under `data/<id>/evidence/`, and a concise chat summary, never a PR.
 It ends with proposed work presented to the captain for approval; it never files, dispatches, or starts an implementation task on its own.
 
 This skill is invoked only when the captain asks for it.
@@ -112,7 +112,7 @@ For every journey, record:
 
 ## 7. Evidence capture
 
-Back every material finding with concrete evidence a builder can act on:
+Back every material finding with concrete evidence a builder can act on, stored under `data/<id>/evidence/` so it survives teardown:
 
 - Screenshots at the moment of friction or failure.
 - The URL of the page where it happened.
@@ -151,9 +151,11 @@ Rank items so the highest-impact, highest-confidence work reads first.
 
 ## 10. Present the findings
 
-Render the report as HTML and open it as a review surface with `lavish-axi`, following this fleet's report-viewer convention, so the captain can read the prioritized findings, screenshots, and evidence on a rich surface rather than as a wall of text.
+Render the report as HTML under `data/<id>/evidence/` and open it as a review surface with `lavish-axi`, following this fleet's report-viewer convention, so the captain can read the prioritized findings, screenshots, and evidence on a rich surface rather than as a wall of text.
 If `lavish-axi` is unavailable, fall back to the markdown report file.
 In chat, give a concise summary: the headline of what the two personas experienced, the top few findings per class, and a pointer to the rendered report - not the full report inline.
+After presenting the completed report, tear the scout down per `AGENTS.md` section 7 and record it in Done with the report path.
+The durable report and evidence remain available while the captain reviews the proposed work.
 
 ## 11. Captain approval gate before any task creation
 
@@ -162,5 +164,4 @@ Present the prioritized defects, UX improvements, and features as proposed work 
 Only after the captain explicitly approves specific items do you hand those approved items into Firstmate's normal backlog and delivery lifecycle (`AGENTS.md` sections 7 and 10) - as ordinary ship or scout tasks through their project's delivery mode.
 Approval of one item is not approval of the rest; file only what the captain named.
 
-Then tear the scout down per section 7 (its report already exists, so teardown is clean) and record it in Done with the report path.
 Do not schedule a follow-up audit; this skill stays idle until the captain invokes it again.
