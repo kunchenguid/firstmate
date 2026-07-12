@@ -1001,6 +1001,58 @@ PY
   pass "fmod discovery: skips stale socket candidates"
 }
 
+test_fmod_connect_discovers_after_default_stale_socket() {
+  fmod_case fmod-connect-stale-default
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod connect should discover after stale default socket"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+attempts = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    sock_name = os.path.basename(sock_path)
+    attempts.append((sock_name, token, role, version))
+    if sock_name == f"daemon-v{protocol}.sock":
+        raise mod["DaemonConnError"]("connect failed")
+    return FakeSocket()
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["DaemonClient"].connect.__globals__["_hello"] = fake_hello
+mod["DaemonClient"].connect.__globals__["_DISCOVERED_VERSION"] = None
+
+client = mod["DaemonClient"]()
+client.connect()
+
+assert client.sock_path.endswith("daemon-v23.sock"), client.sock_path
+assert client.token_path.endswith("daemon-v23.token"), client.token_path
+assert (f"daemon-v{protocol}.sock", f"token-{protocol}", "stream", None) in attempts, attempts
+assert (f"daemon-v{protocol}.sock", f"token-{protocol}", "stream", protocol) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "stream", 23) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "control", 23) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "stream", None) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "control", None) in attempts, attempts
+client.close()
+PY
+  pass "fmod connect: discovers after stale default socket"
+}
+
 # ---- test runner ---------------------------------------------------------
 
 run_test() {

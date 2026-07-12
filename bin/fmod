@@ -237,26 +237,31 @@ class DaemonClient:
             _ = v  # discovery side effect: _DISCOVERED_VERSION is cached
 
         try:
-            # Stream socket first (daemon accepts control only after a paired stream).
-            # Per daemon-server.ts:177-186, a control socket needs a stream socket
-            # with the same clientId; the daemon destroys orphan stream sockets.
+            self._connect_pair(token)
+        except (DaemonHelloError, DaemonConnError) as exc:
+            if isinstance(exc, DaemonHelloError):
+                msg = str(exc)
+                if "Protocol version mismatch" not in msg and "hello rejected" not in msg:
+                    raise
+            self.close()
+            v = discover_protocol_version()
+            sock, tok, _ = daemon_paths()
+            self.sock_path = sock
+            self.token_path = tok
+            token = read_token(tok)
+            _ = v
+            self._connect_pair(token)
+
+    def _connect_pair(self, token: str) -> None:
+        try:
             self._stream = _hello(self.sock_path, self.client_id, token, "stream", HELLO_TIMEOUT_S)
             self._ctrl = _hello(self.sock_path, self.client_id, token, "control", HELLO_TIMEOUT_S)
-        except DaemonHelloError as exc:
-            # The socket exists but the version is wrong. Re-probe and retry
-            # once so a hardcoded PROTOCOL_VERSION lag does not turn into a
-            # permanent failure after an orca AppImage bump.
-            msg = str(exc)
-            if "Protocol version mismatch" in msg or "hello rejected" in msg:
-                v = discover_protocol_version()
-                sock, tok, _ = daemon_paths()
-                self.sock_path = sock
-                self.token_path = tok
-                token = read_token(tok)
-                self._stream = _hello(self.sock_path, self.client_id, token, "stream", HELLO_TIMEOUT_S)
-                self._ctrl = _hello(self.sock_path, self.client_id, token, "control", HELLO_TIMEOUT_S)
-            else:
-                raise
+        except (DaemonHelloError, DaemonConnError):
+            self.close()
+            raise
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         for s in (self._ctrl, self._stream):
