@@ -263,28 +263,69 @@ unit_signal_exits_with_lock_cleanup() {
   rm -rf "$st"
 }
 
-unit_herdr_partial_create_cleanup() {
-  local st killed
+unit_herdr_partial_create_recovery() {
+  local st recorded
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
-  killed="$st/killed"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" KILLED="$killed" bash -c '
+  recorded="$st/recorded"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
+    FM_AFK_LAUNCH_LABEL=afk-exact-label RECORDED="$recorded" bash -c '
     . "$1"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
     fm_backend_herdr_cli() {
       if [ "$2 $3" = "workspace create" ]; then
-        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-partial"},"root_pane":{}}}'\''
+        printf %s '\''truncated'\''
+        return 1
+      elif [ "$2 $3" = "workspace list" ]; then
+        printf %s '\''{"result":{"workspaces":[{"workspace_id":"ws-partial","label":"afk-exact-label"}]}}'\''
       else
         printf %s '\''{"result":{"panes":[{"pane_id":"pane-exact"}]}}'\''
       fi
     }
-    fm_backend_herdr_kill() { printf %s "$1" > "$KILLED"; }
-    ! fm_afk_launch_create_herdr lab:captain herdr
+    fm_afk_launch_record_write() { printf "%s:%s:%s" "$1" "$2" "$3" > "$RECORDED"; }
+    fm_afk_launch_create_herdr lab:captain herdr
   ' _ "$LAUNCH"
-  if [ "$(cat "$killed" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr create: partial response cleanup uses exact workspace pane"
+  if [ "$(cat "$recorded" 2>/dev/null || true)" = "herdr:lab:pane-exact:ws-partial" ]; then
+    pass "herdr create: malformed response recovers durable exact ownership"
   else
-    fail "herdr create: partial response leaked its created workspace"
+    fail "herdr create: malformed response left terminal ownership unknown"
+  fi
+  rm -rf "$st"
+}
+
+unit_record_failure_closes_terminal() {
+  local st closed
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX")
+  closed="$st/closed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
+    . "$1"
+    fm_afk_launch_record_write() { return 1; }
+    fm_afk_launch_close_terminal() { printf "%s:%s" "$1" "$2" > "$CLOSED"; }
+    ! fm_afk_launch_commit_terminal tmux exact-session ""
+  ' _ "$LAUNCH"
+  if [ "$(cat "$closed" 2>/dev/null || true)" = "tmux:exact-session" ]; then
+    pass "record failure: newly created terminal is closed by exact id"
+  else
+    fail "record failure: newly created terminal leaked"
+  fi
+  rm -rf "$st"
+}
+
+unit_readiness_failure_rolls_back_terminal() {
+  local st closed
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready.XXXXXX")
+  closed="$st/closed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
+    . "$1"
+    fm_afk_launch_wait_ready() { return 1; }
+    fm_afk_launch_close_terminal() { printf "%s:%s" "$1" "$2" > "$CLOSED"; }
+    ! fm_afk_launch_commit_terminal tmux exact-session ""
+  ' _ "$LAUNCH"
+  if [ "$(cat "$closed" 2>/dev/null || true)" = "tmux:exact-session" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "readiness failure: exact terminal and durable record roll back"
+  else
+    fail "readiness failure: terminal or record survived"
   fi
   rm -rf "$st"
 }
@@ -394,7 +435,9 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
-unit_herdr_partial_create_cleanup
+unit_herdr_partial_create_recovery
+unit_record_failure_closes_terminal
+unit_readiness_failure_rolls_back_terminal
 e2e_herdr
 e2e_tmux
 
