@@ -17,9 +17,10 @@ When tasks are in flight and there is no live identity-matched watcher with a fr
 ## Shared Predicate
 
 The guard first scopes itself to a real primary checkout.
-A secondmate home runs its own primary firstmate session, so the guard applies there too, exactly as it does in the main home; the `.fm-secondmate-home` marker is not an exclusion.
-This matches the cd-guard, which shares the same primary detection.
-The guard is inert only in crewmate and scout worktrees, because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`; that same linked-worktree test exempts the child worktrees of the main home and of a secondmate home alike.
+A secondmate home runs its own primary firstmate session, so a genuine `.fm-secondmate-home` marker force-includes it whether treehouse leased it as a linked worktree or it is a git-cloned plain checkout.
+The marker must be a regular non-symlink file whose first line, after all whitespace is removed, contains a non-empty identifier made only of letters, digits, dots, underscores, and dashes.
+An unmarked checkout, or one with an invalid marker, falls through to the git-dir check.
+That check keeps crewmate and scout worktrees inert because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
 
 For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
@@ -117,11 +118,11 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 
 The guard originally early-exited in every secondmate home on the `.fm-secondmate-home` marker.
 That was a scoping choice inherited from the guard's primary-only origin, not a defense against any secondmate-specific hazard.
-Removing that single line makes the guard apply to a secondmate's OWN primary session exactly as it does to the main home, while the retained linked-worktree test still exempts the secondmate's child crew/scout worktrees.
-That is the same scope the cd-guard (`bin/fm-cd-pretool-check.sh`) already enforces, so the two seatbelts now share one primary-detection rule.
+A genuinely marked secondmate home is now force-included as a guarded primary regardless of whether it is a treehouse-leased linked worktree or a git-cloned plain checkout.
+Only unmarked child worktrees fall through to the linked-worktree exemption, and marker validation prevents an empty, malformed, or symlink marker from spoofing inclusion.
 
 "No turn ends blind" for a secondmate is delivered by the same two mechanisms the main primary relies on.
-Mechanism B, the turn-end backstop, is this guard; its secondmate-home behavior is covered by hermetic tests in `tests/fm-turnend-guard.test.sh` (`test_hook_blocks_in_secondmate_own_home`, `test_hook_silent_in_idle_secondmate_home`, `test_hook_secondmate_loop_guard_allows_retry`, `test_hook_secondmate_reinvoke_recovery_loop`, and `test_hook_silent_in_secondmate_child_worktree`).
+Mechanism B, the turn-end backstop, is this guard; its secondmate-home behavior is covered by hermetic tests in `tests/fm-turnend-guard.test.sh` (`test_hook_blocks_in_secondmate_own_home`, `test_hook_blocks_in_treehouse_leased_secondmate_home`, `test_hook_silent_in_idle_secondmate_home`, `test_hook_secondmate_loop_guard_allows_retry`, `test_hook_secondmate_reinvoke_recovery_loop`, `test_hook_silent_in_secondmate_child_worktree`, and `test_hook_exempts_linked_worktree_with_stray_marker`).
 Mechanism A, the autonomous wake, is a harness property: when a background watcher task exits, the harness re-invokes the model, which drains the wake, advances children, and re-arms a fresh watcher.
 Mechanism A cannot be a hermetic CI assertion because it requires a live model session, so it is recorded here as a dated first-hand measurement while `test_hook_secondmate_reinvoke_recovery_loop` covers the guard's deterministic half of the same recovery loop.
 
