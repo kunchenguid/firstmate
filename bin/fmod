@@ -124,7 +124,7 @@ def discover_protocol_version() -> int:
             sock = os.path.join(daemon_dir, f"daemon-v{v}.sock")
             tok = os.path.join(daemon_dir, f"daemon-v{v}.token")
             token = read_token(tok)
-            s = _hello(sock, str(uuid.uuid4()), token, "control", HELLO_TIMEOUT_S)
+            s = _hello(sock, str(uuid.uuid4()), token, "control", HELLO_TIMEOUT_S, version=v)
             s.close()
             _DISCOVERED_VERSION = v
             return v
@@ -329,7 +329,12 @@ class DaemonClient:
 
 
 def _hello(
-    sock_path: str, client_id: str, token: str, role: str, timeout: float
+    sock_path: str,
+    client_id: str,
+    token: str,
+    role: str,
+    timeout: float,
+    version: Optional[int] = None,
 ) -> socket.socket:
     s = _connect(sock_path, timeout)
     s.settimeout(timeout)
@@ -338,7 +343,7 @@ def _hello(
     # when the installed AppImage daemon is newer than this script's constant,
     # the first failed hello triggers discover_protocol_version(), and any
     # subsequent hello on a fresh socket uses the cached discovery result.
-    v = _DISCOVERED_VERSION if _DISCOVERED_VERSION is not None else PROTOCOL_VERSION
+    v = version if version is not None else (_DISCOVERED_VERSION if _DISCOVERED_VERSION is not None else PROTOCOL_VERSION)
     hello = {"type": "hello", "version": v, "token": token, "clientId": client_id, "role": role}
     s.sendall((json.dumps(hello) + "\n").encode("utf-8"))
     try:

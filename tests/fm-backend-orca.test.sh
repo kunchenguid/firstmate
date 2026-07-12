@@ -866,6 +866,48 @@ PY
   pass "fmod info: missing token reports daemon_reachable=false JSON"
 }
 
+test_fmod_protocol_discovery_sends_candidate_version() {
+  fmod_case fmod-discovery-version
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod discovery should send each candidate protocol version"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+for version in (22, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+sent = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    sent.append((os.path.basename(sock_path), token, version))
+    if version == 23:
+        return FakeSocket()
+    raise mod["DaemonHelloError"]("Protocol version mismatch")
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["discover_protocol_version"].__globals__["_hello"] = fake_hello
+mod["discover_protocol_version"].__globals__["_DISCOVERED_VERSION"] = None
+
+discovered = mod["discover_protocol_version"]()
+assert discovered == 23, discovered
+assert ("daemon-v23.sock", "token-23", 23) in sent, sent
+assert all(sock == f"daemon-v{version}.sock" for sock, token, version in sent), sent
+PY
+  pass "fmod discovery: sends candidate protocol version in hello"
+}
+
 # ---- test runner ---------------------------------------------------------
 
 run_test() {
