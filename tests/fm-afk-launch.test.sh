@@ -636,6 +636,54 @@ unit_stop_surfaces_afk_removal_failure() {
   rm -rf "$st"
 }
 
+unit_stop_confirms_daemon_exit() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-live.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    seq() { printf "1\n"; }
+    sleep() { :; }
+    ! fm_afk_launch_stop
+  ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
+    && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop liveness: live daemon preserves lifecycle state and fails closed"
+  else
+    fail "stop liveness: live daemon was reported stopped or lost lifecycle state"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_refresh_validates_record() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
+  sleep 30 & daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=tmux bash -c '
+      . "$1"
+      ! fm_afk_launch_start && ! fm_afk_launch_start_native
+    ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ]; then
+    pass "refresh record: malformed terminal identity fails closed"
+  else
+    fail "refresh record: malformed terminal identity was accepted"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_clear_failure_aborts_entry() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
@@ -829,6 +877,8 @@ unit_tmux_planned_record_and_collision
 unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
+unit_stop_confirms_daemon_exit
+unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup

@@ -169,6 +169,13 @@ fm_afk_launch_record_read() {
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
 }
 
+fm_afk_launch_record_validate_if_present() {
+  local result
+  fm_afk_launch_record_read
+  result=$?
+  [ "$result" -ne 2 ]
+}
+
 # Close a recorded terminal by EXACT id (never a broad sweep). The
 # recorded workspace id (herdr) needs no separate close: closing the pane takes
 # its single-tab dedicated workspace with it.
@@ -439,6 +446,7 @@ fm_afk_launch_start() {
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
   if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to refresh away-mode flag"
       return 1
@@ -496,6 +504,7 @@ fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
@@ -554,6 +563,10 @@ fm_afk_launch_stop() {
       fm_pid_alive "$pid" || break
       sleep 0.25
     done
+  fi
+  if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+    return 1
   fi
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then
