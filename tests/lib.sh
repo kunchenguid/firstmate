@@ -91,6 +91,33 @@ SH
   done
 }
 
+# fm_fake_absent <dir> <tool>... writes a BASH_ENV file that makes the named
+# tools unfindable and echoes its path; export it as BASH_ENV for the script
+# under test. Removing a stub from the fakebin is not enough on a machine whose
+# base PATH really carries the tool (node and orca both ship in /usr/bin on
+# common Linux installs), so absence is simulated at the `command -v` level.
+fm_fake_absent() {
+  local dir=$1 env_file="$1/absent.bash" tool
+  shift
+  mkdir -p "$dir"
+  {
+    printf '%s\n' 'command() {'
+    printf '%s\n' '  if [ "${1:-}" = -v ]; then'
+    printf '%s\n' '    case "${2:-}" in'
+    for tool in "$@"; do
+      printf '      %s) return 1 ;;\n' "$tool"
+    done
+    printf '%s\n' '    esac'
+    printf '%s\n' '  fi'
+    printf '%s\n' '  builtin command "$@"'
+    printf '%s\n' '}'
+    for tool in "$@"; do
+      printf '%s() { return 127; }\n' "$tool"
+    done
+  } > "$env_file"
+  printf '%s\n' "$env_file"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
