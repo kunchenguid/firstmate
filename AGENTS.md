@@ -51,7 +51,8 @@ Hands-on firstmate work competes with live supervision for the same single threa
 This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
-This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+Ship shared, tracked material like any other `direct-PR` project by default: branch, commit, run focused local tests and lint, push, open a PR - and the captain's merge rule applies here exactly as it does to projects.
+Run this repo's own change through the `no-mistakes` pipeline only when the captain explicitly asks for it; see section 6's delivery-mode default.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -334,11 +335,11 @@ It sweeps the current session for uncaptured durable knowledge, routes findings 
 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
-- `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
-- `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
+- `direct-PR` (default; `[...]` may be omitted) - focused local tests and lint, push, open a PR via `gh-axi`, no pipeline -> captain merge.
+- `no-mistakes` - full pipeline -> PR -> captain merge. Highest assurance; opt-in only, set explicitly at add or later.
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
 
-Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
+Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `direct-PR` with yolo off; only set `no-mistakes`, `local-only`, or `+yolo` on the captain's explicit say-so.
 
 **Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
 
@@ -444,8 +445,8 @@ A secondmate-reported merged PR is exactly the case the fleet-sync-on-merge wake
 
 A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
 
-- **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
-- **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal landed-work check.
+- **direct-PR** (default) - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal landed-work check.
+- **no-mistakes** (opt-in) - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.

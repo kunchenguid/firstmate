@@ -32,11 +32,12 @@ test_help_includes_entire_header() {
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# exercised. A project absent from the registry defaults to direct-PR.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
+- nomistakes-proj [no-mistakes] - fixture for no-mistakes mode (added 2026-07-01)
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
 EOF
@@ -52,7 +53,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-nomistakes-a1:nomistakes-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj" "brief-defaultpr-a4:no-registry-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -66,12 +67,32 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# A project absent from the registry (or with no mode set) must default to
+# direct-PR, not no-mistakes: no-mistakes is opt-in only.
+test_unregistered_project_defaults_to_direct_pr() {
+  local home id brief
+  home="$TMP_ROOT/default-mode-home"
+  mkdir -p "$home/data"
+  id="brief-default-mode-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" totally-unregistered-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "This project ships **direct-PR**" "$brief" \
+    "an unregistered project must default to the direct-PR DOD, not no-mistakes"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "an unregistered project must not receive the no-mistakes DOD by default"
+  pass "fm-brief.sh: an unregistered project defaults to direct-PR (no-mistakes is opt-in only)"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
+# no-mistakes is opt-in only now, so the fixture project must explicitly
+# register [no-mistakes] to exercise this DOD branch.
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
+  printf -- '- some-proj [no-mistakes] - fixture for the no-mistakes DOD wording pin (added 2026-07-01)\n' > "$home/data/projects.md"
   id="brief-wording-b1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
@@ -263,6 +284,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_unregistered_project_defaults_to_direct_pr
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
