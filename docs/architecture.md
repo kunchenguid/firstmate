@@ -105,7 +105,7 @@ The dispatch file is intentionally judgment-based: firstmate reads the natural-l
 The shell scripts validate the JSON shape and verified harness/effort combinations, and `fm-dispatch-select.sh` owns deterministic selector behavior, but they do not parse task intent or match the natural-language rules.
 The session-start bootstrap step surfaces either the active rule block or a concise invalid-config line at startup.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
-Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
+Secondmate launches are exempt because they resolve their per-id or global secondmate harness profile instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
 
@@ -132,11 +132,13 @@ Secondmate homes converge conservatively to the primary's version and declared i
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session configuration-push contract.
 
 Secondmate agents can run on a different verified harness than crewmates.
-`config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
+`config/secondmate-harness` controls the primary's global secondmate launch profile, while `config/secondmate-harness.d/<id>` may override that profile for one safe secondmate id.
+Both locations accept `<harness> [<model>] [<effort>] [fast]` on the first non-empty, non-comment line, with the position-independent `fast` keyword requesting Codex fast mode.
 A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
-When the harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and the model and effort tokens are ignored.
-Those optional tokens are re-read on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
-An explicit per-spawn harness or raw launch command does not inherit model or effort tokens from `config/secondmate-harness`.
+When no safe per-id override exists, resolution uses the global file; when its harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and its optional profile fields are ignored.
+The profile is re-read by id on every secondmate spawn or respawn, and explicit per-spawn `--model` or `--effort` flags override its matching fields.
+Codex fast mode launches with `service_tier="fast"`; non-Codex harnesses ignore that intent with a warning.
+An explicit per-spawn harness or raw launch command does not inherit model, effort, or fast-mode intent from either secondmate profile location.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces routine backlog updates to hand-editing across the fleet without disabling validated handoff delegation.

@@ -31,21 +31,22 @@
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
-#   harness (config/secondmate-harness -> config/crew-harness -> own), so the
+#   harness (safe config/secondmate-harness.d/<id> override ->
+#   config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
-#   config/secondmate-harness may also carry an optional model and effort as extra
-#   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
-#   --secondmate spawn, those tokens apply only when this spawn also resolves its
-#   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
-#   the file governs the spawn, its model/effort tokens are re-resolved on every
-#   respawn exactly like the harness axis, and explicit --model/--effort flags
-#   still win over the file's tokens.
+#   The global secondmate file and a safe per-id override use the same
+#   whitespace-separated profile ("<harness> [<model>] [<effort>] [fast]"). The
+#   standalone fast keyword requests Codex `service_tier="fast"` and is ignored
+#   with a warning for other harnesses. For a --secondmate spawn, those fields
+#   apply only when this spawn also resolves its harness from a secondmate config
+#   file. An explicit per-spawn --harness, positional harness arg, or raw launch
+#   command starts with clean model/effort/fast defaults unless the caller also
+#   passes explicit --model/--effort flags. The profile is re-resolved by task id
+#   on every respawn, and explicit --model/--effort flags still win.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings
