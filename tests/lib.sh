@@ -100,6 +100,7 @@ fm_fake_absent() {
   local dir=$1 env_file="$1/absent.bash" tool
   shift
   mkdir -p "$dir"
+  # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal shell source for the BASH_ENV file, expanded when the script under test runs, not here.
   {
     printf '%s\n' 'command() {'
     printf '%s\n' '  if [ "${1:-}" = -v ]; then'
