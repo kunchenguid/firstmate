@@ -1098,6 +1098,31 @@ test_per_id_safety() {
   pass "D2 fm-harness.sh: malformed ids and symlinked .d/per-id paths fail safe to the global file"
 }
 
+test_per_id_malformed_profile_falls_back() {
+  local cfg d id
+  cfg="$TMP_ROOT/perid-malformed/config"
+  d="$cfg/secondmate-harness.d"
+  mkdir -p "$d"
+  printf 'claude claude-opus-4-8 max\n' > "$cfg/secondmate-harness"
+  : > "$d/empty"
+  printf '# no profile here\n\n  # still no profile\n' > "$d/comments"
+  printf 'codex gpt-5.6-sol xhigh unexpected\n' > "$d/excess"
+  run() { CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$@"; }
+
+  for id in empty comments excess; do
+    [ "$(run secondmate "$id")" = claude ] || fail "malformed-profile: $id did not fall back to global harness"
+    [ "$(run secondmate-model "$id")" = claude-opus-4-8 ] || fail "malformed-profile: $id did not fall back to global model"
+    [ "$(run secondmate-effort "$id")" = max ] || fail "malformed-profile: $id did not fall back to global effort"
+    [ -z "$(run secondmate-fast "$id")" ] || fail "malformed-profile: $id leaked fast intent"
+  done
+
+  printf 'codex gpt-5.6-sol xhigh ignored\n' > "$cfg/secondmate-harness"
+  [ "$(run secondmate)" = codex ] || fail "malformed-profile: global-only harness behavior changed"
+  [ "$(run secondmate-model)" = gpt-5.6-sol ] || fail "malformed-profile: global-only model behavior changed"
+  [ "$(run secondmate-effort)" = xhigh ] || fail "malformed-profile: global-only effort behavior changed"
+  pass "D2b fm-harness.sh: malformed per-id profiles fall back without changing global-only parsing"
+}
+
 # The "fast" keyword is a position-independent flag: it is pulled out before the
 # remaining tokens are assigned positionally, and it also works in the global file.
 test_per_id_fast_token_parsing() {
@@ -1240,6 +1265,7 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_per_id_override_resolution
 test_per_id_safety
+test_per_id_malformed_profile_falls_back
 test_per_id_fast_token_parsing
 test_propagate_lib
 test_spawn_split_and_inherit

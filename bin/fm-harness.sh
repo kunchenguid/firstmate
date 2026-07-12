@@ -95,6 +95,34 @@ valid_secondmate_id() {
   esac
 }
 
+# A per-id profile must contain exactly one non-empty, non-comment line with one
+# to three positional fields and at most one standalone fast keyword.
+valid_secondmate_profile() {
+  local f=$1 line tok fields=0 fast_count=0 found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      '#'*) continue ;;
+    esac
+    [ "$found" -eq 0 ] || return 1
+    found=1
+    # shellcheck disable=SC2086  # deliberate word-splitting: validating profile fields
+    set -- $line
+    for tok in "$@"; do
+      if [ "$tok" = fast ]; then
+        fast_count=$((fast_count + 1))
+        [ "$fast_count" -le 1 ] || return 1
+      else
+        fields=$((fields + 1))
+        [ "$fields" -le 3 ] || return 1
+      fi
+    done
+  done < "$f"
+  [ "$found" -eq 1 ] && [ "$fields" -ge 1 ]
+}
+
 # Resolve the config file to parse for a secondmate line. With no id, or when the
 # id has no SAFE per-id override, this is the global config/secondmate-harness.
 # With an id whose override file exists and passes the safety checks (valid id, a
@@ -107,7 +135,8 @@ secondmate_source() {
     f="$d/$id"
     # Reject a symlinked .d directory or a symlinked/non-regular per-id file, so an
     # unsafe path falls back to the global file rather than being followed.
-    if [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
+    if [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$f" ] && [ ! -L "$f" ] \
+      && valid_secondmate_profile "$f"; then
       printf '%s\n' "$f"
       return 0
     fi
