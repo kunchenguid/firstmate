@@ -49,6 +49,12 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
+# The NO-BREAK SPACE (U+00A0) claude draws after its composer prompt glyph. Set
+# once at source time, not per classifier call: the classifier runs on every
+# composer-state read, including fm_tmux_submit_core's Enter-retry loop and the
+# away-mode daemon's per-pane poll.
+FM_COMPOSER_NBSP=$'\xc2\xa0'
+
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
 # composer box border or bare prompt glyph is still visible; content extraction
@@ -180,7 +186,7 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content nbsp
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
   # NO-BREAK SPACE normalization (task fmsend-verify-l2): claude >= 2.1.x draws
   # its composer prompt as "❯" + U+00A0, which no [[:space:]] trim removes, so an
@@ -189,9 +195,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # swallowed". Normalize NBSP to a plain space and re-trim both views before any
   # matching; a row of only NBSPs is visually empty, so this cannot promote real
   # pending text to empty.
-  nbsp=$(printf '\302\240')
-  content=${content//"$nbsp"/ }
-  plain_content=${plain_content//"$nbsp"/ }
+  content=${content//"$FM_COMPOSER_NBSP"/ }
+  plain_content=${plain_content//"$FM_COMPOSER_NBSP"/ }
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
   plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"

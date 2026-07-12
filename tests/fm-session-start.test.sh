@@ -30,7 +30,12 @@ SESSION_START="$ROOT/bin/fm-session-start.sh"
 # tool this suite controls through its own fakebin, so a case that omits a tool
 # to assert "MISSING: <tool>" genuinely runs without it no matter what the
 # developer's machine has installed (fm_test_base_path, tests/lib.sh).
-BASE_PATH=${FM_TEST_BASE_PATH:-$(fm_test_base_path)}
+if [ -n "${FM_TEST_BASE_PATH:-}" ]; then
+  BASE_PATH=$FM_TEST_BASE_PATH
+else
+  fm_test_base_path
+  BASE_PATH=$FM_TEST_BASE_PATH_DIR
+fi
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_git_identity fmtest fmtest@example.invalid
 

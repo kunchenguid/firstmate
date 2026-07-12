@@ -57,13 +57,21 @@ fm_test_cleanup() {
   done
 }
 
-fm_test_tmproot() {
-  local prefix=${1:-fm-test} root
-  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
+# fm_test_register_cleanup <dir>: record <dir> for removal on EXIT, installing
+# the trap on the first registration. Call it from the shell that must own the
+# cleanup - a registration made inside a command-substitution subshell is
+# discarded with that subshell.
+fm_test_register_cleanup() {
   if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
     trap fm_test_cleanup EXIT
   fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  FM_TEST_CLEANUP_DIRS+=("$1")
+}
+
+fm_test_tmproot() {
+  local prefix=${1:-fm-test} root
+  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
+  fm_test_register_cleanup "$root"
   printf '%s\n' "$root"
 }
 
@@ -105,30 +113,56 @@ SH
 # CI stayed green only because its runners happen to lack both, which made this
 # a local-only failure that blocked the gate for any developer who had them.
 #
-# fm_test_base_path echoes a sanitized bin dir mirroring the real base dirs'
-# executables EXCEPT the tools these suites control through their own fakebin
-# (FM_TEST_TOOL_BLOCKLIST). The ambient machine therefore can never satisfy a
-# firstmate tool probe, so a case that omits a tool genuinely runs without it and
-# the assertion tests what it was written to test. Everything else - git, jq, and
-# the coreutils the scripts really call - is mirrored through untouched, because
-# the suites need real ones. The dir is built once per test process and cached.
+# fm_test_base_path builds a sanitized bin dir mirroring the real base dirs'
+# executables EXCEPT the tools these suites control through their own fakebin,
+# and sets FM_TEST_BASE_PATH_DIR to it. It writes that variable instead of
+# echoing a path so the caller invokes it directly (NOT in a command
+# substitution): a subshell would discard both the cache and fm_test_tmproot's
+# cleanup registration, leaking the mirror dir and rebuilding its ~2000 symlinks
+# on every call. The ambient machine therefore can never satisfy a firstmate tool
+# probe, so a case that omits a tool genuinely runs without it and the assertion
+# tests what it was written to test. Everything else - git, jq, and the coreutils
+# the scripts really call - is mirrored through untouched, because the suites
+# need real ones. The dir is built once per test process and cached.
 #
 # FM_TEST_BASE_PATH still overrides the whole thing, unchanged.
 
-# The tools firstmate probes for AND these suites control via fakebin. `git` is
-# deliberately NOT here: the suites need a real git, and their missing-git case
-# shadows it with a shell function instead of relying on PATH.
-FM_TEST_TOOL_BLOCKLIST="tmux node gh gh-axi chrome-devtools-axi lavish-axi treehouse no-mistakes tasks-axi quota-axi orca herdr zellij cmux"
-
+# The tools these suites control via fakebin are DERIVED from bootstrap's own
+# TOOLS lists (every backend branch) rather than duplicated here, so a newly
+# required tool cannot silently reintroduce the ambient-toolchain false-pass.
+# FM_TEST_TOOL_EXTRA covers the backend binaries other scripts probe for outside
+# bootstrap's lists. `git` is deliberately exempt: the suites need a real git, and
+# their missing-git case shadows it with a shell function instead of relying on
+# PATH.
+FM_TEST_TOOL_EXEMPT="git"
+FM_TEST_TOOL_EXTRA="herdr zellij cmux"
+FM_TEST_TOOL_BLOCKLIST=""
 FM_TEST_BASE_PATH_DIR=""
+
+fm_test_tool_blocklist() {
+  local declared name
+  [ -z "$FM_TEST_TOOL_BLOCKLIST" ] || return 0
+  declared=$(grep -o 'TOOLS="[^"]*"' "$ROOT/bin/fm-bootstrap.sh" | sed -e 's/^TOOLS="//' -e 's/"$//')
+  [ -n "$declared" ] || fail "tests/lib.sh: could not derive the tool list from bin/fm-bootstrap.sh"
+  for name in $declared $FM_TEST_TOOL_EXTRA; do
+    case " $FM_TEST_TOOL_EXEMPT " in *" $name "*) continue ;; esac
+    case " $FM_TEST_TOOL_BLOCKLIST " in *" $name "*) continue ;; esac
+    FM_TEST_TOOL_BLOCKLIST="$FM_TEST_TOOL_BLOCKLIST $name"
+  done
+  FM_TEST_TOOL_BLOCKLIST=${FM_TEST_TOOL_BLOCKLIST# }
+}
 
 fm_test_base_path() {
   local root dir src entry name
   if [ -n "$FM_TEST_BASE_PATH_DIR" ] && [ -d "$FM_TEST_BASE_PATH_DIR" ]; then
-    printf '%s\n' "$FM_TEST_BASE_PATH_DIR"
     return 0
   fi
-  root=$(fm_test_tmproot fm-base-path)
+  fm_test_tool_blocklist
+  # mktemp directly, then register in THIS shell: fm_test_tmproot echoes its dir,
+  # so calling it in a command substitution would strand the registration (and the
+  # dir) in the subshell.
+  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-base-path.XXXXXX")
+  fm_test_register_cleanup "$root"
   dir="$root/bin"
   mkdir -p "$dir"
   for src in /usr/bin /bin /usr/sbin /sbin; do
@@ -145,7 +179,6 @@ fm_test_base_path() {
     done
   done
   FM_TEST_BASE_PATH_DIR=$dir
-  printf '%s\n' "$dir"
 }
 
 # --- deterministic git identity and fixtures --------------------------------
