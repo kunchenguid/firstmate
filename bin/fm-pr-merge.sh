@@ -19,13 +19,20 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
 #
-# Codebase bytedcli accepts https://code.byted.org/<repo-path>/merge_requests/<n>
-# as a selector elsewhere, but its merge command is number + -R <repo>.
-# bytedcli codebase mr merge supports --merge-method merge_commit|rebase_merge
-# and --squash-commits <bool>. This helper maps the default to a squash merge
-# with --merge-method merge_commit --squash-commits true, maps --merge, --squash,
-# --rebase, and --method=<merge|squash|rebase|merge_commit|rebase_merge>, and
-# passes explicit Codebase flags through.
+# Codebase is not GitHub-shaped. `bytedcli codebase mr merge` documents a
+# positional [number] but rejects it ("Merge request selector missing"), and the
+# --mr-number its own error text advertises does not exist. Its only selector is
+# --mr-id, which wants the MR's INTERNAL id, not the user-visible number. So this
+# helper resolves number -> internal id through `codebase mr get` before merging.
+#
+# It supports --merge-method merge_commit|rebase_merge and --squash-commits <bool>,
+# with no GitHub-style --squash. The Codebase default here is a real merge commit,
+# NOT a squash, and squashing an MR whose head is itself a merge commit is refused
+# outright: it would flatten that merge, drop its second parent, and destroy the
+# merge base, so the next merge from the same upstream replays every already-merged
+# change as a conflict. --merge, --squash, --rebase, and
+# --method=<merge|squash|rebase|merge_commit|rebase_merge> map onto the real flags,
+# and explicit Codebase flags pass through.
 #
 # Extra args must not include --repo, -R, --repo-id, or --mr-id because the repo
 # and MR are parsed from the PR/MR URL.
