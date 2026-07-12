@@ -9,6 +9,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SKILL="$ROOT/.agents/skills/user-journey-audit/SKILL.md"
+AGENTS="$ROOT/AGENTS.md"
 
 test_skill_exists_and_is_captain_invocable() {
   assert_present "$SKILL" "user-journey-audit SKILL.md is missing"
@@ -91,6 +92,13 @@ test_idle_not_recurring() {
   pass "skill stays idle and never self-schedules"
 }
 
+test_agents_md_declares_load_trigger() {
+  # Trigger hygiene: the captain-approved load trigger must stay declared inline.
+  # Match a distinctive backtick-free slice of the trigger sentence (SC2016-safe).
+  assert_grep 'a two-persona, evidence-backed audit as a scout' "$AGENTS" "AGENTS.md does not declare the user-journey-audit load trigger"
+  pass "AGENTS.md declares the user-journey-audit load trigger"
+}
+
 test_skill_exists_and_is_captain_invocable
 test_trigger
 test_dual_persona_isolation
@@ -101,3 +109,4 @@ test_feature_ideas_are_grounded
 test_captain_approval_gate_before_task_creation
 test_completed_scout_is_torn_down_before_approval_wait
 test_idle_not_recurring
+test_agents_md_declares_load_trigger
