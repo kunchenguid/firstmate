@@ -84,14 +84,23 @@ esac
 
 # ---- sensitive-content gate -------------------------------------------------
 # Refuse rather than best-effort: an internal URL cannot be unpublished.
+#
+# Every rule is matched case-INSENSITIVELY (see scan_secrets), so each is written
+# in whatever case reads best; none may rely on case to stay narrow. The keyword
+# rule below still demands a `:`/`=` and a >=16-char value, which is what keeps it
+# off ordinary prose - a gate strict enough to reject real evidence just teaches
+# people to bypass it, which is worse than no gate.
 SECRET_PATTERNS='-----BEGIN [A-Z ]*PRIVATE KEY-----
-AKIA[0-9A-Z]{16}
+(AKIA|ASIA)[0-9A-Z]{16}
 gh[pousr]_[A-Za-z0-9]{20,}
-xox[abprs]-[A-Za-z0-9-]{10,}
+glpat-[A-Za-z0-9_-]{20,}
+xox[a-z]-[A-Za-z0-9-]{10,}
 sk-[A-Za-z0-9_-]{20,}
+AIza[0-9A-Za-z_-]{35}
+npm_[A-Za-z0-9]{36}
 eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
-[Aa]uthorization[[:space:]]*:[[:space:]]*(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}
-(api[_-]?key|secret[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|passwd|password|credential)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9/+_.=-]{16,}
+authorization[[:space:]]*:[[:space:]]*(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}
+(api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|signing[_-]?key|encryption[_-]?key|private[_-]?key|passwd|password|credential)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9/+_.=-]{16,}
 (绝密|机密|密级)'
 
 scan_secrets() {
@@ -101,7 +110,15 @@ scan_secrets() {
     [ -n "$pattern" ] || continue
     # -e is mandatory: the private-key pattern starts with '-' and would otherwise
     # be parsed as an option, silently disabling that rule.
-    if hit=$(LC_ALL=C grep -aEn -e "$pattern" "$file" | head -1); then
+    # -i is mandatory: the keyword rule spells its alternation in lowercase
+    # (api_key, secret_key, password, ...), but the form that actually shows up in
+    # a log or env dump is AWS_SECRET_ACCESS_KEY=... - case-sensitively that walked
+    # straight through the gate and got published. Erring toward over-refusal is
+    # the right side to be wrong on: an internal URL cannot be unpublished.
+    # -m1 rather than `| head -1`: under `set -o pipefail`, head closing the pipe
+    # after the first line can leave grep dead of SIGPIPE (141), which the `if`
+    # then reads as "no match" - a matching secret would sail through.
+    if hit=$(LC_ALL=C grep -aEni -m1 -e "$pattern" "$file"); then
       die "refusing to publish $what: suspected secret or classified content matched /${pattern}/ at ${hit%%:*}; publishing exposes it to the whole internal network. Scrub the evidence and re-run."
     fi
   done <<EOF
@@ -192,7 +209,10 @@ case "$KIND" in
     STAGED="$STAGE/$BASE"
     cp "$ABS" "$STAGED"
     SRC_DIR=$(dirname "$ABS")
-    grep -oE '(src|href)=("[^"]*"|'"'"'[^'"'"']*'"'"')' "$ABS" |
+    # `|| true`: a page with no src/href at all (everything inlined) is the normal
+    # case for a self-contained artifact, but grep exits 1 on no-match and pipefail
+    # would turn that into a silent publish failure - non-zero exit, no message.
+    { grep -oE '(src|href)=("[^"]*"|'"'"'[^'"'"']*'"'"')' "$ABS" || true; } |
       sed -E 's/^(src|href)=//; s/^["'"'"']//; s/["'"'"']$//' | sort -u |
       while IFS= read -r ref; do
         case "$ref" in
