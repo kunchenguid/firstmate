@@ -46,7 +46,7 @@ The captain may supply any of these; useful defaults cover the rest so an audit 
 - **Personas** - default to the two personas in section 3.
 - **Device sizes** - default to one desktop viewport and one mobile viewport.
 - **Production vs local scope** - default to a local test instance (see Safety rails).
-- **Focus area** - default to a full-breadth audit; a captain-named focus (for example "just onboarding" or "sharing and privacy") narrows the journeys and personas accordingly.
+- **Focus area** - default to a full-breadth audit; a captain-named focus (for example "just onboarding" or "sharing and privacy") narrows which journeys are exercised. A focus area never drops a persona: both the new user and the returning user always run, unless the captain explicitly asks for a single persona.
 
 Learn how to launch the app's local instance from its `README.md` or `AGENTS.md` - the launch command, the URL, and any seed/reset step - without reading further into the implementation.
 If the app cannot be launched locally and the captain has not authorized production, report the local-launch blocker directly to the captain and stop.
@@ -61,7 +61,7 @@ Supervise per section 8; when the crewmate reports `done`, its report is at `dat
 
 ## 3. Two isolated personas
 
-Run exactly two personas, each in genuinely separate browser and account state so their experiences never contaminate each other.
+Run both personas by default - a new user and a returning user - each in genuinely separate browser and account state so their experiences never contaminate each other. A focus area narrows the journeys, never this pair; run a single persona only when the captain explicitly asks for one.
 
 - **New user (clean state).**
   A first-time visitor with a fresh browser profile: no cookies, no local storage, no logged-in session, no prior account.

@@ -32,6 +32,8 @@ test_dual_persona_isolation() {
   assert_grep 'Returning user (established state)' "$SKILL" "skill does not define an established-state returning-user persona"
   assert_grep 'strictly isolated' "$SKILL" "skill does not require the two personas to stay strictly isolated"
   assert_grep 'Never reuse the new user' "$SKILL" "skill does not forbid reusing new-user context for the returning user"
+  # A focus area narrows journeys only; it never drops a persona (captain-approved Option A).
+  assert_grep 'A focus area never drops a persona' "$SKILL" "skill lets a focus area drop a persona instead of narrowing journeys only"
   pass "dual personas are defined and kept isolated"
 }
 
