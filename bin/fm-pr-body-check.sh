@@ -82,10 +82,20 @@ else
     echo "error: could not fetch the live PR body: $(cat "$GH_ERR")" >&2
     exit 2
   fi
+  # A PR always has a title, so empty text means the read produced nothing, not
+  # that the PR is empty. Scanning it would print "clean" for a body nobody read.
+  if [ -z "$(printf '%s' "$TEXT" | tr -d '[:space:]')" ]; then
+    echo "error: could not fetch the live PR body: the API returned no title or body for $URL" >&2
+    exit 2
+  fi
 fi
 
 # Each entry is "<label>\t<extended regex>", matched case-insensitively.
-# Deliberately broad: this is a prompt to read a line, not a classifier.
+# Deliberately broad: this is a prompt to read a line, not a classifier. The one
+# limit on that breadth is words that are ordinary English in other repos - a
+# "worktree", a "harness", a "captain" - which fire on innocent prose in every
+# project in the fleet, and steady false noise is how a real leak stops being
+# read. Only unmistakably internal names are listed.
 # Word boundaries are spelled out as character classes rather than `\b`, which is
 # a GNU extension: under BSD grep (stock macOS) a `\b` pattern would quietly
 # match nothing and report a dirty body clean.
@@ -99,7 +109,7 @@ PATTERNS=(
   $'meta-instruction\tnot (a concern|surprising|in scope|to be flagged)'
   $'meta-instruction\t(title|body|pr) (must|should|shall) (not )?(be|name|add|mention|contain)'
   "second-person direction"$'\t'"${B_OPEN}you (must|should|shall|will|need to|are to|may not)${B_CLOSE}"
-  "internal vocabulary"$'\t'"${B_OPEN}(firstmate|crewmate|secondmate|captain|scout task|ship task|task id|worktree|harness|no-mistakes|the brief|this brief)${B_CLOSE}"
+  "internal vocabulary"$'\t'"${B_OPEN}(firstmate|crewmate|secondmate|scout task|ship task|task id|no-mistakes|the brief|this brief)${B_CLOSE}"
   $'agent co-author\tco-authored-by:.*(claude|opus|sonnet|haiku|gpt|codex|copilot|agent|bot)'
 )
 

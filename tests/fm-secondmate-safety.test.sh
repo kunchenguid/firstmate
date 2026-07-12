@@ -45,7 +45,14 @@ test_fm_home_parameterization() {
   # reach the real GitHub API.
   local fakebin
   fakebin=$(fm_fakebin "$home_one")
-  fm_fake_exit0 "$fakebin" gh
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  api) printf '%s\n' 'Retry transient upload failures' 'The uploader now retries three times with backoff.' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
   FM_HOME="$home_one" FM_GUARD_GRACE=999999 PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"

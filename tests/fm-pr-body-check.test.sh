@@ -260,6 +260,44 @@ SH
   pass "fm-pr-body-check.sh: a scan error exits 2 instead of a false clean"
 }
 
+# "worktree", "harness" and "captain" are ordinary English in most repos. The
+# scan runs on every PR-ready and every merge fleet-wide, so flagging them would
+# put permanent noise in front of the lines that matter.
+test_ordinary_english_is_not_flagged_as_internal_vocabulary() {
+  local body out code=0
+  body="$TMP_ROOT/ordinary-english.md"
+  cat > "$body" <<'EOF'
+Retry flaky uploads in the test harness
+
+The test harness now retries three times before failing, and the release script
+builds from a clean worktree so a stale artifact cannot ship. The captain of the
+example fleet stays the sole owner of the schedule.
+EOF
+  out=$("$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 0 "$code" "ordinary prose about a harness, a worktree and a captain was flagged"
+  assert_contains "$out" "clean" "ordinary English prose did not report clean"
+  pass "fm-pr-body-check.sh: ordinary English (harness, worktree, captain) is not internal vocabulary"
+}
+
+# A fetch that succeeds but returns nothing means the body was never read. A PR
+# always has a title, so empty text is a failed read, never a clean body.
+test_empty_successful_fetch_never_reports_clean() {
+  local fakebin out code=0
+  mkdir -p "$TMP_ROOT/empty-fetch"
+  fakebin=$(fm_fakebin "$TMP_ROOT/empty-fetch")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+
+  out=$(PATH="$fakebin:$PATH" "$CHECK" https://github.com/owner/repo/pull/31 2>&1) || code=$?
+  expect_code 2 "$code" "an empty-but-successful fetch did not exit 2"
+  assert_contains "$out" "could not fetch" "an unread body was not reported as unfetchable"
+  assert_not_contains "$out" "clean" "a body that was never read reported clean"
+  pass "fm-pr-body-check.sh: an empty successful fetch is a failed read, never a clean body"
+}
+
 test_bad_url_and_fetch_failure_exit_2() {
   local fakebin out code=0
   out=$("$CHECK" https://example.com/not-a-pr 2>&1) || code=$?
@@ -293,4 +331,6 @@ test_authored_internal_vocabulary_still_flags
 test_word_boundary_patterns_match_without_gnu_extensions
 test_no_bash4_only_constructs
 test_scan_error_never_reports_clean
+test_ordinary_english_is_not_flagged_as_internal_vocabulary
+test_empty_successful_fetch_never_reports_clean
 test_bad_url_and_fetch_failure_exit_2

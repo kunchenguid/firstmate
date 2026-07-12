@@ -60,6 +60,12 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
 esac
+# fm-pr-check scans the live body through fm-pr-body-check.sh; answer its REST
+# read with clean reviewer-facing prose so no test run reaches the real API and
+# the scan has a body to read rather than reporting an unread one.
+case "\${1:-}" in
+  api) printf '%s\n' 'Retry transient upload failures' 'The uploader now retries three times with backoff.' ; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -79,6 +85,9 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  api) printf '%s\n' 'Retry transient upload failures' 'The uploader now retries three times with backoff.' ; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
