@@ -52,6 +52,7 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
@@ -70,8 +71,10 @@ SH
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
+  mkdir -p "$fake/data"
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-worktree-$id
@@ -148,6 +151,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -161,8 +165,10 @@ SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
   # No tasktmp= line at all.
+  mkdir -p "$fake/data"
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-wt-$id
