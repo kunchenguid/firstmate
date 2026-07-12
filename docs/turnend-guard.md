@@ -28,6 +28,14 @@ That is the same identity-matched live lock and fresh beacon check used by `bin/
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
+Only once no live healthy watcher is found does the guard ask a second question: is anything in flight actually **actionable** right now?
+`fm_supervision_actionable_status <state-dir> [grace-seconds]` (`bin/fm-supervision-lib.sh`) counts a direct report as actionable when its status content has not yet been through any watcher scan (compared against the same `state/.seen-<id>_status` marker `bin/fm-watch.sh`'s `scan_signals` writes - this is what covers a freshly spawned task and a just-happened transition, including a terminal one, until at least one checkpoint has had a chance to notice it), or, once seen, when its last status verb is `working`, an unrecognized verb (fail-closed on ambiguous data), or a declared `paused:` external wait now due for its recheck cadence (`FM_PAUSE_RESURFACE_SECS`, default 3600s).
+A last verb of `done`, `failed`, `needs-decision`, `blocked`, or `resolved` is NOT actionable once seen - each is either terminal or already surfaced and waits only on external action.
+A non-empty `state/.wake-queue` always counts as actionable on its own, regardless of any task's classification.
+If nothing is actionable, the guard exits silently instead of demanding a checkpoint.
+This matters most for a harness with no persistent watcher between turns (Codex's bounded `bin/fm-watch-checkpoint.sh` foreground-checkpoint model, `FM_CODEX_WATCH_CHECKPOINT`, default 180 seconds): without it, `fm_watcher_healthy` is essentially always false for that model between turns, so a fleet that is entirely done, idle, parked, or externally blocked would otherwise force a fresh checkpoint on every single turn end forever.
+The predicate is a pure status-file/stat read - no pane capture, no backend call, no `bin/fm-crew-state.sh` invocation - so it stays cheap enough to run on every primary turn end across every harness.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
@@ -115,5 +123,7 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+It also covers the actionable-only gate: five terminal (done/idle/parked/blocked/paused-not-due) persistent secondmates do not force a checkpoint, one genuinely working direct report among otherwise-terminal siblings still does, a lone genuinely active worker still does (active-worker protection preserved), and an unseen status transition forces exactly one more checkpoint even when its verb alone would not be actionable.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
+`tests/fm-pane-busy-corroboration.test.sh` covers a related fix in the same area: `bin/fm-tmux-lib.sh`'s `fm_pane_is_busy` (the busy-pane fallback `bin/fm-crew-state.sh` and `bin/fm-watch.sh`'s `window_is_busy` both use for tmux) no longer lets a leftover background helper process's stale tail text (e.g. a dev server's own "Working..." banner) read as the harness being busy once the harness's own live cursor row shows a genuinely idle composer or a bare dead-shell terminal prompt, while a live cursor-row busy footer is still trusted outright and an ambiguous or unreadable cursor row still falls back to the original tail scan.

@@ -29,6 +29,17 @@
 # That bounds this to at most one forced continuation per turn - never a wedged,
 # un-endable session - while still nagging again on a later turn if the problem
 # persists.
+#
+# Blocking requires more than "something is in flight": once no live watcher
+# holds the lock, fm_supervision_actionable_status (bin/fm-supervision-lib.sh)
+# also requires at least one direct report to be genuinely actionable -
+# actively working, a status transition not yet seen by any watcher scan, or a
+# declared pause now due for recheck. A fleet that is entirely done, idle,
+# parked, or externally blocked does not force a checkpoint, which matters
+# most for a harness with no persistent background watcher between turns
+# (Codex's bounded foreground checkpoint model): without this, that harness
+# would otherwise re-block on every turn end forever with nothing left to
+# observe.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,6 +90,16 @@ GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || ex
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+
+# No live healthy watcher (the common steady state for a harness with no
+# persistent background loop, e.g. Codex's bounded foreground checkpoint
+# model - docs/turnend-guard.md). Before demanding another checkpoint, check
+# whether anything in flight could actually still progress: a harness that
+# re-runs this predicate on every turn end must not busy-loop forcing
+# checkpoints once every direct report is done/idle/parked/blocked with
+# nothing left to observe.
+fm_supervision_actionable_status "$STATE" "$GRACE"
+[ "$FM_SUP_ACTIONABLE" -gt 0 ] || exit 0
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1

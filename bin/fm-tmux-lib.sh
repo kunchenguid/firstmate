@@ -124,10 +124,56 @@ fm_pane_input_pending() {  # <target>
   [ "$(fm_tmux_composer_state "$1")" = pending ]
 }
 
-# fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
-# (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
+# fm_tmux_cursor_busy: read <target>'s LIVE cursor row directly (not a tail
+# window) and report whether it itself carries the busy footer text. Every
+# verified harness renders its busy indicator at/adjacent to the live cursor,
+# so a match here is authoritative and can never miss a genuinely busy pane -
+# this exists to CORROBORATE a tail-window match (fm_pane_is_busy below), not
+# replace it.
+#   0 - the cursor row itself matches the busy regex (definitely busy)
+#   1 - the cursor row is readable and does NOT match (not busy at the cursor)
+#   2 - the pane/cursor row could not be read
+fm_tmux_cursor_busy() {  # <target>
+  local target=$1 cy raw
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 2
+  case "$cy" in ''|*[!0-9]*) return 2 ;; esac
+  raw=$(tmux capture-pane -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || return 2
+  printf '%s' "$raw" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+}
+
+# fm_pane_is_busy: 0 if the pane shows a busy footer (an agent mid-turn).
+# Scans a 40-line tail like fm-watch.sh.
+#
+# Task fix-actionable-supervision (2026-07): the tail-window scan alone can be
+# fooled by a leftover background helper the crew started IN THE SAME PANE (a
+# dev server, a build watcher, any long-running `cmd &` whose output was never
+# redirected away from the tty) whose own recent output happens to include
+# busy-looking text (e.g. a generic "Working..." progress line) while the
+# harness's own composer or terminal has already returned to idle - a false
+# "busy" that then reads as `crew_absorb_class: working` in
+# bin/fm-crew-state.sh long after the actual turn ended. The live cursor row
+# is authoritative for "is the harness ITSELF busy right now" (every verified
+# harness renders its busy indicator there), so it is checked FIRST: a match
+# there is trusted outright (never a false negative on a genuinely busy pane -
+# this preserves the earlier, separately-fixed regression where a long
+# no-mistakes tool call keeps the busy footer on screen the whole time it
+# blocks). When the cursor row is readable and does NOT match, the harness has
+# returned to its own idle composer or a bare dead-shell terminal prompt
+# (fm_tmux_composer_state: empty/unknown) - the busy text is stale/background
+# noise, not current activity, and the tail scan is skipped entirely. A
+# composer state of `pending` (real unsubmitted content on the cursor row -
+# ambiguous, could be a human mid-typing) still falls through to the tail
+# scan below, fail-closed, same as an unreadable cursor row.
 fm_pane_is_busy() {  # <target>
-  local win=$1 tail40
+  local win=$1 tail40 cursor_rc cs
+  fm_tmux_cursor_busy "$win"; cursor_rc=$?
+  [ "$cursor_rc" -eq 0 ] && return 0
+  if [ "$cursor_rc" -eq 1 ]; then
+    cs=$(fm_tmux_composer_state "$win")
+    case "$cs" in
+      empty|unknown) return 1 ;;
+    esac
+  fi
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"

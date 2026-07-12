@@ -91,6 +91,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -142,6 +143,39 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+# --- fm_supervision_actionable_status fixtures -------------------------------
+#
+# Write a task's meta+status, then mark that exact status content as already
+# SEEN by a (simulated) prior watcher scan, using the identical
+# state/.seen-<id>_status size:mtime marker convention bin/fm-watch.sh's own
+# scan_signals writes (see bin/fm-supervision-lib.sh's fm_supervision_actionable_status).
+# Steady-state fixtures need this: an unmarked status always reads as an unseen
+# transition (fail-closed, "needs at least one more checkpoint to notice it"),
+# which would make every fixture actionable regardless of its verb and defeat
+# the point of a done/idle/parked/blocked/paused-not-due test case.
+stat_sig_of() {  # <file>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%z:%Fm' "$1" 2>/dev/null
+  else
+    stat -c '%s:%Y' "$1" 2>/dev/null
+  fi
+}
+
+write_task() {  # <dir> <id> <kind> [<status-line>]
+  local dir=$1 id=$2 kind=$3 status_line=${4:-}
+  printf 'kind=%s\n' "$kind" > "$dir/state/$id.meta"
+  if [ -n "$status_line" ]; then
+    printf '%s\n' "$status_line" > "$dir/state/$id.status"
+  fi
+}
+
+mark_seen() {  # <dir> <id> - simulate an already-observed status (steady state)
+  local dir=$1 id=$2 status="$1/state/$2.status" sig
+  [ -f "$status" ] || return 0
+  sig=$(stat_sig_of "$status")
+  printf '%s' "$sig" > "$dir/state/.seen-${id}_status"
+}
+
 nonexistent_pid() {
   local pid=999999
   while kill -0 "$pid" 2>/dev/null; do
@@ -164,6 +198,72 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
+# --- Task fix-actionable-supervision: actionable-only checkpoint gating -----
+#
+# These four cases reproduce and pin the Codex-checkpoint-loop fix: the guard
+# must stop demanding a live watcher/checkpoint once nothing in flight can
+# actually progress, while never weakening protection for genuinely active or
+# ambiguous/newly-spawned work.
+
+test_hook_silent_with_five_terminal_secondmates() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-five-secondmates")
+  write_task "$dir" sm-done secondmate "done: shipped last task"
+  write_task "$dir" sm-idle secondmate ""
+  write_task "$dir" sm-parked secondmate "needs-decision: which db?"
+  write_task "$dir" sm-blocked secondmate "blocked: cannot reach github"
+  write_task "$dir" sm-paused secondmate "paused: waiting on upstream release"
+  mark_seen "$dir" sm-done
+  mark_seen "$dir" sm-parked
+  mark_seen "$dir" sm-blocked
+  mark_seen "$dir" sm-paused
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must not force a checkpoint when every direct report is done/idle/parked/blocked/paused-not-due"
+  [ -z "$out" ] || fail "hook produced output despite an all-terminal fleet: $out"
+  pass "fm-turnend-guard: five persistent secondmates (done/idle/parked/blocked/paused) do not force a checkpoint"
+}
+
+test_hook_blocks_with_mixed_active_and_blocked() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-mixed-active-blocked")
+  write_task "$dir" sm-done secondmate "done: shipped last task"
+  write_task "$dir" sm-blocked secondmate "blocked: cannot reach github"
+  write_task "$dir" sm-paused secondmate "paused: waiting on upstream release"
+  write_task "$dir" sm-working secondmate "working: implementing the new endpoint"
+  mark_seen "$dir" sm-done
+  mark_seen "$dir" sm-blocked
+  mark_seen "$dir" sm-paused
+  mark_seen "$dir" sm-working
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still force a checkpoint when one direct report is genuinely working, even amid otherwise-terminal siblings"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: one genuinely working secondmate among terminal siblings still forces a checkpoint"
+}
+
+test_hook_blocks_with_real_active_worker() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-active-worker")
+  write_task "$dir" ship-task ship "working: implementing the feature"
+  mark_seen "$dir" ship-task
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must force a checkpoint for a single genuinely active (ship) worker"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a real active worker still forces a checkpoint (active-worker protection preserved)"
+}
+
+test_hook_blocks_with_unseen_terminal_transition() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-unseen-transition")
+  # Freshly written `done:` that no watcher scan has processed yet: still
+  # actionable ONCE, so the primary gets a chance to notice/report it, even
+  # though `done` alone would not be actionable once seen.
+  write_task "$dir" sm-just-finished secondmate "done: shipped last task"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must force one checkpoint for a status transition no watcher scan has processed yet"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: an unseen status transition forces exactly one more checkpoint, even for a terminal verb"
 }
 
 test_hook_silent_when_no_work_in_flight() {
@@ -717,6 +817,10 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_hook_silent_with_five_terminal_secondmates
+test_hook_blocks_with_mixed_active_and_blocked
+test_hook_blocks_with_real_active_worker
+test_hook_blocks_with_unseen_terminal_transition
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon

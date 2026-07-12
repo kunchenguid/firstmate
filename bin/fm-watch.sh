@@ -52,6 +52,14 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# fm_pane_is_busy (the cursor-corroborated tmux busy check) and
+# fm_tmux_composer_state, sourced directly rather than only reached through
+# fm_backend_source: that helper is normally invoked via command substitution
+# in this file (e.g. `bs=$(fm_backend_busy_state ...)`), and functions a
+# subshell sources are not visible back in the parent shell, so relying on it
+# alone would leave fm_pane_is_busy undefined here.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
 # (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
 # synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
@@ -175,18 +183,27 @@ hash_pane() {
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
 # fm_session_busy_state gets real semantics"); falls back to the existing
-# pane-tail regex ONLY when the backend reports unknown (tmux always does, so
-# its path is unchanged byte-for-byte). <tail40> is the same bounded capture
-# already read for hashing, so this adds no extra backend calls on the
-# regex-fallback path.
+# pane-tail regex ONLY when the backend reports unknown. For tmux (which
+# always reports unknown) that fallback is bin/fm-tmux-lib.sh's shared
+# fm_pane_is_busy - the SAME cursor-corroborated check bin/fm-crew-state.sh
+# uses, so the two consumers cannot drift apart on what counts as busy (a
+# leftover background helper's stale tail text is not trusted as busy there;
+# see fm-tmux-lib.sh's header). Any OTHER backend reporting unknown keeps the
+# original inline tail40 regex scan unchanged - <tail40> is the same bounded
+# capture already read for hashing, so that path adds no extra backend calls.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
+  local w=$1 tail40=$2 backend bs
+  backend=$(window_backend "$w")
+  bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      if [ "$backend" = tmux ]; then
+        fm_pane_is_busy "$w"
+      else
+        printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      fi
       ;;
   esac
 }
