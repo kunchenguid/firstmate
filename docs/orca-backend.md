@@ -95,13 +95,51 @@ Teardown:
 - `--secondmate` spawns still refuse `backend=orca`; secondmate-home semantics need a separate design.
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
-- Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
+- Orca exposes no CLI version marker, but its daemon DOES speak a strict `PROTOCOL_VERSION` over its unix-socket hello. `bin/fmod` is now resilient to that drift: it tries the hardcoded default version first, falls through to discovery (any `daemon-v*.sock` in `~/.config/orca/daemon/`), and pins via `FMOD_PROTOCOL_VERSION` env override when set. See "Daemon protocol" below.
+
+## Daemon protocol
+
+The `orca` CLI is a thin shim that talks to the same Unix-socket daemon the GUI uses. While the GUI holds the single-instance lock, the CLI refuses to run with "Another Orca instance is already running..."; the proper integration path is therefore to talk to the daemon directly, not to shell out to `orca`.
+
+`bin/fmod` is firstmate's small Python client for that daemon. It is the only path `bin/backends/orca.sh` uses; the CLI is never invoked at spawn time.
+
+Why this matters:
+
+- The CLI hangs (or fails fast with single-instance-lock errors) when the GUI is the active holder. The daemon does not.
+- The daemon is the same transport the GUI itself uses, so capture/send/kill semantics match exactly what the captain sees on screen.
+- The hello handshake is strict on `version`. A hardcoded `PROTOCOL_VERSION = 21` will be silently rejected by an older daemon, and an installed AppImage newer than the source will silently fail. Discovery closes that gap.
+
+### Resilience knobs
+
+- `FMOD_PROTOCOL_VERSION=<int>` — pin a specific version (no discovery).
+- `FMOD_SOCKET`, `FMOD_TOKEN`, `FMOD_PIDFILE` — pin socket/token/pid paths explicitly (escape hatch for non-default install layouts).
+- Hardcoded default is bumped when the installed AppImage outruns the source; discovery is the safety net for the next bump.
+
+## Daemon supervision
+
+The orca GUI is a single-instance AppImage. On Linux without a desktop session, or after any crash, the daemon can die while `orca-runtime.json` still reads `runtimeState: stale_bootstrap`. Every spawn then refuses with the runtime check.
+
+`bin/fm-supervise-orca.sh` is firstmate's firstmate-owned daemon keeper. It is intentionally separate from `fm-watch.sh` (per-task supervision) so a flaky daemon never widens into per-task noise:
+
+- `bin/fm-supervise-orca.sh once` — single health check (returns 0 if reachable, non-zero otherwise; no relaunch).
+- `bin/fm-supervise-orca.sh start` — background the supervisor (writes pid to `state/.orca-supervisor.pid`).
+- `bin/fm-supervise-orca.sh stop` — stop a running supervisor.
+- `bin/fm-supervise-orca.sh status` — print supervisor liveness and daemon reachability.
+- `bin/fm-supervise-orca.sh --follow` — foreground loop (harness-tracked background).
+
+`bin/fm-bootstrap.sh` integrates the supervisor: when `config/backend=orca` (or `FM_BACKEND=orca`), bootstrap calls `once` and reports `ORCA: daemon reachable`. In a mutating bootstrap it will additionally call `start` to relaunch a dead daemon and report `ORCA: daemon recovered`. In `FM_BOOTSTRAP_DETECT_ONLY=1` it only reports; the lock holder's next bootstrap can recover.
 
 ## Verification
 
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
+
+Live-Linux smoke (recorded against the captain's AppImage install, daemon protocol v21):
+
+- `bin/fm-supervise-orca.sh start` then `pkill -KILL -x orca-ide` recovers the daemon in ~3s.
+- `bin/fm-spawn.sh <id> projects/<repo> --backend orca --harness pi` reaches pi's composer with the brief loaded, the per-task external turn-end extension (`state/<id>.pi-ext.ts`) loaded, and `state/<id>.turn-ended` touched after the first turn.
+- Two general bugs found and fixed: `fmod get-cwd` returns a trailing-slash path that the spawn's cwd-equality check did not normalize; pi 0.80's project-trust gate blocks unattended spawns and needs `--approve` on the launch template. Both fixes are general firstmate bugs and are candidates for upstream PRs.
 
 Fake-Orca tests cover:
 
