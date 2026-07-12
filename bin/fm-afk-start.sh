@@ -56,7 +56,7 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null || true
+        "$state/.subsuper-inject-wedged" 2>/dev/null
 }
 
 daemon_lock_owner() {

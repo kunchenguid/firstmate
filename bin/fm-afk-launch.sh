@@ -395,19 +395,34 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
 fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash
+  local captain_target=$1 captain_backend=$2 session entry cmd hash probe_result probe_out
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   session="fm-afk-daemon-$hash"
-  # Drop any leaked same-named daemon session first (exact id only).
-  tmux kill-session -t "$session" 2>/dev/null || true
+  probe_out=$(tmux has-session -t "$session" 2>&1)
+  probe_result=$?
+  if [ "$probe_result" -eq 0 ]; then
+    fm_afk_launch_log "unrecorded tmux session '$session' already exists; refusing to replace it"
+    return 1
+  fi
+  if [ "$probe_result" -ne 1 ] || ! printf '%s' "$probe_out" | grep -Eq "can't find session"; then
+    fm_afk_launch_log "could not confirm tmux session '$session' is absent"
+    return 1
+  fi
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
-  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
-    fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
+  if ! fm_afk_launch_record_write tmux "$session" ""; then
+    fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
   fi
-  fm_afk_launch_commit_terminal tmux "$session" "" || return 1
+  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
+    fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
+    FM_AFK_REC_BACKEND=tmux
+    FM_AFK_REC_TARGET=$session
+    fm_afk_launch_close_recorded || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
@@ -443,8 +458,12 @@ fm_afk_launch_start() {
   if ! fm_afk_launch_reconcile; then
     result=1
   else
-    fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
-    result=0
+    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+      result=0
+    else
+      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    fi
   fi
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_launch_flag_write; then
@@ -491,8 +510,12 @@ fm_afk_launch_start_native() {
   done
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
-    fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"
-    fm_afk_launch_flag_write || result=1
+    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    elif ! fm_afk_launch_flag_write; then
+      result=1
+    fi
   fi
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_record_write none - native || result=1
@@ -506,7 +529,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid result=0
+  local pid result=0 read_result
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
@@ -522,8 +545,13 @@ fm_afk_launch_stop() {
     done
   fi
   # (2) Close the daemon's own terminal by exact id.
-  if fm_afk_launch_record_read; then
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
+  elif [ "$read_result" -eq 2 ]; then
+    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    return 1
   fi
   # (3) Clear the away-mode flag LAST.
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true

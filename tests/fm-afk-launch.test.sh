@@ -518,6 +518,81 @@ unit_malformed_record_fails_closed() {
   rm -rf "$st"
 }
 
+unit_stop_malformed_record_fails_closed() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    ! fm_afk_launch_stop
+  ' _ "$LAUNCH" && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop: malformed terminal record preserves away state and fails closed"
+  else
+    fail "stop: malformed terminal record cleared protected lifecycle state"
+  fi
+  rm -rf "$st"
+}
+
+unit_tmux_planned_record_and_collision() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-plan.XXXXXX")
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    tmux() {
+      if [ "$1" = has-session ]; then printf "can\\x27t find session\\n" >&2; return 1; fi
+      if [ "$1" = new-session ]; then
+        [ -s "$FM_AFK_LAUNCH_RECORD" ] || return 9
+        return 1
+      fi
+      return 1
+    }
+    ! fm_afk_launch_create_tmux captain:0 tmux
+  ' _ "$LAUNCH"; then
+    pass "tmux launch: planned exact target is recorded before creation"
+  else
+    fail "tmux launch: creation began before exact target publication"
+  fi
+  rm -rf "$st"
+
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-collision.XXXXXX")
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    tmux() {
+      [ "$1" = has-session ] && return 0
+      [ "$1" != kill-session ] || : > "$FM_HOME/killed"
+      return 0
+    }
+    ! fm_afk_launch_create_tmux captain:0 tmux
+  ' _ "$LAUNCH" && [ ! -e "$st/killed" ]; then
+    pass "tmux launch: unowned same-name session fails closed without teardown"
+  else
+    fail "tmux launch: unowned same-name session was replaced"
+  fi
+  rm -rf "$st"
+}
+
+unit_clear_failure_aborts_entry() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.subsuper-escalations"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_reconcile() { return 0; }
+    fm_afk_clear_stale_artifacts() { return 1; }
+    ! fm_afk_launch_start_native
+  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
+    pass "clear failure: native entry aborts and restores prior state"
+  else
+    fail "clear failure: native entry proceeded or lost prior state"
+  fi
+  rm -rf "$st"
+}
+
 unit_confirmed_absence_succeeds() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX")
@@ -688,6 +763,9 @@ unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
+unit_stop_malformed_record_fails_closed
+unit_tmux_planned_record_and_collision
+unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
