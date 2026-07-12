@@ -71,6 +71,11 @@ When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` f
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
+To pin one secondmate id differently from the global file, drop `config/secondmate-harness.d/<id>` holding the same one-line format for that id only; it also accepts a trailing `fast` keyword for Codex fast mode (`-c service_tier="fast"`).
+`bin/fm-spawn.sh` resolves the profile keyed by the task id on every spawn, so a per-id override is durable across recovery and liveness respawns the same way, and explicit per-spawn flags still win.
+Malformed ids and unsafe or symlinked per-id paths fall back to the global file.
+The exact format, safety rules, and fast-mode mechanism live in `docs/configuration.md` and `bin/fm-harness.sh`'s header; do not restate them here.
+
 This section is the single owner of the secondmate sync and inheritable-config propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The locked session-start bootstrap sweep runs the same guarded fast-forward for every live secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).

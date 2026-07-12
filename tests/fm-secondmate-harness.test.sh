@@ -28,6 +28,18 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Per-id override + fast mode. A per-secondmate file
+#      config/secondmate-harness.d/<id> holds the SAME one-line format for a single
+#      id, extended with an optional standalone "fast" keyword marking Codex
+#      fast-mode intent. When fm-harness.sh secondmate* is given an <id> whose SAFE
+#      per-id override exists, it resolves from that file; otherwise it falls back to
+#      the global config/secondmate-harness exactly as before (backward-compat). The
+#      id must be a plain slug and the .d directory and per-id file must be real
+#      (non-symlink), so malformed ids and unsafe/symlinked paths fail safe to the
+#      global file. fm-spawn.sh resolves the whole profile keyed by $ID on every
+#      spawn (so recovery/liveness respawn re-read it, never stale meta), threads
+#      Codex fast mode into the launch as `-c service_tier="fast"`, and lets explicit
+#      per-spawn flags still win.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1015,8 +1027,219 @@ test_config_push_exits_nonzero_on_copy_error() {
   pass "B14 config-push exits nonzero on real propagation errors"
 }
 
+# ===========================================================================
+# D) Per-id override (config/secondmate-harness.d/<id>) + Codex fast mode
+# ===========================================================================
+
+# fm-harness.sh secondmate* with an <id> resolves a SAFE per-id override; other
+# ids and the no-id form fall back to the global file (backward-compat). The
+# "fast" keyword is exposed only from a concrete-harness line.
+test_per_id_override_resolution() {
+  local cfg d
+  cfg="$TMP_ROOT/perid-res/config"
+  d="$cfg/secondmate-harness.d"
+  mkdir -p "$d"
+  printf 'claude claude-opus-4-8 max\n' > "$cfg/secondmate-harness"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$d/smtools"
+  run() { CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$@"; }
+
+  # smtools resolves entirely from its per-id override.
+  [ "$(run secondmate smtools)" = codex ] || fail "per-id: smtools harness not codex"
+  [ "$(run secondmate-model smtools)" = gpt-5.6-sol ] || fail "per-id: smtools model not gpt-5.6-sol"
+  [ "$(run secondmate-effort smtools)" = xhigh ] || fail "per-id: smtools effort not xhigh"
+  [ "$(run secondmate-fast smtools)" = fast ] || fail "per-id: smtools fast not set"
+
+  # A different id with no override falls back to the global pin, with no fast.
+  [ "$(run secondmate spellmerchant)" = claude ] || fail "per-id: other id did not fall back to global harness"
+  [ "$(run secondmate-model spellmerchant)" = claude-opus-4-8 ] || fail "per-id: other id did not fall back to global model"
+  [ "$(run secondmate-effort spellmerchant)" = max ] || fail "per-id: other id did not fall back to global effort"
+  [ -z "$(run secondmate-fast spellmerchant)" ] || fail "per-id: global pin leaked a fast token"
+
+  # The no-id form is unchanged: always the global file.
+  [ "$(run secondmate)" = claude ] || fail "per-id: no-id form changed the global resolution"
+  [ "$(run secondmate-model)" = claude-opus-4-8 ] || fail "per-id: no-id form changed the global model"
+  [ -z "$(run secondmate-fast)" ] || fail "per-id: no-id form invented a fast token"
+  pass "D1 fm-harness.sh: a per-id override resolves for its id; other ids and the no-id form use the global file"
+}
+
+# Malformed ids and unsafe/symlinked per-id paths fail safe: they resolve the
+# global file rather than following the path or launching an unintended harness.
+test_per_id_safety() {
+  local cfg d
+  cfg="$TMP_ROOT/perid-safety/config"
+  d="$cfg/secondmate-harness.d"
+  mkdir -p "$d"
+  printf 'claude claude-opus-4-8 max\n' > "$cfg/secondmate-harness"
+  run() { CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$@"; }
+
+  # A path-traversal id must never escape the .d dir; it falls back to global.
+  printf 'codex\n' > "$cfg/secondmate-evil" 2>/dev/null || true
+  [ "$(run secondmate '../secondmate-evil')" = claude ] || fail "safety: traversal id did not fall back to global"
+  [ "$(run secondmate '../../etc/passwd')" = claude ] || fail "safety: deep traversal id did not fall back to global"
+  [ "$(run secondmate '.')" = claude ] || fail "safety: '.' id did not fall back to global"
+  [ "$(run secondmate 'a/b')" = claude ] || fail "safety: slashed id did not fall back to global"
+
+  # A symlinked per-id file is not followed; it falls back to global.
+  printf 'codex\n' > "$TMP_ROOT/perid-safety/outside-harness"
+  ln -s "$TMP_ROOT/perid-safety/outside-harness" "$d/linky"
+  [ "$(run secondmate linky)" = claude ] || fail "safety: symlinked per-id file was followed"
+
+  # A symlinked .d directory is not trusted; every id falls back to global.
+  local cfg2 realdir
+  cfg2="$TMP_ROOT/perid-safety2/config"
+  mkdir -p "$cfg2"
+  printf 'claude claude-opus-4-8 max\n' > "$cfg2/secondmate-harness"
+  realdir="$TMP_ROOT/perid-safety2/real-d"
+  mkdir -p "$realdir"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$realdir/smtools"
+  ln -s "$realdir" "$cfg2/secondmate-harness.d"
+  [ "$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg2" "$ROOT/bin/fm-harness.sh" secondmate smtools)" = claude ] \
+    || fail "safety: a symlinked .d directory was trusted"
+  pass "D2 fm-harness.sh: malformed ids and symlinked .d/per-id paths fail safe to the global file"
+}
+
+# The "fast" keyword is a position-independent flag: it is pulled out before the
+# remaining tokens are assigned positionally, and it also works in the global file.
+test_per_id_fast_token_parsing() {
+  local cfg d
+  cfg="$TMP_ROOT/perid-fast/config"
+  d="$cfg/secondmate-harness.d"
+  mkdir -p "$d"
+  # Global file carries no fast; per-id files exercise fast in several positions.
+  printf 'claude claude-opus-4-8 max\n' > "$cfg/secondmate-harness"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$d/trailing"
+  printf 'codex fast gpt-5.6-sol xhigh\n' > "$d/leading"
+  printf 'codex gpt-5.6-sol xhigh\n' > "$d/nofast"
+  run() { CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$@"; }
+
+  # Trailing fast: harness/model/effort intact, fast set.
+  [ "$(run secondmate trailing)" = codex ] || fail "fast-parse: trailing harness wrong"
+  [ "$(run secondmate-model trailing)" = gpt-5.6-sol ] || fail "fast-parse: trailing model wrong"
+  [ "$(run secondmate-effort trailing)" = xhigh ] || fail "fast-parse: trailing effort wrong"
+  [ "$(run secondmate-fast trailing)" = fast ] || fail "fast-parse: trailing fast not set"
+
+  # Leading fast (right after the harness): positional tokens still resolve.
+  [ "$(run secondmate leading)" = codex ] || fail "fast-parse: leading harness wrong"
+  [ "$(run secondmate-model leading)" = gpt-5.6-sol ] || fail "fast-parse: leading model not stripped past fast"
+  [ "$(run secondmate-effort leading)" = xhigh ] || fail "fast-parse: leading effort not stripped past fast"
+  [ "$(run secondmate-fast leading)" = fast ] || fail "fast-parse: leading fast not set"
+
+  # No fast keyword: empty fast, model/effort intact (backward-compat shape).
+  [ -z "$(run secondmate-fast nofast)" ] || fail "fast-parse: nofast invented a fast token"
+  [ "$(run secondmate-model nofast)" = gpt-5.6-sol ] || fail "fast-parse: nofast model wrong"
+
+  # Global file may also carry fast (one shared parser, one owner).
+  printf 'codex gpt-5.6-sol high fast\n' > "$cfg/secondmate-harness"
+  [ "$(run secondmate-fast)" = fast ] || fail "fast-parse: global fast token not resolved"
+  [ "$(run secondmate-effort)" = high ] || fail "fast-parse: global effort wrong alongside fast"
+  pass "D3 fm-harness.sh: the fast keyword is position-independent and works in the global file too"
+}
+
+# Spawn acceptance: a per-id override pins smtools to codex/gpt-5.6-sol/xhigh with
+# Codex fast mode, while another id with no override keeps the global claude pin.
+test_spawn_per_id_pins_codex_fast() {
+  local w meta launchlog launch
+  w="$TMP_ROOT/spawn-perid-fast"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config/secondmate-harness.d"
+  printf 'claude claude-opus-4-8 max\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$w/home/config/secondmate-harness.d/smtools"
+
+  # smtools: per-id override -> codex/gpt-5.6-sol/xhigh/fast.
+  make_seeded_home "$w/smtools" smtools
+  spawn_secondmate_capture "$w" smtools "$w/smtools" "$launchlog" >/dev/null 2>&1
+  meta="$w/home/state/smtools.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "perid-fast: smtools harness not codex"
+  [ "$(meta_field "$meta" model)" = gpt-5.6-sol ] || fail "perid-fast: smtools model not gpt-5.6-sol"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "perid-fast: smtools effort not xhigh"
+  [ "$(meta_field "$meta" fast)" = on ] || fail "perid-fast: smtools meta fast not on (got '$(meta_field "$meta" fast)')"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--model 'gpt-5.6-sol'" "perid-fast: launch missing --model gpt-5.6-sol"
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" "perid-fast: launch missing effort override"
+  assert_contains "$launch" "-c 'service_tier=\"fast\"'" "perid-fast: launch missing Codex fast-mode override"
+
+  # A different id (no override) resolves the global claude pin, no fast flag.
+  make_seeded_home "$w/spellmerchant" spellmerchant
+  : > "$launchlog"
+  spawn_secondmate_capture "$w" spellmerchant "$w/spellmerchant" "$launchlog" >/dev/null 2>&1
+  meta="$w/home/state/spellmerchant.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "perid-fast: spellmerchant not on global claude"
+  [ "$(meta_field "$meta" model)" = claude-opus-4-8 ] || fail "perid-fast: spellmerchant model not global pin"
+  [ "$(meta_field "$meta" effort)" = max ] || fail "perid-fast: spellmerchant effort not global pin"
+  [ -z "$(meta_field "$meta" fast)" ] || fail "perid-fast: spellmerchant meta carried a fast field"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "service_tier" "perid-fast: global-pin launch leaked a fast override"
+  pass "D4 spawn: a per-id override pins smtools to codex/gpt-5.6-sol/xhigh + fast; another id keeps the global claude pin"
+}
+
+# Recovery/liveness respawn re-reads the per-id profile, never stale meta: a
+# changed override file yields a fresh profile on the next (no-explicit-harness) spawn.
+test_spawn_per_id_recovery_reresolves() {
+  local w meta launchlog launch
+  w="$TMP_ROOT/spawn-perid-recovery"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config/secondmate-harness.d"
+  printf 'claude claude-opus-4-8 max\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$w/home/config/secondmate-harness.d/smtools"
+  make_seeded_home "$w/smtools" smtools
+
+  # First spawn writes meta with the codex/fast profile.
+  spawn_secondmate_capture "$w" smtools "$w/smtools" "$launchlog" >/dev/null 2>&1
+  meta="$w/home/state/smtools.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "recovery: first spawn harness not codex"
+  [ "$(meta_field "$meta" fast)" = on ] || fail "recovery: first spawn fast not on"
+
+  # The primary edits the per-id override; the stale meta still says codex/fast.
+  printf 'claude sonnet high\n' > "$w/home/config/secondmate-harness.d/smtools"
+  : > "$launchlog"
+  # Respawn with NO explicit harness (the recovery/liveness shape) must re-resolve.
+  spawn_secondmate_capture "$w" smtools "$w/smtools" "$launchlog" >/dev/null 2>&1
+  meta="$w/home/state/smtools.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "recovery: respawn did not re-read the per-id harness (stale meta used)"
+  [ "$(meta_field "$meta" model)" = sonnet ] || fail "recovery: respawn did not re-read the per-id model"
+  [ "$(meta_field "$meta" effort)" = high ] || fail "recovery: respawn did not re-read the per-id effort"
+  [ -z "$(meta_field "$meta" fast)" ] || fail "recovery: respawn kept a stale fast field after the override dropped fast"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "service_tier" "recovery: respawn launch still carried the dropped fast override"
+  pass "D5 spawn: recovery/liveness respawn re-reads the per-id profile rather than stale meta"
+}
+
+# Explicit per-spawn flags keep their precedence over the per-id override.
+test_spawn_per_id_explicit_flags_win() {
+  local w meta launchlog launch
+  w="$TMP_ROOT/spawn-perid-explicit"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config/secondmate-harness.d"
+  printf 'claude claude-opus-4-8 max\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol xhigh fast\n' > "$w/home/config/secondmate-harness.d/smtools"
+  make_seeded_home "$w/smtools" smtools
+
+  # An explicit --harness starts clean: no per-id model/effort/fast inherited.
+  spawn_secondmate_capture "$w" smtools "$w/smtools" "$launchlog" --harness claude >/dev/null 2>&1
+  meta="$w/home/state/smtools.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "perid-explicit: explicit --harness did not win"
+  [ "$(meta_field "$meta" model)" = default ] || fail "perid-explicit: explicit --harness leaked the per-id model"
+  [ "$(meta_field "$meta" effort)" = default ] || fail "perid-explicit: explicit --harness leaked the per-id effort"
+  [ -z "$(meta_field "$meta" fast)" ] || fail "perid-explicit: explicit --harness leaked the per-id fast"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "service_tier" "perid-explicit: explicit --harness launch leaked the fast override"
+
+  # An explicit --model overrides the per-id model token; the file's effort stays.
+  : > "$launchlog"
+  spawn_secondmate_capture "$w" smtools "$w/smtools" "$launchlog" --model o4 >/dev/null 2>&1
+  meta="$w/home/state/smtools.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "perid-explicit: --model changed the resolved harness"
+  [ "$(meta_field "$meta" model)" = o4 ] || fail "perid-explicit: explicit --model did not win over the per-id token"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "perid-explicit: the per-id effort token should still apply"
+  [ "$(meta_field "$meta" fast)" = on ] || fail "perid-explicit: the per-id fast token should still apply under --model"
+  pass "D6 spawn: explicit per-spawn flags keep precedence over the per-id override"
+}
+
 test_harness_resolution
 test_secondmate_model_effort_tokens
+test_per_id_override_resolution
+test_per_id_safety
+test_per_id_fast_token_parsing
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
@@ -1031,6 +1254,9 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawn_fallback_chain_and_crew_scout_unaffected
+test_spawn_per_id_pins_codex_fast
+test_spawn_per_id_recovery_reresolves
+test_spawn_per_id_explicit_flags_win
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home

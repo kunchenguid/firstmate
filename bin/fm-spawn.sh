@@ -111,6 +111,7 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+FAST=
 BACKEND_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -319,9 +320,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____FASTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____FASTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -362,8 +363,8 @@ case "$ARG3" in
     # The launch_template lookup below is the unverified-adapter guard for both
     # kinds: a harness with no template aborts the spawn.
     if [ "$KIND" = secondmate ]; then
-      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
-      harness_src='config/secondmate-harness (falling back to config/crew-harness)'
+      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$ID")
+      harness_src='config/secondmate-harness.d/<id> or config/secondmate-harness (falling back to config/crew-harness)'
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -380,26 +381,32 @@ case "$ARG3" in
     ;;
 esac
 
-# config/secondmate-harness may carry optional model/effort tokens alongside the
-# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
-# the harness itself came from the secondmate config fallback chain. Resolving
-# here on every spawn makes the pin durable across respawns. Precedence: explicit
-# --model/--effort flags still win over the file's tokens.
+# The secondmate config source (a per-id config/secondmate-harness.d/<id> override,
+# else the global config/secondmate-harness) may carry optional model/effort tokens
+# and a fast keyword alongside the harness ("<harness> [<model>] [<effort>] [fast]").
+# They apply only when this is a --secondmate spawn and no explicit per-spawn
+# harness/raw launch was supplied, so the harness itself came from the secondmate
+# config fallback chain. Resolving here on every spawn - keyed by $ID so the per-id
+# override wins - makes the pin durable across respawns (recovery, liveness respawn,
+# restart). Precedence: explicit --model/--effort flags still win over the file's
+# tokens. fast is Codex-only intent; fast_flag_for_harness applies it as
+# `-c service_tier="fast"` for codex and warns (ignoring it) for any other harness.
 if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$ID")
     [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
   fi
   if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID")
     if [ -n "$SM_EFFORT" ]; then
       case "$SM_EFFORT" in
         low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+        *) echo "warning: secondmate config effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
   fi
+  SM_FAST=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fast "$ID")
+  [ "$SM_FAST" = fast ] && FAST=fast
 fi
 
 secondmate_registry_value() {
@@ -468,6 +475,26 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+  esac
+}
+
+fast_flag_for_harness() {
+  local harness=$1 fast=$2
+  [ "$fast" = fast ] || return 0
+  case "$harness" in
+    codex)
+      # Codex "fast mode" is the service_tier="fast" config profile field (a real,
+      # already-shipped config key - see the installed codex config.toml and its
+      # ConfigProfile schema), applied at launch via the same `-c key=value`
+      # override codex uses for model_reasoning_effort above. This is a verified
+      # mechanism, not an invented CLI flag.
+      printf -- '-c %s ' "$(shell_quote 'service_tier="fast"')"
+      ;;
+    *)
+      # fast is Codex-only intent; ignore it (with a warning) for any other harness
+      # rather than passing a flag that harness would reject.
+      echo "warning: secondmate config fast token ignored for non-codex harness '$harness'" >&2
+      ;;
   esac
 }
 
@@ -995,6 +1022,11 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # fast= is written only when Codex fast mode is applied, so the meta of every
+  # other task stays byte-identical (absent fast= means off). It is informational
+  # only: recovery/liveness respawn re-resolve fast from the per-id config, never
+  # from this line.
+  [ "$FAST" = fast ] && echo "fast=on"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1032,8 +1064,10 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+FASTFLAG=$(fast_flag_for_harness "$HARNESS" "$FAST")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__FASTFLAG__/$FASTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

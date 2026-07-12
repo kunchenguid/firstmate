@@ -149,15 +149,21 @@ Claude and Grok use background-notify cycles, Codex uses bounded foreground chec
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
-The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
+The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>] [fast]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
-When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
-`fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
+A standalone `fast` keyword may appear after the harness token in any position; it marks Codex fast-mode intent and is removed before the remaining tokens are assigned positionally to harness, model, and effort.
+When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model, effort, or fast is read from that file.
+`fm-harness.sh secondmate-model`, `fm-harness.sh secondmate-effort`, and `fm-harness.sh secondmate-fast` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
+A single secondmate id can be pinned independently with `config/secondmate-harness.d/<id>`, a local, gitignored file holding the same one-line format for that id only.
+When `fm-harness.sh secondmate*` and `fm-spawn.sh` are given the id, a safe per-id override file is parsed instead of the global `config/secondmate-harness`; otherwise resolution falls back to the global file, so ids without an override are fully backward-compatible.
+The id must be a plain slug, and the `.d` directory and the per-id file must be real (non-symlink) regular paths, so a malformed id or an unsafe or symlinked path fails safe to the global file rather than launching an unintended harness.
+Codex fast mode is applied at launch as `-c service_tier="fast"`, the real Codex config-profile field, and is ignored with a warning for any non-Codex harness.
+`fm-spawn.sh` resolves the whole secondmate profile keyed by the task id on every spawn, so recovery and liveness respawns re-read the per-id override rather than any stale metadata.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
-`config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+Neither `config/secondmate-harness` nor its `config/secondmate-harness.d/` per-id overrides are inherited, because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 

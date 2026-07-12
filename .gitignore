@@ -11,6 +11,7 @@ __pycache__/
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
+config/secondmate-harness.d/
 config/backlog-backend
 config/backend
 config/x-mode.env

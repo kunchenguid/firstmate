@@ -3,21 +3,34 @@
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
-#        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
+#        fm-harness.sh secondmate [<id>]   print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness ->
 #                                        config/crew-harness -> own. "default" or absent
 #                                        defers to the crew resolution, so an unset
 #                                        secondmate-harness behaves exactly as the crew
 #                                        harness did before this knob existed.
-#        fm-harness.sh secondmate-model    print the optional MODEL token from
-#                                        config/secondmate-harness, or empty when absent.
-#        fm-harness.sh secondmate-effort   print the optional EFFORT token from
-#                                        config/secondmate-harness, or empty when absent.
-# config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
+#        fm-harness.sh secondmate-model [<id>]   print the optional MODEL token, or empty.
+#        fm-harness.sh secondmate-effort [<id>]  print the optional EFFORT token, or empty.
+#        fm-harness.sh secondmate-fast [<id>]    print "fast" when Codex fast-mode intent
+#                                        is set, else empty.
+# config/secondmate-harness format: a single line "<harness> [<model>] [<effort>] [fast]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
-# harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
-# Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
+# harness only, no model/effort/fast. Only the first non-empty, non-comment line is parsed.
+# A standalone "fast" keyword may appear after the harness token in any position; it marks
+# Codex fast-mode intent (applied by fm-spawn as `-c service_tier="fast"`) and is removed
+# before the remaining tokens are assigned positionally to harness/model/effort.
+# Model/effort/fast come ONLY from these files - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
+#
+# Per-secondmate override: an optional file config/secondmate-harness.d/<id> holds the SAME
+# one-line format for a single secondmate id, overriding the global config/secondmate-harness
+# for that id only. When the <id> argument is passed and a SAFE per-id override file exists,
+# it is parsed instead of the global file; otherwise resolution falls back to the global file
+# exactly as before, so homes with no per-id override are fully backward-compatible. The id
+# must be a plain slug ([A-Za-z0-9] then [A-Za-z0-9._-]*), the .d directory must be a real
+# directory (not a symlink), and the per-id file must be a regular file (not a symlink), so a
+# malformed id or an unsafe/symlinked path fails safe by falling back to the global file
+# rather than launching an unintended harness.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
 set -u
@@ -72,12 +85,43 @@ resolve_crew() {
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
 }
 
-# Print the first non-empty, non-comment line of config/secondmate-harness
-# (leading/trailing whitespace trimmed), or nothing when the file is absent or
-# holds only blank/comment lines.
+# A safe per-secondmate id: a plain slug that cannot escape the .d directory.
+# Rejects empty, leading dot, and any path metacharacter (so "..", "/", etc. fail).
+valid_secondmate_id() {
+  case "$1" in
+    '' | .*) return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Resolve the config file to parse for a secondmate line. With no id, or when the
+# id has no SAFE per-id override, this is the global config/secondmate-harness.
+# With an id whose override file exists and passes the safety checks (valid id, a
+# real .d directory, a regular non-symlink file), it is config/secondmate-harness.d/<id>.
+# Prints the chosen path, or nothing when no readable source exists.
+secondmate_source() {
+  local id=${1:-} d f
+  if [ -n "$id" ] && valid_secondmate_id "$id"; then
+    d="$CONFIG/secondmate-harness.d"
+    f="$d/$id"
+    # Reject a symlinked .d directory or a symlinked/non-regular per-id file, so an
+    # unsafe path falls back to the global file rather than being followed.
+    if [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  fi
+  [ -f "$CONFIG/secondmate-harness" ] && printf '%s\n' "$CONFIG/secondmate-harness"
+}
+
+# Print the first non-empty, non-comment line of the resolved secondmate source
+# (leading/trailing whitespace trimmed), or nothing when the source is absent or
+# holds only blank/comment lines. An optional id selects a per-id override.
 secondmate_line() {
-  local line
-  [ -f "$CONFIG/secondmate-harness" ] || return 0
+  local id=${1:-} src line
+  src=$(secondmate_source "$id")
+  [ -n "$src" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
@@ -87,21 +131,37 @@ secondmate_line() {
     esac
     printf '%s\n' "$line"
     return 0
-  done < "$CONFIG/secondmate-harness"
+  done < "$src"
 }
 
-# Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort) of
-# the resolved secondmate_line, or nothing if the line or that field is absent.
+# Print a field of the resolved secondmate_line for an optional id. The standalone
+# "fast" keyword is pulled out first (idx "fast" returns it, or empty); the
+# remaining tokens are assigned positionally (1=harness, 2=model, 3=effort). A
+# missing line or field prints nothing.
 secondmate_field() {
-  local idx=$1 line
-  line=$(secondmate_line)
+  local idx=$1 id=${2:-} line tok n=0
+  local fast='' rest_h='' rest_m='' rest_e=''
+  line=$(secondmate_line "$id")
   [ -n "$line" ] || return 0
   # shellcheck disable=SC2086  # deliberate word-splitting: tokenizing the line into fields
   set -- $line
+  for tok in "$@"; do
+    if [ "$tok" = fast ]; then
+      fast=fast
+      continue
+    fi
+    n=$((n + 1))
+    case "$n" in
+      1) rest_h=$tok ;;
+      2) rest_m=$tok ;;
+      3) rest_e=$tok ;;
+    esac
+  done
   case "$idx" in
-    1) printf '%s\n' "${1:-}" ;;
-    2) printf '%s\n' "${2:-}" ;;
-    3) printf '%s\n' "${3:-}" ;;
+    1) printf '%s\n' "$rest_h" ;;
+    2) printf '%s\n' "$rest_m" ;;
+    3) printf '%s\n' "$rest_e" ;;
+    fast) printf '%s\n' "$fast" ;;
   esac
 }
 
@@ -112,34 +172,44 @@ secondmate_field() {
 # launched on the crew harness). config/secondmate-harness is the PRIMARY's own
 # setting and is never inherited downstream - secondmates do not spawn secondmates.
 resolve_secondmate() {
-  local sm
-  sm=$(secondmate_field 1)
+  local id=${1:-} sm
+  sm=$(secondmate_field 1 "$id")
   if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
 }
 
-# Print the optional model token (2nd field) from config/secondmate-harness, or
-# empty when the harness token is absent/"default" (harness-only file, same as
-# today) or when no model token is present.
+# Print the optional model token (2nd field) from the resolved secondmate source,
+# or empty when the harness token is absent/"default" (harness-only file, same as
+# today) or when no model token is present. An optional id selects a per-id override.
 resolve_secondmate_model() {
-  local sm
-  sm=$(secondmate_field 1)
+  local id=${1:-} sm
+  sm=$(secondmate_field 1 "$id")
   [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
-  secondmate_field 2
+  secondmate_field 2 "$id"
 }
 
-# Print the optional effort token (3rd field) from config/secondmate-harness,
-# the same way.
+# Print the optional effort token (3rd field), the same way.
 resolve_secondmate_effort() {
-  local sm
-  sm=$(secondmate_field 1)
+  local id=${1:-} sm
+  sm=$(secondmate_field 1 "$id")
   [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
-  secondmate_field 3
+  secondmate_field 3 "$id"
+}
+
+# Print "fast" when the resolved secondmate source carries the fast keyword and a
+# concrete harness (not absent/"default"), else empty - so the flag is read only
+# when the file actually supplies the launch harness, exactly like model/effort.
+resolve_secondmate_fast() {
+  local id=${1:-} sm
+  sm=$(secondmate_field 1 "$id")
+  [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
+  secondmate_field fast "$id"
 }
 
 case "${1:-}" in
   crew) resolve_crew ;;
-  secondmate) resolve_secondmate ;;
-  secondmate-model) resolve_secondmate_model ;;
-  secondmate-effort) resolve_secondmate_effort ;;
+  secondmate) resolve_secondmate "${2:-}" ;;
+  secondmate-model) resolve_secondmate_model "${2:-}" ;;
+  secondmate-effort) resolve_secondmate_effort "${2:-}" ;;
+  secondmate-fast) resolve_secondmate_fast "${2:-}" ;;
   *) detect_own ;;
 esac
