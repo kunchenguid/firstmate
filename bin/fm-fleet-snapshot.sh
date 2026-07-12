@@ -19,10 +19,20 @@
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     hints.open_decisions is the keyed open-decision set returned by
+#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
+#     against current_state; hints.pending_decision and hints.blocked_event are
+#     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   secondmate_landed: {records[],truncated[],unreadable[]} - a bounded, read-only
+#     roll-up of DONE backlog records from this home's registered secondmate homes,
+#     so landed-work views see merges a secondmate managed (recorded in ITS OWN
+#     backlog, not the main one). Per-home count is capped; homes with an existing
+#     but unparseable backlog are disclosed in unreadable[]. Home paths come from the
+#     one secondmate-home enumerator (meta home= with data/secondmates.md fallback).
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -41,6 +51,12 @@ BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-ff-lib.sh"  # live_secondmate_meta_records: the one secondmate-home enumerator
 
 usage() {
   cat <<'EOF'
@@ -79,24 +95,6 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
-line_verb() {  # <line>
-  local v=${1%%:*}
-  v="${v#"${v%%[![:space:]]*}"}"
-  v="${v%"${v##*[![:space:]]}"}"
-  printf '%s' "$v"
-}
-
-line_note() {  # <line>
-  local n
-  case "$1" in
-    *:*) n=${1#*:} ;;
-    *) n=$1 ;;
-  esac
-  n="${n#"${n%%[![:space:]]*}"}"
-  n="${n%"${n##*[![:space:]]}"}"
-  printf '%s' "$n"
-}
-
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
   raw=$(
@@ -133,8 +131,8 @@ status_event_json() {  # <status-log>
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
-    verb=$(line_verb "$raw")
-    note=$(line_note "$raw")
+    verb=$(status_line_verb "$raw")
+    note=$(status_line_note "$raw")
   fi
   jq -n \
     --arg path "$log" \
@@ -150,14 +148,15 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() {
-  if [ ! -f "$BACKLOG" ]; then
-    jq -n --arg path "$BACKLOG" '{path:$path,present:false,records:[]}'
+backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
+  local backlog=${1:-$BACKLOG}
+  if [ ! -f "$backlog" ]; then
+    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$BACKLOG" '
+  jq -Rn --arg path "$backlog" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -268,13 +267,14 @@ backlog_json() {
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | del(.section,.order)
-  ' < "$BACKLOG"
+  ' < "$backlog"
 }
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw last_event_verb current_state pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -306,12 +306,39 @@ task_json_lines() {
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    last_event_verb=$(printf '%s' "$event_json" | jq -r '.last_event.state // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    pending_decision=0
-    blocked_event=0
-    [ "$last_event_verb" = needs-decision ] && [ "$current_state" = parked ] && pending_decision=1
-    [ "$last_event_verb" = blocked ] && [ "$current_state" = blocked ] && blocked_event=1
+    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+
+    # Durable keyed open-decision set: fold the WHOLE status stream
+    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+    # never mask a still-open captain decision. The set is derived purely from the
+    # keyed fold - never from report bodies or decision-like prose - and then
+    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
+    # crew has provably moved past. Two lifecycle signals clear it, neither of which
+    # reads any report content:
+    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #     crew that resumed past a gate is not still reported as parked; and
+    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
+    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
+    #     report POINTER, never as a reopened pending decision.
+    # Secondmates are excluded from lifecycle clearing: they are persistent and
+    # multiplex many concerns onto one stream, so activity on one concern must
+    # never clear another concern's keyed decision. A parked/blocked state, or a
+    # non-authoritative status-log/none read on a still-live task, keeps the fold's
+    # open decision surfacing.
+    open_decisions_tsv=$(status_open_decisions "$status_log")
+    if [ "$kind" != secondmate ] && \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+      open_decisions_tsv=""
+    fi
+    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+      [ splits("\n") | select(length > 0)
+        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+        | select(. != null) ]')
+    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
+    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
     if [ -n "$target" ]; then
@@ -356,6 +383,7 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
@@ -381,6 +409,7 @@ task_json_lines() {
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
+          open_decisions:$open_decisions,
           scout_report_present:$report_present,
           last_event_text:$last_event_raw
         },
@@ -396,6 +425,50 @@ task_json_lines() {
           end)
       }'
   done | jq -s 'sort_by(.id)'
+}
+
+# Bounded, deterministic roll-up of DONE records from this home's registered
+# secondmate homes. A merge a secondmate managed is recorded in ITS OWN backlog,
+# never the main one, so landed-work views miss it without this. Reuses the single
+# backlog parser (backlog_json) against each home's data/backlog.md - a pure Markdown
+# read, no per-task crew-state and no network - and the one secondmate-home enumerator
+# (fm-ff-lib.sh's live_secondmate_meta_records: meta home= with data/secondmates.md
+# fallback). Per-home Done is capped here by default so the canonical snapshot stays
+# bounded; a cap of 0 explicitly lifts that bound for an expanding caller. Bearings
+# applies its own tighter view caps and omitted[] disclosure. A home with no backlog
+# file yet contributes nothing and is NOT flagged
+# (a fresh secondmate is normal); only an existing backlog that fails to parse is
+# reported unreadable. Records are sorted most-recent-first by completion date, id.
+FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=${FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME:-10}
+case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
+secondmate_landed_json() {
+  local reg="$DATA/secondmates.md" id home backlog bj rows n
+  local records='[]' truncated='[]' unreadable='[]'
+  while IFS='|' read -r id home _; do
+    [ -n "$id" ] || continue
+    [ -n "$home" ] || continue
+    backlog="$home/data/backlog.md"
+    [ -f "$backlog" ] || continue
+    bj=$(backlog_json "$backlog") \
+      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+    rows=$(printf '%s' "$bj" | jq --arg home "$home" --arg id "$id" '
+      [ .records[] | select(.state == "done" and .structured)
+        | {id, title, pr_url, report_path, local_note, completion, home:$home, home_id:$id} ]
+      | sort_by([(.completion.date // ""), .id]) | reverse') \
+      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+    n=$(printf '%s' "$rows" | jq 'length')
+    if [ "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" -gt 0 ] \
+      && [ "$n" -gt "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" ]; then
+      truncated=$(jq -n --argjson a "$truncated" --arg h "$home" '$a + [$h]')
+    fi
+    records=$(jq -n --argjson a "$records" --argjson b "$rows" \
+      --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+      '$a + (if $cap == 0 then $b else $b[:$cap] end)')
+  done <<EOF
+$(live_secondmate_meta_records "$STATE" "$reg")
+EOF
+  jq -n --argjson records "$records" --argjson truncated "$truncated" --argjson unreadable "$unreadable" \
+    '{records:$records, truncated:$truncated, unreadable:$unreadable}'
 }
 
 scout_report_lines() {
@@ -416,6 +489,7 @@ scout_report_lines() {
 BACKLOG_JSON=$(backlog_json)
 TASKS_JSON=$(task_json_lines)
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+SECONDMATE_LANDED_JSON=$(secondmate_landed_json)
 
 jq -n \
   --arg fm_home "$FM_HOME" \
@@ -427,6 +501,7 @@ jq -n \
   --argjson backlog "$BACKLOG_JSON" \
   --argjson tasks "$TASKS_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
+  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -437,6 +512,7 @@ jq -n \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     secondmate_landed:$secondmate_landed,
      secondmate_guidance:{
        note:"For kind=secondmate, send marked supervisor requests with fm-send and read the status/doc return channel; do not routinely fm-peek the secondmate chat for answers."
      }

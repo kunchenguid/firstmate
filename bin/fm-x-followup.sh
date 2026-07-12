@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Post a completion follow-up for an X-linked task, up to three within a 7-day
-# window, and manage the link's counter.
+# Post a completion follow-up for an X-mode-linked task, up to three within a
+# 7-day window, and manage the link's counter.
 #
-# An X mention that spawned real work is linked to its task by fm-x-link.sh
-# (x_request/x_request_ts/x_followups in state/<id>.meta). When that task
-# reaches a genuine milestone (investigation done, build started, shipped,
-# failed), firstmate composes a public-safe outcome and posts it here as one of
-# up to three follow-ups, within the window. Past the window, past the cap, or
-# after --final, this clears the link so a later call is a clean no-op.
+# An X-mode mention that spawned real work is linked to its task by fm-x-link.sh
+# (x_request/x_request_ts/x_followups plus optional reply context in
+# state/<id>.meta). When that task reaches a genuine milestone (investigation
+# done, build started, shipped, failed), firstmate composes a public-safe outcome
+# and posts it here as one of up to three follow-ups, within the window. Past the
+# window, past the cap, or after --final, this clears the link so a later call is
+# a clean no-op.
 #
 # Detection (no reply text needed - cheap pre-check before composing a reply):
 #   fm-x-followup.sh --check <task-id>
@@ -43,9 +44,9 @@
 # Dry-run (FMX_DRY_RUN) flows through fm-x-reply.sh: the follow-up is recorded to
 # state/x-outbox/<request_id>.json instead of posted, and the counter/link are
 # mutated exactly as a live post would (increment-and-keep, or clear on --final
-# / cap), so the full loop runs end to end without a tweet. With --image, the
-# follow-up carries one local image attachment; if the reply text splits into a
-# thread, the relay attaches the image to the opener.
+# / cap), so the full loop runs end to end without a public post. With --image,
+# the follow-up carries one local image attachment; if the reply text splits
+# into a thread, the relay attaches the image to the opener.
 #
 # The window is FMX_FOLLOWUP_MAX_AGE_SECS (default 604800, 7 days). The cap is
 # FMX_FOLLOWUP_MAX_COUNT (default 3). FMX_NOW_OVERRIDE pins "now" for
@@ -70,11 +71,11 @@ usage: fm-x-followup.sh --check <task-id>
        fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
 Post a completion follow-up (up to 3 per link, within a 7-day window) for an
-X-linked task and manage the link's follow-up counter.
+X-mode-linked task and manage the link's follow-up counter.
 
 Options:
   --check          Print the request_id when a follow-up is due.
-  --image <path>   Attach one local image file; threaded replies attach it to the opener tweet.
+  --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
   --final          Clear the link after this post regardless of the remaining count.
   --text-file <path>
                    Read follow-up text from a file.
@@ -142,11 +143,13 @@ META="$STATE/$ID.meta"
 RID=$(fmx_meta_get "$META" x_request)
 TS=$(fmx_meta_get "$META" x_request_ts)
 COUNT=$(fmx_meta_get "$META" x_followups)
+REQ_PLATFORM=$(fmx_meta_get "$META" x_platform)
+REQ_REPLY_MAX=$(fmx_meta_get "$META" x_reply_max_chars)
 case "$COUNT" in
   ''|*[!0-9]*) COUNT=0 ;;
 esac
 
-# Not linked: this task did not originate from an X mention. Detection fails;
+# Not linked: this task did not originate from an X-mode mention. Detection fails;
 # a post is simply a no-op success (firstmate need not special-case it).
 if [ -z "$RID" ]; then
   if [ "$MODE" = check ]; then
@@ -191,8 +194,21 @@ if [ "$MODE" = check ]; then
 fi
 
 # Post the follow-up. fm-x-reply owns text reading, thread-split, dry-run, the
-# endpoint, and the never-inline safety; we only pass the text source through.
-"$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+# endpoint, and the never-inline safety; we only pass the text source and any
+# recorded reply-platform context through.
+declare -a REPLY_ENV=()
+case "$REQ_PLATFORM" in
+  discord|x) REPLY_ENV+=("FMX_REPLY_PLATFORM=$REQ_PLATFORM") ;;
+esac
+case "$REQ_REPLY_MAX" in
+  ''|*[!0-9]*) ;;
+  *) REPLY_ENV+=("FMX_REPLY_MAX_CHARS=$REQ_REPLY_MAX") ;;
+esac
+if [ "${#REPLY_ENV[@]}" -gt 0 ]; then
+  env "${REPLY_ENV[@]}" "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+else
+  "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+fi
 post_rc=$?
 
 case "$post_rc" in

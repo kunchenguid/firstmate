@@ -686,3 +686,77 @@ fm_backend_agent_alive() {  # <backend> <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# --- native event push (backend-extensible) ---------------------------------
+#
+# The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks
+# fm_backend_has_push whether a window's backend can push semantic state changes,
+# and for those backends replaces its blind `sleep POLL` with a bounded wait on
+# fm_backend_wait_transition. Every push-capable backend reuses the shared
+# normalized-transition shape and policy table (bin/fm-transition-lib.sh); today
+# only herdr implements the surface (docs/herdr-backend.md "Native
+# pane.agent_status_changed push escalation"). A backend with no native push
+# reports has-push false and returns 2 from the dispatchers below, so the
+# watcher falls back to its poll loop - the permanent fail-closed backstop.
+
+# fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
+fm_backend_has_push() {  # <backend>
+  case "$1" in
+    herdr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_events_capable: 0 if <backend>'s push path is usable for <session>
+# right now (version/schema/reader gate). Non-push backends are never capable.
+# The watcher memoizes this per session so the potentially heavy capability
+# probe is not repeated every poll.
+fm_backend_events_capable() {  # <backend> <session>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_events_capable "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_wait_transition: bounded wait for a fresh actionable (blocked)
+# transition on one of <pane_window...> in <session>, up to <timeout_secs>.
+# Prints the normalized transition record and returns 0 on a fresh actionable
+# edge; returns 1 on a clean timeout (the caller has effectively already slept);
+# returns 2 when the event path is unusable (the caller sleeps the budget
+# itself). Non-push backends always return 2.
+fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir> <pane_window...>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 2
+  fm_backend_source "$backend" || return 2
+  case "$backend" in
+    herdr) fm_backend_herdr_wait_transition "$@" ;;
+    *) return 2 ;;
+  esac
+}
+
+fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_commit_transition "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_clear_transition() {  # <backend> <state_dir> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 0
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_clear_transition "$@" ;;
+    *) return 0 ;;
+  esac
+}

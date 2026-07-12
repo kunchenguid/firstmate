@@ -7,7 +7,7 @@
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
@@ -393,6 +393,288 @@ test_home_seed_refuses_empty_charter_fields() {
     || fail "seed did not explain empty routing scope refusal"
   [ ! -e "$subhome" ] || fail "empty routing scope seed left a generated subhome"
   pass "home seeding refuses empty normalized charter fields"
+}
+
+test_home_seed_no_projects_end_to_end() {
+  # A domain whose subject is the firstmate repo itself needs no project clones:
+  # the deliberate --no-projects signal scaffolds, seeds, registers, and spawns a
+  # project-less home end to end with no placeholder clone.
+  local home sub sub_abs fakebin log meta proj_val out
+  home="$TMP_ROOT/no-projects-seed-home"
+  sub="$TMP_ROOT/no-projects-seed-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/no-projects-fake")
+  log="$TMP_ROOT/no-projects-fake/tmux.log"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects) \
+    || fail "project-less seed failed"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$sub_abs" >/dev/null || fail "seed did not report the project-less subhome"
+
+  # Registered with an empty projects field, marked, charter copied, no clones.
+  assert_grep '- fdev - firstmate self-development' "$home/data/secondmates.md" "project-less registry line missing"
+  assert_grep 'scope: firstmate repo work' "$home/data/secondmates.md" "project-less registry scope missing"
+  assert_grep 'projects: ;' "$home/data/secondmates.md" "project-less registry did not render an empty projects field"
+  [ "$(cat "$sub/.fm-secondmate-home")" = fdev ] || fail "project-less seed did not mark the subhome"
+  assert_present "$sub/data/charter.md" "project-less seed did not copy the charter"
+  [ -z "$(ls -A "$sub/projects" 2>/dev/null)" ] || fail "project-less seed cloned a project"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after project-less seed"
+
+  # Spawn tolerates the empty projects field: the home resolves from the registry
+  # and the projects meta is recorded empty rather than breaking the launch.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/no-projects-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" fdev "$sub" codex --secondmate >/dev/null 2>&1 \
+    || fail "project-less secondmate spawn failed"
+  meta="$home/state/fdev.meta"
+  assert_grep 'kind=secondmate' "$meta" "project-less spawn meta lost kind=secondmate"
+  assert_grep "home=$sub_abs" "$meta" "project-less spawn meta lost the subhome"
+  proj_val=$(grep '^projects=' "$meta" | head -1 | cut -d= -f2-)
+  [ -z "$proj_val" ] || fail "project-less spawn recorded a non-empty projects meta: '$proj_val'"
+  pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
+}
+
+test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
+  local home reusable_sub stale_sub stale_brief stale_brief_before err
+  home="$TMP_ROOT/no-projects-reused-charter-home"
+  reusable_sub="$TMP_ROOT/no-projects-reused-charter-valid-subhome"
+  stale_sub="$TMP_ROOT/no-projects-reused-charter-stale-subhome"
+  stale_brief="$home/data/stale/brief.md"
+  stale_brief_before="$TMP_ROOT/no-projects-reused-charter.before"
+  err="$TMP_ROOT/no-projects-reused-charter.err"
+  mkdir -p "$home/data" "$home/state" "$reusable_sub/data" "$stale_sub/data"
+  mark_firstmate_home "$reusable_sub"
+  mark_firstmate_home "$stale_sub"
+
+  scaffold_secondmate_charter "$home" reusable 'firstmate self-development' --no-projects \
+    || fail "project-less charter scaffold failed"
+  printf '\n# Custom note\nThe projects above are local clones for work you supervise.\n' >> "$home/data/reusable/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" reusable "$reusable_sub" --no-projects >/dev/null \
+    || fail "project-less seed rejected a reused project-less charter"
+  assert_grep 'None. This is a project-less domain' "$reusable_sub/data/charter.md" \
+    "reused project-less charter was not copied"
+
+  scaffold_secondmate_charter "$home" stale 'firstmate self-development. None. This is a project-less domain.' alpha \
+    || fail "projectful charter scaffold failed"
+  sed 's/The projects above are local clones for work you supervise; they are not an exclusive ownership claim./Project clone details are customized for this domain./' \
+    "$stale_brief" > "$stale_brief_before"
+  mv "$stale_brief_before" "$stale_brief"
+  cp "$stale_brief" "$stale_brief_before"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" stale "$stale_sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed accepted a reused charter with project clones"
+  fi
+  grep -F 'existing charter brief' "$err" >/dev/null \
+    || fail "project-less charter refusal did not name the stale charter conflict"
+  grep -F 'fm-brief.sh stale --secondmate --no-projects' "$err" >/dev/null \
+    || fail "project-less charter refusal did not explain how to re-scaffold"
+  cmp -s "$stale_brief_before" "$stale_brief" \
+    || fail "project-less charter refusal changed the reused charter"
+  assert_absent "$stale_sub/.fm-secondmate-home" "project-less charter refusal wrote a home marker"
+  assert_absent "$stale_sub/data/charter.md" "project-less charter refusal copied a charter"
+  assert_absent "$stale_sub/projects" "project-less charter refusal created a projects directory"
+  if grep -F -- '- stale ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less charter refusal wrote a parent registry route"
+  fi
+  pass "home seeding validates reused project-less charters before mutation"
+}
+
+test_home_seed_refuses_projectless_conversion_of_populated_home() {
+  local home sub err registry_before
+  home="$TMP_ROOT/no-projects-conversion-home"
+  sub="$TMP_ROOT/no-projects-conversion-subhome"
+  err="$TMP_ROOT/no-projects-conversion.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/existing-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$sub/projects/existing-clone"
+  cat > "$sub/data/projects.md" <<EOF
+- registry-only [direct-PR] - retained project entry (added 2026-06-22)
+EOF
+  registry_before=$(cat "$sub/data/projects.md")
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed converted a populated secondmate home"
+  fi
+  grep -F 'existing-clone' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not name the existing clone"
+  grep -F 'registry-only' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not name the registry entry"
+  grep -F 'retire or clean this home first' "$err" >/dev/null \
+    || fail "project-less conversion refusal did not explain the required cleanup"
+  assert_present "$sub/projects/existing-clone/.git" "project-less conversion refusal removed the existing clone"
+  [ "$registry_before" = "$(cat "$sub/data/projects.md")" ] \
+    || fail "project-less conversion refusal changed the project registry"
+  assert_absent "$sub/.fm-secondmate-home" "project-less conversion refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less conversion refusal copied a charter"
+  assert_absent "$sub/state" "project-less conversion refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less conversion refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less conversion of a populated home"
+}
+
+test_home_seed_refuses_projectless_home_with_uninspectable_projects() {
+  local home sub err
+  home="$TMP_ROOT/no-projects-uninspectable-home"
+  sub="$TMP_ROOT/no-projects-uninspectable-subhome"
+  err="$TMP_ROOT/no-projects-uninspectable.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/hidden-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$sub/projects/hidden-clone"
+  chmod 311 "$sub/projects"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 700 "$sub/projects"
+    fail "project-less seed accepted a home whose projects directory could not be inspected"
+  fi
+  chmod 700 "$sub/projects"
+  grep -F 'cannot inspect existing projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not explain the projects inspection failure"
+  grep -F 'resolve its access permissions or retire or clean this home' "$err" >/dev/null \
+    || fail "project-less seed did not explain how to resolve the inspection failure"
+  assert_present "$sub/projects/hidden-clone/.git" "project-less inspection refusal removed the existing clone"
+  assert_absent "$sub/.fm-secondmate-home" "project-less inspection refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less inspection refusal copied a charter"
+  assert_absent "$sub/state" "project-less inspection refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less inspection refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes whose projects directory cannot be inspected"
+}
+
+test_home_seed_refuses_projectless_home_with_symlinked_projects() {
+  local home sub target err
+  home="$TMP_ROOT/no-projects-symlinked-projects-home"
+  sub="$TMP_ROOT/no-projects-symlinked-projects-subhome"
+  target="$sub/retained-projects"
+  err="$TMP_ROOT/no-projects-symlinked-projects.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$target/hidden-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$target/hidden-clone"
+  ln -s "$target" "$sub/projects"
+  chmod 311 "$target"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 700 "$target"
+    fail "project-less seed accepted a home whose projects directory is a symlink"
+  fi
+  chmod 700 "$target"
+  grep -F 'projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not identify the symlinked projects directory"
+  grep -F 'it is a symlink' "$err" >/dev/null \
+    || fail "project-less seed did not explain the symlinked projects directory refusal"
+  assert_present "$target/hidden-clone/.git" "project-less symlink refusal removed the target clone"
+  [ -L "$sub/projects" ] || fail "project-less symlink refusal changed the projects symlink"
+  [ "$(readlink "$sub/projects")" = "$target" ] \
+    || fail "project-less symlink refusal retargeted the projects symlink"
+  assert_absent "$sub/.fm-secondmate-home" "project-less symlink refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less symlink refusal copied a charter"
+  assert_absent "$sub/state" "project-less symlink refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less symlink refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes with symlinked projects directories"
+}
+
+test_home_seed_refuses_projectless_home_with_non_directory_projects() {
+  local home sub err projects_before
+  home="$TMP_ROOT/no-projects-nondirectory-projects-home"
+  sub="$TMP_ROOT/no-projects-nondirectory-projects-subhome"
+  err="$TMP_ROOT/no-projects-nondirectory-projects.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data"
+  mark_firstmate_home "$sub"
+  printf '%s\n' 'retained project path' > "$sub/projects"
+  projects_before=$(cat "$sub/projects")
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed accepted a home whose projects path is not a directory"
+  fi
+  grep -F 'projects directory' "$err" >/dev/null \
+    || fail "project-less seed did not identify the non-directory projects path"
+  grep -F 'it is not a directory' "$err" >/dev/null \
+    || fail "project-less seed did not explain the non-directory projects path refusal"
+  [ "$projects_before" = "$(cat "$sub/projects")" ] \
+    || fail "project-less non-directory refusal changed the projects path"
+  assert_absent "$sub/.fm-secondmate-home" "project-less non-directory refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less non-directory refusal copied a charter"
+  assert_absent "$sub/state" "project-less non-directory refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less non-directory refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes with non-directory projects paths"
+}
+
+test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
+  local home sub err registry_before
+  home="$TMP_ROOT/no-projects-uninspectable-registry-home"
+  sub="$TMP_ROOT/no-projects-uninspectable-registry-subhome"
+  err="$TMP_ROOT/no-projects-uninspectable-registry.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data"
+  mark_firstmate_home "$sub"
+  printf '%s\n' '- hidden-registry [direct-PR] - retained project entry (added 2026-06-22)' > "$sub/data/projects.md"
+  registry_before=$(cat "$sub/data/projects.md")
+  chmod 000 "$sub/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    chmod 600 "$sub/data/projects.md"
+    fail "project-less seed accepted a home whose project registry could not be inspected"
+  fi
+  chmod 600 "$sub/data/projects.md"
+  grep -F 'cannot inspect existing project registry' "$err" >/dev/null \
+    || fail "project-less seed did not explain the project registry inspection failure"
+  grep -F 'resolve its access permissions or retire or clean this home' "$err" >/dev/null \
+    || fail "project-less seed did not explain how to resolve the project registry inspection failure"
+  [ "$registry_before" = "$(cat "$sub/data/projects.md")" ] \
+    || fail "project-less inspection refusal changed the project registry"
+  assert_absent "$sub/.fm-secondmate-home" "project-less registry inspection refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less registry inspection refusal copied a charter"
+  assert_absent "$sub/state" "project-less registry inspection refusal left an operational directory"
+  assert_absent "$sub/projects" "project-less registry inspection refusal created a projects directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less registry inspection refusal wrote a parent registry route"
+  fi
+  pass "home seeding refuses project-less homes whose project registry cannot be inspected"
+}
+
+test_home_seed_refuses_missing_projects_without_signal() {
+  # Accidental omission of the project list, with no deliberate --no-projects
+  # signal, must fail loudly and leave nothing behind, so a forgotten argument is
+  # never mistaken for an intentional project-less seed.
+  local home sub err
+  home="$TMP_ROOT/missing-projects-home"
+  sub="$TMP_ROOT/missing-projects-subhome"
+  err="$TMP_ROOT/missing-projects.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='some scope' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" >/dev/null 2>"$err"; then
+    fail "seed accepted a project-less home without the deliberate --no-projects signal"
+  fi
+  assert_absent "$sub" "loud-failure seed created a subhome"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "loud-failure seed left a registry route"
+  fi
+
+  # The deliberate signal is mutually exclusive with a project list.
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='some scope' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects alpha >/dev/null 2>"$err"; then
+    fail "seed accepted --no-projects combined with a project list"
+  fi
+  grep -F 'cannot be combined with a project list' "$err" >/dev/null \
+    || fail "seed did not explain the --no-projects mutual-exclusion rejection"
+  pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
 }
 
 test_home_seed_refuses_local_only_project() {
@@ -1743,8 +2025,8 @@ EOF
   pass "fm-backlog-handoff aborts atomically on unmatched, in-flight, and unregistered targets"
 }
 
-test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
-  local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
+test_backlog_handoff_refuses_done_items_and_non_secondmate_homes() {
+  local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside before_main before_sub out
   home="$TMP_ROOT/handoff-safety-main"
   subhome="$TMP_ROOT/handoff-safety-sub"
   projhome="$TMP_ROOT/handoff-safety-proj"
@@ -1753,22 +2035,26 @@ test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
   outside="$TMP_ROOT/handoff-safety-outside"
   mkdir -p "$home/data" "$home/state"
 
-  # A Done item handed into a secondmate backlog lacking a Done section gets one.
   seed_secondmate_home_marker "$subhome" archive
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '## Queued\n- [ ] keep-me - stays (repo: alpha)\n' > "$subhome/data/backlog.md"
   printf -- '- archive - archival (home: %s; scope: archival; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
-  cat > "$home/data/backlog.md" <<'EOF'
-## Done
-- [x] shipped-task - shipped thing - local main (merged 2026-06-19)
-EOF
-  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" archive shipped-task >/dev/null \
-    || fail "handoff of a Done item failed"
-  grep -F '## Done' "$subhome/data/backlog.md" >/dev/null \
-    || fail "handoff did not create the missing Done section in the secondmate backlog"
-  awk '/^## Done/{d=1;next} /^## /{d=0} d && /shipped-task/{found=1} END{exit found?0:1}' "$subhome/data/backlog.md" \
-    || fail "Done item did not land under the created Done section"
-  grep -F 'keep-me' "$subhome/data/backlog.md" >/dev/null || fail "handoff clobbered the existing secondmate backlog content"
+  printf '##\tDone\n- [x] shipped-task - shipped thing - local main (merged 2026-06-19)\n' > "$home/data/backlog.md"
+  before_main="$TMP_ROOT/handoff-safety-main.before"
+  before_sub="$TMP_ROOT/handoff-safety-sub.before"
+  cp "$home/data/backlog.md" "$before_main"
+  cp "$subhome/data/backlog.md" "$before_sub"
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" archive shipped-task 2>&1); then
+    fail "handoff accepted a Done backlog item"
+  fi
+  printf '%s\n' "$out" | grep -F 'shipped-task' >/dev/null \
+    || fail "Done-item refusal did not name the selected item"
+  printf '%s\n' "$out" | grep -F 'queued work only' >/dev/null \
+    || fail "Done-item refusal did not state the queued-only contract"
+  cmp -s "$before_main" "$home/data/backlog.md" \
+    || fail "Done-item refusal mutated the main backlog"
+  cmp -s "$before_sub" "$subhome/data/backlog.md" \
+    || fail "Done-item refusal mutated the secondmate backlog"
 
   # A registered home that is not a seeded secondmate home (e.g. a project clone)
   # is refused, and nothing is written into it.
@@ -1809,7 +2095,7 @@ EOF
   fi
   [ ! -e "$outside/backlog.md" ] || fail "handoff wrote through a symlinked secondmate data directory"
   grep -F 'symlink-task' "$home/data/backlog.md" >/dev/null || fail "symlink refusal lost the main backlog item"
-  pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
+  pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
 test_fm_home_parameterization
@@ -1826,6 +2112,14 @@ test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
+test_home_seed_no_projects_end_to_end
+test_home_seed_refuses_projectful_reused_charter_for_projectless_home
+test_home_seed_refuses_projectless_conversion_of_populated_home
+test_home_seed_refuses_projectless_home_with_uninspectable_projects
+test_home_seed_refuses_projectless_home_with_symlinked_projects
+test_home_seed_refuses_projectless_home_with_non_directory_projects
+test_home_seed_refuses_projectless_home_with_uninspectable_registry
+test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
@@ -1861,4 +2155,4 @@ test_secondmate_teardown_path_boundary_matrix
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
-test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home
+test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
