@@ -456,10 +456,13 @@ When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
 When the task meta records `pr=`, the helper also compares that base against the authoritative PR/MR head (`pr_head=` when reachable, otherwise the head resolved through the provider seam) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
 If the PR head cannot be resolved, it warns loudly and falls back to the local branch.
-In target project repos shipped through that project's own no-mistakes pipeline, commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
-Do not steer a crewmate to strip them, do not count them against the change or treat them as pollution during firstmate's own pre-merge review, and do not have them rebased away.
-Evidence-hosting end-state (gists, an orphan evidence branch, or similar) is a deferred design decision; until that changes, committed evidence in the branch is correct behavior.
-Firstmate's own repo is the exception: its `.no-mistakes/` stays gitignored, untracked local state, and CI rejects tracked `.no-mistakes` paths.
+Validation evidence from a project's own no-mistakes pipeline is published as a URL, not committed, wherever the project can publish it.
+Set no-mistakes' `test.evidence.upload_cmd` to `bin/fm-evidence-publish.sh`, which hands each evidence file to the `html-preview` CLI and prints back an internal preview URL; no-mistakes then writes only the URL into the PR/MR description and keeps the file out of git.
+That is what a reviewer actually needs: a MR renders a committed HTML artifact as source text, so a screenshot or a before/after page committed into the branch is evidence nobody can see.
+The script refuses to publish any evidence whose text content trips its credential or classification scan, and a failed publish degrades to the committed-path behavior with a warning rather than failing the run - read its header for the full contract.
+Only when a project has no `upload_cmd` configured does evidence fall back to being committed under `.no-mistakes/evidence/` in the crew branch.
+In that fallback those commits are the pipeline's own PR-viewable evidence, committed by design so they ride along with the change: do not steer a crewmate to strip them, do not count them against the change or treat them as pollution during firstmate's own pre-merge review, and do not have them rebased away.
+Firstmate's own repo is the exception to the fallback: its `.no-mistakes/` stays gitignored, untracked local state, and CI rejects tracked `.no-mistakes` paths.
 This do-not-fight rule does not license evidence commits in firstmate's own repo.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
