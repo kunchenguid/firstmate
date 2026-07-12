@@ -91,6 +91,63 @@ SH
   done
 }
 
+# --- hermetic base PATH -----------------------------------------------------
+#
+# Why this exists (task fmsend-verify-l2): the suites that exercise firstmate's
+# missing-tool detection build a fakebin that deliberately OMITS a tool, then
+# assert bootstrap prints "MISSING: <tool>". They prepended that fakebin to the
+# REAL system dirs, so an omitted tool that happened to exist on the developer's
+# machine silently satisfied the probe and the assertion failed. Two collisions
+# were real and are the reason this helper exists: /usr/bin/orca is the GNOME
+# screen reader (unrelated to firstmate's Orca backend - it merely shares the
+# name) and /usr/bin/node is an ordinary Node install. `/bin` is a usrmerge
+# symlink to `/usr/bin`, so no reordering of the real dirs could dodge either.
+# CI stayed green only because its runners happen to lack both, which made this
+# a local-only failure that blocked the gate for any developer who had them.
+#
+# fm_test_base_path echoes a sanitized bin dir mirroring the real base dirs'
+# executables EXCEPT the tools these suites control through their own fakebin
+# (FM_TEST_TOOL_BLOCKLIST). The ambient machine therefore can never satisfy a
+# firstmate tool probe, so a case that omits a tool genuinely runs without it and
+# the assertion tests what it was written to test. Everything else - git, jq, and
+# the coreutils the scripts really call - is mirrored through untouched, because
+# the suites need real ones. The dir is built once per test process and cached.
+#
+# FM_TEST_BASE_PATH still overrides the whole thing, unchanged.
+
+# The tools firstmate probes for AND these suites control via fakebin. `git` is
+# deliberately NOT here: the suites need a real git, and their missing-git case
+# shadows it with a shell function instead of relying on PATH.
+FM_TEST_TOOL_BLOCKLIST="tmux node gh gh-axi chrome-devtools-axi lavish-axi treehouse no-mistakes tasks-axi quota-axi orca herdr zellij cmux"
+
+FM_TEST_BASE_PATH_DIR=""
+
+fm_test_base_path() {
+  local root dir src entry name
+  if [ -n "$FM_TEST_BASE_PATH_DIR" ] && [ -d "$FM_TEST_BASE_PATH_DIR" ]; then
+    printf '%s\n' "$FM_TEST_BASE_PATH_DIR"
+    return 0
+  fi
+  root=$(fm_test_tmproot fm-base-path)
+  dir="$root/bin"
+  mkdir -p "$dir"
+  for src in /usr/bin /bin /usr/sbin /sbin; do
+    [ -d "$src" ] || continue
+    for entry in "$src"/*; do
+      [ -f "$entry" ] && [ -x "$entry" ] || continue
+      name=${entry##*/}
+      case " $FM_TEST_TOOL_BLOCKLIST " in
+        *" $name "*) continue ;;
+      esac
+      # First dir wins, mirroring real PATH precedence (and /bin == /usr/bin
+      # under usrmerge, so this also dedupes the symlinked duplicates).
+      [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name"
+    done
+  done
+  FM_TEST_BASE_PATH_DIR=$dir
+  printf '%s\n' "$dir"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

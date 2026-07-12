@@ -26,7 +26,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# The base PATH is HERMETIC: it mirrors the real system dirs but withholds every
+# tool this suite controls through its own fakebin, so a case that omits a tool
+# to assert "MISSING: <tool>" genuinely runs without it no matter what the
+# developer's machine has installed (fm_test_base_path, tests/lib.sh).
+BASE_PATH=${FM_TEST_BASE_PATH:-$(fm_test_base_path)}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_git_identity fmtest fmtest@example.invalid
 
