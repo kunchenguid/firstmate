@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, cursor, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -86,6 +86,8 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <id>` | none (effort is a suffix in the id) | Verified on cursor-agent 2026.07.09. The id carries the effort, e.g. `gpt-5.6-sol-medium` (suffixes `-none\|-low\|-medium\|-high\|-xhigh\|-max`). The documented `<model>[effort=<level>]` bracket form is rejected by the installed CLI, so firstmate passes the full suffixed id and emits no effort flag. |
+| agy | `--model <name>` | none (effort is baked into the name) | Verified on agy 1.1.1. `--model` takes a display name from `agy models`, e.g. `'Gemini 3.1 Pro (High)'` or `'Claude Opus 4.6 (Thinking)'`, whose effort is part of the name. No separate effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -99,6 +101,8 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- cursor: no separate verified skill invocation for `no-mistakes`; use natural language. cursor has its own `/`-style slash commands and a distinct skills store, but its discovery of the user-level `no-mistakes` skill is unverified.
+- agy: no separate verified skill invocation for `no-mistakes`; use natural language.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 
 ## claude (VERIFIED)
@@ -264,3 +268,65 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor (VERIFIED 2026-07-12, cursor-agent 2026.07.09-a3815c0)
+
+Cursor Agent CLI (`cursor-agent`), verified as a CREW and secondmate adapter, not as the firstmate primary.
+Launch with a positional prompt: `cursor-agent --force --model <id> "$(cat <brief>)"`.
+The `cursor-agent` binary is a bash launcher that execs Node with `exec -a "$0"`, so the pane command and process name stay `cursor-agent` (not a bare `node`).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (footer stop hint shown iff a turn is running; the spinner line reads `⠘⠣ Working`). Idle footer shows only the placeholder `→ Add a follow-up`. The ASCII `ctrl+c to stop` is the busy regex (avoids the braille spinner glyph). |
+| Exit command | double `Ctrl+C` within ~1s (`Press Ctrl+C again to exit`). Prints `To resume this session: agent --resume=<conversationId>`. |
+| Interrupt | single `Ctrl+C` (cancels the current turn; footer shows `ctrl+c to stop` mid-turn). |
+| Skill invocation | no separate verified `no-mistakes` invocation; use natural language (cursor has its own slash commands and skills store). |
+| Autonomy | `--force` (alias `--yolo`); auto-approves every tool execution, footer shows `Run Everything`. Verified to run fully unattended. |
+| Env marker | `CURSOR_AGENT=1`, set for child/tool processes (also `CURSOR_INVOKED_AS=cursor-agent`). It does NOT set `CLAUDECODE`. |
+| Resume | `cursor-agent --resume=<conversationId>` (id printed on exit and exported as `CURSOR_CONVERSATION_ID`), `--continue` (most recent for the cwd), or bare `--resume` (session picker). |
+
+Model and effort: `--model <id>` where the id carries the effort as a suffix, e.g. `gpt-5.6-sol-medium` (`-none`/`-low`/`-medium`/`-high`/`-xhigh`/`-max`).
+The documented `<model>[effort=<level>]` bracket-override form is rejected by this CLI (`Cannot use this model`), and the rejection prints the full accepted id set.
+So firstmate folds the requested effort into the model id and passes no separate effort flag.
+
+Trust dialog on first launch in a not-yet-trusted directory: `⚠ Workspace Trust Required ... ▶ [a] Trust this workspace / [q] Quit`.
+Accept from an active firstmate session with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter` (Enter selects the highlighted Trust option; `a` also works).
+The `--trust` flag is print/headless-mode only, so it cannot pre-trust the interactive crew launch; accept the dialog after spawn instead.
+The decision persists per directory, so later launches in the same worktree skip it.
+
+Composer: an idle cursor composer shows the placeholder `→ Add a follow-up` rendered dim (SGR 2), which the shared `fm_composer_strip_ghost` strips, so `fm_tmux_composer_state` reads it as `empty` (verified live). No `FM_COMPOSER_IDLE_RE` override is needed.
+
+Turn-end hook: cursor fires a `stop` hook at every turn boundary once the workspace is trusted, the clean equivalent of claude's Stop hook.
+`fm-spawn` installs a per-worktree `.cursor/hooks.json` (`{"version":1,"hooks":{"stop":[{"command":"touch <turnend>"}]}}`) that touches the task's `state/<id>.turn-ended`; it is gitignore-excluded via git info/exclude and removed by `fm-teardown`, exactly like the other harnesses' worktree hook files.
+Verified live: the inline single-file form touches the marker when the agent completes a turn.
+
+## agy (VERIFIED 2026-07-12, agy 1.1.1)
+
+Antigravity CLI (`agy`), a native binary, verified as a CREW and secondmate adapter, not as the firstmate primary.
+Launch with an initial interactive prompt: `agy --dangerously-skip-permissions --model <name> -i "$(cat <brief>)"` (`-i` is `--prompt-interactive`; the non-interactive `-p`/`--print`/`--prompt` is NOT for a crew pane).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to cancel` (footer cancel hint shown iff a turn is running; the verb line reads `Working...` or `Generating...`). Idle footer shows `? for shortcuts`. `esc to cancel` is the busy regex because it is stable across agy's changing verb lines. |
+| Exit command | double `Ctrl+C` within ~1s (`press ctrl+c again to exit`). Prints `Resume with -c (or command below): agy --conversation=<id>`. |
+| Interrupt | single `Escape` (`⎿ Interrupted · What should Antigravity CLI do instead?`). `Ctrl+C` is the exit key, not the interrupt. |
+| Skill invocation | no separate verified `no-mistakes` invocation; use natural language. |
+| Autonomy | `--dangerously-skip-permissions`; auto-approves every tool request. Verified to run fully unattended. |
+| Env marker | `ANTIGRAVITY_AGENT=1`, set for child/tool processes (also `ANTIGRAVITY_CONVERSATION_ID`). |
+| Resume | `agy -c` / `--continue` (most recent) or `agy --conversation=<id>` (id printed on exit and exported as `ANTIGRAVITY_CONVERSATION_ID`). |
+
+Model and effort: `--model <name>` where `<name>` is a display string from `agy models`, e.g. `'Gemini 3.1 Pro (High)'` or `'Claude Opus 4.6 (Thinking)'`.
+The effort is baked into the name (`(High)`/`(Medium)`/`(Low)`/`(Thinking)`), so there is no separate effort flag; firstmate quotes the whole name into `--model`.
+
+Trust dialog on first launch in a not-yet-trusted project: `Do you trust the contents of this project? ... > Yes, I trust this folder / No, exit. ↑/↓ Navigate · enter Confirm`.
+Accept with Enter (the highlighted option is Trust).
+
+Composer: an idle agy composer is a lone `> ` prompt glyph (a 256-colour, not dim, foreground) drawn inside a box whose top and bottom are horizontal `───` rule rows, with no side border on the input row.
+A single-row read of that bare `>` would classify as a dead-shell `unknown`, so the tmux composer reader (`fm_tmux_composer_state`) treats a lone shell-prompt glyph flanked by pure horizontal-rule rows as a genuine composer box and reads it as `empty` (`fm_tmux_row_is_rule` in `bin/fm-tmux-lib.sh`).
+A real dead-shell prompt is not flanked by rule rows, so its unsafe-to-inject `unknown` verdict is preserved.
+Residual gap (unfixed, low-impact): if agy ever renders the cursor on a border row instead of the `>` row (a pristine pre-typing quirk seen on other harnesses), the content row would be a rule and read `pending`; a live crew launched with the brief is past that state.
+
+Turn-end hook: agy exposes no verified trust-free per-turn turn-end hook.
+Its `hooks.json` / `mcp_config.json` system surfaces only internal framework hooks (`captureUserRequests`, `generateContextSummary`, `PreInvocation`, `OnShellCommandFinished`), no confirmed trust-free per-turn `stop` event, and writing into `~/.gemini` is high blast radius.
+So `fm-spawn` installs no hook for agy and the watcher relies on stale-pane detection driven by the `esc to cancel` busy signature disappearing at turn end.
+This is coarser than a precise per-turn hook but is the same busy-signature mechanism the watcher already uses fleet-wide.

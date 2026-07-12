@@ -99,7 +99,7 @@ Verified the same session: a persisting parent process running a child command (
 
 The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
 
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
+- `alive` - the name contains `claude`, `codex`, `opencode`, `grok`, `cursor`, or is exactly `agy`. All were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind. `cursor-agent` is a bash launcher that execs Node with `exec -a "$0"`, so its `pane_current_command` stays `cursor-agent` rather than a bare `node` (verified 2026-07-12, cursor-agent 2026.07.09); `agy` is a native ELF binary named `agy` (verified 2026-07-12, agy 1.1.1). A pane that exits to a login shell reports `bash`/`zsh` and classifies `dead`, so a torn-down cursor/agy crew reads `dead`, not `alive`.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 

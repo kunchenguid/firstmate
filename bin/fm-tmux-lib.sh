@@ -48,8 +48,10 @@
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73);
+# cursor: "ctrl+c to stop" (footer stop hint - verified cursor-agent 2026.07.09);
+# agy: "esc to cancel" (footer cancel hint - verified agy 1.1.1).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop|esc to cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -59,6 +61,24 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 # tmux entry point (and for existing callers/tests) but owns no logic of its own,
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
+
+# fm_tmux_row_is_rule: 0 iff the plain (ANSI-stripped) row on stdin is a pure
+# horizontal-rule border - only box-drawing/block horizontal characters and
+# whitespace, with a run of at least three. Used to recognize a composer box that
+# draws horizontal top/bottom rules around its input row (e.g. agy's "───" box
+# around a lone "> " prompt) rather than the vertical side borders the composer
+# reader detects on the content row itself. The literal rule characters are
+# matched/stripped byte-wise (LC_ALL=C), so this stays locale-independent.
+fm_tmux_row_is_rule() {
+  local row rest
+  row=$(cat)
+  case "$row" in
+    *───*|*━━━*|*▀▀▀*|*▄▄▄*) : ;;
+    *) return 1 ;;
+  esac
+  rest=$(printf '%s' "$row" | LC_ALL=C sed 's/─//g; s/━//g; s/▀//g; s/▄//g' | tr -d '[:space:]')
+  [ -z "$rest" ]
+}
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
 #   empty   - no pending input (blank, a busy footer, an empty agent composer, or
@@ -108,6 +128,28 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  # Horizontal-rule composer box (e.g. agy's "───" rules above and below a lone
+  # "> " prompt): the box draws no side border on the content row, so the
+  # side-border check above left bordered=0 and a bare shell-prompt glyph would
+  # misclassify as a dead shell (unknown, unsafe to inject). When the content is a
+  # lone shell-prompt glyph and BOTH adjacent rows are pure horizontal rules, the
+  # glyph sits inside a genuine agent composer: set bordered=1 so it reads empty. A
+  # real dead-shell prompt is not flanked by rule rows, so its unsafe-to-inject
+  # verdict is preserved. The extra reads fire only in this bare-glyph case (agy
+  # idle or a dead shell), so claude/codex/cursor/grok panes still read one row.
+  # Verified against agy 1.1.1.
+  if [ "$bordered" = 0 ] && [ "$cy" -ge 1 ]; then
+    case "$stripped" in
+      '>'|'$'|'%'|'#')
+        local above below
+        above=$(tmux capture-pane -p -t "$target" -S "$((cy - 1))" -E "$((cy - 1))" 2>/dev/null | fm_composer_strip_ansi)
+        below=$(tmux capture-pane -p -t "$target" -S "$((cy + 1))" -E "$((cy + 1))" 2>/dev/null | fm_composer_strip_ansi)
+        if printf '%s' "$above" | fm_tmux_row_is_rule && printf '%s' "$below" | fm_tmux_row_is_rule; then
+          bordered=1
+        fi
+        ;;
+    esac
+  fi
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
   # only tmux captures the raw cursor row, which may BE the footer).
   if [ -n "$stripped" ] \

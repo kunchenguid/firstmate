@@ -33,7 +33,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -279,7 +279,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +340,24 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI, `cursor-agent`): a positional prompt starts the
+    # supervised interactive session. --force (alias --yolo) auto-approves every
+    # tool execution so the crewmate runs fully unattended (footer "Run
+    # Everything"), the targeted equivalent of claude's
+    # --dangerously-skip-permissions. Effort is embedded in the model id (e.g.
+    # gpt-5.6-sol-medium), so cursor has no separate effort flag - __EFFORTFLAG__
+    # is intentionally absent. cursor's turn-end signal does NOT ride the launch
+    # command - it is a `stop` hook installed below in a per-worktree
+    # .cursor/hooks.json, so the template is identical for ship/scout/secondmate.
+    cursor) printf '%s' 'cursor-agent --force __MODELFLAG__"$(cat __BRIEF__)"' ;;
+    # agy (Antigravity CLI): -i (--prompt-interactive) starts a supervised session
+    # from an initial prompt. --dangerously-skip-permissions auto-approves every
+    # tool request so the crewmate runs unattended. Effort is baked into the model
+    # display name (e.g. "Gemini 3.1 Pro (High)"), so agy has no separate effort
+    # flag. agy exposes no verified trust-free per-turn turn-end hook, so firstmate
+    # relies on stale-pane detection (the "esc to cancel" busy signature); no hook
+    # is installed and the template is identical for ship/scout/secondmate.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG__-i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -427,7 +445,11 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    # cursor takes --model with effort embedded in the id (gpt-5.6-sol-medium);
+    # agy takes --model with a display name whose effort is baked in ("... (High)").
+    # Both are model-flag-only: their effort axis lives inside the model string,
+    # so effort_flag_for_harness deliberately emits nothing for them.
+    claude|codex|opencode|pi|grok|cursor|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -468,6 +490,10 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # cursor and agy have no separate effort flag: effort is part of the model id
+    # (cursor: gpt-5.6-sol-medium; agy: "Gemini 3.1 Pro (High)"), so firstmate
+    # folds the requested effort into the model string it chooses at intake and
+    # emits no effort flag here.
   esac
 }
 
@@ -962,6 +988,24 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    cursor*)
+      # cursor fires a `stop` hook at every turn boundary once the workspace is
+      # trusted (verified, cursor-agent 2026.07.09), the clean equivalent of
+      # claude's Stop hook. A per-worktree .cursor/hooks.json touches the task's
+      # turn-end file; it is gitignore-excluded (git info/exclude) exactly like the
+      # other harnesses' worktree hook files and removed by fm-teardown. The inline
+      # `touch` command needs no helper script (verified: the single-file inline
+      # form fires the marker).
+      mkdir -p "$WT/.cursor"
+      printf '{"version":1,"hooks":{"stop":[{"command":"touch %s"}]}}\n' "$(shell_quote "$TURNEND")" > "$WT/.cursor/hooks.json"
+      exclude_path '.cursor/hooks.json'
+      ;;
+    agy*)
+      # agy exposes no verified trust-free per-turn turn-end hook (its hooks.json
+      # system surfaces only internal framework hooks), so firstmate installs no
+      # hook and relies on stale-pane detection driven by agy's "esc to cancel"
+      # busy signature. No worktree file to exclude or clean up.
       ;;
   esac
 fi
