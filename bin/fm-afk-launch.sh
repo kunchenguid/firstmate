@@ -74,7 +74,7 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i
+  local i incomplete=0
   mkdir -p "$FM_AFK_LAUNCH_STATE"
   for i in $(seq 1 200); do
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
@@ -82,8 +82,18 @@ fm_afk_launch_lock_acquire() {
       fm_pid_identity "$$" > "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null || true
       return 0
     fi
+    if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
+      incomplete=$((incomplete + 1))
+      if [ "$incomplete" -lt 20 ]; then
+        sleep 0.05
+        continue
+      fi
+    else
+      incomplete=0
+    fi
     if ! fm_afk_launch_lock_owned; then
       rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
+      incomplete=0
       continue
     fi
     sleep 0.05
@@ -165,7 +175,7 @@ fm_afk_launch_reconcile() {
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches the captain's active tab. Prints the record line on success.
 fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd
+  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd pane_list pane_count
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
     fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
@@ -179,6 +189,16 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$wsid" ] || [ -z "$pane" ]; then
     fm_afk_launch_log "could not parse workspace/pane id from herdr workspace create"
+    if [ -n "$pane" ]; then
+      fm_backend_herdr_kill "$session:$pane"
+    elif [ -n "$wsid" ]; then
+      pane_list=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null || true)
+      pane_count=$(printf '%s' "$pane_list" | jq '[.result.panes[]?] | length' 2>/dev/null || true)
+      if [ "$pane_count" = 1 ]; then
+        pane=$(printf '%s' "$pane_list" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null)
+        [ -n "$pane" ] && fm_backend_herdr_kill "$session:$pane"
+      fi
+    fi
     return 1
   fi
   entry=$(fm_afk_launch_entry_cmd)
@@ -285,8 +305,11 @@ fm_afk_launch_stop() {
 }
 
 fm_afk_launch_main() {
+  local result
   fm_afk_launch_lock_acquire || return 1
-  trap fm_afk_launch_lock_release EXIT INT TERM
+  trap fm_afk_launch_lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     stop) fm_afk_launch_stop ;;
@@ -294,7 +317,7 @@ fm_afk_launch_main() {
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
-  local result=$?
+  result=$?
   fm_afk_launch_lock_release
   trap - EXIT INT TERM
   return "$result"

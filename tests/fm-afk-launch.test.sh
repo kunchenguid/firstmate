@@ -209,6 +209,86 @@ unit_concurrent_start_serialized() {
   rm -rf "$st"
 }
 
+unit_lock_initialization_grace() {
+  local st marker initializer
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")
+  marker="$st/initialized"
+  mkdir -p "$st/state/.afk-launch.lock"
+  (
+    sleep 0.15
+    if [ -d "$st/state/.afk-launch.lock" ]; then
+      printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
+      ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
+      : > "$marker"
+      sleep 0.15
+      rm -rf "$st/state/.afk-launch.lock"
+    fi
+  ) &
+  initializer=$!
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_acquire
+    fm_afk_launch_lock_release
+  ' _ "$LAUNCH" && [ -e "$marker" ]; then
+    pass "launcher lock: incomplete publication receives initialization grace"
+  else
+    fail "launcher lock: contender removed a lock during initialization"
+  fi
+  wait "$initializer" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_signal_exits_with_lock_cleanup() {
+  local st marker child
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
+  marker="$st/resumed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_main start
+    : > "$2"
+  ' _ "$LAUNCH" "$marker" &
+  child=$!
+  for _ in $(seq 1 40); do
+    [ -d "$st/state/.afk-launch.lock" ] && break
+    sleep 0.05
+  done
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
+    pass "launcher signal: TERM exits and releases the lifecycle lock"
+  else
+    fail "launcher signal: interrupted lifecycle resumed or retained its lock"
+  fi
+  rm -rf "$st"
+}
+
+unit_herdr_partial_create_cleanup() {
+  local st killed
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
+  killed="$st/killed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" KILLED="$killed" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-partial"},"root_pane":{}}}'\''
+      else
+        printf %s '\''{"result":{"panes":[{"pane_id":"pane-exact"}]}}'\''
+      fi
+    }
+    fm_backend_herdr_kill() { printf %s "$1" > "$KILLED"; }
+    ! fm_afk_launch_create_herdr lab:captain herdr
+  ' _ "$LAUNCH"
+  if [ "$(cat "$killed" 2>/dev/null || true)" = "lab:pane-exact" ]; then
+    pass "herdr create: partial response cleanup uses exact workspace pane"
+  else
+    fail "herdr create: partial response leaked its created workspace"
+  fi
+  rm -rf "$st"
+}
+
 # ---------------------------------------------------------------------------
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
@@ -312,6 +392,9 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
+unit_lock_initialization_grace
+unit_signal_exits_with_lock_cleanup
+unit_herdr_partial_create_cleanup
 e2e_herdr
 e2e_tmux
 
