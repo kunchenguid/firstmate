@@ -322,7 +322,7 @@ test_pi_omits_invalid_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
+  assert_contains "$launch" "pi --approve --model 'sonnet' -e" "pi launch did not thread model"
   assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
   pass "pi threads model and omits unsupported max effort"
 }
