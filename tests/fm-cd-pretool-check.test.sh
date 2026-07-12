@@ -434,6 +434,17 @@ test_pi_wiring() {
   pass ".pi primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
 }
 
+test_omp_wiring() {
+  local ext content
+  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
+  content=$(cat "$ext")
+  assert_contains "$content" 'runChecker("fm-cd-pretool-check.sh"' "omp extension must run the cd check in tool_call"
+  assert_contains "$content" 'runChecker("fm-arm-pretool-check.sh"' "omp extension must keep running the watcher-arm check"
+  assert_contains "$content" 'return { block: true, reason:' "omp extension must block on a checker exit 2"
+  pass ".omp primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
+}
+
 test_scripts_are_shellcheck_clean() {
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
@@ -457,4 +468,5 @@ test_codex_wiring
 test_grok_wiring
 test_opencode_wiring
 test_pi_wiring
+test_omp_wiring
 test_scripts_are_shellcheck_clean

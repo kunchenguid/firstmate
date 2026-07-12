@@ -81,14 +81,16 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   return promise;
 }
 
-// PreToolUse seatbelt (bin/fm-arm-pretool-check.sh; docs/arm-pretool-check.md).
-// Piggybacks on this same extension file rather than a separate one so no
-// second omp -e flag is needed at launch - the primary already loads this
-// file for the turn-end guard, and a `tool_call` handler returning { block: true }
-// prevents the bash command from running (OMP ToolCallEvent contract, docs/extensions.md).
-function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
+// PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
+// extension file rather than separate ones so no extra omp -e flag is needed at
+// launch - the primary already loads this file for the turn-end guard, and a
+// `tool_call` handler returning { block: true } prevents the bash command from
+// running (OMP ToolCallEvent contract, docs/extensions.md). Each owner script
+// owns its own decision and is inert outside the real primary checkout.
+function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
-  const child = spawn(`${root}/bin/fm-arm-pretool-check.sh`, ["--command", command], {
+  const child = spawn(`${root}/bin/${script}`, ["--command", command], {
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -116,7 +118,11 @@ export default function (pi: ExtensionAPI) {
         ? input.command
         : "";
     if (!command) return {};
-    const result = await runPretoolCheck(command);
+    const cdResult = await runChecker("fm-cd-pretool-check.sh", command);
+    if (cdResult.code === 2) {
+      return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const result = await runChecker("fm-arm-pretool-check.sh", command);
     if (result.code !== 2) return {};
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
