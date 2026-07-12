@@ -22,9 +22,10 @@ later authorization request, never authorization itself.
   `America/Bogota` (UTC−05:00, no DST); require NTP offset ≤2 seconds.
 - The Socrata `publication DATE` has no time zone or time of day. Parse it as a
   Bogota calendar date and use it for day buckets, regardless of arrival time.
-  If an `update_timestamp` exists, use it for freshness; otherwise use the
-  latest source `Last-Modified`/ETag observation. If all are absent, freshness
-  is `UNKNOWN` and the run cannot PASS.
+  If an `update_timestamp` exists, use it for freshness; otherwise require a
+  valid RFC3339 source `Last-Modified`. An ETag or local observation time is
+  not a freshness timestamp: if either is the only signal, freshness is
+  `UNKNOWN` and the run cannot PASS.
 - Freshness is `now_utc - chosen source timestamp`; internal latency is
   receipt → normalize → score → artifact. Report both; never use one as the
   other. Late rows retain their publication DATE and are labelled late.
@@ -57,7 +58,10 @@ signed reason, rerun, and a new consecutive window (no backfill credit).
 3. Reconcile DATE buckets in UTC/Bogota. Distinguish duplicate rows or
    revisions (same entity/version conflict) from a repeated DATE, which is
    normal and is not an alert by itself. Verify deterministic scoring and
-   canonical deduplication.
+  canonical deduplication. For a revision tie-break, choose highest explicit
+  version, then latest valid `updated_at` in UTC, then lexicographically lowest
+  source event ID. An unresolved field conflict is quarantined and fails the
+  run; never choose by arrival order.
 4. Execute the synthetic send-path probe with a fixture payload. Expected
    short-circuit/deny, zero outbound requests, and zero mutations is a normal
    control result. A real intent, allow, or mutation aborts and pages.
@@ -65,7 +69,13 @@ signed reason, rerun, and a new consecutive window (no backfill credit).
 6. Revoke the mock token, delete temporary files, clear queues, and verify no
    orphan process/session. Repeat secret, ACL, and deny scans.
 7. Write a redacted `RUN_ID` evidence bundle: manifest, canonical hashes,
-   logs, metrics, alerts, fixture/ACL snapshots, and attestations.
+  logs, metrics, alerts, fixture/ACL snapshots, and attestations. Sign the
+  canonical JSON manifest bytes (UTF-8, sorted keys, no insignificant
+  whitespace) with HMAC-SHA256 or Ed25519 under a non-secret key alias (for
+  example `shadow-evidence-v1`). Verify the signature before accepting an
+  evidence bundle; record algorithm, alias, canonical-byte hash, and verifier
+  result. Redact secrets and personal data before signing and retain only the
+  redacted bytes.
 
 ## Day-to-fault matrix and recovery
 
