@@ -2,7 +2,7 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/failed)
+# Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -33,7 +33,9 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line.
+#      recorded backend's pane busy state, then the status log's last line only
+#      when its verb maps to a recognized run-state. Decision-only events such as
+#      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -51,6 +53,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -99,21 +103,17 @@ log_last_line() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
 }
-log_verb_of() {  # <line>
-  local v=${1%%:*}
-  v="${v#"${v%%[![:space:]]*}"}"
-  v="${v%"${v##*[![:space:]]}"}"
-  printf '%s' "$v"
-}
-log_note_of() {  # <line>
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *)   printf '%s' "$1" ;;
-  esac
-}
-# Map a status-log verb onto a canonical state for the fallback path.
-map_log_state() {  # <verb>
-  case "$1" in
+# Map a status-log verb onto a canonical state for the fallback path. `paused` is
+# the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
+# a crew with no active run and an idle pane that declared a known external wait
+# reports `paused` distinctly, so a supervisor reading this sees a declared pause
+# and its reason rather than a wedge-suspect idle.
+map_log_state() {  # <line>
+  if status_is_paused "$1"; then
+    echo paused
+    return
+  fi
+  case "$(status_line_verb "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
@@ -124,7 +124,7 @@ map_log_state() {  # <verb>
 }
 
 LOG_LINE=$(log_last_line || true)
-LOG_VERB=$(log_verb_of "$LOG_LINE")
+LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -279,7 +279,7 @@ nm_gate_findings_count() {
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
-  case "$(log_note_of "$LOG_LINE")" in
+  case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
   esac
@@ -509,7 +509,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -520,7 +520,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
 
@@ -556,8 +556,21 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
 fi
 
+# Fall back to the status log's last line, but ONLY when its verb maps to a real
+# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
+# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
+# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
+# resolved: must never become the current state or leak its resolution prose as the
+# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
+# has no busy check above) fall through to the idle default instead of rendering
+# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
+# the verb->state mapping (including the configurable paused verb), so reusing its
+# `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
-  emit "$(map_log_state "$LOG_VERB")" status-log "$(log_note_of "$LOG_LINE")"
+  LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" != unknown ]; then
+    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+  fi
 fi
 
 emit unknown none "no current-state source available"

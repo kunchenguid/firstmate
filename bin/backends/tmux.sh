@@ -70,14 +70,28 @@ fm_backend_tmux_container_ensure() {
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
-# (session:window, matching how fm-spawn.sh composed its own $T).
-fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs>
-  local ses=$1 wname=$2 proj_abs=$3
+# (session:window, matching how fm-spawn.sh composed its own $T). Prints the
+# created window's stable window id on stdout for the caller to target.
+#
+# Robustness (fm-spawn tmux window handling under a non-default captain config):
+#   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
+#     at the next free index by targeting the session with a trailing colon
+#     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
+#   - PIN the window name by disabling automatic-rename and allow-rename on the
+#     new window: the captain's tmux may rename the window away from fm-<id> once
+#     treehouse cd's into the worktree, which would break name-based targeting.
+# The returned window id lets callers target the window even if its name is ever
+# lost, so worktree discovery cannot fall back to the active client's window.
+fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
+  local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  tmux new-window -d -t "$ses" -n "$wname" -c "$proj_abs"
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf '%s\n' "$wid"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

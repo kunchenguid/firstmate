@@ -49,7 +49,35 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+
+# Shared, backend-neutral normalized-transition shape and the single-owner
+# status->action policy table (bin/fm-transition-lib.sh). This adapter's event
+# subscriber (fm_backend_herdr_wait_transition) normalizes every
+# pane.agent_status_changed edge through fm_transition_record and routes it
+# through fm_transition_policy - it never re-encodes the mapping.
+# shellcheck source=bin/fm-transition-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
+# events.subscribe (the native pane.agent_status_changed push stream) and its
+# subscription_event schema first shipped at protocol 16 (verified: herdr
+# 0.7.3). Below this, or with the events surface absent from `herdr api schema`,
+# the event fast-path fails closed to the watcher's poll loop
+# (fm_backend_herdr_events_capable). Distinct from FM_BACKEND_HERDR_MIN_PROTOCOL
+# (14): the adapter's spawn/capture/send primitives work on 14, only the push
+# subscriber needs 16.
+FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
+# Per-pane escalation dedupe marker prefix, under the state dir. One marker per
+# window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
+# is enqueued, cleared on any working edge, so exactly one wake fires per
+# ->blocked edge and a reconnect level-reconcile never re-delivers a still-
+# blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
+FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
@@ -628,19 +656,12 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# Thin adapter over the shared plain-text stripper (bin/fm-composer-lib.sh),
+# used only for STRUCTURAL row/shape detection where ghost text must be kept so
+# the box border or bare prompt glyph is still visible. Content extraction uses
+# the shared fm_composer_strip_ghost instead.
 fm_backend_herdr_strip_ansi() {  # <text>
-  local esc
-  esc=$'\033'
-  printf '%s' "$1" | sed "s/${esc}\\[[0-9;?]*[[:alpha:]]//g"
-}
-
-fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
-  local raw=$1 esc
-  esc=$'\033'
-  case "$raw" in
-    *"${esc}[1m❯ ${esc}[0m${esc}[2m"*|*"${esc}[1m› ${esc}[0m${esc}[2m"*) return 0 ;;
-  esac
-  return 1
+  printf '%s' "$1" | fm_composer_strip_ansi
 }
 
 # fm_backend_herdr_composer_state: classify the composer's own row as
@@ -678,10 +699,10 @@ fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder), or bare-prompt tail text rendered faint in the ANSI
-#             capture (verified Codex idle suggestions such as "Run /review on
-#             my current changes" and "Find and fix a bug in @filename").
-#             Safe to treat as submitted.
+#             placeholder), or only de-emphasised ANSI ghost/placeholder text
+#             recognized by the shared fm_composer_strip_ghost extractor
+#             (dim/faint or dark-TRUECOLOR foreground). Safe to treat as
+#             submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the
@@ -691,11 +712,16 @@ fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
 #   unknown - the pane could not be read, or no composer row (of either shape)
 #             was found in the captured window.
 #
-# Codex ghost-suggestion note (2026-07-08): herdr's ANSI pane read preserves the
-# faint SGR style Codex uses for idle suggestions after the bare `›` prompt,
-# while real typed input after the same prompt is not faint. The classifier
-# therefore uses ANSI capture when available and treats a faint bare-prompt tail
-# as empty without weakening protection for real typed input.
+# Ghost/placeholder note: herdr's ANSI pane read preserves the harness's own
+# de-emphasis styling, and the classifier extracts real typed content with the
+# shared fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops dim/faint
+# runs (claude's rotating prompt suggestion, codex's idle suggestion after the
+# bare `›` prompt) AND dark/muted truecolor foreground runs (grok's placeholder),
+# while keeping non-de-emphasised real typed input. This is the same owner the
+# tmux adapter routes through, so the two backends cannot drift (task
+# afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
+# that recognized only codex's bold-wrapped bare prompt and missed claude's own
+# dim ghost - the overnight away-mode injection wedge on the primary claude pane.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -706,61 +732,58 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
+  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  # Structural scan: locate the bottom-most composer row and remember its RAW
+  # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
+  # keeps ghost text so the border/prompt glyph is still visible); the raw row is
+  # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
-    raw_line=$line
-    line=$(fm_backend_herdr_strip_ansi "$line")
-    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed=$(fm_backend_herdr_strip_ansi "$line")
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
-        stripped=$trimmed
         shape=bordered
-        raw_match=$raw_line
+        raw_match=$line
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
-          stripped=$trimmed
           shape=bare
-          raw_match=$raw_line
+          raw_match=$line
           found=1
         fi
         ;;
     esac
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # Content: extract the real typed text from the raw row with the shared,
+  # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
+  # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
+  # faint byte-pattern check (which recognized only Codex's bold-wrapped bare
+  # prompt and missed claude's own dim prompt-suggestion ghost - the overnight
+  # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
+  # dark box border too, which is why the bordered flag was read from the plain
+  # shape above, not from this ghost-stripped content.
+  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bordered ]; then
-    # Strip the border glyphs, then trim again.
+    bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
   fi
-  # A bare prompt glyph = empty composer.
-  case "$stripped" in
-    '❯'|'›'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # Strip a leading prompt glyph before judging what remains.
-  case "$stripped" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  if [ "$shape" = bare ] && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
-    faint_tail=1
-  fi
-  [ "$faint_tail" -eq 1 ] && { printf 'empty'; return 0; }
-  printf 'pending'
+  # Delegate the empty/pending/unknown decision to the shared owner. The bare
+  # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
+  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # via the no-composer-row path above, exactly as before.
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -1046,4 +1069,260 @@ fm_backend_herdr_list_live() {  # <session>
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
   done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+}
+
+# --- native event push: pane.agent_status_changed subscriber -----------------
+#
+# The push half of the immediate blocked-state escalation (AGENTS.md section 8,
+# docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
+# fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
+# herdr homes: instead of a blind sleep, it blocks on herdr's native event
+# stream and returns the instant a subscribed pane transitions to `blocked`, so
+# a crew waiting on the human wakes its supervisor sub-second instead of after
+# the ~240s stale-pane wedge timer. Everything not `blocked` is streamed too
+# (the policy, not the subscription, makes `blocked` the sole immediate action)
+# so `working` edges clear the per-pane dedupe marker. Polling stays the
+# permanent fail-closed backstop: below-capability, a connect/subscribe failure,
+# or a missing reader all fall back to the caller sleeping the same budget.
+
+# fm_backend_herdr_socket_path: the control-socket path for <session>, read from
+# `herdr session list --json` (the default session's socket differs from a named
+# session's - verified: default -> ~/.config/herdr/herdr.sock, named ->
+# ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
+fm_backend_herdr_socket_path() {  # <session>
+  local session=$1
+  herdr session list --json 2>/dev/null \
+    | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
+    | head -1
+}
+
+# fm_backend_herdr_events_capable: the version/capability gate for the event
+# fast-path (report section 5c trigger 1). Fails closed to the poll loop unless
+# ALL hold: herdr+jq present; the raw-socket reader available (python3, unless a
+# reader override is configured); client protocol >= FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL;
+# and both `events.subscribe` and `pane.agent_status_changed` present in `herdr
+# api schema`. FM_BACKEND_HERDR_EVENTS_FORCE overrides the whole verdict for
+# tests (1 = capable, 0 = incapable) without touching the real binary. The
+# `api schema` read is ~220KB, so callers (the watcher) memoize this per session
+# for a process lifetime rather than probing every poll.
+fm_backend_herdr_events_capable() {  # <session>
+  local session=$1 protocol schema
+  case "${FM_BACKEND_HERDR_EVENTS_FORCE:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  fm_backend_herdr_tool_check || return 1
+  if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
+    command -v python3 >/dev/null 2>&1 || return 1
+  fi
+  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
+  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
+  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  return 0
+}
+
+# fm_backend_herdr_normalize_event: THE single normalize point (report section 5
+# refinement: one backend transition shape, one parse point). Both the stream
+# reader's projected lines AND the level-reconcile's `agent get` reads flow
+# through here into the shared normalized-transition record. herdr's event
+# carries no previous status and its stream is edge-triggered, so from_status is
+# left empty; to_status drives the policy.
+fm_backend_herdr_normalize_event() {  # <pane_id> <workspace_id> <agent_status> <agent>
+  fm_transition_record "${1:-}" "${2:-}" "" "${3:-}" "${4:-}"
+}
+
+# fm_backend_herdr_event_reader_cmd: emit the reader argv (one word per line) for
+# the raw-socket subscriber. Default: `python3 <this dir>/herdr-eventwait.py`.
+# FM_BACKEND_HERDR_EVENT_READER overrides it with a whitespace-split command so
+# tests can substitute a fake reader that replays canned stream lines.
+fm_backend_herdr_event_reader_cmd() {
+  local word
+  if [ -n "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
+    for word in $FM_BACKEND_HERDR_EVENT_READER; do
+      printf '%s\n' "$word"
+    done
+    return 0
+  fi
+  printf 'python3\n'
+  printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.py"
+}
+
+# fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
+# <window> ("<session>:<pane_id>"), keyed identically to the watcher's
+# .stale-<key> (tr ':/.' '___'), under <state_dir>.
+fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
+  local state=$1 window=$2 key
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
+}
+
+# fm_backend_herdr_apply_transition: route one normalized record through the
+# shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
+# On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
+# it prints the record on stdout and returns 0 (the caller stops and hands the
+# record up). The caller commits the marker only after handling the record.
+# `absorb` (working) clears the marker and
+# returns 1. `defer`/`fallback`, and an already-marked `actionable`, return 1
+# with no output. <session> reconstructs the window ("<session>:<pane_id>") for
+# the marker key, matching the watcher's own key scheme.
+fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
+  local state=$1 session=$2 record=$3 pane_id to action window marker
+  pane_id=$(fm_transition_pane_id "$record")
+  [ -n "$pane_id" ] || return 1
+  to=$(fm_transition_to_status "$record")
+  action=$(fm_transition_policy "$to")
+  window="$session:$pane_id"
+  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
+  case "$action" in
+    actionable)
+      if [ ! -e "$marker" ]; then
+        printf '%s' "$record"
+        return 0
+      fi
+      ;;
+    absorb)
+      rm -f "$marker" 2>/dev/null || true
+      ;;
+  esac
+  return 1
+}
+
+fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
+  local state=$1 session=$2 record=$3 pane_id window marker
+  pane_id=$(fm_transition_pane_id "$record")
+  [ -n "$pane_id" ] || return 1
+  window="$session:$pane_id"
+  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
+  : > "$marker"
+}
+
+fm_backend_herdr_clear_transition() {  # <state_dir> <window>
+  local state=$1 window=$2 marker
+  [ -n "$window" ] || return 0
+  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
+  rm -f "$marker" 2>/dev/null || true
+}
+
+# fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
+# <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
+# fresh `blocked` edge, then prints the normalized record and returns 0.
+# Returns 1 on a clean timeout (the reader ran the full budget, no fresh
+# actionable edge - the caller has effectively already slept and just continues)
+# and 2 when the event path is unusable (not capable, socket unresolved, reader
+# failed to run/subscribe - the caller sleeps the budget itself, the fail-closed
+# backstop). See the header block above for the full contract.
+fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pane_window...>
+  local session=$1 timeout=$2 state=$3
+  shift 3
+  local windows=("$@")
+  [ "${#windows[@]}" -gt 0 ] || return 2
+  if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
+    fm_backend_herdr_events_capable "$session" || return 2
+  fi
+  local sock
+  sock=$(fm_backend_herdr_socket_path "$session")
+  [ -n "$sock" ] || return 2
+
+  # Map each window to its herdr pane id (strip the leading "<session>:").
+  local w pane_id
+  local pane_ids=()
+  for w in "${windows[@]}"; do
+    pane_id=${w#*:}
+    if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
+      continue
+    fi
+    pane_ids+=("$pane_id")
+  done
+  [ "${#pane_ids[@]}" -gt 0 ] || return 2
+
+  # Start the raw-socket reader and wait for its subscription acknowledgement
+  # before level reconciliation, so edges occurring during reconciliation are
+  # already buffered in the live stream.
+  local reader=()
+  while IFS= read -r w; do
+    reader+=("$w")
+  done < <(fm_backend_herdr_event_reader_cmd)
+  [ "${#reader[@]}" -gt 0 ] || return 2
+
+  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
+  fifo="$fifo_dir/events"
+  if ! mkfifo "$fifo" 2>/dev/null; then
+    rm -rf "$fifo_dir" 2>/dev/null || true
+    return 2
+  fi
+  "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
+  reader_pid=$!
+  if ! exec 9< "$fifo"; then
+    kill "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    rm -rf "$fifo_dir" 2>/dev/null || true
+    return 2
+  fi
+  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
+    rc=2
+  fi
+
+  # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
+  # during the gap since the last subscription is returned now, once, while
+  # newer edges accumulate in the active stream. `working` panes clear their
+  # marker here too.
+  if [ "$rc" -ne 2 ]; then
+    for w in "${windows[@]}"; do
+      pane_id=${w#*:}
+      if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
+        continue
+      fi
+      raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+      [ -n "$raw" ] || continue
+      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
+      if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
+        printf '%s' "$hit"
+        rc=0
+        break
+      fi
+    done
+  fi
+
+  # Drain stream edges until a fresh blocked edge or the timeout. The reader is
+  # a subprocess of this call (NOT a second watcher), and is killed the instant
+  # a blocked edge is found.
+  # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent)
+  # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
+  # collapse an empty middle field (e.g. an absent workspace_id) and shift the
+  # status into the wrong column. `cut` preserves empty fields.
+  while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
+    [ -n "$line" ] || continue
+    pane_id=$(printf '%s' "$line" | cut -f1)
+    ws=$(printf '%s' "$line" | cut -f2)
+    status=$(printf '%s' "$line" | cut -f3)
+    agent=$(printf '%s' "$line" | cut -f4)
+    [ -n "$pane_id" ] || continue
+    record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
+    if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
+      printf '%s' "$hit"
+      rc=0
+      break
+    fi
+  done
+  if [ "$rc" -eq 0 ]; then
+    kill "$reader_pid" 2>/dev/null || true
+  fi
+  if [ "$rc" -eq 2 ]; then
+    kill "$reader_pid" 2>/dev/null || true
+  fi
+  # No actionable edge: distinguish a clean full-budget wait (reader exit 0 ->
+  # return 1, caller already waited) from a reader error (connect/subscribe
+  # failure, exit non-zero -> return 2, caller sleeps and counts toward the
+  # runtime-disable threshold).
+  wait "$reader_pid" 2>/dev/null || reader_rc=$?
+  exec 9<&-
+  rm -rf "$fifo_dir" 2>/dev/null || true
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 2 ] && return 2
+  [ "$reader_rc" -eq 0 ] && return 1
+  return 2
 }

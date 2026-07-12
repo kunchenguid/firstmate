@@ -4,13 +4,12 @@
 # (bin/backends/herdr.sh's created-vs-adopted default-tab-prune gate; see
 # docs/herdr-backend.md "Default-tab prune" / the incident writeup there).
 #
-# Reproduces the EXACT incident shape against a private, throwaway
-# HERDR_SESSION (NEVER the captain's default): a startup-workspace-shaped
-# layout - one tab labeled "1" whose herdr-derived DISPLAYED label (from the
-# pane cwd's basename) coincidentally collides with the primary firstmate
-# home's own derived label "firstmate" - with a live long-running process in
-# that pane, exactly as the captain's own live crewmate session looked at
-# incident time. Then drives the real spawn-time container_ensure +
+# Reproduces the exact collision shape against a private, throwaway
+# HERDR_SESSION (never the captain's default): a startup-workspace-shaped
+# layout - one tab labeled "1" in a pre-existing workspace labeled
+# "firstmate" - with a live long-running process in that pane, exactly as
+# the captain's own live crewmate session looked at incident time. Then
+# drives the real spawn-time container_ensure +
 # create_task path and asserts the live pane (and its live process) survive
 # untouched. Also exercises the normal happy path (a genuinely fresh
 # workspace's seeded default tab gets pruned, leaving exactly one clean
@@ -34,15 +33,15 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
-SESSION="fm-prune-safety-e2e-$$"
+SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
-trap cleanup_all EXIT
-
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$SCRATCH"
 }
+trap cleanup_all EXIT
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
@@ -51,17 +50,17 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
 # --- 1. reproduce the label-collision startup-workspace shape ---------------
-# A directory named exactly "firstmate" so a bare `workspace create` (no
-# --label) derives the DISPLAYED workspace label from the cwd basename -
-# exactly what happens when a captain launches herdr directly inside the
-# firstmate repo. The seeded tab itself is still labeled "1" regardless.
+# Explicitly label the startup workspace "firstmate" to create the collision
+# deterministically. Herdr's unlabeled workspace-label derivation is not a
+# stable test contract, while the adopted-workspace state is the behavior
+# this regression must exercise. The seeded tab remains labeled "1".
 
 LIVE_CWD="$SCRATCH/firstmate"
 mkdir -p "$LIVE_CWD"
 
 fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
 
-CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --no-focus) \
+CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate --no-focus) \
   || fail "could not create the label-collision startup workspace"
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 LIVE_TAB_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.tab.tab_id // empty')
@@ -71,8 +70,8 @@ if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
 fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace's derived label should be 'firstmate' (from the cwd basename), got '$LIVE_LABEL' - repro setup is wrong"
-pass "repro setup: a bare 'herdr workspace create --cwd <dir named firstmate>' derives the DISPLAYED label 'firstmate', colliding with the primary home's own label"
+[ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
+pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just

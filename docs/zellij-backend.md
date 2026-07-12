@@ -15,7 +15,7 @@ Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The same universal requirements as tmux (a verified crew harness, git with GitHub auth, node, treehouse, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi 0.1.1 or newer, and quota-axi); treehouse still provides the worktree, zellij only provides the session.
+- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
@@ -57,7 +57,7 @@ No empirical evidence surfaced during verification that forces a different conta
 Because every task in every firstmate home - primary or secondmate - shares this ONE session's tab bar with no per-home container split, and zellij enforces no tab-name uniqueness at all (verified: two tabs can share a name), two firstmate homes whose task ids happen to collide could send/peek/close each other's tabs.
 This is the exact gap a captain-directed no-mistakes review gate caught for the cmux backend (`docs/cmux-backend.md` "Task container shape") - cmux's fix was ported here for the identical reason, sharing its tag-derivation code (`bin/fm-backend-hometag-lib.sh`).
 
-The caller-facing task label stays `fm-<id>` in meta and briefs, while `fm-send.sh` and `fm-peek.sh` also accept exact task ids before the legacy `fm-<id>` selector fallback.
+The caller-facing task label stays `fm-<id>` in meta and briefs; task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 The actual zellij tab title a NEW task's tab is created with is home-scoped: `fm-<home-label>-<id>`.
 `<home-label>` is `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_ROOT` path - the same identity scheme as cmux's home label (`docs/cmux-backend.md` "Task container shape"), so e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` or `fm-2ndmate-sm1-9f8e7d6c-fix-login-k3`.
 The path hash means even two independent PRIMARY installations on one machine (each with no `.fm-secondmate-home` marker, so both would otherwise resolve to the same `firstmate` prefix) still get distinct tags.
@@ -78,7 +78,7 @@ This is accepted, exactly as it is for cmux: a task's own recorded worktree path
 A zellij task's `window=` meta field holds `<zellij-session>:<pane-id>`, for example `firstmate:7`.
 The pane id is a bare non-negative integer with no embedded colon (simpler than herdr's own pane-id shape, which itself contains a colon), so splitting on the first colon is trivially correct.
 This mirrors tmux's `session:window` and herdr's `session:pane` target shapes closely enough that `fm_backend_resolve_selector` (`bin/fm-backend.sh`) needed no zellij-specific logic at all.
-When a caller reaches a zellij endpoint through firstmate metadata (an exact task id, a legacy `fm-<id>` selector, or a meta scan), it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
+When the shared selector contract routes a zellij caller through firstmate metadata, it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
 That label check prevents a stale numeric pane id from being trusted after an external session deletion/recreation, or from being trusted for a different firstmate home's same-named tab; explicit raw `session:pane` targets remain a pane-existence-only escape hatch because there is no metadata label to verify.
 
 Zellij tasks additionally record:
@@ -184,7 +184,7 @@ This is why `fm_backend_zellij_kill` resolves the owning tab id from the pane wh
 ## Composer verification: delta-based
 
 Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` still uses a content-diff strategy: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
-This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state only for pending-input guards and submit fallback.
+This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state for the affirmative-empty injection guard and submit fallback.
 All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching.
 
 ## Session safety
