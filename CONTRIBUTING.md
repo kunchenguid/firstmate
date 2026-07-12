@@ -78,6 +78,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+A suite that exercises missing-tool detection must build its `PATH` from `tests/lib.sh`'s `fm_test_base_path` (which sets `FM_TEST_BASE_PATH_DIR`) rather than from the real system dirs, so a tool the suite deliberately omits cannot be satisfied by whatever the developer's machine happens to have installed - `/usr/bin/orca` (the GNOME screen reader, unrelated to firstmate's Orca backend) and `/usr/bin/node` both collided this way, and `FM_TEST_BASE_PATH` still overrides the whole thing.
+That helper derives the tools it withholds from `bin/fm-bootstrap.sh`'s own `TOOLS="..."` lists, so keep those a literal name list with no substitutions: the derivation fails the suite loudly rather than silently running the missing-tool cases against a partial blocklist.
 
 ## Questions
 

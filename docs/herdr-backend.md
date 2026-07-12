@@ -592,7 +592,11 @@ On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a
 The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way.
 `inject_msg` was hardened to match: its composer-guard now reads `fm_backend_composer_state` directly and defers on anything that is not affirmatively `empty` (`pending` real text, or `unknown` for a dead shell or an unreadable pane), instead of only deferring on `pending`.
 
-**Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, idle placeholder, real text -> `pending`).
+**Whitespace normalization (added 2026-07-12).** Before any glyph matching, the shared owner normalizes NO-BREAK SPACE (U+00A0) to a plain space and re-trims, because claude draws its composer prompt as `❯` followed by an NBSP that no `[[:space:]]` trim removes, so an empty composer read as `❯<NBSP>` fell through every glyph match to `pending`.
+All four adapters inherit that normalization from the owner; the incident it fixed (every `fm-send` text submit to a claude pane false-failing with "Enter swallowed") is written up in [`docs/tmux-backend.md`](tmux-backend.md) under "Incident (2026-07-11)".
+The safety rule is unchanged by it: a dead-shell `$<NBSP>` row still reads `unknown`, and `❯<NBSP><text>` still reads `pending`.
+
+**Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, NBSP-suffixed prompt glyphs, idle placeholder, real text -> `pending`).
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 

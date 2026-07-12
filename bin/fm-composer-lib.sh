@@ -38,6 +38,15 @@
 # byte-pattern check missed claude's own dim ghost (its prompt glyph is not
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
+# WHITESPACE NORMALIZATION is the third thing this owner does (task
+# fmsend-verify-l2): claude draws its composer prompt as `❯` followed by a
+# NO-BREAK SPACE (U+00A0), which no [[:space:]] trim removes, so an EMPTY claude
+# composer read as `❯<NBSP>` fell through every glyph match to `pending` and
+# every fm-send text submit to a claude pane false-failed with "Enter
+# swallowed". fm_composer_classify_content normalizes NBSP to a plain space and
+# re-trims before matching, so all four adapters inherit the fix; see
+# docs/tmux-backend.md's "Incident (2026-07-11)".
+#
 # Each adapter still owns its own CAPTURE and structural row-finding, because
 # those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
 # tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
