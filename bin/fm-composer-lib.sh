@@ -207,7 +207,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
+    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#* } ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"

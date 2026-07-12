@@ -5,7 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+JQ_DIR=$(dirname "$(command -v jq)")
+BASE_PATH=${FM_TEST_BASE_PATH:-$JQ_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 mkdir -p "$TMP_ROOT"
 
