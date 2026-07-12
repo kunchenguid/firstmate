@@ -685,6 +685,44 @@ ok - real herdr: the watcher fast-path enqueues a stale wake naming the task win
 The subscriber returned the `blocked` transition in **0.129s** and the watcher fast-path enqueued a durable `stale` wake naming the task window - versus up to `FM_POLL` (15s) plus `FM_STALE_ESCALATE_SECS` (240s) on the poll path this shortcuts.
 Dedupe (one wake per `->blocked` edge, marker cleared when the pane returns to `working`), subscribe-then-reconcile ordering (an already-blocked pane enqueued exactly once while newer edges buffer in the active stream), the `kind=secondmate`/`paused:` exemptions, and the three fail-closed fallbacks are covered by the fake-CLI unit tests in `tests/fm-backend-herdr.test.sh` (the `wait_transition`/`apply_transition` cases), `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh`.
 
+## Away-mode daemon terminal launch (2026-07-12, herdr 0.7.3, protocol 16, macOS aarch64)
+
+`bin/fm-afk-start.sh` execs the supervise daemon in the FOREGROUND of whatever terminal it is already in.
+Harnesses with a native in-pane tracked-background tool (claude, grok) run it there and the daemon inherits the captain pane's env.
+A harness with NO native background mechanism (pi) has no place to run it, and manufacturing one by SPLITTING the captain's active pane visibly shrinks it: `herdr pane split <pane> --direction down --ratio 0.20 --no-focus` creates a second pane whose `tab_id` equals the captain pane's, so the two co-tenant one tab's viewport.
+`--no-focus` does not prevent this - it governs focus, not geometry.
+
+`bin/fm-afk-launch.sh` is the single owner of the daemon TERMINAL lifecycle for that case.
+On herdr it creates a dedicated background workspace (`workspace create --no-focus`, label `firstmate-afk-daemon`) in the captain's session, runs the daemon in its pane via `pane run` with `FM_SUPERVISOR_TARGET`/`FM_SUPERVISOR_BACKEND` set to the captain pane (so injection targets the captain, not the daemon's own pane), records the exact pane id in `state/.afk-daemon-terminal`, and on `stop` closes exactly that pane (which takes its single-tab workspace with it).
+No shell `&` is used.
+Recovery reconciles a recorded-but-dead terminal by exact id.
+
+Verified in an isolated lab session (`bin/fm-herdr-lab.sh`, fleet-state tripwire armed; `default` byte-identical before/after). A workspace `w1`/tab `w1:t1`/pane `w1:p1` stood in for the captain's primary pane:
+
+```
+# start (FM_SUPERVISOR_TARGET=<lab>:w1:p1, FM_SUPERVISOR_BACKEND=herdr)
+fm-afk-launch: daemon launched in non-visible herdr workspace w2 (pane <lab>:w2:p1), supervising <lab>:w1:p1
+record: herdr <TAB> <lab>:w2:p1 <TAB> w2
+captain-tab (w1:t1) pane count: BEFORE=1  DURING=1   # unchanged: NOT a split
+workspace count:                BEFORE=1  DURING=2   # daemon in a separate space
+daemon pane w2:p1 tab_id = w2:t1                     # NOT the captain tab w1:t1
+
+# stop
+captain-tab (w1:t1) pane count: AFTER=1             # restored/unchanged
+workspace count:                AFTER=1             # daemon workspace removed by exact id
+record removed, state/.afk cleared last
+```
+
+The topology invariant (entering AND exiting away mode leaves the captain's active tab pane set unchanged), the separate-terminal placement, and the exact-id teardown are covered per backend (herdr and tmux) by `tests/fm-afk-launch.test.sh`.
+
+### Stale-artifact lifecycle fix (same change)
+
+The away daemon's `state/.subsuper-escalations` (+ `.since`) and `state/.subsuper-inject-wedged` are a transient delivery cache, cleared only on a successful flush.
+Two ordering/scoping bugs leaked them into the next away session: on a clean exit the `/afk` skill cleared `state/.afk` BEFORE stopping the daemon, so the daemon's shutdown flush hit its own presence gate (`inject_msg`: `afk_active || return 1`) and was a no-op; and nothing cleared them on entry.
+The fix: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still present (flush can run), then clears `state/.afk` last; and `fm_afk_clear_stale_artifacts` (`bin/fm-afk-start.sh`) drops the prior session's artifacts on a FRESH entry (daemon not already running), never on a refresh.
+This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
+Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
+
 ## Known gaps and follow-up notes
 
 - **Backend-specific bootstrap detection is absent.** `bin/fm-bootstrap.sh` still requires `tmux` outside Orca mode, and does not yet conditionally add `herdr` and `jq` when a backend selection resolves to herdr.

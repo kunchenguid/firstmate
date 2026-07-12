@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# tests/fm-afk-launch.test.sh - the script-owned, backend-aware away-daemon
+# launch (bin/fm-afk-launch.sh) and the away-mode stale-artifact lifecycle fixes
+# (bin/fm-afk-start.sh). Two layers:
+#
+#   UNIT (always run, no backend): the session-scoped stale-artifact clear on a
+#   fresh entry vs a refresh, and the correct-ordered stop (daemon SIGTERM'd
+#   while state/.afk is still present, .afk cleared last).
+#
+#   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
+#   regression for the pane split/shrink - entering AND exiting away mode leaves
+#   the captain's active tab topology UNCHANGED, because the daemon lands in a
+#   NON-VISIBLE separate terminal (a herdr dedicated workspace, a detached tmux
+#   session), never a split of the captain's pane. The herdr path runs on a
+#   throwaway, NEVER-default HERDR_SESSION and asserts the default session is
+#   byte-identical via the fm-herdr-lab.sh fleet-state tripwire; the tmux path
+#   uses uniquely-named throwaway sessions killed by exact name. A harmless
+#   sleeper replaces the real daemon (FM_AFK_LAUNCH_ENTRY) so the test observes
+#   only the terminal lifecycle.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+START="$ROOT/bin/fm-afk-start.sh"
+
+FAILED=0
+fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
+pass() { printf 'ok - %s\n' "$1"; }
+
+SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
+printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
+chmod +x "$SLEEPER"
+TRACK_TMUX_SESSIONS=""
+GLOBAL_CLEANUP() {
+  rm -f "$SLEEPER" 2>/dev/null || true
+  local s
+  for s in $TRACK_TMUX_SESSIONS; do
+    tmux kill-session -t "$s" 2>/dev/null || true
+  done
+}
+trap GLOBAL_CLEANUP EXIT
+
+# ---------------------------------------------------------------------------
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# ---------------------------------------------------------------------------
+unit_clear_stale() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.subsuper-escalations"
+  : > "$st/state/.subsuper-escalations.since"
+  : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.wake-queue"          # durable queue must be untouched
+  # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
+  # otherwise leak that into this test shell) and call the clear helper.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
+  if [ ! -e "$st/state/.subsuper-escalations" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.since" ] \
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
+    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+  else
+    fail "clear-stale: stale artifacts survived"
+  fi
+  if [ -e "$st/state/.wake-queue" ]; then
+    pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
+  else
+    fail "clear-stale: removed the durable wake-queue"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT 2: a FRESH entry clears; a REFRESH (daemon already alive) preserves the
+# current session's buffered escalations.
+# ---------------------------------------------------------------------------
+unit_fresh_vs_refresh() {
+  local st sleep_pid lock
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.subsuper-escalations"
+  : > "$st/state/.subsuper-inject-wedged"
+  # A live "daemon": a real process whose identity the lock records, so
+  # daemon_lock_held_by_live_daemon returns true (a refresh).
+  sleep 600 &
+  sleep_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleep_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
+  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
+    pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
+  else
+    fail "refresh: incorrectly cleared the current session's buffered escalations"
+  fi
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
+# still present (so its flush is not a no-op), and clears .afk last.
+# ---------------------------------------------------------------------------
+unit_stop_ordering() {
+  local st lock marker daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  marker="$st/afk-at-term"
+  # A fake daemon: on SIGTERM, record whether .afk was still present, then exit.
+  bash -c '
+    trap "if [ -f \"$1/state/.afk\" ]; then echo present > \"$2\"; else echo absent > \"$2\"; fi; exit 0" TERM
+    while :; do sleep 0.2; done
+  ' _ "$st" "$marker" &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  # A recorded terminal (harmless: a non-existent tmux session name -> no-op close).
+  printf 'tmux\tfm-afk-nonexistent-%s\t\n' "$$" > "$st/state/.afk-daemon-terminal"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
+    pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
+  else
+    fail "stop-ordering: .afk was already cleared when the daemon got SIGTERM"
+  fi
+  if [ ! -e "$st/state/.afk" ]; then
+    pass "stop-ordering: .afk cleared last"
+  else
+    fail "stop-ordering: .afk not cleared"
+  fi
+  if [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop-ordering: daemon-terminal record removed"
+  else
+    fail "stop-ordering: record not removed"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# E2E herdr: topology invariant.
+# ---------------------------------------------------------------------------
+e2e_herdr() {
+  command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found (herdr e2e)"; return 0; }
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
+  # shellcheck source=tests/herdr-test-safety.sh
+  . "$ROOT/tests/herdr-test-safety.sh"
+  # shellcheck source=bin/fm-backend.sh
+  . "$ROOT/bin/fm-backend.sh"
+
+  local SESSION home_tmp cap_ws cap_tab cap_pane target
+  local before during after ws_before ws_during ws_after out dtgt dtab
+  SESSION="fm-lab-afk-launch-e2e-$$"
+  export HERDR_SESSION="$SESSION"
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
+  E2E_HERDR_CLEANUP() {
+    FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+      FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
+    herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
+    rm -rf "$home_tmp" 2>/dev/null || true
+  }
+  fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
+  fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
+  fm_backend_herdr_server_ensure "$SESSION" || { E2E_HERDR_CLEANUP; fail "herdr e2e: lab server did not start"; return 0; }
+
+  out=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$ROOT" --label captain --no-focus 2>/dev/null)
+  cap_ws=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty')
+  cap_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty')
+  cap_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')
+  if [ -z "$cap_ws" ] || [ -z "$cap_pane" ]; then E2E_HERDR_CLEANUP; fail "herdr e2e: could not create captain workspace"; return 0; fi
+  target="$SESSION:$cap_pane"
+  before=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
+  ws_before=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
+
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    "$LAUNCH" start >/dev/null 2>&1
+
+  during=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
+  ws_during=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
+  dtgt=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
+  dtab=$(fm_backend_herdr_cli "$SESSION" pane get "${dtgt#*:}" 2>/dev/null | jq -r '.result.pane.tab_id // empty')
+
+  if [ "$before" = "$during" ]; then pass "herdr e2e: captain tab pane count unchanged after start (no split)"; else fail "herdr e2e: captain tab pane count changed ($before -> $during)"; fi
+  if [ "$ws_during" -gt "$ws_before" ]; then pass "herdr e2e: daemon launched in a separate non-visible workspace"; else fail "herdr e2e: no separate daemon workspace created"; fi
+  if [ -n "$dtab" ] && [ "$dtab" != "$cap_tab" ]; then pass "herdr e2e: daemon pane is NOT in the captain's tab"; else fail "herdr e2e: daemon pane shares the captain tab ($dtab)"; fi
+  case "$dtgt" in "$SESSION":*) pass "herdr e2e: daemon terminal scoped to the lab session" ;; *) fail "herdr e2e: daemon terminal not in the lab session ($dtgt)" ;; esac
+
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1
+
+  after=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
+  ws_after=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
+  if [ "$after" = "$before" ]; then pass "herdr e2e: captain tab pane count restored after stop"; else fail "herdr e2e: captain tab pane count not restored ($before -> $after)"; fi
+  if [ "$ws_after" = "$ws_before" ]; then pass "herdr e2e: daemon workspace removed by exact id on stop"; else fail "herdr e2e: daemon workspace leaked ($ws_before -> $ws_after)"; fi
+  if [ ! -e "$home_tmp/state/.afk-daemon-terminal" ] && [ ! -e "$home_tmp/state/.afk" ]; then pass "herdr e2e: record + .afk cleared on stop"; else fail "herdr e2e: record or .afk not cleared"; fi
+
+  E2E_HERDR_CLEANUP
+}
+
+# ---------------------------------------------------------------------------
+# E2E tmux: topology invariant (captain window untouched; daemon in a separate
+# detached session).
+# ---------------------------------------------------------------------------
+e2e_tmux() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux e2e)"; return 0; }
+  local cap_session home_tmp cap_pane before during after rec
+  cap_session="fm-afk-launch-cap-$$"
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-home.XXXXXX")
+  tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "tmux e2e: could not create captain session"; rm -rf "$home_tmp"; return 0; }
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
+  cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  before=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
+
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    "$LAUNCH" start >/dev/null 2>&1
+
+  during=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
+  rec=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  if [ "$before" = "$during" ]; then pass "tmux e2e: captain window pane count unchanged after start (no split-window)"; else fail "tmux e2e: captain window pane count changed ($before -> $during)"; fi
+  if [ -n "$rec" ] && tmux has-session -t "$rec" 2>/dev/null && [ "$rec" != "$cap_session" ]; then pass "tmux e2e: daemon launched in a separate detached session"; else fail "tmux e2e: no separate daemon session ($rec)"; fi
+
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" stop >/dev/null 2>&1
+
+  after=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
+  if [ "$after" = "$before" ]; then pass "tmux e2e: captain window pane count unchanged after stop"; else fail "tmux e2e: captain window changed ($before -> $after)"; fi
+  if [ -n "$rec" ] && ! tmux has-session -t "$rec" 2>/dev/null; then pass "tmux e2e: daemon session killed by exact id on stop"; else fail "tmux e2e: daemon session leaked ($rec)"; fi
+  if [ ! -e "$home_tmp/state/.afk-daemon-terminal" ] && [ ! -e "$home_tmp/state/.afk" ]; then pass "tmux e2e: record + .afk cleared on stop"; else fail "tmux e2e: record or .afk not cleared"; fi
+
+  tmux kill-session -t "$cap_session" 2>/dev/null || true
+  rm -rf "$home_tmp" 2>/dev/null || true
+}
+
+unit_clear_stale
+unit_fresh_vs_refresh
+unit_stop_ordering
+e2e_herdr
+e2e_tmux
+
+[ "$FAILED" -eq 0 ] || exit 1

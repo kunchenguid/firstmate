@@ -42,7 +42,9 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
-| `fm-afk-start.sh`        | Enter away mode and run the sub-supervisor daemon as a tracked foreground process    |
+| `fm-afk-start.sh`        | Common away-mode daemon entry: set `state/.afk`, clear a prior session's stale artifacts on a fresh start, exec the daemon in the foreground |
+| `fm-afk-launch.sh`       | Own the away-daemon terminal per backend: launch it in a non-visible tracked terminal (never a captain-pane split), record its exact id, and stop/reconcile by that id |
+| `fm-supervisor-target-lib.sh` | Shared supervisor-pane discovery (target + backend) for the daemon and the away launcher |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
