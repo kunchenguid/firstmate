@@ -95,6 +95,12 @@ matrix_case B16 deny 'command cd projects/foo'
 matrix_case B17 deny 'cd projects/foo >/dev/null'
 matrix_case B18 deny $'cd projects/foo\necho done'
 matrix_case B19 deny "\$'\\143d' projects/foo"
+matrix_case B20 deny "c'd' projects/foo"
+matrix_case B21 deny 'c"d" projects/foo'
+matrix_case B22 deny 'c\d projects/foo'
+matrix_case B23 deny 'builtin cd projects/foo'
+matrix_case B24 deny 'command builtin cd projects/foo'
+matrix_case B25 deny 'builtin command cd projects/foo'
 
 # ALLOW: not a persistent top-level cwd change (scoped, data, or non-cd).
 matrix_case A01 allow 'git -C projects/foo status'
@@ -121,6 +127,11 @@ matrix_case A21 allow 'git checkout main'
 matrix_case A22 allow "sh -c 'cd projects/foo && ls'"
 matrix_case A23 allow "printf '%s\\n' 'cd projects/foo'"
 matrix_case A24 allow 'ls -la'
+matrix_case A25 allow './cd projects/foo'
+matrix_case A26 allow '/tmp/cd projects/foo'
+matrix_case A27 allow '/usr/bin/cd projects/foo'
+matrix_case A28 allow './builtin cd projects/foo'
+matrix_case A29 allow 'c\d\ projects/foo'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

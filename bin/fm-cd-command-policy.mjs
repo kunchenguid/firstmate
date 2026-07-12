@@ -15,7 +15,7 @@
 // never evaluates, expands, sources, or runs any byte of the submitted command;
 // it inspects lexical command positions only.
 
-import { Lexer, splitProgram, commandPosition, basename } from "./fm-arm-command-policy.mjs";
+import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -65,8 +65,14 @@ function decision(command) {
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(nodes[index]);
-    if (!position.command) continue;
-    if (!CD_BUILTINS.has(basename(position.command.value))) continue;
+    let command = position.command;
+    let wordIndex = position.index;
+    while (command && (command.value === "builtin" || command.value === "command")) {
+      wordIndex += 1;
+      command = position.words[wordIndex];
+    }
+    if (!command) continue;
+    if (!CD_BUILTINS.has(command.value)) continue;
     if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
     return deny("persistent-cd");
   }

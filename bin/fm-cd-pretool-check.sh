@@ -93,10 +93,10 @@ fi
 [ -n "$CMD" ] || exit 0
 
 # Strict-superset prefilter (transport only; owns zero classification
-# semantics). Every persistent cd/pushd/popd command carries one of those
-# literal substrings, so a command that carries none of them can never be a
-# deniable cwd change and is fast-allowed without the Node policy owner or the
-# git scoping calls. A quoting-decoder marker - a $ immediately followed by a
+# semantics). Strip syntax bytes that the classifier joins within a shell word
+# before looking for cd/pushd/popd, so ordinary quoted or escaped fragments
+# cannot hide a deniable cwd change from the policy owner. A quoting-decoder
+# marker - a $ immediately followed by a
 # single quote (ANSI-C $'...') or a double quote (bash locale $"...") - delegates
 # too, because the classifier decodes those and can reconstruct cd from bytes
 # this substring test cannot see. This marker set is COUPLED to the classifier's
@@ -104,10 +104,20 @@ fi
 # form the classifier decodes REQUIRES extending it here in the same change, or
 # the prefilter stops being a strict superset. Deliberate deeper obfuscation is
 # out of scope by the same agent-mistake threat model the policy uses.
+PREFILTER=$CMD
+PREFILTER=${PREFILTER//\\/}
+PREFILTER=${PREFILTER//\"/}
+PREFILTER=${PREFILTER//\'/}
+PREFILTER=${PREFILTER//$'\n'/}
+PREFILTER=${PREFILTER//$'\r'/}
 case "$CMD" in
   *"\$'"*|*'$"'*) ;;
-  *cd*|*pushd*|*popd*) ;;
-  *) exit 0 ;;
+  *)
+    case "$PREFILTER" in
+      *cd*|*pushd*|*popd*) ;;
+      *) exit 0 ;;
+    esac
+    ;;
 esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
