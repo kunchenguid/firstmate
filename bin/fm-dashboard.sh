@@ -65,6 +65,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CREW_STATE_BIN=${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 
 OUT="$STATE/dashboard.html"
 OPEN=0
@@ -177,7 +178,7 @@ DECS=""
 collect_tasks() {
   local meta id project pname kind pr statusf turnf last_line smt tmt
   local csline cs_state cs_source cs_detail rest
-  local pct cls label pr_cell status_cell bar
+  local pct cls label pr_cell status_cell bar stage
   local dec_ask dec_mt dec_when dec_pr
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -196,7 +197,7 @@ collect_tasks() {
     smt=$(mtime_of "$statusf" || true)
     tmt=$(mtime_of "$turnf" || true)
 
-    csline=$("$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true)
+    csline=$("$CREW_STATE_BIN" "$id" 2>/dev/null || true)
     [ -n "$csline" ] || csline='state: unknown · source: none · state read failed'
     cs_state=${csline#state: }
     cs_state=${cs_state%% *}
@@ -209,6 +210,9 @@ collect_tasks() {
         case "$rest" in *' · '*) cs_detail=${rest#*' · '} ;; esac
         ;;
     esac
+
+    stage=""
+    [ "$cs_state" = 'done' ] && stage=$(done_stage "$cs_detail" "$last_line")
 
     # Stage-based progress (see header mapping). Never invents precision.
     pct=""; cls=muted; label=""
@@ -224,7 +228,7 @@ collect_tasks() {
         failed)
           cls=fail; label=failed ;;
         done)
-          case "$(done_stage "$cs_detail" "$last_line")" in
+          case "$stage" in
             checks-green) pct=90; cls='pr'; label='checks green' ;;
             merged)       pct=100; cls='done'; label='merged' ;;
             *)            pct=100; cls='done'; label='done' ;;
@@ -263,6 +267,7 @@ collect_tasks() {
     case "$cs_state" in
       parked|blocked|failed) ATTENTION=$(( ATTENTION + 1 )) ;;
       unknown) [ "$kind" = secondmate ] || ATTENTION=$(( ATTENTION + 1 )) ;;
+      done) [ -n "$pr" ] && [ "$stage" = checks-green ] && ATTENTION=$(( ATTENTION + 1 )) ;;
     esac
 
     # Decisions needed (best-effort, see header): a parked/blocked task's ask
@@ -275,7 +280,7 @@ collect_tasks() {
         [ -n "$dec_ask" ] || dec_ask="$cs_state: ${cs_detail:-waiting on a decision}"
         ;;
       done)
-        if [ -n "$pr" ] && [ "$(done_stage "$cs_detail" "$last_line")" = checks-green ]; then
+        if [ -n "$pr" ] && [ "$stage" = checks-green ]; then
           dec_ask='merge? checks are green'
         fi
         ;;
