@@ -138,14 +138,30 @@ make_crewmate_worktree_dir() {
 
 # A secondmate home's OWN child crew/scout worktree: a genuine linked git
 # worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
-# main-home child worktree. Removing the .fm-secondmate-home exclusion guards the
-# secondmate's own home but must still exempt its children by this same test.
+# main-home child worktree. A child worktree never carries the gitignored
+# .fm-secondmate-home marker, so the marker force-include never fires for it and
+# it stays exempt through the linked-worktree git-dir test.
 make_secondmate_child_worktree_dir() {
   local home=$1 dir=$2
   git -C "$home" worktree add --quiet -b fm/turnend-secondmate-child "$dir"
   mkdir -p "$dir/state"
   : > "$dir/AGENTS.md"
   install_guard_scripts "$dir"
+  printf '%s\n' "$dir"
+}
+
+# A treehouse-leased secondmate HOME: a genuine linked `git worktree` (git-dir !=
+# git-common-dir, exactly like a default treehouse-leased home) that DOES carry a
+# valid .fm-secondmate-home marker. This is the production topology the plain
+# git-init secondmate fixture cannot represent; the guard must force-INCLUDE it
+# as a guarded primary via the marker, not exempt it as a linked worktree.
+make_secondmate_linked_home_dir() {
+  local base=$1 dir=$2
+  fm_git_worktree "$base" "$dir" fm/turnend-secondmate-linked-home
+  mkdir -p "$dir/state"
+  : > "$dir/AGENTS.md"
+  install_guard_scripts "$dir"
+  printf 'sm-linked-1\n' > "$dir/.fm-secondmate-home"
   printf '%s\n' "$dir"
 }
 
@@ -407,9 +423,10 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits"
 }
 
-# Removing the marker check must guard only the secondmate's OWN home, never its
-# children: a secondmate's linked crew/scout worktree stays exempt by the same
-# git-dir/git-common-dir test that exempts the main home's children.
+# The marker force-include must guard only the secondmate's OWN home, never its
+# children: a secondmate's linked crew/scout worktree carries no marker, so it
+# stays exempt by the same git-dir/git-common-dir test that exempts the main
+# home's children.
 test_hook_silent_in_secondmate_child_worktree() {
   local home dir out status
   home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
@@ -420,6 +437,44 @@ test_hook_silent_in_secondmate_child_worktree() {
   expect_code 0 "$status" "hook must stay exempt in a secondmate's own child crew/scout worktree"
   [ -z "$out" ] || fail "hook produced output inside a secondmate's child worktree: $out"
   pass "fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy"
+}
+
+# THE regression the plain git-init fixtures masked: a treehouse-leased secondmate
+# home is a genuine LINKED worktree (git-dir != git-common-dir), which the
+# remove-only form wrongly exempted. With the marker force-include, its own
+# primary session is GUARDED. The test asserts the fixture really is a linked
+# worktree so it can never silently regress back into a plain-checkout shape.
+test_hook_blocks_in_treehouse_leased_secondmate_home() {
+  local base dir gd gcd out status
+  base="$TMP_ROOT/hook-sm-leased-base"
+  dir="$TMP_ROOT/hook-sm-leased-home"
+  make_secondmate_linked_home_dir "$base" "$dir" >/dev/null
+  gd=$(git -C "$dir" rev-parse --git-dir)
+  gcd=$(git -C "$dir" rev-parse --git-common-dir)
+  [ "$gd" != "$gcd" ] || fail "leased-home fixture must be a linked worktree (git-dir != git-common-dir), got equal: $gd"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must GUARD a treehouse-leased (linked) secondmate home via its marker when unhealthy"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: blocks a blind turn end in a treehouse-leased LINKED secondmate home (marker force-include)"
+}
+
+# Anti-spoof: a linked worktree with an INVALID (empty) marker must NOT be
+# force-included. Marker validation rejects it, so it falls through to the
+# linked-worktree exemption and stays exempt - a stray/empty marker file can
+# never spoof a child worktree into being guarded.
+test_hook_exempts_linked_worktree_with_stray_marker() {
+  local base dir out status
+  base="$TMP_ROOT/hook-stray-marker-base"
+  dir="$TMP_ROOT/hook-stray-marker-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  : > "$dir/.fm-secondmate-home"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "an empty/invalid marker must not spoof force-inclusion in a linked worktree"
+  [ -z "$out" ] || fail "stray empty marker wrongly force-included a linked worktree: $out"
+  pass "fm-turnend-guard: an invalid (empty) marker cannot spoof inclusion; linked worktree stays exempt"
 }
 
 test_hook_silent_in_crewmate_worktree() {
@@ -833,6 +888,8 @@ test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
+test_hook_blocks_in_treehouse_leased_secondmate_home
+test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
