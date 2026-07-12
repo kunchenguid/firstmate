@@ -152,6 +152,12 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+
+The two PR-opening modes also treat the PR body as public writing, because everything a crewmate hands the PR - including the `--intent` string no-mistakes renders verbatim into the body - reaches the repo's maintainers.
+Briefs scaffolded by `bin/fm-brief.sh` for those modes forbid meta-instructions, second-person direction, internal firstmate vocabulary, and agent co-authors in the body, and require the crewmate to read the live body back with `bin/fm-pr-body-check.sh` before it may report the PR done; `local-only` briefs publish nothing and omit the section.
+`bin/fm-pr-check.sh` runs the same scan itself at PR-ready, so firstmate reads what was published rather than trusting the crewmate the contract constrains, and `bin/fm-pr-merge.sh` runs it again at merge time as a post-hoc record - it catches a body edited after the PR-ready check, but it gates nothing, since the body has been public since the PR opened and the merge follows in the same invocation.
+That scan is surface-only: it prints the live body's suspicious lines for firstmate to judge, never edits the PR, never blocks the PR-ready or merge path, and records its verdict in `state/<id>.body-scan` so a repeat check of an unchanged body is not re-printed.
+
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
