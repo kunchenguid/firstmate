@@ -582,7 +582,6 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # means the turn PROCESS exited, so it is trustworthy on its own.
 fm_backend_busy_state() {  # <backend> <target> [state-dir]
   local backend=$1 target=$2 state=${3:-} meta harness
-  shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ -n "$state" ] && [ "$backend" = tmux ]; then
     meta=$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null || true)
