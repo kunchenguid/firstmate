@@ -23,9 +23,9 @@ later authorization request, never authorization itself.
 - The Socrata `publication DATE` has no time zone or time of day. Parse it as a
   Bogota calendar date and use it for day buckets, regardless of arrival time.
   If an `update_timestamp` exists, use it for freshness; otherwise require a
-  valid RFC3339 source `Last-Modified`. An ETag or local observation time is
-  not a freshness timestamp: if either is the only signal, freshness is
-  `UNKNOWN` and the run cannot PASS.
+  valid source `Last-Modified` (RFC3339 or HTTP IMF-fixdate/RFC1123, converted
+  to UTC). An ETag or local observation time is not a freshness timestamp: if
+  either is the only signal, freshness is `UNKNOWN` and the run cannot PASS.
 - Freshness is `now_utc - chosen source timestamp`; internal latency is
   receipt → normalize → score → artifact. Report both; never use one as the
   other. Late rows retain their publication DATE and are labelled late.
@@ -72,8 +72,10 @@ signed reason, rerun, and a new consecutive window (no backfill credit).
   logs, metrics, alerts, fixture/ACL snapshots, and attestations. Sign the
   canonical JSON manifest bytes (UTF-8, sorted keys, no insignificant
   whitespace) with HMAC-SHA256 or Ed25519 under a non-secret key alias (for
-  example `shadow-evidence-v1`). Verify the signature before accepting an
-  evidence bundle; record algorithm, alias, canonical-byte hash, and verifier
+  example `shadow-evidence-v1`); the alias identifies a verifier-held secret
+  and never exposes the underlying HMAC key. Verify the signature before
+  accepting an evidence bundle; record algorithm, alias, canonical-byte hash,
+  and verifier
   result. Redact secrets and personal data before signing and retain only the
   redacted bytes.
 
