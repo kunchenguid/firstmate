@@ -139,6 +139,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Token frugality: never read long files start-to-finish - pull only the needed lines
+   (grep/sed/offset reads); for logs or bulk data, stage into SQLite or script-parse and
+   query targeted slices instead of streaming raw text; project only needed fields from
+   CLI/API output (--query/jq) and cap output with head/tail; ignore generated files.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -222,6 +226,11 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Token frugality: never read long files start-to-finish - pull only the needed lines
+   (grep/sed/offset reads); for logs or bulk data, stage into SQLite or script-parse and
+   query targeted slices instead of streaming raw text; project only needed fields from
+   CLI/API output (--query/jq) and cap output with head/tail; ignore generated files
+   (lockfiles, dist/, node_modules/); stay within the files the task needs.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
