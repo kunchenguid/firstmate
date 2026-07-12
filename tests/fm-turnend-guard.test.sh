@@ -77,6 +77,35 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# A paused task whose recheck cadence has been crossed must count actionable
+# at most once per cadence window (bin/fm-supervision-lib.sh's per-id
+# .actionable-paused-resurfaced-<id> marker, mirroring bin/fm-watch.sh's own
+# once-per-window .paused-resurfaced-<key>). Without this bound, an unchanged
+# pause that outlives its cadence would count actionable on every single call
+# forever - the same busy-loop this predicate exists to stop, just for the
+# paused-overdue case.
+test_predicate_paused_resurface_fires_once_per_window() {
+  local dir="$TMP_ROOT/pred-paused-resurface" state="$TMP_ROOT/pred-paused-resurface/state" sig
+  mkdir -p "$state"
+  write_task "$dir" sm-pause secondmate "paused: waiting on upstream release"
+  # Backdate the status file well past a tiny recheck cadence so it reads due,
+  # then mark THAT (backdated) content as already seen by a prior watcher scan.
+  touch -t 202001010000 "$state/sm-pause.status"
+  sig=$(stat_sig_of "$state/sm-pause.status")
+  printf '%s' "$sig" > "$state/.seen-sm-pause_status"
+
+  FM_PAUSE_RESURFACE_SECS=2 fm_supervision_actionable_status "$state" 300
+  [ "$FM_SUP_ACTIONABLE" -eq 1 ] || fail "an overdue pause must count actionable on its first due check, got $FM_SUP_ACTIONABLE"
+
+  FM_PAUSE_RESURFACE_SECS=2 fm_supervision_actionable_status "$state" 300
+  [ "$FM_SUP_ACTIONABLE" -eq 0 ] || fail "a re-check within the same cadence window must not count actionable again, got $FM_SUP_ACTIONABLE"
+
+  sleep 3
+  FM_PAUSE_RESURFACE_SECS=2 fm_supervision_actionable_status "$state" 300
+  [ "$FM_SUP_ACTIONABLE" -eq 1 ] || fail "a re-check after the cadence window elapses must count actionable again, got $FM_SUP_ACTIONABLE"
+  pass "fm_supervision_actionable_status: an overdue pause resurfaces at most once per cadence window"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -817,6 +846,7 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_paused_resurface_fires_once_per_window
 test_hook_silent_with_five_terminal_secondmates
 test_hook_blocks_with_mixed_active_and_blocked
 test_hook_blocks_with_real_active_worker

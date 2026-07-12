@@ -121,7 +121,16 @@ fm_supervision_unhealthy() {
 #   - once seen, its last verb is a declared `paused:` external wait that is
 #     now DUE for recheck (status file age >= the pause resurface cadence,
 #     the same FM_PAUSE_RESURFACE_SECS cadence fm-watch.sh's own
-#     handle_paused_stale uses);
+#     handle_paused_stale uses) AND that recheck has not already been counted
+#     within the current cadence window. A per-id `state/.actionable-paused-
+#     resurfaced-<id>` marker (mirroring fm-watch.sh's own once-per-window
+#     `.paused-resurfaced-<key>`, bin/fm-watch.sh's handle_paused_stale) is
+#     touched the first time a stale pause is counted actionable; while that
+#     marker is itself younger than the cadence, a still-unchanged pause does
+#     NOT keep counting actionable on every single call - otherwise a pause
+#     that outlives its recheck cadence would force a fresh checkpoint FOREVER
+#     once due, reintroducing the exact busy-loop this predicate exists to
+#     stop, just for the paused-overdue case;
 #   - once seen, its last verb is anything unrecognized (not one of
 #     working/done/needs-decision/blocked/failed/paused/resolved) - fail-closed
 #     on ambiguous data, matching "genuinely running agents still require
@@ -151,6 +160,7 @@ fm_supervision_unhealthy() {
 fm_supervision_actionable_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}}
   local meta id kind status_file marker cur_sig seen_sig last verb age pause_secs
+  local resurf_marker resurf_age
   FM_SUP_ACTIONABLE=0
   FM_SUP_ACTIONABLE_IDS=""
 
@@ -193,7 +203,19 @@ fm_supervision_actionable_status() {
     verb=$(status_line_verb "$last")
     if status_is_paused "$last"; then
       age=$(fm_sup_path_age "$status_file")
-      [ "$age" -lt "$pause_secs" ] && continue
+      if [ "$age" -lt "$pause_secs" ]; then
+        continue
+      fi
+      # Due for recheck. Bound this to firing at most once per pause_secs
+      # window (matching fm-watch.sh's own .paused-resurfaced-<key> cadence)
+      # instead of counting actionable on every call once the threshold is
+      # first crossed.
+      resurf_marker="$state/.actionable-paused-resurfaced-$id"
+      resurf_age=$(fm_sup_path_age "$resurf_marker")
+      if [ "$resurf_age" -lt "$pause_secs" ]; then
+        continue
+      fi
+      touch "$resurf_marker" 2>/dev/null || true
     else
       case "$verb" in
         done|failed|needs-decision|blocked|resolved) continue ;;
