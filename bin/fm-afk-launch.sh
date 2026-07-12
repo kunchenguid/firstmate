@@ -183,7 +183,10 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
       [ "$code" = pane_not_found ]
       ;;
     tmux)
-      ! tmux has-session -t "$target" 2>/dev/null
+      out=$(tmux has-session -t "$target" 2>&1)
+      result=$?
+      [ "$result" -eq 1 ] || return 1
+      printf '%s' "$out" | grep -Eq "can't find session"
       ;;
     none)
       return 0
@@ -193,10 +196,11 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
 }
 
 fm_afk_launch_close_recorded() {
-  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+  local close_result=0
+  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || close_result=$?
   if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
-    rm -f "$FM_AFK_LAUNCH_RECORD"
-    return 0
+    rm -f "$FM_AFK_LAUNCH_RECORD" || return 1
+    return "$close_result"
   fi
   fm_afk_launch_log "recorded terminal teardown is unconfirmed; preserving exact id"
   return 1
@@ -232,17 +236,18 @@ fm_afk_launch_wait_ready() {  # <backend> <target>
   return 1
 }
 
-fm_afk_launch_commit_terminal() {  # <backend> <target> <extra>
-  local backend=$1 target=$2 extra=$3
-  if ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
+fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]
+  local backend=$1 target=$2 extra=$3 already_recorded=${4:-0}
+  if [ "$already_recorded" -ne 1 ] && ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
     fm_afk_launch_log "failed to persist daemon terminal record; closing $backend:$target"
     fm_afk_launch_close_terminal "$backend" "$target"
     return 1
   fi
   if ! fm_afk_launch_wait_ready "$backend" "$target"; then
     fm_afk_launch_log "daemon did not become ready; closing $backend:$target"
-    fm_afk_launch_close_terminal "$backend" "$target"
-    rm -f "$FM_AFK_LAUNCH_RECORD" 2>/dev/null || true
+    FM_AFK_REC_BACKEND=$backend
+    FM_AFK_REC_TARGET=$target
+    fm_afk_launch_close_recorded
     return 1
   fi
 }
@@ -308,7 +313,13 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ "$create_result" -ne 0 ] && [ -n "$wsid" ] && [ -n "$pane" ]; then
     fm_afk_launch_log "herdr create failed after returning exact ids; closing $session:$pane"
-    fm_backend_herdr_kill "$session:$pane"
+    if fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
+      FM_AFK_REC_BACKEND=herdr
+      FM_AFK_REC_TARGET="$session:$pane"
+      fm_afk_launch_close_recorded || true
+    else
+      fm_afk_launch_log "failed to persist exact id for failed herdr create"
+    fi
     return 1
   fi
   if [ -z "$wsid" ] || [ -z "$pane" ]; then
@@ -321,12 +332,19 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
-  if ! fm_backend_herdr_cli "$session" pane run "$pane" "$cmd" >/dev/null 2>&1; then
-    fm_afk_launch_log "failed to run daemon in herdr pane $session:$pane; closing it"
-    fm_backend_herdr_kill "$session:$pane"
+  if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
+    fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
+    fm_afk_launch_close_terminal herdr "$session:$pane"
     return 1
   fi
-  fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" || return 1
+  if ! fm_backend_herdr_cli "$session" pane run "$pane" "$cmd" >/dev/null 2>&1; then
+    fm_afk_launch_log "failed to run daemon in herdr pane $session:$pane; closing it"
+    FM_AFK_REC_BACKEND=herdr
+    FM_AFK_REC_TARGET="$session:$pane"
+    fm_afk_launch_close_recorded || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" 1 || return 1
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
@@ -370,9 +388,14 @@ fm_afk_launch_start() {
   fi
 
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  [ -f "$FM_AFK_LAUNCH_STATE/.afk" ] && had_afk=1 && cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk"
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ] && cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact"
+    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+    fi
   done
   if ! fm_afk_launch_reconcile; then
     result=1
@@ -418,9 +441,14 @@ fm_afk_launch_start_native() {
     return 0
   fi
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  [ -f "$FM_AFK_LAUNCH_STATE/.afk" ] && had_afk=1 && cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk"
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ] && cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact"
+    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+    fi
   done
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
@@ -431,7 +459,7 @@ fm_afk_launch_start_native() {
     fm_afk_launch_record_write none - native || result=1
   fi
   if [ "$result" -ne 0 ]; then
-    rm -f "$FM_AFK_LAUNCH_STATE/.afk" "$FM_AFK_LAUNCH_RECORD" \
+    rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
       "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
       "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged"
     [ "$had_afk" -eq 1 ] && cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk"

@@ -119,8 +119,7 @@ unit_stop_ordering() {
   mkdir -p "$lock"
   printf '%s' "$daemon_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
-  # A recorded terminal (harmless: a non-existent tmux session name -> no-op close).
-  printf 'tmux\tfm-afk-nonexistent-%s\t\n' "$$" > "$st/state/.afk-daemon-terminal"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
     pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
@@ -294,10 +293,9 @@ unit_herdr_partial_create_recovery() {
 }
 
 unit_herdr_error_with_exact_ids_closes_exact() {
-  local st closed
+  local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-error-exact.XXXXXX")
-  closed="$st/closed"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
@@ -305,16 +303,47 @@ unit_herdr_error_with_exact_ids_closes_exact() {
       if [ "$2 $3" = "workspace create" ]; then
         printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
         return 1
+      elif [ "$2 $3" = "pane get" ]; then
+        printf %s '\''{"error":{"code":"transport_error"}}'\''
+        return 2
       fi
-      return 1
+      return 2
     }
-    fm_backend_herdr_kill() { printf "%s" "$1" > "$CLOSED"; }
     ! fm_afk_launch_create_herdr lab:captain herdr
   ' _ "$LAUNCH"
-  if [ "$(cat "$closed" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr create error: returned exact id is retained for cleanup"
+  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
+    pass "herdr create error: unconfirmed exact id is persisted for reconciliation"
   else
-    fail "herdr create error: exact cleanup id was discarded"
+    fail "herdr create error: unconfirmed exact cleanup id was discarded"
+  fi
+  rm -rf "$st"
+}
+
+unit_herdr_run_failure_preserves_unconfirmed_record() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX")
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
+        return 0
+      elif [ "$2 $3" = "pane run" ]; then
+        return 1
+      elif [ "$2 $3" = "pane get" ]; then
+        printf %s '\''{"error":{"code":"transport_error"}}'\''
+        return 2
+      fi
+      return 2
+    }
+    ! fm_afk_launch_create_herdr lab:captain herdr
+  ' _ "$LAUNCH"
+  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
+    pass "herdr run failure: unconfirmed exact id remains reconcilable"
+  else
+    fail "herdr run failure: unconfirmed exact id was discarded"
   fi
   rm -rf "$st"
 }
@@ -352,6 +381,41 @@ unit_readiness_failure_rolls_back_terminal() {
     pass "readiness failure: exact terminal and durable record roll back"
   else
     fail "readiness failure: terminal or record survived"
+  fi
+  rm -rf "$st"
+}
+
+unit_readiness_failure_preserves_unconfirmed_record() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready-unconfirmed.XXXXXX")
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_wait_ready() { return 1; }
+    fm_afk_launch_close_terminal() { return 1; }
+    fm_afk_launch_terminal_absent() { return 1; }
+    ! fm_afk_launch_commit_terminal tmux exact-session ""
+  ' _ "$LAUNCH"
+  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = exact-session ]; then
+    pass "readiness failure: unconfirmed terminal retains its reconciliation id"
+  else
+    fail "readiness failure: unconfirmed terminal lost its reconciliation id"
+  fi
+  rm -rf "$st"
+}
+
+unit_tmux_absence_distinguishes_probe_failure() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-probe.XXXXXX")
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    tmux() { printf "%s" "can'\''t find session: exact-session" >&2; return 1; }
+    fm_afk_launch_terminal_absent tmux exact-session
+    tmux() { printf "%s" "error connecting to /tmp/tmux.sock" >&2; return 1; }
+    ! fm_afk_launch_terminal_absent tmux exact-session
+  ' _ "$LAUNCH"; then
+    pass "tmux absence: clean missing differs from transport probe failure"
+  else
+    fail "tmux absence: probe failure was treated as confirmed absence"
   fi
   rm -rf "$st"
 }
@@ -540,8 +604,11 @@ unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
+unit_herdr_run_failure_preserves_unconfirmed_record
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
+unit_readiness_failure_preserves_unconfirmed_record
+unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record

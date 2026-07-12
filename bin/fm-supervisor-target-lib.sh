@@ -18,8 +18,8 @@
 # "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
 # configured, nothing detected) assumes tmux - matching the daemon's pre-herdr
 # behavior byte-for-byte when run outside both tmux and herdr.
-: "${FM_SUPERVISOR_TARGET_DEFAULT:=firstmate:0}"
-: "${FM_SUPERVISOR_BACKEND_DEFAULT:=tmux}"
+FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
+FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
