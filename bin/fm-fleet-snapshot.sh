@@ -433,13 +433,14 @@ task_json_lines() {
 # backlog parser (backlog_json) against each home's data/backlog.md - a pure Markdown
 # read, no per-task crew-state and no network - and the one secondmate-home enumerator
 # (fm-ff-lib.sh's live_secondmate_meta_records: meta home= with data/secondmates.md
-# fallback). Per-home Done is capped here so the canonical snapshot stays bounded
-# regardless of the view; bearings applies its own tighter view caps and omitted[]
-# disclosure. A home with no backlog file yet contributes nothing and is NOT flagged
+# fallback). Per-home Done is capped here by default so the canonical snapshot stays
+# bounded; a cap of 0 explicitly lifts that bound for an expanding caller. Bearings
+# applies its own tighter view caps and omitted[] disclosure. A home with no backlog
+# file yet contributes nothing and is NOT flagged
 # (a fresh secondmate is normal); only an existing backlog that fails to parse is
 # reported unreadable. Records are sorted most-recent-first by completion date, id.
 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=${FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME:-10}
-case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*|0) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
+case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
 secondmate_landed_json() {
   local reg="$DATA/secondmates.md" id home backlog bj rows n
   local records='[]' truncated='[]' unreadable='[]'
@@ -456,11 +457,13 @@ secondmate_landed_json() {
       | sort_by([(.completion.date // ""), .id]) | reverse') \
       || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
     n=$(printf '%s' "$rows" | jq 'length')
-    if [ "$n" -gt "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" ]; then
+    if [ "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" -gt 0 ] \
+      && [ "$n" -gt "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" ]; then
       truncated=$(jq -n --argjson a "$truncated" --arg h "$home" '$a + [$h]')
     fi
     records=$(jq -n --argjson a "$records" --argjson b "$rows" \
-      --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" '$a + ($b[:$cap])')
+      --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+      '$a + (if $cap == 0 then $b else $b[:$cap] end)')
   done <<EOF
 $(live_secondmate_meta_records "$STATE" "$reg")
 EOF
