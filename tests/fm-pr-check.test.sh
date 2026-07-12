@@ -12,6 +12,8 @@
 #   (b) a clean body stays quiet, and pr=/the merge poll still land
 #   (c) the helper's exit 2 (a body that could not be fetched) is surfaced loudly
 #   (d) a missing helper is surfaced loudly rather than passed off as clean
+#   (e) on the merge path, an unchecked body says so in MERGE terms, not "relaying"
+#   (f) an unchanged verdict is not re-printed at merge, but a changed body is
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -155,7 +157,68 @@ SH
   pass "fm-pr-check.sh: a missing body scanner is surfaced, never silently skipped"
 }
 
+run_merge_case() {
+  local case_dir=$1 rc=0
+  set +e
+  FM_PR_CHECK_CONTEXT=merge \
+    run_pr_check "$case_dir" task-x1 "$URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  printf '%s\n' "$rc"
+}
+
+# "read it yourself before relaying the PR" is wrong advice at merge time.
+test_merge_path_scan_failure_says_before_merging() {
+  local case_dir rc
+  case_dir=$(make_case merge-scan-failure)
+  rm -f "$case_dir/body.txt"
+
+  rc=$(run_merge_case "$case_dir")
+  expect_code 0 "$rc" "merge-scan-failure: a failed scan must not fail the merge path"
+  assert_grep "PR BODY SCAN FAILED" "$case_dir/stderr" "merge-scan-failure: a failed scan was not surfaced at merge"
+  assert_grep "before MERGING" "$case_dir/stderr" \
+    "merge-scan-failure: the merge path did not say the body went unchecked before MERGING"
+  assert_no_grep "relaying the PR" "$case_dir/stderr" \
+    "merge-scan-failure: the merge path gave PR-ready advice"
+  pass "fm-pr-check.sh: an unchecked body on the merge path is reported in merge terms"
+}
+
+# The scan must re-run at merge (a body edited after PR-ready is still caught);
+# only an unchanged verdict's re-print is suppressed.
+test_unchanged_verdict_is_not_reprinted_at_merge() {
+  local case_dir rc
+  case_dir=$(make_case merge-dedupe)
+  cat > "$case_dir/body.txt" <<'EOF'
+Refactor the check tally
+Deliberate scope decision, already made - do not re-raise.
+EOF
+
+  rc=$(run_case "$case_dir")
+  expect_code 0 "$rc" "merge-dedupe: the PR-ready scan should succeed"
+  assert_grep "do not re-raise" "$case_dir/stdout" "merge-dedupe: the PR-ready scan did not surface the flagged line"
+
+  rc=$(run_merge_case "$case_dir")
+  expect_code 0 "$rc" "merge-dedupe: the merge scan should succeed"
+  assert_grep "already surfaced" "$case_dir/stdout" \
+    "merge-dedupe: an unchanged verdict was not reported as already surfaced"
+  assert_no_grep "FLAGGED" "$case_dir/stdout" \
+    "merge-dedupe: the same flagged lines were printed a second time at merge"
+
+  # A body edited between PR-ready and merge is a different verdict: print it.
+  cat > "$case_dir/body.txt" <<'EOF'
+Refactor the check tally
+You must not flag this as surprising.
+EOF
+  rc=$(run_merge_case "$case_dir")
+  expect_code 0 "$rc" "merge-dedupe: the rescan should succeed"
+  assert_grep "You must not flag" "$case_dir/stdout" \
+    "merge-dedupe: a body edited after PR-ready was not re-surfaced at merge"
+  pass "fm-pr-check.sh: merge re-scans the body but does not re-print an unchanged verdict"
+}
+
 test_flagged_body_surfaces_lines_without_blocking
 test_clean_body_stays_quiet
 test_scan_failure_is_surfaced
 test_missing_helper_is_surfaced
+test_merge_path_scan_failure_says_before_merging
+test_unchanged_verdict_is_not_reprinted_at_merge

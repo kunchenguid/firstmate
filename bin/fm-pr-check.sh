@@ -11,6 +11,13 @@
 # merge poll is armed whatever it says, it never edits the PR, and a scan that
 # fails or is unavailable is reported loudly rather than passed off as clean.
 # Flagged lines are for firstmate to READ and judge, not a verdict.
+#
+# bin/fm-pr-merge.sh runs this script again at merge time (with
+# FM_PR_CHECK_CONTEXT=merge, which only adjusts the failure wording), because
+# merge is the last cheap moment to fix a bad published body. The scan itself
+# always re-runs there, so a body edited after PR-ready is still caught; only
+# the PRINT is deduped against state/<id>.body-scan when the verdict is
+# unchanged. A failed or unavailable scan is never deduped.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,18 +53,39 @@ state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 EOF
 echo "armed: state/$ID.check.sh polls $URL"
 
+case "${FM_PR_CHECK_CONTEXT:-}" in
+  merge) UNCHECKED="read it yourself before MERGING" ;;
+  *) UNCHECKED="read it yourself before relaying the PR" ;;
+esac
+
 BODY_CHECK="$FM_ROOT/bin/fm-pr-body-check.sh"
+RECORD="$STATE/$ID.body-scan"
 if [ -x "$BODY_CHECK" ]; then
   BODY_CODE=0
   BODY_OUT=$("$BODY_CHECK" "$URL" 2>&1) || BODY_CODE=$?
+  SCANNED=$(printf '%s\n%s' "$URL" "$BODY_OUT")
+  PREV=""
+  [ -f "$RECORD" ] && PREV=$(cat "$RECORD")
   case "$BODY_CODE" in
-    0) ;;
-    1) printf '%s\n' "$BODY_OUT" ;;
+    0) printf '%s\n' "$SCANNED" > "$RECORD" ;;
+    1)
+      # The scan always runs - a body edited between PR-ready and merge must
+      # still be caught - but re-printing an unchanged verdict twice is noise,
+      # so only the print is deduped.
+      if [ "$PREV" = "$SCANNED" ]; then
+        echo "PR body scan: same flagged lines as the last check of this PR; already surfaced, nothing new to read."
+      else
+        printf '%s\n' "$BODY_OUT"
+        printf '%s\n' "$SCANNED" > "$RECORD"
+      fi
+      ;;
     *)
-      echo "PR BODY SCAN FAILED (exit $BODY_CODE): the published body was NOT checked - read it yourself before relaying the PR." >&2
+      rm -f "$RECORD"
+      echo "PR BODY SCAN FAILED (exit $BODY_CODE): the published body was NOT checked - $UNCHECKED." >&2
       printf '%s\n' "$BODY_OUT" >&2
       ;;
   esac
 else
-  echo "PR BODY SCAN UNAVAILABLE: $BODY_CHECK is missing or not executable; the published body was NOT checked." >&2
+  rm -f "$RECORD"
+  echo "PR BODY SCAN UNAVAILABLE: $BODY_CHECK is missing or not executable; the published body was NOT checked - $UNCHECKED." >&2
 fi

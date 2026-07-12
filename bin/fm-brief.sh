@@ -278,8 +278,9 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
 # The public-PR contract, carried by every ship mode that actually opens a PR
-# (no-mistakes and direct-PR; local-only publishes nothing). $INTENT_CLAUSE names
-# the specific text that reaches the public body in that mode.
+# (no-mistakes and direct-PR; local-only publishes nothing). The first argument
+# names the specific text that reaches the public body in that mode; the second
+# is the final done: line the verify step gates.
 PR_BODY_CHECK=$(shell_quote "$FM_ROOT/bin/fm-pr-body-check.sh")
 public_pr_section() {
   local intent_clause=$1

@@ -18,6 +18,10 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
 #
+# fm-pr-check.sh also re-reads the LIVE PR body here, so a body edited after the
+# PR-ready check is still caught at the last moment it can be fixed cheaply. That
+# scan never blocks the merge; it surfaces lines for firstmate to read.
+#
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
@@ -79,7 +83,7 @@ reject_repo_overrides() {
 parse_pr_url "$URL" || exit 1
 reject_repo_overrides "$@" || exit 1
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+FM_PR_CHECK_CONTEXT=merge "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
 merge_args=()
