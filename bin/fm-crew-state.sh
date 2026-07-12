@@ -129,6 +129,14 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
+file_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
 # shell - so a finished crew whose endpoint has closed still reports its run-step
@@ -222,6 +230,27 @@ nm_run() {  # <args...>
 RUN_OUT=""
 nm_field() {  # <key>
   printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+run_terminal_epoch() {
+  local key value
+  for key in completed_at ended_at updated_at updated; do
+    value=$(strip_quotes "$(nm_field "$key")")
+    [ -n "$value" ] || continue
+    case "$value" in
+      *[!0-9]*) ;;
+      *) printf '%s' "$value"; return 0 ;;
+    esac
+    if date -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s >/dev/null 2>&1; then
+      date -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null
+      return 0
+    fi
+    if date -d "$value" +%s >/dev/null 2>&1; then
+      date -d "$value" +%s 2>/dev/null
+      return 0
+    fi
+  done
+  return 1
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -543,16 +572,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   # A deliberate trailing paused: declaration outranks a terminal historical
-  # run-step. A failed/done past run is not evidence the pane needs attention;
-  # the watcher absorbs that stale on the long pause-recheck cadence instead of
-  # resurfacing every poll. A live working or parked run still wins (checked by
-  # falling through only for failed|done). Without this, crew_absorb_class
-  # returns none on a failed historical run and the pause declaration makes
-  # noise strictly worse than a terminal done: line (surfaced once).
+  # run-step only when durable ordering proves the pause is newer.
   if status_is_paused "$LOG_LINE"; then
     case "$RUN_STATE" in
       failed|done)
-        emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}historical run $RUN_STATE"
+        RUN_TERMINAL_EPOCH=$(run_terminal_epoch || true)
+        LOG_EPOCH=$(file_mtime "$LOG" || true)
+        if [ -n "$RUN_TERMINAL_EPOCH" ] && [ -n "$LOG_EPOCH" ] \
+          && [ "$LOG_EPOCH" -gt "$RUN_TERMINAL_EPOCH" ]; then
+          emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}historical run $RUN_STATE"
+        fi
         ;;
     esac
   fi

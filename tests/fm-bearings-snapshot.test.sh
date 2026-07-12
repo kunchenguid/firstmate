@@ -433,6 +433,21 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
+test_secondmate_landed_report_path_uses_secondmate_home() {
+  local home fakebin json expected
+  home=$(make_home mate-report-path); write_fixture "$home"
+  cat >> "$home/secondmate-home/data/backlog.md" <<'EOF'
+- [x] mate-scout - Secondmate scout data/mate-scout/report.md (repo: firstmate) (kind: scout) (completed 2026-07-12)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  expected="$home/secondmate-home/data/mate-scout/report.md"
+  printf '%s' "$json" | jq -e --arg expected "$expected" '
+    .landed | any(.[]; .id == "mate-scout" and .artifact == $expected)
+  ' >/dev/null || fail "secondmate report artifact must resolve against its home: $json"
+  pass "secondmate landed report paths resolve against the secondmate home"
+}
+
 # The roll-up stays bounded: a per-home cap and an overall cap, both disclosed in
 # omitted[], with --all-landed as the counted expansion knob. This also covers the
 # previously-silent main-home landed truncation.
@@ -521,6 +536,7 @@ test_chat_contract_four_sections() {
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_secondmate_landed_report_path_uses_secondmate_home
 test_landed_bounded_and_disclosed
 test_captains_call_anti_leak
 test_chat_contract_four_sections

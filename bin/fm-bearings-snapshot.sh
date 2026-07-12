@@ -276,7 +276,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("endpoints")) != null) as $f_endpoints
   | ([ .backlog.records[] | select(.state == "done" and .structured)
        | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
-  | ((.secondmate_landed.records) // []) as $mate_done
+  | ((.secondmate_landed.records) // []
+     | map(if (.report_path // "") != "" and (.report_path | startswith("/") | not)
+           then .report_path = (.home + "/" + .report_path)
+           else . end)) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse

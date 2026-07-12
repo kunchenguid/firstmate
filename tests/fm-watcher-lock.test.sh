@@ -155,6 +155,13 @@ test_guard_warnings() {
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
+
+  printf 'ts=1\ndetail=arm cycle received TERM with no live successor\n' > "$state/.watcher-arm-dead"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'fresh-looking but no independently healthy watcher' "$err" >/dev/null \
+    || fail "fresh beacon hid an explicit arm-death marker: $(cat "$err")"
+  grep -F 'Last arm death: arm cycle received TERM with no live successor' "$err" >/dev/null \
+    || fail "fresh-marker warning omitted arm-death detail: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
 }
 
@@ -568,6 +575,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
+  printf 'window=test:fm-live\nkind=ship\n' > "$state/live-task.meta"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
@@ -589,6 +597,9 @@ test_arm_hup_cleans_child_and_temp_output() {
   done
   ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
+  grep -F 'watcher: FAILED - arm cycle received HUP with no live successor while tasks are in flight' "$armout" >/dev/null \
+    || fail "dying watcher child suppressed the HUP arm-death report: $(cat "$armout")"
+  [ -f "$state/.watcher-arm-dead" ] || fail "HUP arm death did not write its marker"
   pass "arm cleans child watcher and temp output on HUP"
 }
 

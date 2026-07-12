@@ -33,6 +33,8 @@ CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
+WATCH="$SCRIPT_DIR/fm-watch.sh"
+
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
@@ -70,11 +72,17 @@ watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
 [ "$in_flight" -eq 0 ] && exit 0
 
+arm_dead=false
+if [ -f "$STATE/.watcher-arm-dead" ] \
+  && ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  arm_dead=true
+fi
+
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
-if [ "$watcher_fresh" = false ]; then
+if [ "$watcher_fresh" = false ] || [ "$arm_dead" = true ]; then
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   queue_arg=0
@@ -91,7 +99,11 @@ if [ "$watcher_fresh" = false ]; then
   {
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-    printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    if [ "$watcher_fresh" = false ]; then
+      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    else
+      printf '●  %s task(s) in flight; the beacon is fresh-looking but no independently healthy watcher holds this home.\n' "$in_flight"
+    fi
     if [ -f "$STATE/.watcher-arm-dead" ]; then
       arm_dead_detail=$(grep '^detail=' "$STATE/.watcher-arm-dead" 2>/dev/null | head -1 | sed 's/^detail=//')
       [ -n "$arm_dead_detail" ] || arm_dead_detail='arm cycle died without a successor'

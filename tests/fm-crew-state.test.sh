@@ -280,6 +280,16 @@ outcome: failed
 EOF
 }
 
+run_failed_at() {  # <branch> <epoch>
+  run_failed "$1"
+  printf 'updated_at: %s\n' "$2"
+}
+
+run_passed_at() {  # <branch> <epoch>
+  run_passed "$1"
+  printf 'updated_at: %s\n' "$2"
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -684,7 +694,7 @@ test_paused_outranks_terminal_failed_run() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-pause-fail.meta" "window=fm:fm-feat-pause-fail" "worktree=$d/wt" "kind=ship"
   printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-fail.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-pause-fail)"
+  FM_FAKE_AXI_STATUS="$(run_failed_at fm/feat-pause-fail 1)"
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-pause-fail)
   assert_contains "$out" "state: paused" "trailing paused outranks terminal failed run"
@@ -702,7 +712,7 @@ test_paused_outranks_terminal_passed_run() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-pause-pass.meta" "window=fm:fm-feat-pause-pass" "worktree=$d/wt" "kind=ship"
   printf 'paused: waiting on an upstream release\n' > "$d/state/feat-pause-pass.status"
-  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-pause-pass)"
+  FM_FAKE_AXI_STATUS="$(run_passed_at fm/feat-pause-pass 1)"
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-pause-pass)
   assert_contains "$out" "state: paused" "trailing paused outranks terminal passed run"
@@ -710,6 +720,36 @@ test_paused_outranks_terminal_passed_run() {
   assert_contains "$out" "historical run done" "detail notes the historical done run"
   assert_not_contains "$out" "state: done" "must not report done over trailing paused"
   pass "trailing paused: outranks a terminal passed historical run-step"
+}
+
+
+test_newer_terminal_run_outranks_older_pause() {
+  reset_fakes
+  local d; d=$(new_case newer-failure-over-pause)
+  make_repo_on_branch "$d/wt" fm/feat-new-fail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-new-fail.meta" "window=fm:fm-feat-new-fail" "worktree=$d/wt" "kind=ship"
+  printf 'paused: old provider wait\n' > "$d/state/feat-new-fail.status"
+  FM_FAKE_AXI_STATUS="$(run_failed_at fm/feat-new-fail 4102444800)"
+  local out; out=$(run_crew_state "$d" feat-new-fail)
+  assert_contains "$out" "state: failed" "newer terminal failure outranks older pause"
+  assert_contains "$out" "source: run-step" "newer failure remains run-step sourced"
+  assert_not_contains "$out" "state: paused" "older pause must not hide newer failure"
+  pass "a newer terminal run outranks an older pause declaration"
+}
+
+test_unordered_terminal_run_outranks_pause() {
+  reset_fakes
+  local d; d=$(new_case unordered-failure-over-pause)
+  make_repo_on_branch "$d/wt" fm/feat-unordered-fail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unordered-fail.meta" "window=fm:fm-feat-unordered-fail" "worktree=$d/wt" "kind=ship"
+  printf 'paused: provider wait with unknown ordering\n' > "$d/state/feat-unordered-fail.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unordered-fail)"
+  local out; out=$(run_crew_state "$d" feat-unordered-fail)
+  assert_contains "$out" "state: failed" "terminal run wins when ordering is unavailable"
+  assert_not_contains "$out" "state: paused" "unproven pause must not hide failure"
+  pass "an unordered terminal run outranks a pause declaration"
 }
 
 # Live run-step still beats a trailing paused: declaration (run-step precedence).
@@ -1241,6 +1281,8 @@ test_terminal_passed
 test_terminal_failed
 test_paused_outranks_terminal_failed_run
 test_paused_outranks_terminal_passed_run
+test_newer_terminal_run_outranks_older_pause
+test_unordered_terminal_run_outranks_pause
 test_running_run_outranks_paused_status
 test_terminal_failed_last_line_unchanged_with_failed_run
 test_terminal_done_last_line_unchanged_with_passed_run
