@@ -3,12 +3,19 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk, checks state/.supervise-daemon.lock, and:
+#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
+#   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
-#       (fm_afk_clear_stale_artifacts) and execs bin/fm-supervise-daemon.sh in
-#       the foreground.
+#       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
+#       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
+#       already cleared transactionally by bin/fm-afk-launch.sh.
+#
+# This file is sourceable: its BASH_SOURCE guard keeps main from running, while
+# exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
+# enables nounset and errexit; callers that need different shell options must
+# restore them explicitly.
 #
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:

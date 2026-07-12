@@ -693,9 +693,10 @@ A harness with NO native background mechanism (pi) has no place to run it, and m
 `--no-focus` does not prevent this - it governs focus, not geometry.
 
 `bin/fm-afk-launch.sh` is the single owner of the daemon TERMINAL lifecycle for that case.
-On herdr it creates a dedicated background workspace (`workspace create --no-focus`, label `firstmate-afk-daemon`) in the captain's session, runs the daemon in its pane via `pane run` with `FM_SUPERVISOR_TARGET`/`FM_SUPERVISOR_BACKEND` set to the captain pane (so injection targets the captain, not the daemon's own pane), records the exact pane id in `state/.afk-daemon-terminal`, and on `stop` closes exactly that pane (which takes its single-tab workspace with it).
+On herdr it creates a dedicated background workspace with `workspace create --no-focus` and a unique `firstmate-afk-daemon-*` label in the captain's session, runs the daemon in its pane via `pane run` with `FM_SUPERVISOR_TARGET` and `FM_SUPERVISOR_BACKEND` set to the captain pane, records the exact pane id in `state/.afk-daemon-terminal`, and on `stop` closes exactly that pane, which takes its single-tab workspace with it.
+The explicit target and backend make injection reach the captain rather than the daemon's own pane.
 No shell `&` is used.
-Recovery reconciles a recorded-but-dead terminal by exact id.
+Recovery reconciles a recorded-but-dead terminal by exact id, never by enumerating or matching other Herdr workspaces.
 
 Verified in an isolated lab session (`bin/fm-herdr-lab.sh`, fleet-state tripwire armed; `default` byte-identical before/after). A workspace `w1`/tab `w1:t1`/pane `w1:p1` stood in for the captain's primary pane:
 
@@ -719,7 +720,8 @@ The topology invariant (entering AND exiting away mode leaves the captain's acti
 
 The away daemon's `state/.subsuper-escalations` (+ `.since`) and `state/.subsuper-inject-wedged` are a transient delivery cache, cleared only on a successful flush.
 Two ordering/scoping bugs leaked them into the next away session: on a clean exit the `/afk` skill cleared `state/.afk` BEFORE stopping the daemon, so the daemon's shutdown flush hit its own presence gate (`inject_msg`: `afk_active || return 1`) and was a no-op; and nothing cleared them on entry.
-The fix: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still present (flush can run), then clears `state/.afk` last; and `fm_afk_clear_stale_artifacts` (`bin/fm-afk-start.sh`) drops the prior session's artifacts on a FRESH entry (daemon not already running), never on a refresh.
+The fix: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still present so the flush can run, closes its recorded terminal by exact id, and then clears `state/.afk` last.
+On entry the launcher drops the prior session's artifacts when the daemon is not already running, never on a refresh; the sourceable `bin/fm-afk-start.sh` exposes the shared clearing helper and also applies it for a direct, non-prepared fresh start.
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 

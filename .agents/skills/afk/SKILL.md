@@ -22,8 +22,8 @@ batched digest rather than per-wake injections.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
-   Its hosting differs
-   by harness. Pick the right path:
+   Its hosting differs by harness.
+   Pick the right path:
    - **Harness WITH a native in-pane tracked-background tool** (e.g. claude's
      background bash, grok's background tool): first run
      `bin/fm-afk-launch.sh start-native`, then run
@@ -212,30 +212,10 @@ the marker lets firstmate distinguish it from a real captain message.
 
 ## Stale-artifact lifecycle
 
-`state/.subsuper-escalations` (plus its `.since` sidecar) and
-`state/.subsuper-inject-wedged` are the daemon's transient escalation-DELIVERY
-cache, not the durable record of pending work (that is `state/.wake-queue` plus
-each crew's `state/<id>.status`). They are cleared only on a successful flush,
-so an away session that ended with anything undelivered - the common case, since
-the captain returning makes their pane busy and the exit flush can defer - used
-to leave them on disk, and the NEXT away session's daemon surfaced them as stale
-escalations from an old session.
-
-Two fixes close that leak, and they compose:
-
-- **Correct exit ordering** (`bin/fm-afk-launch.sh stop`, above): the daemon is
-  stopped while `state/.afk` is still present, so its shutdown flush is actually
-  attempted instead of being a structural no-op.
-- **Session-scoped clear on a fresh entry** (`fm_afk_clear_stale_artifacts` in
-  `bin/fm-afk-start.sh`): when the daemon is not already running, a fresh entry
-  removes any leftover `state/.subsuper-escalations`, its `.since` sidecar, and
-  `state/.subsuper-inject-wedged` before the new daemon starts. This is
-  session-scoped by timing - the new daemon has produced nothing yet, so anything
-  present belongs to a prior session - and it is NOT done on a refresh (daemon
-  already alive), so the current session's own buffer is preserved. It never
-  drops a genuinely-pending escalation: any condition still true is re-derived
-  and re-escalated by the daemon's heartbeat catch-all scan and the durable
-  `state/.wake-queue` replay.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
+Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
+`docs/herdr-backend.md` "Stale-artifact lifecycle fix" owns the mechanism and verification evidence.
 
 ## Reliability properties
 
