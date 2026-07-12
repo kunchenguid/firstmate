@@ -68,11 +68,14 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2
 # cannot spoof inclusion and an unmarked child is never guarded by accident: it
 # must be a regular (non-symlink) file whose first line, with all whitespace
 # removed, is a non-empty id token (letters, digits, dot, underscore, dash only).
-# This is a deliberately lightweight guard-local presence check, distinct from
-# fm-ff-lib.sh's validate_secondmate_home (which matches an EXPECTED id and does
-# path-safety); the guard does not source that heavier library.
+# The allowlist is matched under forced C (ASCII) collation - `local LC_ALL=C`,
+# restored on return - so a locale-crafted non-ASCII id cannot slip through the
+# range match and spoof force-inclusion. This is a deliberately lightweight
+# guard-local presence check, distinct from fm-ff-lib.sh's validate_secondmate_home
+# (which matches an EXPECTED id and does path-safety); the guard does not source
+# that heavier library.
 fm_root_is_secondmate_home() {
-  local marker="$1/.fm-secondmate-home" id
+  local marker="$1/.fm-secondmate-home" id LC_ALL=C
   [ -L "$marker" ] && return 1
   [ -f "$marker" ] || return 1
   IFS= read -r id < "$marker" 2>/dev/null || return 1

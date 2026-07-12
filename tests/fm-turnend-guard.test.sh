@@ -477,6 +477,23 @@ test_hook_exempts_linked_worktree_with_stray_marker() {
   pass "fm-turnend-guard: an invalid (empty) marker cannot spoof inclusion; linked worktree stays exempt"
 }
 
+# Anti-spoof under any locale: a NON-ASCII marker id must be REJECTED by the
+# ASCII-only (C-collation) allowlist, so it can never force-include a linked
+# worktree even where the ambient locale's collation would treat it as a letter.
+# Rejection -> git-dir exemption -> the linked worktree stays exempt.
+test_hook_exempts_linked_worktree_with_non_ascii_marker() {
+  local base dir out status
+  base="$TMP_ROOT/hook-nonascii-marker-base"
+  dir="$TMP_ROOT/hook-nonascii-marker-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  printf 'caf\xc3\xa9\n' > "$dir/.fm-secondmate-home"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a non-ASCII marker id must not spoof force-inclusion in a linked worktree"
+  [ -z "$out" ] || fail "non-ASCII marker wrongly force-included a linked worktree: $out"
+  pass "fm-turnend-guard: a non-ASCII marker cannot spoof inclusion; linked worktree stays exempt"
+}
+
 test_hook_silent_in_crewmate_worktree() {
   local base dir out status
   base="$TMP_ROOT/hook-crew-base"
@@ -890,6 +907,7 @@ test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
 test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
+test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
