@@ -88,6 +88,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-pr-url-lib.sh
+. "$SCRIPT_DIR/fm-pr-url-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
@@ -191,6 +193,10 @@ pr_number_from_target() {
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
+    *"/pulls/"*)
+      n=${target##*/pulls/}
+      n=${n%%[!0-9]*}
+      ;;
     [0-9]*)
       n=${target%%[!0-9]*}
       ;;
@@ -242,10 +248,14 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name. A recorded
+# Gitea PR URL (fm-pr-url-lib.sh: any host, plural "pulls") is looked up via
+# `tea pulls` (cwd inside $WT so tea auto-discovers the login/host); anything
+# else (a GitHub URL, or a bare number from pr_number_from_branch, which is
+# always gh-axi-sourced) is looked up via `gh pr view` exactly as before.
+# Returns non-zero when the PR is not merged, the current work is not contained
+# in the PR head, no PR is found, or any lookup error occurs - the caller then
+# falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state head current
   if [ -n "$PR_URL" ]; then
@@ -254,14 +264,26 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
+  if fm_parse_pr_url "$target" && [ "$FM_PR_FORGE" = gitea ]; then
+    view=$(cd "$WT" && tea pulls "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" -o json 2>/dev/null \
+      | jq -r '(.hasMerged | tostring) + "\t" + (.headSha // "")') || return 1
+    state=${view%%$'\t'*}
+    head=${view#*$'\t'}
+    [ "$state" != "$view" ] || return 1
+    case "$state" in
+      true) ;;
+      *) return 1 ;;
+    esac
+  else
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+    state=${view%%$'\t'*}
+    head=${view#*$'\t'}
+    [ "$state" != "$view" ] || return 1
+    case "$state" in
+      MERGED|merged) ;;
+      *) return 1 ;;
+    esac
+  fi
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1

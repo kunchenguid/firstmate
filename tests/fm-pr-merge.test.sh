@@ -14,6 +14,12 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#
+# A Gitea PR URL (any host, plural "pulls") dispatches to `tea pulls merge`
+# instead of gh-axi (bin/fm-pr-url-lib.sh):
+#   (i) Gitea URL merges via tea with default --style squash
+#   (j) explicit --style is not overridden by the default
+#   (k) merge refuses when the task has no worktree to resolve tea's login from
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -89,8 +95,26 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_TEA_LOG="$case_dir/tea.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
+}
+
+# tea mock recording every invocation to a log file, and answering `tea pulls
+# <n>` (fm-pr-check.sh's pr_head lookup) with the given head sha; `tea pulls
+# merge` always succeeds. Args: case_dir head
+add_tea_mocks() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_TEA_LOG"
+case "\${1:-} \${2:-}" in
+  "pulls merge") exit 0 ;;
+  "pulls "*) printf '{"headSha":"%s","hasMerged":false}\n' '$head' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tea"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -295,6 +319,65 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_gitea_merge_uses_tea_with_default_style() {
+  local case_dir rc
+  case_dir=$(make_case gitea-merge)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir" abcdef0123456789abcdef0123456789abcdef01
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://git.example.com/example/repo/pulls/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitea-merge: fm-pr-merge should succeed"
+  assert_grep 'pr=https://git.example.com/example/repo/pulls/9' "$case_dir/state/task-x1.meta" \
+    "gitea-merge: pr= was not recorded"
+  assert_grep 'pr_head=abcdef0123456789abcdef0123456789abcdef01' "$case_dir/state/task-x1.meta" \
+    "gitea-merge: pr_head= was not recorded"
+  grep -qxF 'pulls merge 9 --repo example/repo --style squash' "$case_dir/tea.log" \
+    || fail "gitea-merge: tea pulls merge was not invoked with number, --repo, and default --style squash"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "gitea-merge: gh-axi was invoked for a Gitea PR"
+  pass "fm-pr-merge merges a Gitea PR via tea pulls merge with the default --style squash"
+}
+
+test_gitea_explicit_style_not_overridden() {
+  local case_dir
+  case_dir=$(make_case gitea-explicit-style)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir" 1234567890abcdef1234567890abcdef12345678
+  : > "$case_dir/tea.log"
+
+  run_pr_merge "$case_dir" task-x1 https://git.example.com/example/repo/pulls/22 -- --style rebase \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-explicit-style: fm-pr-merge failed"
+
+  grep -qxF 'pulls merge 22 --repo example/repo --style rebase' "$case_dir/tea.log" \
+    || fail "gitea-explicit-style: caller --style rebase was not forwarded without an extra default --style squash"
+  pass "fm-pr-merge does not add a default --style squash when the caller passes an explicit tea --style"
+}
+
+test_gitea_merge_refuses_without_worktree() {
+  local case_dir rc
+  case_dir=$(make_case gitea-no-worktree)
+  add_tea_mocks "$case_dir" 2468135790abcdef2468135790abcdef24681357
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://git.example.com/example/repo/pulls/30 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-no-worktree: fm-pr-merge should refuse without a resolvable worktree"
+  assert_grep 'cannot resolve Gitea login context for tea' "$case_dir/stderr" \
+    "gitea-no-worktree: refusal did not explain the missing worktree"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-no-worktree: tea pulls merge was invoked despite the missing worktree"
+  pass "fm-pr-merge refuses a Gitea merge when the task has no worktree to resolve tea's login from"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -305,3 +388,6 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_gitea_merge_uses_tea_with_default_style
+test_gitea_explicit_style_not_overridden
+test_gitea_merge_refuses_without_worktree

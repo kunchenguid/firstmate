@@ -49,6 +49,11 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers Gitea PR dispatch (bin/fm-pr-url-lib.sh: any host, plural "pulls"
+# in the recorded pr= URL routes the containment check through `tea` instead of
+# `gh`):
+#   (z) no-mistakes + Gitea squash-merged PR, deleted branch  -> ALLOW (tea dispatch)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -242,6 +247,32 @@ append_pr_meta_for_current_head() {
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
+# Gitea equivalent of append_pr_meta_for_current_head: a plural "pulls" URL
+# (any host) so fm-teardown.sh's containment check dispatches to tea.
+append_gitea_pr_meta_for_current_head() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://git.example.com/example/repo/pulls/7' \
+    "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
+# Override tea to report PR 7 as merged with the supplied head, via
+# `tea pulls <n> --repo <owner>/<repo> -o json`. Gitea equivalent of
+# add_gh_pr_merged_for_head.
+add_tea_pr_merged_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pulls "*)
+    printf '{"headSha":"%s","hasMerged":true}\n' '$head' ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tea"
 }
 
 append_pr_meta_url() {
@@ -648,6 +679,28 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_gitea_squash_merged_branch_deleted_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case gitea-squash-merged)
+  write_meta "$case_dir" no-mistakes ship
+  # Same scenario as test_squash_merged_branch_deleted_allows, but the recorded
+  # pr= is a Gitea URL (plural "pulls"), so the containment check must dispatch
+  # to tea instead of gh.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_gitea_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_tea_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitea-squash-merged: teardown should succeed when the Gitea PR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gitea-squash-merged: teardown printed a REFUSED line"
+  pass "Gitea squash-merged + deleted-branch worktree (PR merged via tea) is torn down"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -1273,6 +1326,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
+test_gitea_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

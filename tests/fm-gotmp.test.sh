@@ -54,6 +54,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-pr-url-lib.sh: teardown sources it to dispatch a recorded pr= URL to gh
+  # or tea; unused by this suite's nonexistent-worktree fixture but must exist.
+  ln -s "$ROOT/bin/fm-pr-url-lib.sh" "$fake/bin/fm-pr-url-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

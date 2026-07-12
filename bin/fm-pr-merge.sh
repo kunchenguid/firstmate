@@ -18,24 +18,32 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
 #
-# Merge method: defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. An explicit
-# caller method is never overridden.
+# A Gitea PR URL (fm-pr-url-lib.sh: any host, plural "pulls") is merged with
+# `tea pulls merge` instead, run with cwd inside the task's worktree so tea
+# auto-discovers the right login/host from its origin remote.
+#
+# Merge method: defaults to --squash (gh-axi) / --style squash (tea) when the
+# caller passes no explicit method after the optional -- separator. An explicit
+# caller method is never overridden. For a Gitea PR the caller passes tea's own
+# `--style <merge|rebase|squash|rebase-merge>` flag; gh-axi's --squash/--merge/
+# --rebase/--method flags are gh-specific and are not translated.
 # Extra args must not include --repo or -R because the repo is parsed from the
 # PR URL.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi/tea merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
-URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
+ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi/tea merge args>]}
+URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi/tea merge args>]}
 shift 2
 [ "${1:-}" = "--" ] && shift
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-pr-url-lib.sh
+. "$SCRIPT_DIR/fm-pr-url-lib.sh"
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META; refusing to merge without recording pr=" >&2; exit 1; }
 
@@ -49,17 +57,26 @@ caller_has_merge_method() {
   return 1
 }
 
+caller_has_style_arg() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --style|--style=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 parse_pr_url() {
   local url=$1
-  if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
-    PR_OWNER="${BASH_REMATCH[1]}"
-    PR_REPO="${BASH_REMATCH[2]}"
-    PR_NUMBER="${BASH_REMATCH[3]}"
-    if [[ "$PR_OWNER" != *- ]]; then
-      return 0
-    fi
+  if fm_parse_pr_url "$url"; then
+    PR_FORGE=$FM_PR_FORGE
+    PR_OWNER=$FM_PR_OWNER
+    PR_REPO=$FM_PR_REPO
+    PR_NUMBER=$FM_PR_NUMBER
+    return 0
   fi
-  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> (got: $url)" >&2
+  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> or a Gitea https://<host>/<owner>/<repo>/pulls/<number> URL (got: $url)" >&2
   return 1
 }
 
@@ -83,8 +100,16 @@ reject_repo_overrides "$@" || exit 1
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
 merge_args=()
-if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
+if [ "$PR_FORGE" = gitea ]; then
+  if ! caller_has_style_arg "$@"; then
+    merge_args=(--style squash)
+  fi
+  WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: no worktree recorded for task $ID; cannot resolve Gitea login context for tea" >&2; exit 1; }
+  ( cd "$WT" && tea pulls merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" )
+else
+  if ! caller_has_merge_method "$@"; then
+    merge_args=(--squash)
+  fi
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
 fi
-
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
