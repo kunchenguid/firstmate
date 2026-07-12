@@ -55,16 +55,13 @@ command -v jq >/dev/null 2>&1 || exit 0
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
-# --- scope precisely to the PRIMARY checkout --------------------------------
-# Excludes secondmate homes (the .fm-secondmate-home marker is written at seed
-# time regardless of whether the home was treehouse-leased or git-cloned; see
-# bin/fm-home-seed.sh) and ordinary crewmate/scout task worktrees of
-# firstmate-on-itself (bin/fm-spawn.sh only ever hands those out as genuine
-# linked `git worktree`s - it aborts the spawn otherwise - so a plain,
-# non-worktree checkout is never one of those). A linked worktree's git-dir
-# lives under the main repo's .git/worktrees/<name> and differs from the common
-# (shared) git-dir; only the main, non-worktree checkout has the two equal.
-[ -f "$FM_ROOT/.fm-secondmate-home" ] && exit 0
+# --- scope precisely to a PRIMARY checkout ----------------------------------
+# Excludes ordinary crewmate/scout task worktrees of firstmate-on-itself
+# (bin/fm-spawn.sh only ever hands those out as genuine linked `git worktree`s -
+# it aborts the spawn otherwise - so a plain, non-worktree checkout is never one
+# of those). A linked worktree's git-dir lives under the main repo's
+# .git/worktrees/<name> and differs from the common (shared) git-dir; only the
+# main, non-worktree checkout has the two equal.
 GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
 GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
 [ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0

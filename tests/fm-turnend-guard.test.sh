@@ -136,6 +136,19 @@ make_crewmate_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
+# A secondmate home's OWN child crew/scout worktree: a genuine linked git
+# worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
+# main-home child worktree. Removing the .fm-secondmate-home exclusion guards the
+# secondmate's own home but must still exempt its children by this same test.
+make_secondmate_child_worktree_dir() {
+  local home=$1 dir=$2
+  git -C "$home" worktree add --quiet -b fm/turnend-secondmate-child "$dir"
+  mkdir -p "$dir/state"
+  : > "$dir/AGENTS.md"
+  install_guard_scripts "$dir"
+  printf '%s\n' "$dir"
+}
+
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
@@ -312,14 +325,101 @@ test_hook_loop_guard_allows_retry() {
   pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
 }
 
-test_hook_silent_in_secondmate_home() {
+# A secondmate's OWN home runs a primary firstmate session and must be guarded
+# exactly like the main primary. This was the guard's proven blind spot: the
+# .fm-secondmate-home marker used to early-exit here, so an overnight secondmate
+# could end a turn with an unsupervised child and sit blind. Removing that marker
+# check makes the guard fire, mirroring the cd-guard.
+test_hook_blocks_in_secondmate_own_home() {
   local dir out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 0 "$status" "hook must never block inside a secondmate home"
-  [ -z "$out" ] || fail "hook produced output inside a secondmate home: $out"
-  pass "fm-turnend-guard: inert in a secondmate home (.fm-secondmate-home marker present) even when unhealthy"
+  expect_code 2 "$status" "hook must guard a secondmate's own home like the main primary when unhealthy"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: blocks a blind turn end in a secondmate's own home (.fm-secondmate-home no longer excludes it)"
+}
+
+# Idle-by-default: an empty-queue secondmate has no in-flight meta, so the guard
+# exits at the in-flight gate - never forcing a busy continuation loop.
+test_hook_silent_in_idle_secondmate_home() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-idle")
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must stay silent in an idle, empty-queue secondmate home"
+  [ -z "$out" ] || fail "idle secondmate home produced guard output: $out"
+  pass "fm-turnend-guard: idle-by-default - silent in a secondmate home with nothing in flight"
+}
+
+# The stop_hook_active loop guard bounds the secondmate to one forced
+# continuation per turn, exactly as it does for the main primary - no wedged,
+# un-endable session.
+test_hook_secondmate_loop_guard_allows_retry() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-loopguard")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" true); status=$?
+  expect_code 0 "$status" "hook must allow the stop in a secondmate home when stop_hook_active is already true"
+  [ -z "$out" ] || fail "secondmate loop-guarded retry produced output: $out"
+  pass "fm-turnend-guard: stop_hook_active=true allows the stop in a secondmate home (never blocks twice in one turn)"
+}
+
+# The guard's half of the deferred-death recovery loop in a secondmate home,
+# proven deterministically without a live model or any daemon: silent while the
+# watcher is live (the secondmate ends its turn and relies on the background
+# re-invoke), then blocks to force the re-arm once the watcher has exited and a
+# second child event lands. The live half - that Claude Code autonomously
+# re-invokes the model when the background watcher exits (Mechanism A) - is a
+# harness property recorded empirically in docs/turnend-guard.md; it needs a live
+# session and cannot be a hermetic CI assertion.
+test_hook_secondmate_reinvoke_recovery_loop() {
+  local dir pid identity out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-reinvoke")
+  : > "$dir/state/child1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "secondmate turn must end silently while its watcher is live (Stop #1)"
+  [ -z "$out" ] || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "guard nagged a healthy secondmate at Stop #1: $out"
+  }
+  # The watcher exits on the wake (its normal lifecycle) and a SECOND child event
+  # lands. On the re-invoked recovery turn the secondmate must re-arm; if it did
+  # not, the guard blocks that turn's end and forces the re-arm (Stop #2).
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  : > "$dir/state/child2.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "secondmate recovery turn must not end blind after the watcher exits (Stop #2)"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits"
+}
+
+# Removing the marker check must guard only the secondmate's OWN home, never its
+# children: a secondmate's linked crew/scout worktree stays exempt by the same
+# git-dir/git-common-dir test that exempts the main home's children.
+test_hook_silent_in_secondmate_child_worktree() {
+  local home dir out status
+  home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
+  dir="$TMP_ROOT/hook-sm-child-wt"
+  make_secondmate_child_worktree_dir "$home" "$dir" >/dev/null
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must stay exempt in a secondmate's own child crew/scout worktree"
+  [ -z "$out" ] || fail "hook produced output inside a secondmate's child worktree: $out"
+  pass "fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy"
 }
 
 test_hook_silent_in_crewmate_worktree() {
@@ -728,7 +828,11 @@ test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
-test_hook_silent_in_secondmate_home
+test_hook_blocks_in_secondmate_own_home
+test_hook_silent_in_idle_secondmate_home
+test_hook_secondmate_loop_guard_allows_retry
+test_hook_secondmate_reinvoke_recovery_loop
+test_hook_silent_in_secondmate_child_worktree
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
