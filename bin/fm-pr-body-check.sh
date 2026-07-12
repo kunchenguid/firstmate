@@ -19,6 +19,11 @@
 # PR against firstmate itself names "firstmate" and "crewmate" all the time.
 # Every flagged line is printed in full for exactly that reason.
 #
+# The trailing `## Pipeline` section no-mistakes generates is NOT scanned: it is
+# machine-written boilerplate that names no-mistakes on every PR, and a check
+# that can never come back clean is a check nobody reads. Everything above it -
+# the title, the intent text, and any prose - is scanned.
+#
 # Exit codes:
 #   0  nothing flagged
 #   1  flagged lines printed; read each one and judge it
@@ -47,6 +52,7 @@ esac
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-body-check.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 TMP="$WORK/text"
+SCAN="$WORK/scan"
 HITS="$WORK/hits"
 GH_ERR="$WORK/gh-err"
 
@@ -79,6 +85,11 @@ fi
 
 # Each entry is "<label>\t<extended regex>", matched case-insensitively.
 # Deliberately broad: this is a prompt to read a line, not a classifier.
+# Word boundaries are spelled out as character classes rather than `\b`, which is
+# a GNU extension: under BSD grep (stock macOS) a `\b` pattern would quietly
+# match nothing and report a dirty body clean.
+B_OPEN='(^|[^[:alnum:]_])'
+B_CLOSE='([^[:alnum:]_]|$)'
 PATTERNS=(
   $'meta-instruction\tdo(es)? ?n[o\']?t (re-?raise|raise|flag|surface|question|re-?open|suggest|comment|nitpick|review|change)'
   $'meta-instruction\talready (been )?(decided|made|agreed|settled|discussed)'
@@ -86,12 +97,29 @@ PATTERNS=(
   $'meta-instruction\t(user|captain|reviewer|maintainer) (explicitly )?(declined|decided|approved|asked|wants)'
   $'meta-instruction\tnot (a concern|surprising|in scope|to be flagged)'
   $'meta-instruction\t(title|body|pr) (must|should|shall) (not )?(be|name|add|mention|contain)'
-  $'second-person direction\t\\byou (must|should|shall|will|need to|are to|may not)\\b'
-  $'internal vocabulary\t\\b(firstmate|crewmate|secondmate|captain|scout task|ship task|task id|worktree|harness|no-mistakes|the brief|this brief)\\b'
+  "second-person direction"$'\t'"${B_OPEN}you (must|should|shall|will|need to|are to|may not)${B_CLOSE}"
+  "internal vocabulary"$'\t'"${B_OPEN}(firstmate|crewmate|secondmate|captain|scout task|ship task|task id|worktree|harness|no-mistakes|the brief|this brief)${B_CLOSE}"
   $'agent co-author\tco-authored-by:.*(claude|opus|sonnet|haiku|gpt|codex|copilot|agent|bot)'
 )
 
 printf '%s\n' "$TEXT" > "$TMP"
+
+# The no-mistakes pipeline appends its own trailing "## Pipeline" section to the
+# bodies it publishes, and the generated "Updates from [git push no-mistakes]"
+# link in it always matches the internal-vocabulary pattern. That footer is not
+# the author's writing, and a check that can never report clean is one nobody
+# reads: scan only the body ABOVE it. The cut needs BOTH the heading and the
+# generated link, so a "## Pipeline" heading someone actually wrote is still
+# scanned, and truncating a suffix keeps every line number intact.
+CUT=$(awk '
+  /^## Pipeline[[:space:]]*$/ { start = FNR; next }
+  start && /Updates from \[git push no-mistakes\]/ { print start; exit }
+' "$TMP")
+if [ -n "$CUT" ]; then
+  head -n "$((CUT - 1))" "$TMP" > "$SCAN"
+else
+  cp "$TMP" "$SCAN"
+fi
 
 # Every hit is recorded as "<line number>\t<label>"; associative arrays would
 # pin this script to bash 4, and stock macOS ships bash 3.2.
@@ -102,7 +130,7 @@ for entry in "${PATTERNS[@]}"; do
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     printf '%s\t%s\n' "${hit%%:*}" "$label" >> "$HITS"
-  done < <(grep -n -i -E -- "$regex" "$TMP" || true)
+  done < <(grep -n -i -E -- "$regex" "$SCAN" || true)
 done
 
 if [ ! -s "$HITS" ]; then
@@ -121,7 +149,7 @@ awk -F'\t' '
     next
   }
   FNR in labels { printf "  line %s [%s]: %s\n", FNR, labels[FNR], $0 }
-' "$HITS" "$TMP"
+' "$HITS" "$SCAN"
 
 cat <<'EOF'
 

@@ -148,6 +148,89 @@ SH
   pass "fm-pr-body-check.sh: gh's stderr is never folded into the scanned body"
 }
 
+# no-mistakes appends this footer to every body it publishes. Its generated link
+# names no-mistakes, so scanning it would flag every single ship forever, and a
+# check that can never report clean stops being read.
+write_pipeline_footer() {
+  cat >> "$1" <<'EOF'
+
+## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<details>
+<summary>Review - passed</summary>
+
+No issues found.
+
+</details>
+EOF
+}
+
+test_pipeline_footer_is_not_scanned() {
+  local body out code=0
+  body="$TMP_ROOT/footer-clean.md"
+  write_clean_body "$body"
+  write_pipeline_footer "$body"
+  out=$("$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 0 "$code" "the pipeline's own generated footer flagged an otherwise clean body"
+  assert_contains "$out" "clean" "a clean body under the pipeline footer did not report clean"
+  pass "fm-pr-body-check.sh: the pipeline's generated footer is not scanned"
+}
+
+test_leak_above_the_pipeline_footer_still_flags() {
+  local body out code=0
+  body="$TMP_ROOT/footer-dirty.md"
+  write_dirty_body "$body"
+  write_pipeline_footer "$body"
+  out=$("$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 1 "$code" "a leaky intent line above the pipeline footer was not flagged"
+  assert_contains "$out" "do not re-raise" "the leaky line above the footer was not printed"
+  assert_not_contains "$out" "git push no-mistakes" "the generated footer line was reported as a leak"
+  pass "fm-pr-body-check.sh: a leak above the footer still flags, without footer noise"
+}
+
+# The vocabulary pattern must not be weakened by the footer carve-out: intent
+# prose that genuinely names no-mistakes is still the author's public writing.
+test_authored_internal_vocabulary_still_flags() {
+  local body out code=0
+  body="$TMP_ROOT/authored-vocab.md"
+  cat > "$body" <<'EOF'
+Tidy the parser
+
+The crewmate runs no-mistakes from its worktree before the captain merges.
+EOF
+  write_pipeline_footer "$body"
+  out=$("$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 1 "$code" "authored internal vocabulary was not flagged under a pipeline footer"
+  assert_contains "$out" "internal vocabulary" "the authored vocabulary line was not labeled"
+  assert_contains "$out" "runs no-mistakes from its worktree" "the authored vocabulary line was not printed"
+  pass "fm-pr-body-check.sh: authored internal vocabulary flags even when a footer is present"
+}
+
+# A GNU-only \b under BSD grep matches nothing and reports a dirty body clean -
+# the worst failure this tool has. Assert the two boundary patterns FLAG.
+test_word_boundary_patterns_match_without_gnu_extensions() {
+  local body out code=0
+  if grep -v '^[[:space:]]*#' "$CHECK" | grep -F -q '\b'; then
+    fail "the check's code still uses GNU-only word boundaries, which BSD grep does not honor"
+  fi
+
+  body="$TMP_ROOT/boundaries.md"
+  cat > "$body" <<'EOF'
+Tidy the parser
+
+You must not re-order these tokens.
+The worktree is torn down by firstmate once the no-mistakes run is green.
+EOF
+  out=$("$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 1 "$code" "the boundary-anchored patterns matched nothing on a known-dirty body"
+  assert_contains "$out" "second-person direction" "second-person direction stopped matching"
+  assert_contains "$out" "internal vocabulary" "internal vocabulary stopped matching"
+  assert_contains "$out" "You must not re-order" "the second-person line was not printed"
+  pass "fm-pr-body-check.sh: boundary-anchored patterns match on GNU and BSD grep alike"
+}
+
 # Stock macOS ships bash 3.2, so the script must not need bash 4 features.
 test_no_bash4_only_constructs() {
   assert_no_grep 'declare -A' "$CHECK" "the check uses associative arrays, which bash 3.2 cannot run"
@@ -181,5 +264,9 @@ test_output_carries_the_gh_pr_edit_noop_workaround
 test_second_person_and_agent_coauthor_are_flagged
 test_live_pr_body_is_read_from_the_api
 test_gh_stderr_never_becomes_body_text
+test_pipeline_footer_is_not_scanned
+test_leak_above_the_pipeline_footer_still_flags
+test_authored_internal_vocabulary_still_flags
+test_word_boundary_patterns_match_without_gnu_extensions
 test_no_bash4_only_constructs
 test_bad_url_and_fetch_failure_exit_2

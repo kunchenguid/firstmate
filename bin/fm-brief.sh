@@ -283,6 +283,7 @@ EOF
 PR_BODY_CHECK=$(shell_quote "$FM_ROOT/bin/fm-pr-body-check.sh")
 public_pr_section() {
   local intent_clause=$1
+  local final_done=$2
   cat <<EOF
 # The PR you open is public writing
 Every word of the PR title and body is PUBLIC.
@@ -291,22 +292,23 @@ It is read by maintainers who know nothing about how the change was produced, so
 It must contain no meta-instructions aimed at a reviewer or a bot ("do not re-raise", "do not flag as surprising", "already decided"), no second-person direction, no internal vocabulary (firstmate, crewmate, captain, brief, task id, harness, worktree, scout, ship), and no agent co-author.
 The rule is unconditional - assume every PR body is read by a stranger - and it matters most on a repo the captain does not own.
 
-**Verify what you actually published, before you report done.**
+**Verify what you actually published, before you report the PR done.**
+This is about your FINAL status line, \`$final_done\` - the one that names the PR; it does not apply to any earlier \`done:\` append your mode makes before a PR exists.
 Once the PR exists, re-read its LIVE body from the API - never trust your memory of the text you passed in - and confirm it is clean:
 \`$PR_BODY_CHECK {url}\`
 It prints the live body's suspicious lines. READ each flagged line and judge it; a match is a line to inspect, not a verdict, so never act on a hit count alone (a PR about firstmate legitimately says "firstmate").
-If the body is dirty, rewrite it and re-verify before appending \`done:\`.
+If the body is dirty, rewrite it and re-verify before appending \`$final_done\`.
 Do NOT rewrite it with \`gh pr edit --body\`: that can silently NO-OP (it has failed with "GraphQL: Projects (classic) is being deprecated", changing nothing while reporting success, which then looks like something else clobbering your edit). Use the REST API:
 \`gh api -X PATCH repos/OWNER/REPO/pulls/{n} -F body=@{file}\`
 This one repair intentionally bypasses \`gh-axi\`, which exposes no \`api\` subcommand, so raw \`gh api\` is the correct and sanctioned tool for it; every other GitHub operation still goes through \`gh-axi\`.
-Reporting \`done\` on a public body you have not read back live is not acceptable.
+Reporting \`$final_done\` on a public body you have not read back live is not acceptable.
 EOF
 }
 
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    PUBLIC_PR=$(public_pr_section "You write that body yourself when you open the PR, so it is your writing that reaches the public.")
+    PUBLIC_PR=$(public_pr_section "You write that body yourself when you open the PR, so it is your writing that reaches the public." "done: PR {url}")
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -332,7 +334,7 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    PUBLIC_PR=$(public_pr_section "This includes the \`--intent\` text you pass to no-mistakes: it is rendered VERBATIM into the \`## Intent\` section of the PR body, so it is public, reviewer-facing prose - not a note to yourself, to the pipeline, or to firstmate.")
+    PUBLIC_PR=$(public_pr_section "This includes the \`--intent\` text you pass to no-mistakes: it is rendered VERBATIM into the \`## Intent\` section of the PR body, so it is public, reviewer-facing prose - not a note to yourself, to the pipeline, or to firstmate." "done: PR {url} checks green")
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'

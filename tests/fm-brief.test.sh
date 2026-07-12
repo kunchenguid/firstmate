@@ -140,6 +140,18 @@ test_public_pr_contract_on_pr_opening_modes() {
       "$id: brief does not say the raw gh api repair is a sanctioned exception to the gh-axi rule"
   done
 
+  # no-mistakes appends a pre-PR `done: {summary}` before any PR exists, so the
+  # verify step must name the FINAL, PR-naming done line or a crewmate could try
+  # to check a PR that is not there yet.
+  # shellcheck disable=SC2016 # Literal backticks must reach the brief text unexpanded.
+  assert_grep 'This is about your FINAL status line, `done: PR {url} checks green`' \
+    "$home/data/brief-public-nm-e1/brief.md" \
+    "no-mistakes brief does not tie the live-body check to its final done line"
+  # shellcheck disable=SC2016 # Literal backticks must reach the brief text unexpanded.
+  assert_grep 'This is about your FINAL status line, `done: PR {url}`' \
+    "$home/data/brief-public-dp-e2/brief.md" \
+    "direct-PR brief does not tie the live-body check to its final done line"
+
   assert_grep "rendered VERBATIM into the \`## Intent\` section" "$home/data/brief-public-nm-e1/brief.md" \
     "no-mistakes brief does not say the --intent text is published verbatim"
   assert_no_grep "--intent" "$home/data/brief-public-dp-e2/brief.md" \
