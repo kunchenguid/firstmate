@@ -13,6 +13,7 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
+# shellcheck disable=SC2034 # Referenced by tests/lib.sh cleanup helpers.
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 

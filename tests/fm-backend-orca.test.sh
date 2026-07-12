@@ -800,7 +800,7 @@ mod = runpy.run_path(sys.argv[1])
 print(mod["PROTOCOL_VERSION"])
 PY
 )
-  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME= python3 - "$ROOT/bin/fmod" <<'PY'
+  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME='' python3 - "$ROOT/bin/fmod" <<'PY'
 import os
 import runpy
 import sys

@@ -20,6 +20,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# shellcheck disable=SC2034 # Referenced by tests/lib.sh cleanup helpers.
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
 
