@@ -59,6 +59,15 @@ assert_contains "$out" "https://stub.example.invalid/report.html" "html publish 
 staged=$(tail -1 "$CALLS")
 assert_present "$(dirname "$staged")/shot.png" "sibling asset was staged next to the page"
 
+# A self-contained page with no src/href at all is the normal artifact shape, not a
+# failure: grep finds nothing, and under pipefail that used to exit 1 silently.
+cat >"$EV/ev-2/selfcontained.html" <<'HTML'
+<!doctype html><html><body><h1>all inlined</h1><p>no refs here</p></body></html>
+HTML
+out=$("$PUBLISH" "$EV/ev-2/selfcontained.html" 2>/dev/null)
+expect_code 0 "$?" "html with no src/href publishes"
+assert_contains "$out" "https://stub.example.invalid/selfcontained.html" "self-contained html prints the URL"
+
 # --- text evidence: wrapped in a <pre>, html-escaped -------------------------
 printf '<not-a-tag> & done\n' >"$EV/ev-1/stdout.txt"
 out=$("$PUBLISH" "$EV/ev-1/stdout.txt" 2>/dev/null)
@@ -89,6 +98,45 @@ api_key = "abcdefghijklmnopqrstuvwx"
 密级：机密
 EOF
 [ "$(wc -l <"$CALLS")" = "$before_calls" ] || fail "secret gate let html-preview run"
+
+# The keyword rule is spelled lowercase, but an env dump is UPPERCASE - and that is
+# the single most common way a credential reaches an evidence file. A case-sensitive
+# gate published these (an internal page really did get built from the first one).
+before_calls=$(wc -l <"$CALLS")
+i=0
+while IFS= read -r secret; do
+  i=$((i + 1))
+  printf '%s\n' "$secret" >"$EV/ev-1/upper-$i.txt"
+  out=$("$PUBLISH" "$EV/ev-1/upper-$i.txt" 2>/dev/null)
+  expect_code 1 "$?" "secret gate refuses uppercase fixture $i"
+  assert_not_contains "$out" "http" "uppercase secret gate printed a URL for fixture $i"
+done <<'EOF'
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_SESSION_TOKEN=FwoGZXIvYXdzEBYaDHNlc3Npb25leGFtcGxlVE9LRU4x
+ANTHROPIC_AUTH_TOKEN=abcdefghijklmnopqrstuvwx
+DB_PASSWORD=hunter2hunter2hunter2
+Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1lMTIzNDU2
+EOF
+[ "$(wc -l <"$CALLS")" = "$before_calls" ] || fail "uppercase secret gate let html-preview run"
+
+# ...and the lowercase forms the gate already caught must keep being caught.
+printf 'aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n' >"$EV/ev-1/lower.txt"
+out=$("$PUBLISH" "$EV/ev-1/lower.txt" 2>/dev/null)
+expect_code 1 "$?" "lowercase secret is still refused"
+assert_not_contains "$out" "http" "lowercase secret gate printed a URL"
+
+# Over-refusal is the wrong failure too: a gate that eats ordinary evidence just
+# teaches people to route around it. Prose that merely mentions the keywords, with
+# no `key = <16+ chars of value>`, must still publish.
+cat >"$EV/ev-2/prose.html" <<'HTML'
+<!doctype html><html><body>
+<p>Repro: the login form rejects the password before the api key is even read.</p>
+<pre>GET /v1/session -> 401 (no Authorization header)</pre>
+</body></html>
+HTML
+out=$("$PUBLISH" "$EV/ev-2/prose.html" 2>/dev/null)
+expect_code 0 "$?" "evidence that only mentions the keywords still publishes"
+assert_contains "$out" "https://stub.example.invalid/prose.html" "non-secret prose prints the URL"
 
 # The label is interpolated into the page, so it is gated too.
 out=$(NM_EVIDENCE_LABEL='token=ghp_abcdefghijklmnopqrstuvwxyz0123' "$PUBLISH" "$EV/ev-1/shot.png" 2>/dev/null)
