@@ -47,10 +47,14 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
-1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear. Empty-state: "Nothing needs your action right now."
-2. **Recently Landed** - work completed since the prior report: merged PRs, completed scouts, and finished local-only merges, across the main fleet and every registered secondmate home. Empty-state: "Nothing has landed since your last report."
-3. **Underway** - live work progressing on its own, one line of current state per direct report. Empty-state: "Nothing is underway."
-4. **Charted Next** - queued or gated work waiting on the fleet or a date, never on the captain. Empty-state: "Nothing is queued."
+1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
+   Empty-state: "Nothing needs your action right now."
+2. **Recently Landed** - work completed since the prior report: merged PRs, completed scouts, and finished local-only merges, across the main fleet and every registered secondmate home.
+   Empty-state: "Nothing has landed since your last report."
+3. **Underway** - live work progressing on its own, one line of current state per direct report.
+   Empty-state: "Nothing is underway."
+4. **Charted Next** - queued or gated work waiting on the fleet or a date, never on the captain.
+   Empty-state: "Nothing is queued."
 
 Rules that keep the contract unambiguous:
 
