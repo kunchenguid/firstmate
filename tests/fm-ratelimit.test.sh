@@ -284,47 +284,59 @@ test_resume_self_recovered_clears_without_submit() {
   pass "a self-recovered idle pane clears its marker without submitting continue"
 }
 
-test_overload_regex_matches_only_529() {
-  local match
+test_overload_regex_is_opt_in() {
+  local match overload_regex
+  overload_regex='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
   if fm_ratelimit_render_match 'ordinary line
 the model is overloaded right now
 please try again later' >/dev/null; then
-    fail "tightened overload regex still matched generic retry phrasing"
+    fail "disabled overload regex still matched generic retry phrasing"
   fi
   if fm_ratelimit_render_match 'ordinary line
 another line
 API Error: 529' >/dev/null; then
-    fail "bare API Error: 529 footer matched as overload"
+    fail "disabled overload regex matched bare API Error: 529"
   fi
-  # A realistic idle-529 render: claude draws the overload as a tool-result line
-  # with a leading continuation glyph and trailing overloaded_error JSON. The
-  # loosened default must still classify it as overload.
-  match=$(fm_ratelimit_render_match 'ordinary line
+  if fm_ratelimit_render_match 'ordinary line
+another line
+- API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' >/dev/null; then
+    fail "disabled overload regex matched dash-prefixed API Error: 529"
+  fi
+  if fm_ratelimit_render_match 'ordinary line
+another line
+: API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' >/dev/null; then
+    fail "disabled overload regex matched colon-prefixed API Error: 529"
+  fi
+  if fm_ratelimit_render_match 'ordinary line
+another line
+  ⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' >/dev/null; then
+    fail "disabled overload regex matched realistic glyph+JSON 529 render"
+  fi
+  match=$(FM_OVERLOAD_REGEX="$overload_regex" fm_ratelimit_render_match 'ordinary line
 another line
   ⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}')
   case "$match" in
     *"$(printf '\t')"overload) ;;
-    *) fail "realistic glyph+JSON 529 render did not match as overload: $match" ;;
+    *) fail "explicit FM_OVERLOAD_REGEX did not classify glyph+JSON 529 render as overload: $match" ;;
   esac
-  # A 529 merely mentioned mid-transcript (preceded by words) must NOT match, so
-  # the loosened prefix stays anchored near line start rather than matching prose.
   if fm_ratelimit_render_match 'ordinary line
 another line
 The previous outage was API Error: 529 in a log, not a live footer.' >/dev/null; then
     fail "mid-transcript API Error: 529 mention matched as overload"
   fi
-  pass "overload matcher requires the real Claude 529 render shape"
+  pass "overload matcher is disabled by default and opt-in via FM_OVERLOAD_REGEX"
 }
 
-# A transient API Error: 529 overload parks with the SHORT FM_OVERLOAD_FALLBACK
-# (default 120s), not the hourly FM_RATELIMIT_FALLBACK a quota reset uses, so an
-# idle overloaded pane is not suppressed for a full quota-reset window before the
-# first auto-resume attempt. The quota fallback stays 3600s (the two are
-# independent knobs).
+# An opted-in transient API Error: 529 overload parks with the SHORT
+# FM_OVERLOAD_FALLBACK (default 120s), not the hourly FM_RATELIMIT_FALLBACK a
+# quota reset uses, so an idle overloaded pane is not suppressed for a full
+# quota-reset window before the first auto-resume attempt. The quota fallback
+# stays 3600s (the two are independent knobs).
 test_overload_uses_short_fallback_distinct_from_quota() {
-  local now match reset kind
+  local now match reset kind overload_regex
   now=1000000000
-  match=$(fm_ratelimit_render_match 'ordinary line
+  overload_regex='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
+  match=$(FM_OVERLOAD_REGEX="$overload_regex" fm_ratelimit_render_match 'ordinary line
 another line
   ⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
@@ -333,7 +345,7 @@ EOF
   [ "$kind" = overload ] || fail "glyph+JSON 529 render did not classify as overload: $match"
   [ "$reset" = "$((now + 120))" ] \
     || fail "overload used the wrong default fallback: reset=$reset, expected $((now + 120))"
-  match=$(FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now")
+  match=$(FM_OVERLOAD_REGEX="$overload_regex" FM_OVERLOAD_FALLBACK=45 fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -348,7 +360,7 @@ EOF
   [ "$kind" = ratelimit ] || fail "quota footer did not classify as ratelimit: $match"
   [ "$reset" = "$((now + 3600))" ] \
     || fail "quota fallback changed from 3600s: reset=$reset, expected $((now + 3600))"
-  pass "API Error: 529 parks with the short overload fallback while quota reset fallback stays 3600s"
+  pass "opt-in API Error: 529 parks with the short overload fallback while quota reset fallback stays 3600s"
 }
 
 # While a pane stays parked, the watcher re-classifies its footer every poll but
@@ -357,8 +369,9 @@ EOF
 # parked for ~an hour does not re-spawn python (quota) or slide its reset forward
 # (overload) once per poll only to discard the recomputed value.
 test_render_match_reuses_marker_reset_without_reparsing() {
-  local now match reset kind
+  local now match reset kind overload_regex
   now=1000000000
+  overload_regex='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
   # A quota footer with no parseable reset time would normally fall back to
   # now+3600; with a reuse-reset the recorded epoch is returned verbatim instead.
   match=$(fm_ratelimit_render_match 'ordinary line
@@ -369,8 +382,8 @@ $match
 EOF
   [ "$kind" = ratelimit ] || fail "reuse path did not classify footer as ratelimit: $match"
   [ "$reset" = 1234567890 ] || fail "render_match did not reuse the supplied quota reset: reset=$reset"
-  # Overload reuse likewise pins the reset instead of sliding to now+120 each poll.
-  match=$(fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now" 1111111111)
+  # Opted-in overload reuse likewise pins the reset instead of sliding to now+120 each poll.
+  match=$(FM_OVERLOAD_REGEX="$overload_regex" fm_ratelimit_render_match '⎿  API Error: 529 {"type":"overloaded_error","message":"Overloaded"}' "$now" 1111111111)
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -477,7 +490,7 @@ test_resume_pending_input_does_not_type_continue
 test_resume_prior_pending_continue_does_not_double_type
 test_marker_write_preserves_active_episode_reset
 test_resume_self_recovered_clears_without_submit
-test_overload_regex_matches_only_529
+test_overload_regex_is_opt_in
 test_overload_uses_short_fallback_distinct_from_quota
 test_render_match_reuses_marker_reset_without_reparsing
 test_marker_reset_reads_only_matching_episode

@@ -597,7 +597,7 @@ SH
 # --- ratelimit markers clear when the pane returns to activity ----------------
 # The marker set (state/<id>.ratelimit[.attempts][.failed]) must not outlive the
 # rate-limit episode. Once the pane content changes and the render no longer shows a
-# quota/overload footer, the crew is active again: the whole set is cleared so a
+# quota or opted-in overload footer, the crew is active again: the whole set is cleared so a
 # stuck .failed verdict cannot forbid parking for the rest of the task, and a stale
 # past reset cannot be reused by a later episode. A genuinely new episode then parks
 # and wakes fresh, proving the auto-resume feature survives across episodes.

@@ -152,7 +152,7 @@ Classify each wake this way:
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
 - `ratelimited` -> self-handle.
-  A pane parked on a Claude quota or `API Error: 529` overload footer needs no captain action.
+  A pane parked on a Claude quota footer or an opted-in `API Error: 529` overload footer needs no captain action.
   The daemon's housekeeping runs the same quota-parking auto-resume as the always-on watcher, submitting `continue` to a still-limited pane only when its composer is empty after the reset margin.
   It also parks a rate-limited supervisor pane of its own, marking that self-pane resume with the sentinel so it is not mistaken for a captain return.
   Only an exhausted auto-resume (`FM_RATELIMIT_MAX_RESUMES` attempts) escalates

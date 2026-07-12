@@ -34,12 +34,12 @@
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
 # footer set (mirrors fm-watch.sh / the daemon).
-# Claude quota parking override: FM_RATELIMIT_REGEX and FM_OVERLOAD_REGEX match
-# only the footer render inspected by fm_ratelimit_render_match, never the full
-# transcript. FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds for a
-# quota wait (default 3600s, ~an hourly reset). FM_OVERLOAD_FALLBACK is the
-# separate, shorter fallback for a terminal "API Error: 529" overload (default
-# 120s), since overloads are transient rather than hourly.
+# Claude quota parking override: FM_RATELIMIT_REGEX matches only the footer
+# render inspected by fm_ratelimit_render_match, never the full transcript.
+# FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds for a quota wait
+# (default 3600s, ~an hourly reset). Transient "API Error: 529" overload parking
+# is opt-in: set FM_OVERLOAD_REGEX to a calibrated footer-line signature before
+# FM_OVERLOAD_FALLBACK (default 120s) is used.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -57,21 +57,12 @@
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+reached\.[[:space:]]+Your[[:space:]]+limit[[:space:]]+will[[:space:]]+reset[[:space:]]+at[[:space:]]+[^[:cntrl:]]+'
-# Claude renders an idle overload as a tool-result line: a leading continuation
-# glyph (e.g. "⎿ ") before "API Error: 529", and often trailing JSON such as
-# {"type":"overloaded_error",...}. fm_ratelimit_footer_line_match full-line
-# anchors this, so the default requires a visible non-alphanumeric prefix
-# (glyph/punctuation) before the literal and a trailing overloaded_error JSON
-# payload after it. That keeps bare transcript/log lines ending in
-# "API Error: 529" from being parked. This shape is a best-effort default: it
-# is deliberately strict rather than broad, and is not yet confirmed against a
-# captured real idle-529 render. If a real render ever splits the glyph and the
-# JSON across separate captured lines (or reshapes them), this pattern safely
-# no-ops - the pane is not parked, normal stale/wedge detection still surfaces
-# the crew, and primary quota-reset auto-resume is unaffected. Verify/tune this
-# default against a real idle-529 render; override via FM_OVERLOAD_REGEX if the
-# actual footer differs.
-FM_OVERLOAD_REGEX_DEFAULT='[^[:alnum:][:space:]][^[:alnum:]]*API Error: 529[[:space:]]+\{[^[:cntrl:]]*"type"[[:space:]]*:[[:space:]]*"overloaded_error"[^[:cntrl:]]*\}'
+# Transient overload 529 detection is disabled by default because no captured
+# real idle-529 render has calibrated a safe stock pattern. Operators can opt in
+# with FM_OVERLOAD_REGEX once they have a real footer-line sample; the same
+# fm_ratelimit_footer_line_match full-line wrapper still prevents transcript
+# substring matches.
+FM_OVERLOAD_REGEX_DEFAULT=''
 
 # FM_INJECT_MARK: the away-mode daemon's in-band sentinel (U+2063 INVISIBLE
 # SEPARATOR, UTF-8 e2 81 a3, untypable on a normal keyboard and - unlike the
