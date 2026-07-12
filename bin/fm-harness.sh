@@ -52,7 +52,7 @@ detect_own() {
       # cursor-agent's interactive pane runs as "cursor-agent" (its bash launcher
       # execs node with `exec -a "$0"`, so argv[0] carries the cursor-agent path);
       # agy is a native binary named "agy".
-      *cursor-agent*|*cursor*) echo cursor; return ;;
+      *cursor-agent*) echo cursor; return ;;
       agy) echo agy; return ;;
       pi) echo pi; return ;;
       node*|python*)
@@ -63,7 +63,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
-          *cursor-agent*|*cursor*) echo cursor; return ;;
+          *cursor-agent*) echo cursor; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
