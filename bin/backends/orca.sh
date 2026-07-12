@@ -97,7 +97,10 @@ fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
   fm_backend_orca_tool_check || return 1
   fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null || return 1
   actual_cwd=$(fmod get-cwd "$session_id") || return 1
-  if [ "$actual_cwd" != "$cwd" ]; then
+  # fmod get-cwd normalizes the path with a trailing slash; the caller-supplied
+  # $cwd never has one. Compare on the canonical stripped form so a sane create
+  # is not misclassified as a cwd mismatch and aborted.
+  if [ "${actual_cwd%/}" != "${cwd%/}" ]; then
     echo "error: orca session $session_id attached at $actual_cwd, expected $cwd" >&2
     return 1
   fi
@@ -186,7 +189,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
       fi
       return 1
     fi
-    if [ "$actual_cwd" != "$wt_path" ]; then
+    if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
       echo "error: orca session $session_id attached at $actual_cwd, expected $wt_path" >&2
       fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
       git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
