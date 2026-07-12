@@ -20,6 +20,8 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const REASONS = {
+  // "Address the target by absolute path" means passing an absolute target to
+  // the intended command, not running `cd /absolute/path`, which remains denied.
   "persistent-cd":
     "a persistent top-level directory change in the primary firstmate checkout is blocked; it would move the shell out of the home so a later firstmate-owned command runs inside a project clone. Address files or repositories directly, for example with an absolute-path operand or git -C <dir>, or scope the change to a subshell like (cd <dir> && ...).",
 };

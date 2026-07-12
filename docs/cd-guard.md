@@ -69,16 +69,19 @@ Every deny carries one stable code in square brackets before its prose reason.
 | --- | --- |
 | `persistent-cd` | A top-level `cd`/`pushd`/`popd` would persistently change the primary shell's own working directory. |
 
-The reason text names the safe alternatives (absolute path, `git -C <dir>`, or a subshell) so the block is self-documenting at the point of use.
+In the reason text, "Address the target by absolute path" means invoking the intended command with an absolute target argument, such as `touch /home/state/file` or `git -C /home/project status`.
+It never means `cd /home/project`, because an absolute-path `cd` remains a persistent directory change and is denied.
+The other safe alternative is to scope the directory change to a subshell.
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports the same entry forms as the watcher-arm transport:
+`bin/fm-cd-pretool-check.sh` supports all five harness entry shapes used by the tracked adapters:
 
-- Stdin JSON at `.tool_input.command` for Claude and Codex.
-- Stdin JSON at `.toolInput.command` for Grok.
-- `--command <exact string>` for OpenCode and Pi.
-- `--claude` to preserve Claude's stderr-only deny requirement.
+- Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
+- Codex sends stdin JSON at `.tool_input.command` without `--claude`.
+- Grok sends stdin JSON at `.toolInput.command`.
+- OpenCode sends the exact command string through `--command <exact string>`.
+- Pi sends the exact command string through `--command <exact string>`.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
 The prefilter removes ordinary single quotes, double quotes, backslashes, carriage returns, and newlines before fast-allowing any command that carries no `cd`, `pushd`, or `popd` substring and no quoting-decoder marker (`$'` ANSI-C or `$"` locale), so quoted or escaped command-word fragments delegate to the policy while most commands never pay for the git scoping calls or the Node process.
