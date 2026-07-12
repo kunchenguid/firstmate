@@ -106,11 +106,12 @@ test_guard_warnings() {
   state="$dir/state"
   err="$dir/guard.err"
 
-  # (1) watcher down (no beacon) + two in-flight tasks + a queued wake.
-  # FM_ROOT_OVERRIDE points the worktree-tangle check at a non-git dir so it stays
-  # inert here; this case is about the watcher-down banner, not the tangle guard.
+  # (1) watcher down (no beacon) + two in-flight tasks + a queued wake + an
+  # arm-death marker from a prior silent cycle death. FM_ROOT_OVERRIDE points the
+  # worktree-tangle check at a non-git dir so it stays inert here.
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
+  printf 'ts=1\ndetail=arm cycle ended with no live successor while tasks are in flight\n' > "$state/.watcher-arm-dead"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
@@ -121,6 +122,9 @@ test_guard_warnings() {
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
   grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
+  grep -F 'Last arm death: arm cycle ended with no live successor while tasks are in flight' "$err" >/dev/null \
+    || fail "guard banner did not name the arm-death marker: $(cat "$err")"
+  grep -F 'state/.watcher-arm-dead' "$err" >/dev/null || fail "guard banner omitted the arm-death marker path"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
   grep -F 'resume supervision' "$err" >/dev/null || fail "guard banner missing the harness-aware fix command"
@@ -672,12 +676,58 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   [ "$status" -ne 124 ] || fail "arm never returned for an unconfirmable watcher"
   [ "$status" -ne 0 ] || fail "arm exited zero when no fresh watcher could be confirmed"
   grep -F 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" >/dev/null || fail "arm did not print the FAILED line"
+  [ -f "$state/.watcher-arm-dead" ] || fail "FAILED path did not write the arm-death marker"
+  grep -F 'detail=no live watcher with a fresh beacon' "$state/.watcher-arm-dead" >/dev/null \
+    || fail "arm-death marker missing detail: $(cat "$state/.watcher-arm-dead" 2>/dev/null || true)"
   ! grep -qE 'watcher: (healthy|attached)' "$armout" || fail "arm reported attached/healthy off a stale beacon"
   ! grep -qF 'watcher: started' "$armout" || fail "arm falsely reported started"
   is_live_non_zombie "$live" || fail "arm killed the unrelated live lock holder"
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
+}
+
+# When an attached arm cycle ends with tasks still in flight and no healthy
+# successor, the death must be loud (FAILED line + durable marker + non-zero).
+# Idle homes (no .meta) still exit 0 so empty-fleet attach teardown stays quiet.
+test_arm_attached_death_loud_when_tasks_in_flight() {
+  local dir state fakebin out armout i wpid armpid status
+  dir=$(make_case arm-attach-death-loud)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  printf 'window=test:fm-live\nkind=ship\n' > "$state/live-task.meta"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not report attach: $(cat "$armout")"
+  [ ! -e "$state/.watcher-arm-dead" ] || fail "successful attach left a stale arm-death marker"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 0 ] || fail "attached arm exited zero with tasks in flight after seed died: $(cat "$armout")"
+  grep -F 'watcher: FAILED - arm cycle ended with no live successor while tasks are in flight' "$armout" >/dev/null \
+    || fail "attached arm death was not loud: $(cat "$armout")"
+  [ -f "$state/.watcher-arm-dead" ] || fail "loud arm death did not write state/.watcher-arm-dead"
+  grep -F 'detail=arm cycle ended with no live successor while tasks are in flight' "$state/.watcher-arm-dead" >/dev/null \
+    || fail "arm-death marker missing expected detail: $(cat "$state/.watcher-arm-dead")"
+  pass "attached arm cycle death is loud when tasks are in flight (FAILED + marker + non-zero)"
 }
 
 test_pid_identity_is_locale_invariant() {
@@ -725,3 +775,4 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_arm_attached_death_loud_when_tasks_in_flight

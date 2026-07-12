@@ -235,11 +235,14 @@ signal_reason_is_actionable() {  # <file> ...
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
+# authoritatively (not the status log) is what keeps live run-step precedence: a
+# crew that appended paused: but then STARTED a run reports working, never paused.
+# A trailing paused: with only a terminal historical run (failed/done) is reported
+# as paused by fm-crew-state.sh, so this class returns paused and the watcher
+# absorbs on the long recheck cadence. NOT a pure read: fm-crew-state.sh may make
+# a bounded no-mistakes call, so callers run it only on no-verb signal and
+# first-sighting stale paths, never every wake. FM_CREW_STATE_BIN lets tests stub
+# the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }

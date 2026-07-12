@@ -213,6 +213,11 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  # Post-fix contract from fm-crew-state.sh: trailing paused + terminal historical
+  # run reports paused (not failed), so absorb class is paused not none.
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for provider recovery · historical run failed'
+  [ "$(crew_absorb_class a)" = paused ] || fail "paused-over-historical-failed not classed paused"
+  crew_is_paused a || fail "crew_is_paused missed paused-over-historical-failed"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -588,6 +593,43 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# Regression for 2026-07-12: trailing paused: + failed historical run-step used to
+# make crew_absorb_class return none (fm-crew-state reported failed from the dead
+# run), so the idle pane re-surfaced every poll. Fixed crew-state reports paused
+# with a historical-run note; the watcher must absorb that on the long recheck
+# cadence exactly like any other declared pause.
+test_nonterminal_stale_paused_over_historical_failed_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case nonterminal-stale-paused-hist-fail); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held-hist-fail"
+  printf 'idle, holding after a failed validation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held-hist.meta"
+  statusf="$state/held-hist.status"
+  printf 'paused: holding for provider recovery\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-hist_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding after a failed validation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for provider recovery · historical run failed'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced paused-over-historical-failed instead of absorbing: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "paused-over-historical-failed printed a wake during absorb: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "paused-over-historical-failed enqueued a wake during absorb"
+  [ -e "$state/.paused-$key" ] || fail "paused flag not recorded for paused-over-historical-failed"
+  [ ! -e "$state/.stale-since-$key" ] || fail "paused-over-historical-failed must not start the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "trailing paused: over a historical failed run-step is absorbed on the long recheck cadence"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1116,6 +1158,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_nonterminal_stale_paused_over_historical_failed_absorbed
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

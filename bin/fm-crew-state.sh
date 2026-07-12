@@ -21,13 +21,16 @@
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch, active or terminal
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
+#      A live run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      A second exception: a deliberate trailing paused: status outranks a
+#      terminal historical run (failed/done) - a past failed run is not evidence
+#      the pane needs attention; a live working/parked run still wins over paused.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -538,6 +541,21 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  # A deliberate trailing paused: declaration outranks a terminal historical
+  # run-step. A failed/done past run is not evidence the pane needs attention;
+  # the watcher absorbs that stale on the long pause-recheck cadence instead of
+  # resurfacing every poll. A live working or parked run still wins (checked by
+  # falling through only for failed|done). Without this, crew_absorb_class
+  # returns none on a failed historical run and the pause declaration makes
+  # noise strictly worse than a terminal done: line (surfaced once).
+  if status_is_paused "$LOG_LINE"; then
+    case "$RUN_STATE" in
+      failed|done)
+        emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}historical run $RUN_STATE"
+        ;;
+    esac
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

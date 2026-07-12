@@ -92,6 +92,11 @@ if [ "$watcher_fresh" = false ]; then
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
     printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    if [ -f "$STATE/.watcher-arm-dead" ]; then
+      arm_dead_detail=$(grep '^detail=' "$STATE/.watcher-arm-dead" 2>/dev/null | head -1 | sed 's/^detail=//')
+      [ -n "$arm_dead_detail" ] || arm_dead_detail='arm cycle died without a successor'
+      printf '●  Last arm death: %s (state/.watcher-arm-dead).\n' "$arm_dead_detail"
+    fi
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the lapse, not repair it.\n'
     else

@@ -673,6 +673,90 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# Trailing paused: outranks a terminal historical run-step. A failed past run is
+# not evidence the pane needs attention; without this override the watcher treats
+# absorb class as none and resurfaces the idle pane on every poll (worse than a
+# terminal done: line, which at least takes the surfaced-once path).
+test_paused_outranks_terminal_failed_run() {
+  reset_fakes
+  local d; d=$(new_case paused-over-failed)
+  make_repo_on_branch "$d/wt" fm/feat-pause-fail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-fail.meta" "window=fm:fm-feat-pause-fail" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-fail.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-pause-fail)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-pause-fail)
+  assert_contains "$out" "state: paused" "trailing paused outranks terminal failed run"
+  assert_contains "$out" "source: status-log" "pause-over-failed uses status-log source"
+  assert_contains "$out" "holding for provider recovery" "pause reason is preserved"
+  assert_contains "$out" "historical run failed" "detail notes the historical failed run"
+  assert_not_contains "$out" "state: failed" "must not report failed over trailing paused"
+  pass "trailing paused: outranks a terminal failed historical run-step"
+}
+
+test_paused_outranks_terminal_passed_run() {
+  reset_fakes
+  local d; d=$(new_case paused-over-passed)
+  make_repo_on_branch "$d/wt" fm/feat-pause-pass
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-pass.meta" "window=fm:fm-feat-pause-pass" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting on an upstream release\n' > "$d/state/feat-pause-pass.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-pause-pass)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-pause-pass)
+  assert_contains "$out" "state: paused" "trailing paused outranks terminal passed run"
+  assert_contains "$out" "source: status-log" "pause-over-passed uses status-log source"
+  assert_contains "$out" "historical run done" "detail notes the historical done run"
+  assert_not_contains "$out" "state: done" "must not report done over trailing paused"
+  pass "trailing paused: outranks a terminal passed historical run-step"
+}
+
+# Live run-step still beats a trailing paused: declaration (run-step precedence).
+test_running_run_outranks_paused_status() {
+  reset_fakes
+  local d; d=$(new_case running-over-paused)
+  make_repo_on_branch "$d/wt" fm/feat-run-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-run-pause.meta" "window=fm:fm-feat-run-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for the upstream tool release\n' > "$d/state/feat-run-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-run-pause)"
+  local out; out=$(run_crew_state "$d" feat-run-pause)
+  assert_contains "$out" "state: working" "active run outranks trailing paused"
+  assert_contains "$out" "source: run-step" "active run stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "must not report paused over a live run"
+  pass "live running run-step outranks trailing paused: status"
+}
+
+# Terminal done:/failed: last lines (no trailing pause) keep run-step authority.
+test_terminal_failed_last_line_unchanged_with_failed_run() {
+  reset_fakes
+  local d; d=$(new_case failed-last-line)
+  make_repo_on_branch "$d/wt" fm/feat-fail-line
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fail-line.meta" "window=fm:fm-feat-fail-line" "worktree=$d/wt" "kind=ship"
+  printf 'failed: validation crashed\n' > "$d/state/feat-fail-line.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-fail-line)"
+  local out; out=$(run_crew_state "$d" feat-fail-line)
+  assert_contains "$out" "state: failed" "failed: last line + failed run stays failed"
+  assert_contains "$out" "source: run-step" "failed last line still run-step sourced"
+  pass "terminal failed: last line behavior unchanged with a failed run-step"
+}
+
+test_terminal_done_last_line_unchanged_with_passed_run() {
+  reset_fakes
+  local d; d=$(new_case done-last-line)
+  make_repo_on_branch "$d/wt" fm/feat-done-line
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-done-line.meta" "window=fm:fm-feat-done-line" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://example.test/pr/1 checks green\n' > "$d/state/feat-done-line.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-done-line)"
+  local out; out=$(run_crew_state "$d" feat-done-line)
+  assert_contains "$out" "state: done" "done: last line + passed run stays done"
+  assert_contains "$out" "source: run-step" "done last line still run-step sourced"
+  pass "terminal done: last line behavior unchanged with a passed run-step"
+}
+
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
@@ -1155,6 +1239,11 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_paused_outranks_terminal_failed_run
+test_paused_outranks_terminal_passed_run
+test_running_run_outranks_paused_status
+test_terminal_failed_last_line_unchanged_with_failed_run
+test_terminal_done_last_line_unchanged_with_passed_run
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
