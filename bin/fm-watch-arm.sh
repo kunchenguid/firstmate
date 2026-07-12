@@ -64,6 +64,9 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 ARM_DEAD_MARKER="$STATE/.watcher-arm-dead"
+# Monotonic wake counter (fm_wake_append bumps it on every enqueue; never reset by
+# a drain). An attached arm reads it to tell a normal wake handoff from a silent death.
+WAKE_SEQ="$STATE/.wake-queue.seq"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -106,6 +109,14 @@ tasks_in_flight() {
 
 clear_arm_death_marker() {
   rm -f "$ARM_DEAD_MARKER"
+}
+
+# Current durable wake sequence, floored at 0 on a missing/garbage counter.
+read_wake_seq() {
+  local s
+  s=$(cat "$WAKE_SEQ" 2>/dev/null || echo 0)
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  printf '%s' "$s"
 }
 
 # Durable marker the guard can name on the next fleet action. Best-effort write;
@@ -162,20 +173,37 @@ report_healthy() {
 # Stay alive until the attached identity-matched healthy holder is gone.
 # If a different healthy watcher appears mid-attach (rare steal), re-attach.
 # Does not reprint the starter arm's wake reason line; a clean end (no tasks, or
-# a healthy peer) exits 0 so the harness notify fires for re-arm. A silent end
-# with tasks still in flight fails loud via finalize_arm_cycle.
+# a healthy peer) exits 0 so the harness notify fires for re-arm.
+#
+# An attached arm does NOT own the watcher child, so it cannot read the watcher's
+# wake output to set handoff=1 the way the started path does. Distinguishing a
+# normal wake handoff from a silent orphan death would otherwise be impossible,
+# and a bare finalize_arm_cycle 0 0 would falsely declare arm-death every time an
+# owner watcher woke normally while this arm was also attached. Instead it reads
+# the durable wake counter: the watched holder BLOCKS without enqueuing until its
+# single terminal wake, so any advance of the counter since we began watching THIS
+# holder is that wake being delivered (the primary re-arms on the notify) - a
+# healthy handoff, ended quiet. Only a holder that vanished with no wake enqueued
+# is a genuine orphan; that falls through to finalize_arm_cycle, which fails loud
+# when tasks are in flight and no healthy successor exists.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 seq_at_attach
+  seq_at_attach=$(read_wake_seq)
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         attached_pid=$HEALTHY_PID
+        seq_at_attach=$(read_wake_seq)
         report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
     # Attached cycle ended (pid gone, identity mismatch, or beacon no longer fresh).
+    if [ "$(read_wake_seq)" != "$seq_at_attach" ]; then
+      clear_arm_death_marker
+      exit 0
+    fi
     finalize_arm_cycle 0 0
   done
 }

@@ -741,6 +741,50 @@ test_arm_attached_death_loud_when_tasks_in_flight() {
   pass "attached arm cycle death is loud when tasks are in flight (FAILED + marker + non-zero)"
 }
 
+# An attached arm cannot read the watcher's wake output, so it must NOT mistake a
+# NORMAL wake handoff (the watched holder enqueued an actionable wake and exited,
+# which the primary re-arms on) for a silent orphan death - even with tasks in
+# flight and no successor yet. The distinguishing signal is the durable wake
+# counter advancing since the arm began watching that holder.
+test_arm_attached_wake_handoff_is_quiet_when_tasks_in_flight() {
+  local dir state fakebin out armout i wpid armpid status
+  dir=$(make_case arm-attach-handoff-quiet)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  printf 'window=test:fm-live\nkind=ship\n' > "$state/live-task.meta"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not report attach: $(cat "$armout")"
+  # The holder delivers a normal wake: it enqueues an actionable wake (bumping the
+  # durable counter) and then exits, exactly as fm-watch.sh's wake() does.
+  append_wake "$state" stale "test:fm-live" "stale: test:fm-live" || fail "handoff wake append failed"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 0 ] || fail "attached arm did not exit zero on a normal wake handoff (status $status): $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm falsely reported arm-death on a normal wake handoff: $(cat "$armout")"
+  [ ! -e "$state/.watcher-arm-dead" ] || fail "attached arm wrote arm-death marker on a normal wake handoff"
+  pass "attached arm stays quiet on a normal wake handoff while tasks are in flight"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The watcher records its process identity under one locale; arm/guard/turn-end
   # re-read it under the machine's ambient locale. ps's lstart date format follows
@@ -787,3 +831,4 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_attached_death_loud_when_tasks_in_flight
+test_arm_attached_wake_handoff_is_quiet_when_tasks_in_flight
