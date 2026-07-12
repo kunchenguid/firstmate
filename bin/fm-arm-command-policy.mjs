@@ -7,7 +7,7 @@
 //
 // This file is the sole owner of firstmate's shell command classification.
 // The tokenizer and command-position analysis (Lexer, splitProgram,
-// commandPosition, basename) are exported so the sibling cd-guard policy
+// commandPosition) are exported so the sibling cd-guard policy
 // (bin/fm-cd-command-policy.mjs) reuses the same proven parser instead of
 // duplicating shell lexing; see docs/cd-guard.md. The watcher-arm decision
 // procedure below stays private to this file. The CLI entry point at the bottom
@@ -56,7 +56,7 @@ function normalizeLineContinuations(source) {
   return source.replace(/\\\r?\n/g, "");
 }
 
-export function basename(value) {
+function basename(value) {
   return value.split("/").filter(Boolean).at(-1) || value;
 }
 

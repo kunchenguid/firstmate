@@ -50,6 +50,12 @@ function deny(code) {
   return { decision: "deny", code, reason: REASONS[code] };
 }
 
+function hasPathQualifiedCommandPrefix(position) {
+  return position.words
+    .slice(position.prefixAssignments, position.index)
+    .some((word) => word.value.includes("/") && word.value.split("/").at(-1) === "command");
+}
+
 function decision(command) {
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize. The cd-guard's threat
@@ -65,6 +71,7 @@ function decision(command) {
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(nodes[index]);
+    if (hasPathQualifiedCommandPrefix(position)) continue;
     let command = position.command;
     let wordIndex = position.index;
     while (command && (command.value === "builtin" || command.value === "command")) {

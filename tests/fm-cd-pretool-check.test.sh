@@ -132,6 +132,9 @@ matrix_case A26 allow '/tmp/cd projects/foo'
 matrix_case A27 allow '/usr/bin/cd projects/foo'
 matrix_case A28 allow './builtin cd projects/foo'
 matrix_case A29 allow 'c\d\ projects/foo'
+matrix_case A30 allow './command cd projects/foo'
+matrix_case A31 allow '/usr/bin/command cd projects/foo'
+matrix_case A32 allow '/tmp/builtin cd projects/foo'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

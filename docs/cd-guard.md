@@ -45,7 +45,7 @@ The guard **allows** everything else, including these safe scoped forms that mus
 - A command that only addresses a target by path without changing the shell's own cwd: `git -C <dir> ...`, `make -C <dir> ...`, any command reading or writing an absolute path.
 - A directory change that does not persist to the parent shell: a subshell `(cd x && ...)`, a `bash -c 'cd ...'` / `sh -c` / `zsh -c` payload, an `env -C <dir> ...`, a `find ... -execdir` runner, a pipeline stage (`cd x | cmd`), or a backgrounded `cd x &`.
 - A `cd` behind a forking or exec'ing wrapper (`env`, `sudo`, `nohup`, `timeout`, `gtimeout`, `exec`), which runs in a child and never persists (and generally just fails, since `cd` is a builtin with no external program).
-- A path-qualified external command named `cd` or `builtin`, such as `./cd`, `/tmp/cd`, `/usr/bin/cd`, or `./builtin`, because it runs as a child process and cannot change the parent shell's cwd.
+- A path-qualified external command named `cd`, `command`, or `builtin`, such as `./cd`, `/usr/bin/cd`, `./command`, `/usr/bin/command`, or `./builtin`, because it runs as a child process and cannot change the parent shell's cwd.
 - The token `cd` appearing as data: quoted text (`echo "cd projects/foo"`), a comment, a substring of another word (`cdk`, `abcd`, `record`), a `printf` payload, or any later argument word.
 
 An absolute-path `cd` is blocked on purpose: the ALLOW carve-out for absolute paths is for commands that address a target by absolute path, not for `cd`, which relocates the shell itself regardless of whether its argument is relative or absolute.
@@ -100,7 +100,8 @@ Identical in shape to `docs/arm-pretool-check.md`:
 
 ## Shared classifier ownership
 
-`bin/fm-cd-command-policy.mjs` imports the shell tokenizer and command-position analysis (`Lexer`, `splitProgram`, `commandPosition`, `basename`) from `bin/fm-arm-command-policy.mjs`, the sole owner of firstmate's shell classification.
+`bin/fm-cd-command-policy.mjs` imports the shell tokenizer and command-position analysis (`Lexer`, `splitProgram`, `commandPosition`) from `bin/fm-arm-command-policy.mjs`, the sole owner of firstmate's shell classification.
+`basename` remains a private helper of the shared arm classifier because the cd policy identifies shell builtins by exact cooked-word identity.
 The cd-guard never duplicates shell lexing; it adds only the cd-specific decision on top of that shared classifier.
 `bin/fm-arm-command-policy.mjs` runs its own CLI entry point only when invoked directly, never on import, so the two policies stay independent CLIs over one parser.
 
