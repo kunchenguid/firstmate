@@ -77,12 +77,22 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i incomplete=0
-  mkdir -p "$FM_AFK_LAUNCH_STATE"
+  local i incomplete=0 identity
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   for i in $(seq 1 200); do
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
-      printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"
-      fm_pid_identity "$$" > "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null || true
+      if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      fi
+      identity=$(fm_pid_identity "$$" 2>/dev/null) || {
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      }
+      if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      fi
       return 0
     fi
     if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
@@ -95,7 +105,7 @@ fm_afk_launch_lock_acquire() {
       incomplete=0
     fi
     if ! fm_afk_launch_lock_owned; then
-      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
+      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
       incomplete=0
       continue
     fi
@@ -108,7 +118,8 @@ fm_afk_launch_lock_acquire() {
 fm_afk_launch_lock_release() {
   local pid
   pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
-  [ "$pid" = "$$" ] && rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
+  [ "$pid" = "$$" ] || return 0
+  rm -rf "$FM_AFK_LAUNCH_LOCK"
 }
 
 fm_afk_launch_usage() {
@@ -395,19 +406,10 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
 fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash probe_result probe_out
+  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
-  session="fm-afk-daemon-$hash"
-  probe_out=$(tmux has-session -t "$session" 2>&1)
-  probe_result=$?
-  if [ "$probe_result" -eq 0 ]; then
-    fm_afk_launch_log "unrecorded tmux session '$session' already exists; refusing to replace it"
-    return 1
-  fi
-  if [ "$probe_result" -ne 1 ] || ! printf '%s' "$probe_out" | grep -Eq "can't find session"; then
-    fm_afk_launch_log "could not confirm tmux session '$session' is absent"
-    return 1
-  fi
+  nonce="$$-${RANDOM:-0}-$(date '+%s')"
+  session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
@@ -417,9 +419,9 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fi
   if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
     fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
-    FM_AFK_REC_BACKEND=tmux
-    FM_AFK_REC_TARGET=$session
-    fm_afk_launch_close_recorded || true
+    if ! rm -f "$FM_AFK_LAUNCH_RECORD"; then
+      fm_afk_launch_log "failed to remove planned tmux daemon record after creation failure"
+    fi
     return 1
   fi
   fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
@@ -530,31 +532,38 @@ fm_afk_launch_start_native() {
 
 fm_afk_launch_stop() {
   local pid result=0 read_result
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 2 ]; then
+    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    return 1
+  fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
   if daemon_lock_held_by_live_daemon; then
-    pid=$(daemon_lock_pid 2>/dev/null || true)
+    pid=$(daemon_lock_pid 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
-    kill -TERM "$pid" 2>/dev/null || true
+    if ! kill -TERM "$pid" 2>/dev/null; then
+      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
+      result=1
+    fi
     for _ in $(seq 1 40); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done
   fi
   # (2) Close the daemon's own terminal by exact id.
-  fm_afk_launch_record_read
-  read_result=$?
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
-  elif [ "$read_result" -eq 2 ]; then
-    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
-    return 1
   fi
   # (3) Clear the away-mode flag LAST.
-  rm -f "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true
+  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+    fm_afk_launch_log "failed to clear away-mode flag"
+    result=1
+  fi
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
   else
@@ -578,7 +587,7 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
-  fm_afk_launch_lock_release
+  fm_afk_launch_lock_release || result=1
   trap - EXIT INT TERM
   return "$result"
 }

@@ -536,41 +536,102 @@ unit_stop_malformed_record_fails_closed() {
 }
 
 unit_tmux_planned_record_and_collision() {
-  local st
+  local st first second
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-plan.XXXXXX")
   mkdir -p "$st/state"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     tmux() {
-      if [ "$1" = has-session ]; then printf "can\\x27t find session\\n" >&2; return 1; fi
       if [ "$1" = new-session ]; then
         [ -s "$FM_AFK_LAUNCH_RECORD" ] || return 9
+        printf "%s" "$4" > "$FM_HOME/created-name"
         return 1
       fi
+      [ "$1" != kill-session ] || : > "$FM_HOME/killed"
       return 1
     }
     ! fm_afk_launch_create_tmux captain:0 tmux
-  ' _ "$LAUNCH"; then
-    pass "tmux launch: planned exact target is recorded before creation"
+  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ ! -e "$st/killed" ]; then
+    pass "tmux launch: planned exact target is recorded before creation and removed on failure"
   else
     fail "tmux launch: creation began before exact target publication"
   fi
+  first=$(cat "$st/created-name")
   rm -rf "$st"
 
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-collision.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-unique.XXXXXX")
   mkdir -p "$st/state"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     tmux() {
-      [ "$1" = has-session ] && return 0
+      [ "$1" != new-session ] || { printf "%s" "$4" > "$FM_HOME/created-name"; return 1; }
       [ "$1" != kill-session ] || : > "$FM_HOME/killed"
-      return 0
+      return 1
     }
     ! fm_afk_launch_create_tmux captain:0 tmux
   ' _ "$LAUNCH" && [ ! -e "$st/killed" ]; then
-    pass "tmux launch: unowned same-name session fails closed without teardown"
+    second=$(cat "$st/created-name")
+    if [ "$first" != "$second" ]; then
+      pass "tmux launch: unique names eliminate collision teardown"
+    else
+      fail "tmux launch: consecutive launches reused a session name"
+    fi
   else
-    fail "tmux launch: unowned same-name session was replaced"
+    fail "tmux launch: creation failure attempted session teardown"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_validates_before_signal() {
+  local st sleeper_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-validate.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
+  sleep 30 & sleeper_pid=$!
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  printf '%s' "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  if kill -0 "$sleeper_pid" 2>/dev/null && [ -e "$st/state/.afk" ]; then
+    pass "stop validation: malformed record causes no daemon or state side effects"
+  else
+    fail "stop validation: malformed record signaled daemon or cleared state"
+  fi
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_lock_requires_complete_metadata() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-metadata.XXXXXX")
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_pid_identity() { return 1; }
+    ! fm_afk_launch_lock_acquire
+  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk-launch.lock" ]; then
+    pass "launcher lock: incomplete metadata fails acquisition and releases lock"
+  else
+    fail "launcher lock: incomplete metadata was accepted"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_surfaces_afk_removal_failure() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-remove.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    rm() { local last=${!#}; [ "$last" != "$FM_AFK_LAUNCH_STATE/.afk" ]; }
+    ! fm_afk_launch_stop
+  ' _ "$LAUNCH"; then
+    pass "stop state: away-flag removal failure is surfaced"
+  else
+    fail "stop state: away-flag removal failure reported success"
   fi
   rm -rf "$st"
 }
@@ -765,6 +826,9 @@ unit_record_publication_atomic
 unit_malformed_record_fails_closed
 unit_stop_malformed_record_fails_closed
 unit_tmux_planned_record_and_collision
+unit_stop_validates_before_signal
+unit_lock_requires_complete_metadata
+unit_stop_surfaces_afk_removal_failure
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
