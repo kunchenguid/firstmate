@@ -38,6 +38,9 @@
 #   parked / blocked (needs-decision, blocked)   holds the stage percent it
 #     would otherwise have (pr= -> 80, run-step gate -> 60, else the kind's
 #     working percent) and is styled as a warning, never advancing.
+#   paused (declared external wait)              holds the stage percent the
+#     same way parked/blocked do, but styled distinctly and NOT counted as
+#     needs-attention: it is a deliberate wait, not a captain decision.
 #   failed                                       no percent; a failed badge.
 #   kind=secondmate                              no percent; persistent
 #     supervisors have no completion stage.
@@ -212,6 +215,7 @@ collect_tasks() {
     if [ "$kind" = secondmate ]; then
       case "$cs_state" in
         failed) cls=fail; label=failed ;;
+        paused) cls=paused; label=paused ;;
         blocked|parked) cls=warn; label="$cs_state" ;;
         *) cls=ok; label='persistent' ;;
       esac
@@ -234,6 +238,13 @@ collect_tasks() {
           cls=warn
           if [ "$cs_state" = parked ]; then label='held: needs decision'
           else label='held: blocked'; fi ;;
+        paused)
+          if [ -n "$pr" ]; then pct=80
+          elif [ "$cs_source" = run-step ]; then pct=60
+          elif [ "$kind" = scout ]; then pct=40
+          else pct=30
+          fi
+          cls=paused; label='paused: external wait' ;;
         working)
           case "$cs_detail" in
             *validating*|*fixing*|*'ci running'*) pct=60; label=validating ;;
@@ -389,10 +400,12 @@ th{background:#1c2128;color:#8b949e;font-size:11px;text-transform:uppercase;lett
 .b-pr{background:#0d2137;color:#58a6ff;border:1px solid #1f6feb}
 .b-done{background:#12261e;color:#3fb950;border:1px solid #238636}
 .b-muted{background:#21262d;color:#8b949e;border:1px solid #30363d}
+.b-paused{background:#1d1b2e;color:#a371f7;border:1px solid #8957e5}
 .bar{width:120px;height:8px;background:#21262d;border-radius:4px;overflow:hidden}
 .fill{height:100%;border-radius:4px}
 .f-ok{background:#238636}.f-warn{background:#9e6a03}.f-pr{background:#1f6feb}
 .f-done{background:#3fb950}.f-fail{background:#da3633}.f-muted{background:#30363d}
+.f-paused{background:#8957e5}
 .plabel{font-size:11px;color:#8b949e;margin-top:3px;white-space:nowrap}
 .stagenote{color:#57606a}
 .detail{font-size:12px;color:#8b949e;max-width:260px;word-break:break-word}
