@@ -167,7 +167,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
     fi
     return 1
   fi
-  if [ "$actual_cwd" != "$wt_path" ]; then
+  if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
     fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
       echo "error: fmod recreate failed for $session_id at $wt_path after stale attach at $actual_cwd:" >&2

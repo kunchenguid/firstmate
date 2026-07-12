@@ -39,7 +39,8 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-STATE="$FM_ROOT/state"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PIDFILE="$STATE/.orca-supervisor.pid"
 
 CHECK_INTERVAL=${FM_ORCA_CHECK_INTERVAL:-30}
@@ -61,8 +62,8 @@ reap_orca_user_procs() {
   # pkill -f matches the AppImage mountpoint names; -x matches the bare process.
   pkill -TERM -u "$USER" -f 'orca.AppImage' 2>/dev/null || true
   pkill -KILL -u "$USER" -f 'orca.AppImage' 2>/dev/null || true
-  pkill -TERM -x 'orca-ide' 2>/dev/null || true
-  pkill -KILL -x 'orca-ide' 2>/dev/null || true
+  pkill -TERM -u "$USER" -x 'orca-ide' 2>/dev/null || true
+  pkill -KILL -u "$USER" -x 'orca-ide' 2>/dev/null || true
   sleep 1
 }
 
@@ -156,7 +157,7 @@ stop() {
 
 case "${1:-status}" in
   once)
-    ensure_healthy
+    fmod_info_reachable
     ;;
   start)
     mkdir -p "$STATE" 2>/dev/null || true

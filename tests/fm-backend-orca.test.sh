@@ -405,6 +405,27 @@ PY
   pass "fm_backend_orca_worktree_create: kills and recreates stale attached sessions"
 }
 
+test_worktree_create_accepts_trailing_slash_cwd() {
+  fmod_case wt-create-trailing-slash-cwd
+  local repo expected_wt
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-slash)
+  printf '%s/\n' "$expected_wt" > "$RESP/2.out"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-slash' "$ROOT" "$repo" > "$CASE_DIR/raw"
+  [ -d "$expected_wt" ] || fail "worktree path $expected_wt was not created"
+  python3 - "$LOG" "$expected_wt" <<'PY' || fail "worktree_create should accept fmod get-cwd trailing slash"
+import sys
+log = open(sys.argv[1], "rb").read()
+wt = sys.argv[2].encode()
+US = b"\x1f"
+create = b"fmod" + US + b"create" + US + b"fm-test-slash" + US + b"--cwd" + US + wt
+assert log.count(create) == 1, log
+assert b"fmod" + US + b"kill" + US + b"fm-test-slash" not in log, log
+PY
+  pass "fm_backend_orca_worktree_create: accepts fmod get-cwd trailing slash"
+}
+
 test_remove_worktree_kills_session_and_removes_dir() {
   fmod_case wt-remove
   local repo
@@ -729,7 +750,14 @@ test_orca_adapter_sources_clean_under_set_e() {
 
 test_fmod_defaults_follow_home_and_xdg_config_home() {
   fmod_case fmod-paths
-  local out
+  local out protocol
+  protocol=$(python3 - "$ROOT/bin/fmod" <<'PY'
+import runpy
+import sys
+mod = runpy.run_path(sys.argv[1])
+print(mod["PROTOCOL_VERSION"])
+PY
+)
   out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME= python3 - "$ROOT/bin/fmod" <<'PY'
 import os
 import runpy
@@ -743,9 +771,9 @@ mod = runpy.run_path(sys.argv[1])
 print("\n".join(mod["daemon_paths"]()))
 PY
 )
-  [ "$out" = "$CASE_DIR/home/.config/orca/daemon/daemon-v18.sock
-$CASE_DIR/home/.config/orca/daemon/daemon-v18.token
-$CASE_DIR/home/.config/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under HOME, got: $out"
+  [ "$out" = "$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.sock
+$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.token
+$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.pid" ] || fail "fmod defaults should resolve under HOME, got: $out"
 
   out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME="$CASE_DIR/xdg" python3 - "$ROOT/bin/fmod" <<'PY'
 import os
@@ -759,9 +787,9 @@ mod = runpy.run_path(sys.argv[1])
 print("\n".join(mod["daemon_paths"]()))
 PY
 )
-  [ "$out" = "$CASE_DIR/xdg/orca/daemon/daemon-v18.sock
-$CASE_DIR/xdg/orca/daemon/daemon-v18.token
-$CASE_DIR/xdg/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
+  [ "$out" = "$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.sock
+$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.token
+$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
   pass "fmod daemon_paths: defaults follow HOME and XDG_CONFIG_HOME"
 }
 
