@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|cursor|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,11 +35,21 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # cursor (Cursor CLI, binary cursor-agent) sets CURSOR_AGENT=1 for its child/tool
+  # processes (verified, cursor-agent 2026.07.09). Its runtime reports
+  # AI_AGENT=claude-code_* but does NOT set CLAUDECODE, so this marker is unambiguous.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename "$comm")" in
+      # cursor-agent BEFORE claude: cursor's runtime is claude-code-derived, so a
+      # cursor process path could plausibly contain "claude", but never vice versa.
+      # The token is the full binary name, NOT *cursor*: the Cursor IDE's own
+      # processes (binary "cursor" on Linux, "Cursor" helpers on macOS) would match
+      # a bare *cursor* glob when firstmate runs in the IDE's integrated terminal.
+      *cursor-agent*) echo cursor; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -49,6 +59,7 @@ detect_own() {
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
+          *cursor-agent*) echo cursor; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;

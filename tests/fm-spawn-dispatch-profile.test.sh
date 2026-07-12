@@ -311,6 +311,25 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_threads_model_and_ignores_effort_axis() {
+  local rec id out status launch
+  id=profile-cursor-q4
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4.5-xhigh --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with model and ignored effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor grok-4.5-xhigh high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent --force --model 'grok-4.5-xhigh'" \
+    "cursor launch did not thread model"
+  assert_not_contains "$launch" "--effort" "cursor launch must not pass an effort flag (effort is baked into the model id)"
+  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not pass grok reasoning effort"
+  assert_not_contains "$launch" "--thinking" "cursor launch must not pass pi thinking flag"
+  pass "cursor receives --model and omits the unsupported effort axis"
+}
+
 test_pi_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -376,6 +395,7 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch

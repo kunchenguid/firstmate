@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -86,6 +86,7 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <id>` | none - effort is baked into the model id | Verified on cursor-agent 2026.07.09. Cursor model ids carry their own reasoning tier, so pick effort by picking the id; a separate effort axis in a dispatch profile is invalid for cursor. Naming quirks and the id catalog: see the cursor section below. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -100,6 +101,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- cursor: `/<command>` opens a slash-autocomplete popup (verified with `/exit`; the popup also lists the captain's user-level claude-style commands, so discovery of `/no-mistakes` is plausible but NOT yet verified end to end). Same too-fast-Enter hazard as codex/grok; `fm-send`'s slash settle plus retried Enter lands it. Use natural language if the skill invocation is uncertain.
 
 ## claude (VERIFIED)
 
@@ -264,3 +266,37 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor (VERIFIED 2026-07-11, cursor-agent 2026.07.09-a3815c0)
+
+Cursor CLI (`cursor-agent`, also invocable as `agent`), Anysphere's terminal agent.
+It reaches the captain's Cursor-subscription model catalog (Grok 4.5, Codex/GPT tiers, Sonnet, Gemini, and more via `cursor-agent --list-models`), which makes it the route to models the captain has no direct subscription for.
+Launch with a positional prompt: `cursor-agent --force --model <id> "$(cat <brief>)"`.
+
+Scope: cursor is verified as a CREWMATE/SECONDMATE adapter only.
+Running the PRIMARY firstmate session on cursor is NOT verified: it has no tracked turn-end guard, no PreToolUse seatbelt, and no watcher wake adapter, so a cursor primary falls back to the unknown-harness supervision snippet by design.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` at end of line (shown right of the composer line iff a turn is running; absent when idle). The spinner word varies (`Working`, `Running`), so the cancel hint is the stable ASCII signature; the busy regex end-anchors it because it is generic English a transcript could contain mid-line. |
+| Exit command | `/exit` or `/quit` (both listed; typing opens the slash-autocomplete popup, so a too-fast Enter is the usual hazard - `fm-send`'s retried Enter lands it). |
+| Interrupt | single `Ctrl+C` (cancels the running turn; the transcript shows `Cancelled`). |
+| Skill invocation | `/<command>` with popup; `/no-mistakes` discovery not yet verified end to end - prefer natural language when uncertain. |
+| Autonomy | `--force` (auto-approves command execution; file edits and shell commands verified to run fully unattended). `/run-everything` is the in-session equivalent. |
+| Env marker | `CURSOR_AGENT=1`, set for child/tool processes. The runtime reports `AI_AGENT=claude-code_*` (claude-code-derived) but does NOT set `CLAUDECODE`, so the marker is unambiguous. |
+| Resume | `cursor-agent --continue` resumes the most recent chat (verified 2026-07-12: a headless `--continue` recalled the prior chat's content after `/quit`); `--resume [chatId]` targets a specific chat. |
+
+Trust dialog: "Workspace Trust Required" appears on the first launch in a not-yet-trusted directory; accept with Enter (or `a`).
+The decision persists per directory, so later spawns in the same worktree slot skip it.
+After every spawn, peek the pane within about 20 seconds and accept it if showing, exactly like claude's flow.
+
+Model ids bake reasoning effort into the name (`grok-4.5-xhigh`, `gpt-5.3-codex-high`), so there is no effort flag; `fm-spawn` records a requested `effort=` in meta but never passes it.
+Display names are shifted one tier below the id (`grok-4.5-xhigh` displays "Cursor Grok 4.5", `grok-4.5-high` displays "Cursor Grok 4.5 Medium"); trust the id suffix.
+
+No verified turn-end hook: despite the claude-code-derived runtime, a Claude-style `.claude/settings.local.json` Stop hook did NOT fire (tested 2026-07-11), so `fm-spawn` writes no hook file and the watcher supervises cursor crewmates through busy-regex stale-pane detection only.
+
+Idle composer shows placeholder ghost text (`Plan, search, build anything` on a fresh session, `Add a follow-up` after a turn), rendered dim (SGR 2, verified 2026-07-12 via raw styled capture), so the generic ghost-stripper drops it and no `FM_COMPOSER_IDLE_RE` override is needed.
+`fm_tmux_composer_state` was verified live against an idle cursor pane (`empty`), a mid-turn pane (`empty`, busy footer correctly ignored), and `fm_pane_is_busy` fires mid-turn and stays quiet when idle.
+
+Composer quirk: an Enter arriving in the same keystroke burst as the message text can be swallowed, leaving the text unsubmitted in the composer (observed live with raw `tmux send-keys 'text' Enter`).
+`fm-send`'s settle-then-retried-Enter submit path handles this; do not raw-send text+Enter to a cursor pane in one burst.
