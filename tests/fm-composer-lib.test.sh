@@ -82,6 +82,34 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
 }
 
+# --- claude >= 2.1.x NBSP glyph separator (task fmsend-verify-l2) ------------
+
+test_nbsp_glyph_separator_reads_empty() {
+  local nbsp out
+  nbsp=$(printf '\302\240')
+  # claude 2.1.207 draws its composer prompt as "❯" + U+00A0 NO-BREAK SPACE,
+  # which no [[:space:]] trim removes, so an EMPTY composer read "❯<NBSP>" and
+  # classified pending - every fm-send text submit to a claude pane false-failed
+  # with "Enter swallowed" (observed 2026-07-11, fixed by NBSP normalization).
+  out=$(classify 0 "❯${nbsp}")
+  [ "$out" = empty ] || fail "bare '❯<NBSP>' (claude 2.1.x empty composer) must read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive "❯${nbsp}")
+  [ "$out" = empty ] || fail "stripped '❯<NBSP>' plain-content fallback must read empty, got '$out'"
+  pass "fm_composer_classify_content: claude's '❯' + NO-BREAK SPACE empty composer reads empty"
+}
+
+test_nbsp_normalization_keeps_pending_and_safety_verdicts() {
+  local nbsp out
+  nbsp=$(printf '\302\240')
+  # Real text after the NBSP separator is still unsubmitted -> pending.
+  out=$(classify 0 "❯${nbsp}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "'❯<NBSP><text>' must stay pending, got '$out'"
+  # The dead-shell safety verdict survives NBSP normalization.
+  out=$(classify 0 "\$${nbsp}")
+  [ "$out" = unknown ] || fail "bare '\$<NBSP>' must stay unknown (dead shell), got '$out'"
+  pass "fm_composer_classify_content: NBSP normalization never promotes pending text or a dead shell to empty"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -130,6 +158,8 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_nbsp_glyph_separator_reads_empty
+test_nbsp_normalization_keeps_pending_and_safety_verdicts
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

@@ -250,6 +250,58 @@ test_real_text_with_trailing_ghost_is_pending() {
   pass "fm_pane_input_pending: real text plus a trailing ghost run is still pending"
 }
 
+# --- claude 2.1.x unbordered NBSP composer rows (task fmsend-verify-l2) -----
+
+test_claude_nbsp_empty_composer_reads_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/claude-nbsp-empty"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact cursor row Claude Code v2.1.207 leaves after a submitted text send
+  # (captured live 2026-07-12, tmux 3.4): an UNBORDERED row, a 256-color grey
+  # prompt glyph, and a U+00A0 NO-BREAK SPACE separator. This row read `pending`
+  # before NBSP normalization, so EVERY fm-send text submit to a claude pane
+  # false-failed with "Enter swallowed".
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[39m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "claude 2.1.x empty composer row ('❯' + NBSP) must read empty, got '$out'"
+  pass "fm_tmux_composer_state: claude 2.1.x unbordered '❯' + NBSP empty composer reads empty"
+}
+
+test_claude_nbsp_queued_hint_reads_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/claude-nbsp-queued"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact cursor row after a text send lands as a QUEUED message on a busy
+  # claude pane (captured live 2026-07-12, Claude Code v2.1.207): the NBSP glyph
+  # plus a DIM "Press up to edit queued messages" hint. The submit landed, so
+  # this must read empty (the hint is ghost, the NBSP is separator).
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[2m\033[39mPress up to edit queued messages\033[0m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "claude queued-message hint row must read empty (submit landed), got '$out'"
+  pass "fm_tmux_composer_state: claude's queued-message hint row reads empty (submit landed)"
+}
+
+test_claude_nbsp_typed_text_still_pending() {
+  local dir fb capture out
+  dir="$TMP_ROOT/claude-nbsp-typed"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The same layout with real typed-but-unsubmitted text after the NBSP (captured
+  # live 2026-07-12): a genuinely stuck composer must still read pending.
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[39malso please summarize what you did when finished\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "claude 2.1.x typed-text row must still read pending, got '$out'"
+  pass "fm_tmux_composer_state: claude 2.1.x typed text after the NBSP separator is still pending"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -287,4 +339,7 @@ test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
+test_claude_nbsp_empty_composer_reads_empty
+test_claude_nbsp_queued_hint_reads_empty
+test_claude_nbsp_typed_text_still_pending
 test_peek_output_is_escape_free

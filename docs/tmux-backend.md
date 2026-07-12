@@ -111,6 +111,29 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Incident (2026-07-11): false "Enter swallowed" on every claude text send
+
+Symptom: every multi-word `bin/fm-send.sh <task-id> "<text>"` to a Claude Code crewmate pane exited 1 with `error: text not submitted ... (Enter swallowed; text left in composer)` while the message had in fact submitted - the pane went busy immediately and the crew acted on it.
+`--key` sends were unaffected because they skip submit verification.
+The danger was a blind retry after the false error, which would have double-submitted the steer.
+
+Root cause, reproduced 2026-07-12 against a live Claude Code v2.1.207 pane in a scratch tmux 3.4 session: claude's composer renders its prompt as `❯` followed by a NO-BREAK SPACE (U+00A0), and the composer is unbordered (horizontal rules above and below, no `│ ... │` side borders).
+Capturing the cursor row after a verified-clean submit and hex-dumping the ghost-stripped content showed exactly `e2 9d af c2 a0` (`❯` + NBSP):
+
+```sh
+cy=$(tmux display-message -p -t fmrepro '#{cursor_y}')
+tmux capture-pane -e -p -t fmrepro -S "$cy" -E "$cy" | fm_composer_strip_ghost | hexdump -C
+# 00000000  e2 9d af c2 a0 0a
+```
+
+No `[[:space:]]` trim removes U+00A0, so the empty-composer row `❯<NBSP>` fell through every glyph match in `fm_composer_classify_content` to `pending`, and `fm_tmux_submit_core` exhausted its Enter retries against a composer that was already empty.
+A send landing as a queued message on a busy pane showed `❯<NBSP>` plus a dim `Press up to edit queued messages` hint on the cursor row; the hint strips as ghost, leaving the same misread `❯<NBSP>`.
+
+Fix: `fm_composer_classify_content` (`bin/fm-composer-lib.sh`, the one fleet-wide classification owner) normalizes NBSP to a plain space and re-trims before any matching, so all backend adapters inherit the fix.
+A genuinely stuck composer (`❯<NBSP><text>`, Enter withheld) still classifies `pending`, verified live with a raw-tty pane that swallows Enter (`fm-send` exited 1) and an idle claude pane (`fm-send` exited 0, message processed).
+Regression fixtures: `tests/fm-composer-lib.test.sh` (NBSP classification) and `tests/fm-composer-ghost.test.sh` (the exact captured claude rows through `fm_tmux_composer_state`).
+The harness-facing quirk note lives in the `harness-adapters` skill's claude section.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

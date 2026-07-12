@@ -180,8 +180,22 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content nbsp
   plain_content=${5:-$content}
+  # NO-BREAK SPACE normalization (task fmsend-verify-l2): claude >= 2.1.x draws
+  # its composer prompt as "❯" + U+00A0, which no [[:space:]] trim removes, so an
+  # EMPTY composer read as "❯<NBSP>" fell through every glyph match to `pending`
+  # and every fm-send text submit to a claude pane false-failed with "Enter
+  # swallowed". Normalize NBSP to a plain space and re-trim both views before any
+  # matching; a row of only NBSPs is visually empty, so this cannot promote real
+  # pending text to empty.
+  nbsp=$(printf '\302\240')
+  content=${content//"$nbsp"/ }
+  plain_content=${plain_content//"$nbsp"/ }
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
