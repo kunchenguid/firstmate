@@ -160,6 +160,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
     echo "error: fmod get-cwd failed for $session_id after create:" >&2
     printf '%s\n' "$actual_cwd" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
     current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
     if [ "$current_head" = "$start_head" ]; then
@@ -182,6 +183,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
     if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
       echo "error: fmod get-cwd failed for $session_id after recreate:" >&2
       printf '%s\n' "$actual_cwd" >&2
+      fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
       git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
       current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
       if [ "$current_head" = "$start_head" ]; then

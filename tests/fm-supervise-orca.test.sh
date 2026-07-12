@@ -68,6 +68,37 @@ test_reap_scopes_orca_ide_pkill_to_user() {
   pass "fm-supervise-orca reap: orca-ide pkill is scoped to current user"
 }
 
+test_start_lets_follow_process_own_pidfile() {
+  local case_dir home fakebin pidfile pid out stop_out
+  case_dir="$TMP_ROOT/start-pidfile"
+  home="$case_dir/home"
+  fakebin=$(fm_fakebin "$case_dir")
+  mkdir -p "$home/state"
+  pidfile="$home/state/.orca-supervisor.pid"
+  cat > "$fakebin/fmod" <<'SH'
+#!/usr/bin/env bash
+printf '{"daemon_reachable":true,"daemon_pong":{"pong":true}}\n'
+exit 0
+SH
+  chmod +x "$fakebin/fmod"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--fork" ] && shift
+"$@" &
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fakebin/fmod" FM_ORCA_CHECK_INTERVAL=60 "$SUPERVISOR" start)
+  assert_contains "$out" "supervisor: started pid=" "start should confirm the pid written by --follow"
+  [ -s "$pidfile" ] || fail "start should wait for --follow to write a pidfile"
+  pid=$(cat "$pidfile")
+  kill -0 "$pid" 2>/dev/null || fail "pidfile should point at the live --follow process, got $pid"
+  stop_out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fakebin/fmod" "$SUPERVISOR" stop)
+  assert_contains "$stop_out" "supervisor: stopped (pid=$pid)" "stop should use the --follow pid"
+  pass "fm-supervise-orca start: --follow owns the pidfile"
+}
+
 run_test() {
   local t
   for t in $(declare -F | awk '{print $3}' | grep ^test_); do

@@ -426,6 +426,48 @@ PY
   pass "fm_backend_orca_worktree_create: accepts fmod get-cwd trailing slash"
 }
 
+test_worktree_create_kills_session_when_initial_cwd_check_fails() {
+  fmod_case wt-create-cwd-fail
+  local repo expected_wt status
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-cwd-fail)
+  echo "7" > "$RESP/2.exit"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-cwd-fail' "$ROOT" "$repo" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree_create should fail when initial fmod get-cwd fails"
+  [ ! -d "$expected_wt" ] || fail "worktree_create should remove worktree after initial get-cwd failure"
+  python3 - "$LOG" <<'PY' || fail "initial get-cwd failure should kill the created session"
+import sys
+log = open(sys.argv[1], "rb").read()
+US = b"\x1f"
+assert b"fmod" + US + b"kill" + US + b"fm-test-cwd-fail" + US + b"--immediate" in log, log
+PY
+  pass "fm_backend_orca_worktree_create: kills session after initial get-cwd failure"
+}
+
+test_worktree_create_kills_session_when_recreated_cwd_check_fails() {
+  fmod_case wt-create-recreate-cwd-fail
+  local repo expected_wt status
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-rec-cwd-fail)
+  printf '%s\n' "$CASE_DIR/stale-worktree" > "$RESP/2.out"
+  echo "7" > "$RESP/5.exit"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-rec-cwd-fail' "$ROOT" "$repo" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree_create should fail when recreated fmod get-cwd fails"
+  [ ! -d "$expected_wt" ] || fail "worktree_create should remove worktree after recreated get-cwd failure"
+  python3 - "$LOG" <<'PY' || fail "recreated get-cwd failure should kill the recreated session"
+import sys
+log = open(sys.argv[1], "rb").read()
+US = b"\x1f"
+needle = b"fmod" + US + b"kill" + US + b"fm-test-rec-cwd-fail" + US + b"--immediate"
+assert log.count(needle) == 2, log
+PY
+  pass "fm_backend_orca_worktree_create: kills session after recreated get-cwd failure"
+}
+
 test_remove_worktree_kills_session_and_removes_dir() {
   fmod_case wt-remove
   local repo

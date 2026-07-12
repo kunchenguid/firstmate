@@ -168,14 +168,16 @@ case "${1:-status}" in
     # Make sure the daemon is healthy before we fork ourselves; otherwise
     # the supervisor's first poll would just report what we already saw.
     ensure_healthy || exit 2
+    rm -f "$PIDFILE"
     setsid --fork "$0" --follow </dev/null >/tmp/fm-supervise-orca.log 2>&1 &
     disown
-    echo $! > "$PIDFILE"
-    sleep 0.5
-    if already_supervised; then
-      echo "supervisor: started pid=$(cat "$PIDFILE")"
-      exit 0
-    fi
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if already_supervised; then
+        echo "supervisor: started pid=$(cat "$PIDFILE")"
+        exit 0
+      fi
+      sleep 0.1
+    done
     echo "supervisor: FAILED to confirm pid"
     exit 1
     ;;
