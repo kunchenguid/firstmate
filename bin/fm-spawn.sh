@@ -321,10 +321,15 @@ launch_template() {
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
     pi)
+      # -a / --approve (pi 0.80+): "Trust project-local files for this run" -
+      # auto-accepts pi's project-trust prompt so unattended spawns do not block
+      # on a keyboard dialog. We still use -e <external-file> for the turn-end
+      # extension so the extension itself lives outside the worktree and never
+      # needs trust re-acquisition (the -a flag is sufficient either way).
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
