@@ -528,10 +528,12 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 #
 # pane_input_pending returns 0 (pending) when the cursor line holds real
 # unsubmitted text - a human's half-typed line (the return race) or a previous
-# injection whose Enter was swallowed. The detector drops dim/faint ghost text and
-# strips the harness's composer box borders, so a ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly read as empty, not pending (incidents
-# afk-invx-i5 and composer-robust).
+# injection whose Enter was swallowed. The detector drops dim/faint ghost text,
+# strips the harness's composer box borders, and normalizes the NO-BREAK SPACE
+# claude draws after its `❯` prompt glyph, so a ghost-only composer, an older
+# claude's bordered one ("│ > … │"), and today's unbordered `❯ ` one are all
+# correctly read as empty, not pending (incidents afk-invx-i5, composer-robust,
+# and fmsend-verify-l2).
 # pane_is_busy / pane_input_pending: BACKEND-AWARE now (previously tmux-only
 # direct calls). <backend> defaults to tmux when omitted, so every existing
 # caller/test that passes only <target> is unaffected. Dispatch goes through

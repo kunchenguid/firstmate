@@ -7,9 +7,9 @@
 # logic cannot drift between the two.
 #
 # Why this exists (incident afk-invx-i5): the daemon's old composer check only
-# recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
-# input box with box-drawing borders ("│ > … │"), so every idle claude pane read
-# as "pending input" and the away-mode daemon deferred 100% of escalations for
+# recognized a BARE prompt glyph ("> ") as an empty composer. claude then drew
+# its input box with box-drawing borders ("│ > … │"), so every idle claude pane
+# read as "pending input" and the away-mode daemon deferred 100% of escalations for
 # 9.5 hours with no escape. The detector below strips the box borders before
 # deciding, so a bordered-but-empty composer is correctly seen as empty. The same
 # corrected detector backs the submit acknowledgement (a submit "landed" iff the
@@ -83,8 +83,11 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # no multibyte character classes), and delegates the empty/pending/unknown
 # decision to the shared owner fm_composer_classify_content
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
-# (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
-# prompt reads unknown.
+# (an older claude's idle composer) read empty while a bare, unbordered `$ `
+# dead-shell prompt reads unknown. Today's claude composer is UNBORDERED and
+# draws `❯` followed by a NO-BREAK SPACE; the shared owner normalizes that NBSP
+# before matching, so the row reads empty (docs/tmux-backend.md, "Incident
+# (2026-07-11)").
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cy raw plain stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
