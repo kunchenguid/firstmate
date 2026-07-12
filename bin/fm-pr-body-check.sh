@@ -27,7 +27,8 @@
 # Exit codes:
 #   0  nothing flagged
 #   1  flagged lines printed; read each one and judge it
-#   2  usage error, unparseable PR URL, or the body could not be fetched
+#   2  usage error, unparseable PR URL, the body could not be fetched, or the
+#      scan itself failed - never a silent "clean" on a body that was not read
 #
 # Repairing a dirty body: `gh pr edit --body` can silently NO-OP (observed
 # failing with "GraphQL: Projects (classic) is being deprecated", changing
@@ -124,13 +125,24 @@ fi
 # Every hit is recorded as "<line number>\t<label>"; associative arrays would
 # pin this script to bash 4, and stock macOS ships bash 3.2.
 : > "$HITS"
+MATCH="$WORK/match"
 for entry in "${PATTERNS[@]}"; do
   label=${entry%%$'\t'*}
   regex=${entry#*$'\t'}
+  # Only grep's "no match" (1) is tolerated. An error (2+: a regex the local
+  # engine cannot compile, an unreadable file) would otherwise contribute zero
+  # hits and let an unscanned body report clean - the one failure this tool
+  # exists to prevent.
+  status=0
+  grep -n -i -E -- "$regex" "$SCAN" > "$MATCH" || status=$?
+  if [ "$status" -gt 1 ]; then
+    echo "error: the scan failed (grep exit $status) on the [$label] pattern; the body was NOT checked" >&2
+    exit 2
+  fi
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     printf '%s\t%s\n' "${hit%%:*}" "$label" >> "$HITS"
-  done < <(grep -n -i -E -- "$regex" "$SCAN" || true)
+  done < "$MATCH"
 done
 
 if [ ! -s "$HITS" ]; then

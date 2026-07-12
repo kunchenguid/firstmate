@@ -237,6 +237,29 @@ test_no_bash4_only_constructs() {
   pass "fm-pr-body-check.sh: runs on bash 3.2 (no associative arrays)"
 }
 
+# grep exits 2+ on a real error - a regex the local engine cannot compile, an
+# unreadable file. Read as "no match", that pattern contributes nothing and an
+# unscanned body reports clean: the exact false clean this tool exists to stop.
+test_scan_error_never_reports_clean() {
+  local fakebin body out code=0
+  mkdir -p "$TMP_ROOT/scan-error"
+  fakebin=$(fm_fakebin "$TMP_ROOT/scan-error")
+  cat > "$fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+echo "grep: brackets ([ ]) not balanced" >&2
+exit 2
+SH
+  chmod +x "$fakebin/grep"
+
+  body="$TMP_ROOT/scan-error.md"
+  write_clean_body "$body"
+  out=$(PATH="$fakebin:$PATH" "$CHECK" --file "$body" 2>&1) || code=$?
+  expect_code 2 "$code" "a scan that errored out did not exit 2"
+  assert_contains "$out" "the body was NOT checked" "a failed scan did not say the body went unchecked"
+  assert_not_contains "$out" "clean" "a failed scan reported the body clean"
+  pass "fm-pr-body-check.sh: a scan error exits 2 instead of a false clean"
+}
+
 test_bad_url_and_fetch_failure_exit_2() {
   local fakebin out code=0
   out=$("$CHECK" https://example.com/not-a-pr 2>&1) || code=$?
@@ -269,4 +292,5 @@ test_leak_above_the_pipeline_footer_still_flags
 test_authored_internal_vocabulary_still_flags
 test_word_boundary_patterns_match_without_gnu_extensions
 test_no_bash4_only_constructs
+test_scan_error_never_reports_clean
 test_bad_url_and_fetch_failure_exit_2
