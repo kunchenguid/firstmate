@@ -49,13 +49,14 @@ The captain may supply any of these; useful defaults cover the rest so an audit 
 - **Focus area** - default to a full-breadth audit; a captain-named focus (for example "just onboarding" or "sharing and privacy") narrows the journeys and personas accordingly.
 
 Learn how to launch the app's local instance from its `README.md` or `AGENTS.md` - the launch command, the URL, and any seed/reset step - without reading further into the implementation.
-If the app cannot be launched locally and the captain has not authorized production, append `blocked:` and stop.
+If the app cannot be launched locally and the captain has not authorized production, report the local-launch blocker directly to the captain and stop.
+Reserve a `blocked:` status for a scout that has already been dispatched.
 
 ## 2. Run it as a scout
 
 Dispatch the audit as a scout task through the normal lifecycle in `AGENTS.md` section 7, do not perform the browsing yourself.
 Scaffold with `bin/fm-brief.sh <id> <repo> --scout` and spawn with `bin/fm-spawn.sh <id> projects/<repo> --scout`.
-Fill the brief's `{TASK}` with the resolved scope from section 1 and the full audit methodology in sections 3 through 9 of this skill, so the crewmate carries the personas, the goals-before-browsing rule, the journey set, what to record, the evidence and secret-avoidance rules, and the report contract.
+Fill the brief's `{TASK}` with the resolved scope from section 1, the Safety rails, and the full audit methodology in sections 3 through 10 of this skill, so the crewmate carries the local-only and headless defaults, the prohibition on source-guided journeys, the personas, the goals-before-browsing rule, the journey set, what to record, the evidence and secret-avoidance rules, the report contract, and the HTML/Lavish presentation contract.
 Supervise per section 8; when the crewmate reports `done`, its report is at `data/<id>/report.md`.
 
 ## 3. Two isolated personas

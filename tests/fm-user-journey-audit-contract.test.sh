@@ -48,6 +48,11 @@ test_local_instance_default() {
   pass "audits a local instance by default and never mutates production without authorization"
 }
 
+test_scout_brief_receives_full_audit_contract() {
+  assert_grep "resolved scope from section 1, the Safety rails, and the full audit methodology in sections 3 through 10" "$SKILL" "scout brief does not receive the safety rails and sections 3 through 10"
+  pass "scout brief receives the safety rails and sections 3 through 10"
+}
+
 test_evidence_and_report_requirements() {
   assert_grep 'Screenshots' "$SKILL" "skill does not require screenshot evidence"
   assert_grep 'reproduction steps' "$SKILL" "skill does not require reproduction steps"
@@ -104,6 +109,7 @@ test_trigger
 test_dual_persona_isolation
 test_headless_default
 test_local_instance_default
+test_scout_brief_receives_full_audit_contract
 test_evidence_and_report_requirements
 test_feature_ideas_are_grounded
 test_captain_approval_gate_before_task_creation
