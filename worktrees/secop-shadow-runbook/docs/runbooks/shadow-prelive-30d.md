@@ -1,52 +1,116 @@
 # Shadow pre-live 30-day runbook (no-send)
 
-**Purpose.** Operate the Socrata-backed shadow pipeline for 30 consecutive calendar days without sending, publishing, or taking action on behalf of a user. Every run is read-only, synthetic-safe, and reversible. This runbook is the gate for any later authorization request; it is not authorization to send.
+**Purpose.** Run the Socrata shadow pipeline for 30 consecutive calendar days
+without sending, publishing, or acting for a user. This is evidence for a
+later authorization request, never authorization itself.
 
-## Guardrails and ownership
+## Guardrails, identity, and access
 
-- **No-send invariant:** outbound email, SMS, webhook, CRM write, proposal submission, and browser form submit are disabled by policy and by ACL. A run that cannot prove the deny path is a FAIL.
-- The on-call operator owns the run; a reviewer signs daily evidence; the service owner approves any rollback or authorization request. No individual may self-approve an exception.
-- Production credentials, real personal data, and unapproved tokens are prohibited. Use fixtures and `MOCK_TOKEN` only.
+- Deny outbound email, SMS, webhook, CRM write, proposal submission, and form
+  submit by policy and ACL. A failed deny check is a FAIL, not a send incident.
+- Each run has `RUN_ID` matching `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
+  Propagate it through headers, logs, metrics, and artifacts.
+- Set only fixture `MOCK_TOKEN`, matching `^MOCK_[A-Za-z0-9_-]{16,}$`; reject
+  unset, production-looking prefixes, JWTs, or tokens found by the secret scan.
+- ACL permits Socrata read and evidence write only. Deny all outbound routes
+  and send/write APIs. Record the canonical sorted policy and `sha256sum`
+  before and after each run; attach the hash and redacted command output.
 
-## Time, freshness, and publication dates
+## Time, DATE, and freshness
 
-- Store event timestamps in UTC (`YYYY-MM-DDTHH:mm:ssZ`). Display/reporting may use `America/Bogota` (UTC−05:00, no DST), with both zones shown at day boundaries.
-- Define a reporting day by the **publication date** supplied by Socrata, not ingestion time. `publication DATE` is parsed as a calendar date in `America/Bogota`; late arrivals remain attributed to their publication day and are labelled late.
-- Track two independent clocks: **Socrata freshness** (`now_utc - max(publication/update timestamp)`) and **internal latency** (source receipt → normalize → score → artifact). Never substitute internal latency for source freshness.
-- Default warning/critical thresholds: freshness warning >24 h, critical >48 h; internal p95 warning >5 min, critical >15 min. Thresholds are configuration, versioned, and reviewed weekly.
+- Persist timestamps in UTC ISO-8601 with `Z`. Display UTC and
+  `America/Bogota` (UTC−05:00, no DST); require NTP offset ≤2 seconds.
+- The Socrata `publication DATE` has no time zone or time of day. Parse it as a
+  Bogota calendar date and use it for day buckets, regardless of arrival time.
+  If an `update_timestamp` exists, use it for freshness; otherwise use the
+  latest source `Last-Modified`/ETag observation. If all are absent, freshness
+  is `UNKNOWN` and the run cannot PASS.
+- Freshness is `now_utc - chosen source timestamp`; internal latency is
+  receipt → normalize → score → artifact. Report both; never use one as the
+  other. Late rows retain their publication DATE and are labelled late.
 
-## SLOs and alerts
+## SLOs, windows, exceptions, and alerts
 
-For each UTC day, publish a signed SLO record: availability ≥99%, successful scheduled runs ≥95%, p95 internal latency ≤5 min, zero send attempts, and 100% fixture/ACL checks. Alert immediately on any send-path invocation, ACL drift, missing RUN_ID, stale source >48 h, duplicate publication dates, data/schema drift, or failed cleanup. Page on-call for critical; ticket warnings for next review. Alerts include RUN_ID, UTC timestamp, Bogota date, metric, threshold, and evidence URI.
+For each UTC 24-hour window, sign a record with denominators and numerators:
+availability ≥99% (scheduled minutes), successful runs ≥95% (scheduled runs),
+p95 internal latency ≤5 minutes (completed runs), zero real send attempts,
+and 100% fixture/ACL checks (checks performed). Freshness warning is >24 h and
+critical >48 h; internal-latency warning is p95 >5 min and critical >15 min.
+Alert on missing `RUN_ID`, unknown freshness, ACL/hash drift, schema drift,
+failed cleanup, or a real send attempt. A synthetic expected-deny probe is
+recorded as a normal PASS and must not page; only an unexpected allow or real
+side effect is an incident. Exceptions require owner, reason, scope, expiry,
+and reviewer signature; expired or unsigned exceptions count as FAIL.
 
-## Synthetic fixtures, identity, and access
+## Fixtures and daily procedure
 
-Every run starts with an immutable fixture set (small, boundary-heavy, and containing a known duplicate plus a known late publication). Generate a unique `RUN_ID` (UUID) and propagate it through request headers, logs, metrics, and artifacts. Set `MOCK_TOKEN` in the isolated test context; reject unset, production-looking, or leaked tokens. ACL must allow Socrata read and artifact write only; explicitly deny all outbound network destinations and send/write APIs. Capture an ACL snapshot and hash before execution.
+Use an immutable, hashed fixture set with boundary dates, a known duplicate row,
+and a known late publication. The 30-day window starts at Day 1 and must contain
+30 consecutive UTC calendar dates; a missed day pauses the gate and requires a
+signed reason, rerun, and a new consecutive window (no backfill credit).
 
-## Daily procedure (30 days)
+1. Verify clock/NTP, prior evidence, alerts, fixture hash, ACL hash, and a
+   clean workspace. Record operator and reviewer.
+2. Run the read-only job with pinned schema/query versions, `RUN_ID`, and
+   `MOCK_TOKEN`. Record source metadata, DATE values, row counts, and both
+   freshness and latency.
+3. Reconcile DATE buckets in UTC/Bogota. Distinguish duplicate rows or
+   revisions (same entity/version conflict) from a repeated DATE, which is
+   normal and is not an alert by itself. Verify deterministic scoring and
+   canonical deduplication.
+4. Execute the synthetic send-path probe with a fixture payload. Expected
+   short-circuit/deny, zero outbound requests, and zero mutations is a normal
+   control result. A real intent, allow, or mutation aborts and pages.
+5. Run that day's fault from the matrix below. Verify bounded recovery.
+6. Revoke the mock token, delete temporary files, clear queues, and verify no
+   orphan process/session. Repeat secret, ACL, and deny scans.
+7. Write a redacted `RUN_ID` evidence bundle: manifest, canonical hashes,
+   logs, metrics, alerts, fixture/ACL snapshots, and attestations.
 
-1. Check previous-day evidence, open alerts, clock synchronization, fixture hash, ACL hash, and clean workspace. Record operator/reviewer in the run ledger.
-2. Execute the scheduled shadow job with `RUN_ID`, `MOCK_TOKEN`, pinned schema/query version, and a read-only Socrata response (or a recorded fixture when offline). Record source ETag/Last-Modified, publication dates, row counts, and freshness/latency metrics.
-3. Reconcile publication-date buckets in UTC and `America/Bogota`; verify late-arrival labeling, deduplication, deterministic scoring, and idempotent replay. Confirm no side effect beyond the run artifact.
-4. Run the synthetic send-path probe: assert deny/short-circuit, zero outbound requests, and zero mutations. Store the negative result, not credentials or payloads.
-5. Run fault probes scheduled for the day (timeout, 429, malformed row, schema field removal, duplicate page, clock skew, partial write). Verify bounded retry/backoff, quarantine, alerting, and safe halt.
-6. Execute cleanup: revoke the run token, remove temporary files, clear queues, and verify no orphan process/session/container. Re-run secret scan and ACL check.
-7. Write an evidence bundle named `RUN_ID` containing manifest, hashes, logs, metrics, alert outcomes, fixture/ACL snapshots, and operator/reviewer attestations. Mark PASS or FAIL before the next run.
+## Day-to-fault matrix and recovery
 
-## Replay and fault matrix
+| Days | Fault | Required bounded behavior |
+|---|---|---|
+| 1–4 | timeout, DNS failure | ≤3 retries, exponential backoff 1/2/4 s plus jitter, then quarantine and alert |
+| 5–8 | HTTP 429/rate limit | honor `Retry-After`, ≤3 attempts, quarantine after deadline |
+| 9–12 | malformed row/missing field | reject row, preserve reason, continue safe batch, alert schema owner |
+| 13–16 | duplicate page/row revision | canonical dedup, stable hash, no duplicate side effect |
+| 17–20 | source stale or clock skew | mark freshness UNKNOWN/critical, halt scoring, page on-call |
+| 21–24 | partial artifact write | atomic temp-to-final write; quarantine incomplete artifact and recover |
+| 25–27 | ACL/token drift | fail closed, revoke token, preserve evidence, escalate |
+| 28–30 | combined replay and recovery | execute one isolated fault at a time, then prove clean recovery |
 
-A replay of the same fixture and query version must produce the same normalized rows, scores, and hashes. Replaying a RUN_ID is allowed only in a quarantined namespace and must never overwrite evidence. Inject one fault at a time; abort on unexpected side effects, unbounded retries, non-determinism, or inability to prove recovery. Keep fault injection and observed outcome in the ledger.
+No retry may exceed the run deadline or five total attempts. Quarantine is a
+separate immutable namespace; recovery must be evidenced before PASS.
 
-## Abort, cleanup, and evidence retention
+## Replay, abort, cleanup, and rollback
 
-Abort immediately on any send attempt, ACL/token anomaly, source poisoning, uncontrolled retry, clock ambiguity, data loss, or evidence gap. Disable the worker, isolate the run namespace, preserve volatile logs, and notify the service owner. Cleanup is complete only when deny checks pass, temporary credentials are revoked, queues are empty, and a post-cleanup filesystem/network/process scan is attached. Retain signed daily bundles and weekly summaries for at least 90 days; redact secrets and personal data.
+Replay the same fixture, query/schema version, configuration hash, and frozen
+UTC clock. PASS requires identical canonical normalized-row, score, and
+artifact hashes. Replay `RUN_ID`s only in a quarantined namespace and never
+overwrite evidence.
 
-## Reviews and decision gates
+Abort immediately on an unexpected allow, real side effect, token/ACL anomaly,
+data loss, unbounded retry, or evidence gap. If the worker does not stop within
+60 seconds, escalate to the service owner at 60/120 seconds, revoke the token,
+disable scheduling, and isolate the namespace. Preserve immutable logs before
+cleanup. Roll back only to a signed last-known-good config/schema/query hash;
+record old/new hashes, operator, time, reason, and verification. Never delete
+failed evidence. Redact secrets and personal data; retain signed daily bundles
+and weekly summaries for 90 days.
 
-**Daily:** operator checks SLOs, freshness versus latency, no-send proof, faults, cleanup, and evidence completeness; reviewer countersigns or records FAIL/RCA. **Weekly:** service owner reviews seven-day trends, alert quality, schema/query changes, fixture coverage, ACL diffs, and open risks; approve threshold/config changes explicitly.
+## Reviews and authorization gate
 
-At day 30, produce a PASS/FAIL report. PASS requires 30 complete daily bundles, zero send attempts/mutations, all critical SLOs met or documented exceptions, deterministic replay, successful fault/cleanup checks, and reviewer signatures. Any missing proof is FAIL. On FAIL, rollback to the last known-good query/schema/config, disable scheduling if required, quarantine affected artifacts, open an RCA, and repeat the failed window; do not delete evidence.
+Daily, the operator checks SLO denominators, DATE/freshness versus latency,
+expected-deny proof, fault result, cleanup, and evidence; the reviewer signs or
+records FAIL/RCA. Weekly, the owner reviews seven-day trends, alert quality,
+schema/query changes, fixture coverage, ACL diffs, and exceptions.
 
-## Authorization and rollback
-
-No production authorization is implied by PASS. A separate, written authorization must name scope, sender identity, destinations, rate limits, monitoring, abort owner, and start/end times. Before enabling any send capability, rerun ACL and secret checks, stage a canary with an explicit approval, and record the authorization ID. At any anomaly, invoke the abort owner, disable send ACL, revoke tokens, and restore the last known-good configuration; attach rollback evidence to the ledger.
+PASS at Day 30 requires 30 consecutive complete bundles, zero real send
+attempts/mutations, critical SLOs met or valid unexpired exceptions,
+deterministic replay, all scheduled faults recovered, cleanups, and signatures.
+Any missing proof is FAIL; rollback, quarantine, RCA, and restart the 30-day
+window. PASS never authorizes production. A separate written authorization must
+name scope, identity, destinations, rate limits, monitoring, abort owner,
+start/end, and expiry. Recheck ACL, secret scan, hashes, and a canary approval
+before any capability change.
