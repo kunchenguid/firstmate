@@ -107,8 +107,8 @@ SH
 #   eval "$(adapter_env)"
 #   bash -c '. "$ROOT/bin/backends/orca.sh"; ...'
 adapter_env() {
-  printf 'FMOD_FAKE_LOG=%q FMOD_FAKE_RESPONSES=%q PATH=%q:$PATH ROOT=%q' \
-    "$LOG" "$RESP" "$FB" "$ROOT"
+  printf 'FMOD_FAKE_LOG=%q FMOD_FAKE_RESPONSES=%q PATH=%q:%s ROOT=%q' \
+    "$LOG" "$RESP" "$FB" "\$PATH" "$ROOT"
 }
 
 # ---- runtime check --------------------------------------------------------
