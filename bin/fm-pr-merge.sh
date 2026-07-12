@@ -18,9 +18,11 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
 #
-# fm-pr-check.sh also re-reads the LIVE PR body here, so a body edited after the
-# PR-ready check is still caught at the last moment it can be fixed cheaply. That
-# scan never blocks the merge; it surfaces lines for firstmate to read.
+# fm-pr-check.sh also re-reads the LIVE PR body here. That is a post-hoc record
+# of what was published, not a gate - the body has been public since the PR
+# opened, and this script merges in the same invocation. Its value is catching a
+# body edited after the PR-ready check and leaving a durable record for firstmate
+# to read. The scan never blocks the merge.
 #
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit

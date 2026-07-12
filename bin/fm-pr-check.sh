@@ -13,11 +13,20 @@
 # Flagged lines are for firstmate to READ and judge, not a verdict.
 #
 # bin/fm-pr-merge.sh runs this script again at merge time (with
-# FM_PR_CHECK_CONTEXT=merge, which only adjusts the failure wording), because
-# merge is the last cheap moment to fix a bad published body. The scan itself
-# always re-runs there, so a body edited after PR-ready is still caught; only
-# the PRINT is deduped against state/<id>.body-scan when the verdict is
-# unchanged. A failed or unavailable scan is never deduped.
+# FM_PR_CHECK_CONTEXT=merge, which only adjusts the failure wording). That
+# merge-time scan prevents nothing: the body has been public since the PR
+# opened, and the merge follows in the same invocation with nothing pausing to
+# read this output. It is a post-hoc record of what was actually published -
+# its value is catching a body edited between PR-ready and merge, and leaving a
+# durable verdict for firstmate to read. Leak prevention lives earlier: at
+# PR-open, in the crewmate's verify-before-done step, and at PR-ready, where
+# firstmate reads this scan before relaying the PR.
+#
+# The scan itself always runs. Only the PRINT is deduped, keyed on the URL plus
+# the scan output, so ANY repeat invocation for the same PR with an unchanged
+# verdict - a second PR-ready run as much as the merge - points at
+# state/<id>.body-scan instead of re-printing the lines. A failed or
+# unavailable scan is never deduped.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,9 +78,9 @@ if [ -x "$BODY_CHECK" ]; then
   case "$BODY_CODE" in
     0) printf '%s\n' "$SCANNED" > "$RECORD" ;;
     1)
-      # The scan always runs - a body edited between PR-ready and merge must
-      # still be caught - but re-printing an unchanged verdict twice is noise,
-      # so only the print is deduped.
+      # The scan always runs - a body edited since the last check must still be
+      # caught - but re-printing an unchanged verdict on any repeat run of the
+      # same PR is noise, so only the print is deduped.
       if [ "$PREV" = "$SCANNED" ]; then
         echo "PR body scan: same flagged lines as the last check of this PR; nothing new. Read them in state/$ID.body-scan."
       else
