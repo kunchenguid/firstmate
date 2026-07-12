@@ -241,8 +241,8 @@ run_terminal_epoch() {
       *[!0-9]*) ;;
       *) printf '%s' "$value"; return 0 ;;
     esac
-    if date -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s >/dev/null 2>&1; then
-      date -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null
+    if date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s >/dev/null 2>&1; then
+      date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null
       return 0
     fi
     if date -d "$value" +%s >/dev/null 2>&1; then

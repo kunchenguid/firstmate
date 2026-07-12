@@ -285,6 +285,17 @@ run_failed_at() {  # <branch> <epoch>
   printf 'updated_at: %s\n' "$2"
 }
 
+# Format a Unix epoch as an ISO-8601 UTC instant (trailing Z), portably.
+iso_utc() {  # <epoch>
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+run_failed_iso() {  # <branch> <iso-utc>
+  run_failed "$1"
+  printf 'updated_at: %s\n' "$2"
+}
+
 run_passed_at() {  # <branch> <epoch>
   run_passed "$1"
   printf 'updated_at: %s\n' "$2"
@@ -703,6 +714,30 @@ test_paused_outranks_terminal_failed_run() {
   assert_contains "$out" "historical run failed" "detail notes the historical failed run"
   assert_not_contains "$out" "state: failed" "must not report failed over trailing paused"
   pass "trailing paused: outranks a terminal failed historical run-step"
+}
+
+# The pause-strictly-newer comparison parses an ISO-8601 Z run timestamp into a
+# Unix epoch and compares it against the pause file's real mtime. That parse must
+# treat the trailing Z as UTC regardless of the machine's local timezone; a
+# west-of-UTC parse that ignores Z shifts the run epoch forward by the local
+# offset and can flip a genuinely-older run into a spuriously-newer one, wrongly
+# suppressing the pause. Pin a west-of-UTC zone and place the run two hours before
+# the fresh pause file: the correct UTC parse keeps the run older (pause wins),
+# while an offset-skewed parse would push it past the pause and report failed.
+test_paused_outranks_terminal_failed_run_iso_ts_tz() {
+  reset_fakes
+  local d; d=$(new_case paused-over-failed-iso-tz)
+  make_repo_on_branch "$d/wt" fm/feat-pause-iso
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-iso.meta" "window=fm:fm-feat-pause-iso" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for provider recovery\n' > "$d/state/feat-pause-iso.status"
+  local now iso; now=$(date +%s); iso=$(iso_utc "$((now - 7200))")
+  FM_FAKE_AXI_STATUS="$(run_failed_iso fm/feat-pause-iso "$iso")"
+  FM_FAKE_BUSY=0
+  local out; out=$(TZ=America/New_York run_crew_state "$d" feat-pause-iso)
+  assert_contains "$out" "state: paused" "trailing paused outranks older ISO-Z failed run under west-of-UTC tz"
+  assert_not_contains "$out" "state: failed" "west-of-UTC Z parse must not flip an older run into a newer one"
+  pass "trailing paused: outranks an older ISO-Z terminal run regardless of local timezone"
 }
 
 test_paused_outranks_terminal_passed_run() {
@@ -1280,6 +1315,7 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_paused_outranks_terminal_failed_run
+test_paused_outranks_terminal_failed_run_iso_ts_tz
 test_paused_outranks_terminal_passed_run
 test_newer_terminal_run_outranks_older_pause
 test_unordered_terminal_run_outranks_pause
