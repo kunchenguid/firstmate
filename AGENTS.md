@@ -219,7 +219,7 @@ Secondmates can run on a different harness than crewmates.
 `config/secondmate-harness` (local, gitignored) is the harness the primary uses to launch SECONDMATE agents; resolve it with `bin/fm-harness.sh secondmate`, which follows the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> your own harness.
 An explicit per-spawn harness still overrides either kind, and every secondmate respawn re-resolves from the file, so the split is durable across restarts without being recorded per-task.
 
-`config/secondmate-harness` and `config/secondmate-harness.d/<id>` can pin secondmate model, effort, and Codex fast mode; format, precedence, safety, accessors, and inheritance exceptions live in `secondmate-provisioning` (load before creating, seeding, launching, or recovering a secondmate).
+`config/secondmate-harness` and `config/secondmate-harness.d/<id>` can pin secondmate model, effort, and Codex fast mode; the human contract lives in `docs/configuration.md`, while conditional agent details live in `secondmate-provisioning` (load before creating, seeding, launching, or recovering a secondmate).
 
 `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited into every secondmate home; neither secondmate harness profile location is inherited, because secondmates never spawn secondmates.
 `secondmate-provisioning` owns the propagation timing, mechanism, the literal-file inheritance nuance, and `bin/fm-config-push.sh`.

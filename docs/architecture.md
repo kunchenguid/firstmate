@@ -133,12 +133,7 @@ The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/
 
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's global secondmate launch profile, while `config/secondmate-harness.d/<id>` may override that profile for one safe secondmate id.
-Both locations accept `<harness> [<model>] [<effort>] [fast]` on the first non-empty, non-comment line, with the position-independent `fast` keyword requesting Codex fast mode.
-A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
-When no safe per-id override exists, resolution uses the global file; when its harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and its optional profile fields are ignored.
-The profile is re-read by id on every secondmate spawn or respawn, and explicit per-spawn `--model` or `--effort` flags override its matching fields.
-Codex fast mode launches with `service_tier="fast"`; non-Codex harnesses ignore that intent with a warning.
-An explicit per-spawn harness or raw launch command does not inherit model, effort, or fast-mode intent from either secondmate profile location.
+The [configuration reference](configuration.md#harness-support) owns the profile format, fallback, safety, precedence, and Codex fast-mode contract.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces routine backlog updates to hand-editing across the fleet without disabling validated handoff delegation.
