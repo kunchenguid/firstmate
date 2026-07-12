@@ -100,6 +100,66 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The 2026-07-12 leak: no-mistakes renders --intent verbatim into the public PR
+# body, and intent written for an internal audience shipped agent-facing
+# meta-instructions to a third-party maintainer. Both PR-opening modes must warn
+# that the body is public and must send the crewmate back to the LIVE body before
+# it may report done; local-only opens no PR and must not carry the section.
+test_public_pr_contract_on_pr_opening_modes() {
+  local home brief id
+  home="$TMP_ROOT/public-pr-home"
+  write_registry "$home"
+
+  for id_proj in "brief-public-nm-e1:no-registry-proj" "brief-public-dp-e2:direct-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# The PR you open is public writing" "$brief" \
+      "$id: ship brief lost the public-PR contract"
+    assert_grep "Every word of the PR title and body is PUBLIC." "$brief" \
+      "$id: public-PR contract lost the plain statement that the body is public"
+    assert_grep "no meta-instructions aimed at a reviewer or a bot" "$brief" \
+      "$id: public-PR contract lost the no-meta-instructions rule"
+    assert_grep "no internal vocabulary (firstmate, crewmate, captain, brief, task id, harness, worktree, scout, ship), and no agent co-author" "$brief" \
+      "$id: public-PR contract lost the internal-vocabulary and co-author rules"
+    assert_grep "assume every PR body is read by a stranger" "$brief" \
+      "$id: public-PR contract lost the unconditional framing"
+    assert_grep "re-read its LIVE body from the API" "$brief" \
+      "$id: brief does not require verifying the published body before done"
+    assert_grep "bin/fm-pr-body-check.sh' {url}" "$brief" \
+      "$id: brief does not point at the live-body check helper"
+    assert_grep "a match is a line to inspect, not a verdict" "$brief" \
+      "$id: brief lost the read-the-lines, do-not-count rule"
+    # shellcheck disable=SC2016 # Literal backticks must reach the brief text unexpanded.
+    assert_grep 'Do NOT rewrite it with `gh pr edit --body`: that can silently NO-OP' "$brief" \
+      "$id: brief lost the gh pr edit no-op trap"
+    assert_grep 'gh api -X PATCH repos/OWNER/REPO/pulls/{n} -F body=@{file}' "$brief" \
+      "$id: brief lost the REST API repair command"
+  done
+
+  assert_grep "rendered VERBATIM into the \`## Intent\` section" "$home/data/brief-public-nm-e1/brief.md" \
+    "no-mistakes brief does not say the --intent text is published verbatim"
+  assert_no_grep "--intent" "$home/data/brief-public-dp-e2/brief.md" \
+    "direct-PR brief names --intent, which only no-mistakes passes"
+
+  id="brief-public-lo-e3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  assert_no_grep "# The PR you open is public writing" "$home/data/$id/brief.md" \
+    "local-only brief carries a public-PR contract for a PR it never opens"
+  pass "fm-brief.sh: PR-opening ship briefs carry the public-body contract and the live verify step"
+}
+
+test_scout_brief_has_no_public_pr_contract() {
+  local home id
+  home="$TMP_ROOT/scout-public-home"
+  mkdir -p "$home/data"
+  id="brief-scout-public-e4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  assert_no_grep "# The PR you open is public writing" "$home/data/$id/brief.md" \
+    "scout brief carries a public-PR contract though it never opens a PR"
+  pass "fm-brief.sh: scout briefs omit the public-PR contract"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -265,6 +325,8 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_public_pr_contract_on_pr_opening_modes
+test_scout_brief_has_no_public_pr_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

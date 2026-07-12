@@ -729,6 +729,7 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Briefs for the two PR-opening modes carry the public-PR contract, which the scaffold owns in full: the PR body is public reviewer-facing writing, and the crewmate must read the live body back with `bin/fm-pr-body-check.sh <pr-url>` and clear it before reporting done.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For a crewmate task that will drive Herdr lifecycle behavior, add `--herdr-lab`: the scaffold embeds the hard Herdr-isolation contract backed by `bin/fm-herdr-lab.sh` (a never-`default` lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire), and the flag is rejected for `--secondmate` briefs.
