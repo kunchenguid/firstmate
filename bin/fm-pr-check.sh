@@ -73,7 +73,7 @@ if [ -x "$BODY_CHECK" ]; then
       # still be caught - but re-printing an unchanged verdict twice is noise,
       # so only the print is deduped.
       if [ "$PREV" = "$SCANNED" ]; then
-        echo "PR body scan: same flagged lines as the last check of this PR; already surfaced, nothing new to read."
+        echo "PR body scan: same flagged lines as the last check of this PR; nothing new. Read them in state/$ID.body-scan."
       else
         printf '%s\n' "$BODY_OUT"
         printf '%s\n' "$SCANNED" > "$RECORD"

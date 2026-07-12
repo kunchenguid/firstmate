@@ -98,10 +98,16 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
+  # fm-pr-check scans the live body through fm-pr-body-check.sh; answer its REST
+  # read with clean reviewer-facing prose so no test run reaches the real API and
+  # the scan has a body to read rather than reporting an unread one.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+esac
+case "${1:-}" in
+  api) printf '%s\n' 'Retry transient upload failures' 'The uploader now retries three times with backoff.' ; exit 0 ;;
 esac
 exit 0
 SH
@@ -229,6 +235,9 @@ case "\${1:-} \${2:-}" in
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+esac
+case "\${1:-}" in
+  api) printf '%s\n' 'Retry transient upload failures' 'The uploader now retries three times with backoff.' ; exit 0 ;;
 esac
 echo "error: pull request not found" >&2
 exit 1

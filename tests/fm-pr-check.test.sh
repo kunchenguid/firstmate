@@ -199,10 +199,14 @@ EOF
 
   rc=$(run_merge_case "$case_dir")
   expect_code 0 "$rc" "merge-dedupe: the merge scan should succeed"
-  assert_grep "already surfaced" "$case_dir/stdout" \
-    "merge-dedupe: an unchanged verdict was not reported as already surfaced"
+  assert_grep "nothing new" "$case_dir/stdout" \
+    "merge-dedupe: an unchanged verdict was not reported as unchanged"
+  assert_grep "state/task-x1.body-scan" "$case_dir/stdout" \
+    "merge-dedupe: the suppressed lines were not made locatable by naming their record"
   assert_no_grep "FLAGGED" "$case_dir/stdout" \
     "merge-dedupe: the same flagged lines were printed a second time at merge"
+  assert_grep "do not re-raise" "$case_dir/state/task-x1.body-scan" \
+    "merge-dedupe: the record does not hold the flagged lines it points at"
 
   # A body edited between PR-ready and merge is a different verdict: print it.
   cat > "$case_dir/body.txt" <<'EOF'
