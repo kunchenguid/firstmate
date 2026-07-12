@@ -11,6 +11,43 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 mkdir -p "$STATE"
 
+# Supervision ownership is durable so normal Codex and away mode can transfer
+# one already-running daemon without a watcher gap or a second daemon. The
+# owner is deliberately a closed set: an unreadable or unexpected value never
+# permits injection.
+fm_supervision_owner_get() {  # <state>
+  local state=$1 owner
+  owner=$(cat "$state/.supervision-owner" 2>/dev/null || true)
+  case "$owner" in
+    afk|normal-codex) printf '%s\n' "$owner" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_supervision_owner_set() {  # <state> <afk|normal-codex>
+  local state=$1 owner=$2 tmp
+  case "$owner" in
+    afk|normal-codex) ;;
+    *) return 2 ;;
+  esac
+  mkdir -p "$state"
+  tmp=$(mktemp "$state/.supervision-owner.tmp.XXXXXX") || return 1
+  printf '%s\n' "$owner" > "$tmp" && mv -f "$tmp" "$state/.supervision-owner"
+}
+
+fm_supervision_owner_clear() {  # <state>
+  rm -f "$1/.supervision-owner"
+}
+
+fm_supervision_owner_injection_active() {  # <state>
+  local state=$1 owner
+  owner=$(fm_supervision_owner_get "$state") || return 1
+  case "$owner" in
+    afk) [ -e "$state/.afk" ] ;;
+    normal-codex) [ ! -e "$state/.afk" ] ;;
+  esac
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -408,4 +445,37 @@ fm_wake_print_deduped() {
       }
     }
   ' "$file"
+}
+
+fm_daemon_lock_owner() {  # <lock>
+  local lock=$1 owner
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock" 2>/dev/null) || return 1
+    [ -n "$owner" ] || return 1
+    case "$owner" in
+      /*) printf '%s\n' "$owner" ;;
+      *) printf '%s/%s\n' "$(dirname "$lock")" "$owner" ;;
+    esac
+    return 0
+  fi
+  [ -d "$lock" ] || return 1
+  printf '%s\n' "$lock"
+}
+
+fm_daemon_lock_held_by_live_daemon() {  # <lock> <daemon-script>
+  local lock=$1 daemon_script=$2 owner pid identity current command
+  owner=$(fm_daemon_lock_owner "$lock") || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  if [ -n "$identity" ]; then
+    current=$(fm_pid_identity "$pid") || return 1
+    [ "$current" = "$identity" ]
+    return
+  fi
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in
+    *"$daemon_script"*|*"fm-supervise-daemon.sh"*) return 0 ;;
+  esac
+  return 1
 }

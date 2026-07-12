@@ -12,6 +12,7 @@ set -u
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"
+CODEX_START="$ROOT/bin/fm-codex-supervise-start.sh"
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
 # via a BASH_SOURCE guard, so only classify_*/housekeeping/escalate_*/afk_* and the
 # pane/submit helpers become defined.
@@ -22,6 +23,129 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
 fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
+
+test_codex_start_failure_leaves_no_false_owner() {
+  local dir state status
+  dir=$(make_supercase codex-start-failure)
+  state="$dir/state"
+  status=0
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported \
+    "$CODEX_START" >/dev/null 2>&1 || status=$?
+
+  [ "$status" -ne 0 ] || fail "normal Codex launcher unexpectedly succeeded with an unsupported backend"
+  assert_absent "$state/.supervision-owner" "failed normal Codex startup left false supervision ownership"
+  pass "failed normal Codex startup leaves no false supervision owner"
+}
+
+test_normal_codex_daemon_shutdown_releases_owner() {
+  local dir state fakebin daemon_pid i
+  dir=$(make_supercase normal-codex-shutdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fake:0 \
+    FM_POLL=0.05 FM_HOUSEKEEPING_TICK=1 \
+    "$CODEX_START" >/dev/null 2>&1 &
+  daemon_pid=$!
+
+  i=0
+  while [ "$i" -lt 100 ] && {
+    [ ! -s "$state/.supervise-daemon.pid" ] ||
+      [ "$(cat "$state/.supervision-owner" 2>/dev/null || true)" != normal-codex ]
+  }; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -s "$state/.supervise-daemon.pid" ] || {
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "normal Codex daemon did not start"
+  }
+  [ "$(cat "$state/.supervision-owner" 2>/dev/null || true)" = normal-codex ] || {
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "normal Codex daemon did not record ownership"
+  }
+
+  kill -TERM "$daemon_pid"
+  wait "$daemon_pid"
+
+  assert_absent "$state/.supervision-owner" "normal Codex daemon shutdown left stale supervision ownership"
+  pass "normal Codex daemon shutdown releases normal-codex ownership"
+}
+
+test_normal_codex_daemon_shutdown_preserves_afk_owner() {
+  local dir state fakebin daemon_pid i
+  dir=$(make_supercase normal-codex-shutdown-afk-owner)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fake:0 \
+    FM_POLL=0.05 FM_HOUSEKEEPING_TICK=1 \
+    "$CODEX_START" >/dev/null 2>&1 &
+  daemon_pid=$!
+
+  i=0
+  while [ "$i" -lt 100 ] && \
+    [ "$(cat "$state/.supervision-owner" 2>/dev/null || true)" != normal-codex ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.supervision-owner" 2>/dev/null || true)" = normal-codex ] || {
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "normal Codex daemon did not record ownership before AFK transfer"
+  }
+
+  printf '%s\n' afk > "$state/.supervision-owner"
+  touch "$state/.afk"
+  kill -TERM "$daemon_pid"
+  wait "$daemon_pid"
+
+  [ "$(cat "$state/.supervision-owner" 2>/dev/null || true)" = afk ] || \
+    fail "normal Codex daemon shutdown erased transferred AFK ownership"
+  pass "normal Codex daemon shutdown preserves transferred AFK ownership"
+}
+
+test_afk_exit_non_codex_preserves_afk_ownership() {
+  local dir state out status
+  dir=$(make_supercase afk-exit-non-codex)
+  state="$dir/state"
+  afk_enter "$state"
+
+  status=0
+  out=$(FM_PRIMARY_HARNESS=claude afk_exit "$state" 2>&1) || status=$?
+
+  [ "$status" -ne 0 ] || fail "non-Codex afk exit unexpectedly succeeded"
+  assert_present "$state/.afk" "non-Codex afk exit cleared the away marker"
+  [ "$(fm_supervision_owner_get "$state" 2>/dev/null || true)" = afk ] || \
+    fail "non-Codex afk exit abandoned afk supervision ownership"
+  assert_contains "$out" "afk flag and ownership retained" "non-Codex afk exit did not fail loudly"
+  pass "non-Codex afk exit fails loudly and preserves afk ownership"
+}
+
+test_afk_exit_owner_write_failure_restores_afk_marker() {
+  local dir state out status
+  dir=$(make_supercase afk-exit-owner-write-failure)
+  state="$dir/state"
+  afk_enter "$state"
+
+  status=0
+  out=$( {
+    fm_supervision_owner_set() { return 1; }
+    FM_PRIMARY_HARNESS=codex afk_exit "$state"
+  } 2>&1) || status=$?
+
+  [ "$status" -ne 0 ] || fail "afk exit unexpectedly succeeded when owner write failed"
+  assert_present "$state/.afk" "failed afk exit did not restore the away marker"
+  [ "$(fm_supervision_owner_get "$state" 2>/dev/null || true)" = afk ] || \
+    fail "failed afk exit abandoned afk supervision ownership"
+  assert_contains "$out" ".afk restored" "failed afk exit did not explain its recoverable state"
+  pass "failed afk exit restores the marker and preserves afk ownership"
+}
 
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
@@ -1649,6 +1773,11 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
 }
 
+test_codex_start_failure_leaves_no_false_owner
+test_normal_codex_daemon_shutdown_releases_owner
+test_normal_codex_daemon_shutdown_preserves_afk_owner
+test_afk_exit_non_codex_preserves_afk_ownership
+test_afk_exit_owner_write_failure_restores_afk_marker
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid

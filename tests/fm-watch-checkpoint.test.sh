@@ -46,6 +46,54 @@ test_signal_passes_through_and_exits_zero() {
   pass "checkpoint passes through a real watcher wake and leaves the queue for drain"
 }
 
+test_pending_queue_is_drained_before_a_new_checkpoint_starts() {
+  local home out err status
+  home=$(make_home queued)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  printf '1\t1\tsignal\ttask.status\tsignal: task.status\n' > "$home/state/.wake-queue"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "queued checkpoint exit"
+  assert_contains "$(cat "$out")" $'\tsignal\ttask.status\t' "checkpoint did not surface its durable queued wake"
+  [ ! -s "$home/state/.wake-queue" ] || fail "checkpoint left the durable wake queued"
+  assert_absent "$home/state/.watch.lock/pid" "checkpoint started a duplicate watcher while a wake was pending"
+  pass "checkpoint drains a durable queued wake before starting another watcher"
+}
+
+test_next_checkpoint_reconciles_a_terminal_status_missed_while_no_watcher_lived() {
+  local home out err status signature drained
+  home=$(make_home missed-terminal)
+  out="$home/out.txt"
+  err="$home/err.txt"
+
+  # A bounded checkpoint has ended, so its watcher lock must be gone before the
+  # crewmate writes a terminal status in the blind interval.
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "initial quiet checkpoint exit"
+  assert_absent "$home/state/.watch.lock/pid" "quiet checkpoint left a watcher alive"
+
+  printf 'done: terminal status during the checkpoint gap\n' > "$home/state/task.status"
+  if [ "$(uname)" = Darwin ]; then
+    signature=$(stat -f '%z:%Fm' "$home/state/task.status")
+  else
+    signature=$(stat -c '%s:%Y' "$home/state/task.status")
+  fi
+  # Reproduce a per-signal miss: the durable .seen marker is current, but the
+  # terminal status was never marked surfaced and no wake was queued.
+  printf '%s' "$signature" > "$home/state/.seen-task_status"
+
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$CHECKPOINT" --seconds 3 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "reconciliation checkpoint exit"
+  assert_contains "$(cat "$out")" "heartbeat" "next checkpoint did not surface the missed terminal status"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" $'\theartbeat\theartbeat\theartbeat' "reconciliation wake was not durable"
+  assert_absent "$home/state/.watch.lock/pid" "reconciliation checkpoint did not clean up its watcher"
+  pass "next checkpoint durably reconciles a terminal status missed between checkpoints"
+}
+
 test_check_uses_preserved_watcher_environment() {
   local home out err status
   home=$(make_home check-env)
@@ -81,5 +129,7 @@ test_existing_singleton_watcher_is_not_success() {
 
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
+test_pending_queue_is_drained_before_a_new_checkpoint_starts
+test_next_checkpoint_reconciles_a_terminal_status_missed_while_no_watcher_lived
 test_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success

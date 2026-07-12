@@ -4,6 +4,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {
@@ -44,6 +47,18 @@ case "$SECONDS_ARG" in
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
 
+command -v perl >/dev/null 2>&1 || { echo "error: perl is required for the bounded checkpoint timeout" >&2; exit 1; }
+
+# A previous checkpoint may have ended after an actionable wake was queued but
+# before the primary drained it. Surface that durable record before claiming a
+# new watcher lock, so a Codex continuation cannot wait out a fresh checkpoint
+# while already-actionable work is sitting in its own queue.
+if [ -s "$STATE/.wake-queue" ]; then
+  echo "signal: queued wakes drained"
+  "$SCRIPT_DIR/fm-wake-drain.sh"
+  exit 0
+fi
+
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
   rm -f "$OUT"
@@ -74,16 +89,11 @@ run_with_perl_timeout() {
 }
 
 set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-else
-  run_with_perl_timeout >"$OUT" 2>"$ERR"
-  RC=$?
-fi
+# Kill the watcher process group, not only its shell. A plain timeout(1) can
+# return while fm-watch.sh is still waiting on sleep, leaving its singleton lock
+# behind and making the next foreground checkpoint unusable.
+FM_WATCH_FORCE_HEARTBEAT=1 run_with_perl_timeout >"$OUT" 2>"$ERR"
+RC=$?
 set -e
 
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then

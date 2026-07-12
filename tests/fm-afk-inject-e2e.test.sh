@@ -15,6 +15,13 @@
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
 #     single-line digest with no duplicate or spurious user submission.
 #
+#   Scenario D (normal Codex): the normal-mode singleton delivers a terminal
+#     status without creating the away marker.
+#
+#   Scenario E (ownership transition): normal Codex -> afk -> normal Codex
+#     keeps one daemon and watcher, switches the durable owner truthfully, and
+#     delivers each terminal status once without a captain poll or restart.
+#
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
@@ -156,11 +163,12 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
+  local daemon_bin=${FM_DAEMON_BIN:-$DAEMON}
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
   FM_SUPERVISOR_BACKEND=tmux \
-  FM_ESCALATE_BATCH_SECS=0 \
+  FM_ESCALATE_BATCH_SECS="${FM_TEST_BATCH_SECS:-0}" \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
   FM_SIGNAL_GRACE=1 \
@@ -169,7 +177,7 @@ start_daemon() {
   FM_INJECT_CONFIRM_SLEEP=0.3 \
   FM_INJECT_CONFIRM_RETRIES=5 \
   FM_STALE_ESCALATE_SECS=999999 \
-  nohup "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
+  nohup "$daemon_bin" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
   DAEMON_PID=$!
   # Wait for the daemon to start and acquire the lock.
   local i=0
@@ -184,6 +192,16 @@ start_daemon() {
   }
 }
 
+start_normal_codex_daemon() {
+  FM_DAEMON_BIN="$ROOT/bin/fm-codex-supervise-start.sh" start_daemon
+  local i=0
+  while [ "$i" -lt 30 ] &&
+    [ "$(cat "$STATE_DIR/.supervision-owner" 2>/dev/null || true)" != normal-codex ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+}
+
 stop_daemon() {
   [ -n "${DAEMON_PID:-}" ] || return 0
   afk_exit "$STATE_DIR" 2>/dev/null || true
@@ -196,7 +214,9 @@ stop_daemon() {
 reset_state() {
   # Clear daemon and watcher state for a fresh scenario.
   rm -f "$STATE_DIR"/*.status \
+         "$STATE_DIR"/.afk \
          "$STATE_DIR"/.subsuper-* \
+         "$STATE_DIR"/.supervision-owner \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
          "$STATE_DIR"/.last-* \
@@ -423,8 +443,95 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: normal Codex supervision, no away-mode ownership -----------
+
+test_scenario_d() {
+  reset_state
+  FM_TEST_BATCH_SECS=1 start_normal_codex_daemon
+  [ ! -e "$STATE_DIR/.afk" ] || fail "Scenario D: normal Codex mode created the away-mode flag"
+  FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-codex-supervise-start.sh" >"$STATE_DIR/second-daemon.out" 2>&1 \
+    || fail "Scenario D: normal Codex launcher could not adopt the singleton daemon"
+  grep -q 'adopted existing daemon' "$STATE_DIR/second-daemon.out" \
+    || fail "Scenario D: second normal launcher did not report singleton adoption"
+
+  echo "done: normal Codex daemon wake" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  local digest_count
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 1 ] \
+    || fail "Scenario D: normal Codex mode expected one injected digest, got $digest_count"
+  grep -q 'normal Codex daemon wake' "$LOG_FILE" \
+    || fail "Scenario D: terminal status did not reach the normal Codex supervisor"
+  [ -e "$STATE_DIR/.last-watcher-beat" ] \
+    || fail "Scenario D: daemon did not maintain the watcher liveness beacon"
+
+  stop_daemon
+  pass "Scenario D: normal Codex supervision injects one terminal wake without away mode"
+}
+
+# --- Scenario E: normal Codex <-> afk ownership transfer -------------------
+
+test_scenario_e() {
+  local normal_pid afk_pid transition_out normal_out digest_count
+  reset_state
+  FM_TEST_BATCH_SECS=1 start_normal_codex_daemon
+  normal_pid=$(cat "$STATE_DIR/.supervise-daemon.pid")
+  [ "$(cat "$STATE_DIR/.supervision-owner" 2>/dev/null || true)" = "normal-codex" ] \
+    || fail "Scenario E: normal Codex start did not record normal-codex as durable owner"
+
+  transition_out=$(PATH="$TMUX_SHIM_DIR:$PATH" FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-afk-start.sh") \
+    || fail "Scenario E: normal-to-afk transition failed: $transition_out"
+  afk_pid=$(cat "$STATE_DIR/.supervise-daemon.pid")
+  [ "$afk_pid" = "$normal_pid" ] \
+    || fail "Scenario E: normal-to-afk transition restarted the daemon ($normal_pid -> $afk_pid)"
+  [ "$(cat "$STATE_DIR/.supervision-owner" 2>/dev/null || true)" = "afk" ] \
+    || fail "Scenario E: normal-to-afk transition did not record afk owner"
+  [ -e "$STATE_DIR/.afk" ] || fail "Scenario E: normal-to-afk transition did not set away mode"
+
+  echo "done: transition afk terminal" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 1 ] \
+    || fail "Scenario E: afk owner expected one terminal digest, got $digest_count"
+
+  FM_PRIMARY_HARNESS=codex afk_exit "$STATE_DIR"
+  normal_out=$(PATH="$TMUX_SHIM_DIR:$PATH" FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-codex-supervise-start.sh") \
+    || fail "Scenario E: afk-to-normal transition failed: $normal_out"
+  [ "$(cat "$STATE_DIR/.supervise-daemon.pid")" = "$normal_pid" ] \
+    || fail "Scenario E: afk-to-normal transition restarted the daemon"
+  [ "$(cat "$STATE_DIR/.supervision-owner" 2>/dev/null || true)" = "normal-codex" ] \
+    || fail "Scenario E: afk-to-normal transition did not restore normal-codex owner"
+  [ ! -e "$STATE_DIR/.afk" ] || fail "Scenario E: afk-to-normal transition left away mode active"
+
+  echo "done: transition normal terminal" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
+  [ "$digest_count" -eq 2 ] \
+    || fail "Scenario E: transition expected two total terminal digests, got $digest_count"
+  [ -e "$STATE_DIR/.last-watcher-beat" ] \
+    || fail "Scenario E: transition lost the watcher liveness beacon"
+
+  local afk_instructions normal_instructions
+  afk_instructions=$(FM_HOME="${STATE_DIR%/state}" "$ROOT/bin/fm-supervision-instructions.sh" --harness codex --afk 1)
+  normal_instructions=$(FM_HOME="${STATE_DIR%/state}" "$ROOT/bin/fm-supervision-instructions.sh" --harness codex --afk 0)
+  case "$afk_instructions" in
+    *'Away mode already owns watcher supervision'*) ;;
+    *) fail "Scenario E: away-mode instructions did not name the afk owner" ;;
+  esac
+  case "$normal_instructions" in
+    *'Mode: Codex daemon-backed normal supervision.'*) ;;
+    *) fail "Scenario E: normal-mode instructions did not name the normal Codex owner" ;;
+  esac
+
+  stop_daemon
+  pass "Scenario E: normal Codex and afk transfer one owner without dropped or duplicate wakes"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
+test_scenario_e
 
 echo "all e2e injection tests passed"

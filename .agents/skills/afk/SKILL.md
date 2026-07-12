@@ -16,9 +16,14 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
-1. **Set the durable away-mode flag:**
+1. **Transfer the durable supervision owner to away mode and set the flag.**
+   `state/.supervision-owner` is the single owner record and has only two
+   valid values: `afk` and `normal-codex`.
+   The away-mode helper updates that record together with `state/.afk`.
+   A mismatch fails closed: no injection is attempted until the transition is
+   complete, while the wake queue retains every event.
    ```sh
-   date '+%s' > state/.afk
+   bin/fm-afk-start.sh
    ```
    This file survives a firstmate restart: recovery re-enters afk if the
    flag is present.
@@ -28,7 +33,8 @@ batched digest rather than per-wake injections.
    ```sh
    bin/fm-afk-start.sh
    ```
-   The helper sets or refreshes `state/.afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
+   The helper transfers the durable owner to `afk`, exits immediately if the identity-backed daemon lock already names a live process, and otherwise execs `bin/fm-supervise-daemon.sh` in the foreground.
+   A live normal Codex daemon is adopted in place - it is not restarted.
    Do not wrap this in `nohup ... &`.
    Codex/herdr can reap fire-and-forget shell children after a tool call
    returns; a tracked background terminal/session keeps the daemon attached to
@@ -47,7 +53,14 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
-  Clear `state/.afk`, stop the daemon, flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
+  Clear `state/.afk` through the existing `afk_exit` return path.
+  For a Codex primary, that return path restores the durable owner to `normal-codex`; `bin/fm-codex-supervise-start.sh` then adopts the same verified daemon instead of starting another one.
+  For every other primary, clear both the owner and the away-mode flag manually, then stop the daemon:
+  ```sh
+  rm -f state/.supervision-owner state/.afk
+  pkill -f bin/fm-supervise-daemon.sh || true
+  ```
+  Flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume the emitted primary-harness supervision protocol from session start.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
   is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this

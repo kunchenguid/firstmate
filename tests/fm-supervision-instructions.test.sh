@@ -12,8 +12,8 @@ test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
-  assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
+  assert_contains "$out" "Mode: Codex daemon-backed normal supervision." "codex snippet missing"
+  assert_contains "$out" "bin/fm-codex-supervise-start.sh" "codex daemon launcher missing"
   assert_not_contains "$out" "Mode: Claude background-notify supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
@@ -37,26 +37,37 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
+  assert_contains "$out" 'Mode: Codex away-mode daemon.' "codex afk snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
+}
+
+test_codex_normal_instructions_name_the_auto_wake_owner() {
+  local home out
+  home="$TMP_ROOT/codex-normal-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex)
+  assert_contains "$out" "Mode: Codex daemon-backed normal supervision." "Codex normal instructions did not name the auto-wake mode"
+  assert_contains "$out" "bin/fm-codex-supervise-start.sh" "Codex normal instructions did not name the daemon entry point"
+  assert_contains "$out" "Do not run a foreground checkpoint while this daemon owns supervision" "Codex normal instructions did not prevent competing watcher ownership"
+  pass "Codex normal instructions direct supervision to the daemon-owned auto-wake path"
 }
 
 test_repair_lines() {
   local home out
   home="$TMP_ROOT/repair-home"
   mkdir -p "$home/state" "$home/config"
-  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --repair-line)
+  assert_contains "$out" "bin/fm-codex-supervise-start.sh" "codex repair line did not use the normal supervisor launcher"
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
   assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
 
   : > "$home/config/x-mode.env"
-  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --x-mode 1 --repair-line)
   assert_contains "$out" "source '$home/config/x-mode.env' first" "x-mode repair line did not source the effective cadence config"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "x-mode codex repair line lost the checkpoint helper"
+  assert_contains "$out" "bin/fm-codex-supervise-start.sh" "x-mode codex repair line lost the normal supervisor launcher"
 
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
   assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
@@ -110,6 +121,7 @@ test_pi_snippet_uses_effective_extension_path() {
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
+test_codex_normal_instructions_name_the_auto_wake_owner
 test_repair_lines
 test_grok_is_background_notify
 test_grok_command_sources_effective_config

@@ -11,14 +11,12 @@
 # declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
-# catch-up or when afk is re-entered.
+# OWNERSHIP-GATING (the /afk contract). state/.supervision-owner names either
+# afk or normal-codex. The daemon reads that durable owner on every injection
+# and housekeeping pass, so normal Codex and away mode transfer the same
+# singleton without a watcher gap or a second daemon. The away marker must
+# agree with its owner; any mismatch fails closed and leaves the durable digest
+# queued until the transfer completes.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
@@ -153,6 +151,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_DAEMON_DIR/fm-wake-lib.sh"
+
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
@@ -242,16 +243,35 @@ afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
 }
 
+supervision_injection_active() {  # <state>
+  fm_supervision_owner_injection_active "$1"
+}
+
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
 # skill (enter) and by firstmate on user return (exit). Durable: a plain file,
 # so recovery (§5) re-enters afk if it is present after a restart.
 afk_enter() {  # <state>
   mkdir -p "$1"
+  fm_supervision_owner_set "$1" afk || return 1
   date '+%s' > "$1/$AFK_FLAG_NAME"
 }
 
 afk_exit() {  # <state>
-  rm -f "$1/$AFK_FLAG_NAME"
+  local state=$1 primary_harness
+  primary_harness=${FM_PRIMARY_HARNESS:-}
+  if [ -z "$primary_harness" ] && [ -x "$FM_DAEMON_DIR/fm-harness.sh" ]; then
+    primary_harness=$(FM_HOME="$FM_HOME" "$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || true)
+  fi
+  if [ "$primary_harness" != codex ]; then
+    echo "error: primary harness is not Codex (detected: '${primary_harness:-unknown}'); afk flag and ownership retained; exit afk via the /afk return contract from a Codex session, then re-run fm-codex-supervise-start.sh" >&2
+    return 1
+  fi
+  rm -f "$state/$AFK_FLAG_NAME"
+  if ! fm_supervision_owner_set "$state" normal-codex; then
+    date '+%s' > "$state/$AFK_FLAG_NAME"
+    echo "error: failed to write supervision owner; .afk restored to preserve recoverable afk state; retry via the /afk return contract, then re-run fm-codex-supervise-start.sh" >&2
+    return 1
+  fi
 }
 
 # should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
@@ -988,7 +1008,7 @@ housekeeping() {  # <state>
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  if supervision_injection_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
     # as the throttle). A successful flush clears the buffer; a failed one alarms
@@ -1127,10 +1147,10 @@ window_for_task() {  # <task-key> [state]
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer
   state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1) Ownership gate: away mode always owns injections; the explicit normal
+  # Codex launcher is the only present-mode exception. Every other normal mode
+  # keeps escalations durable for the primary's ordinary watcher protocol.
+  supervision_injection_active "$state" || { log "inject deferred: no injection owner"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then prepend the sentinel marker - firstmate's afk-exit contract
@@ -1386,6 +1406,7 @@ fm_super_main() {
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
+  local supervision_mode="${FM_SUPERVISION_MODE:-away-only}"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
@@ -1400,9 +1421,35 @@ fm_super_main() {
     exit 1
   fi
 
-  local afk_status="off"
+  if [ "$supervision_mode" = normal-codex ]; then
+    if [ -e "$STATE/.afk" ]; then
+      echo "error: away mode claimed supervision during normal Codex startup; return from /afk, then retry" >&2
+      log "startup failed: away mode claimed supervision before normal ownership"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+    fm_supervision_owner_set "$STATE" normal-codex || {
+      echo "error: could not record normal Codex supervision ownership" >&2
+      log "startup failed: could not record normal Codex supervision ownership"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    }
+    if [ -e "$STATE/.afk" ]; then
+      fm_supervision_owner_set "$STATE" afk 2>/dev/null || true
+      echo "error: away mode claimed supervision during normal Codex startup; return from /afk, then retry" >&2
+      log "startup failed: away mode claimed supervision after normal ownership write"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+  fi
+
+  local afk_status="off" supervision_owner="unset"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  supervision_owner=$(fm_supervision_owner_get "$STATE" 2>/dev/null || printf unset)
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; owner=$supervision_owner; mode=$supervision_mode; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
@@ -1417,6 +1464,14 @@ fm_super_main() {
     fi
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
+    fi
+    if [ "$supervision_mode" = normal-codex ] &&
+      [ "$(fm_supervision_owner_get "$STATE" 2>/dev/null || true)" = normal-codex ]; then
+      if [ -e "$STATE/.afk" ]; then
+        fm_supervision_owner_set "$STATE" afk 2>/dev/null || true
+      else
+        fm_supervision_owner_clear "$STATE" 2>/dev/null || true
+      fi
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
