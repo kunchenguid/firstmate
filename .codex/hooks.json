@@ -8,6 +8,11 @@
             "type": "command",
             "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-arm-pretool-check.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-arm-pretool-check.sh\"'",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-cd-pretool-check.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-cd-pretool-check.sh\"'",
+            "timeout": 10
           }
         ]
       }
