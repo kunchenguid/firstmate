@@ -152,18 +152,25 @@ wait_for_prompt() { # <needle>
 }
 
 wait_for_idle() {
-  local status _
+  local status _ stable=0
   for _ in $(seq 1 240); do
     status=$("$LAB_HELPER" run "$SESSION" agent get "$PANE" 2>/dev/null \
       | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
-    case "$status" in idle|done) return 0 ;; esac
+    case "$status" in
+      idle|done)
+        stable=$((stable + 1))
+        [ "$stable" -ge 4 ] && return 0
+        ;;
+      *) stable=0 ;;
+    esac
     sleep 0.25
   done
   return 1
 }
 
 # The startup charter proves the CLI extension loaded. Wait until ctx.abort()
-# has fully settled before exercising the idle Pi composer.
+# has remained idle long enough for the Pi composer to fully settle before
+# exercising it. A single native idle sample can precede Pi's final redraw.
 wait_for_prompt 'Isolated marker capture secondmate' \
   || fail "real Pi before_agent_start capture did not load for the startup charter"
 wait_for_idle || fail "real Pi did not become idle after the startup capture"
