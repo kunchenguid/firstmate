@@ -1054,6 +1054,56 @@ PY
   pass "fmod connect: discovers after stale default socket"
 }
 
+# ---- orca secondmate: create_terminal returns the session id on stdout ----
+# (the orca secondmate path uses fm_backend_orca_create_terminal with
+# $() capture; the function must printf the session id, not just create
+# it and verify cwd silently. Earlier this function returned empty,
+# which made ORCA_TERMINAL unset and the launch send went to "".)
+
+test_fm_backend_orca_create_terminal_prints_session_id() {
+  fmod_case create-terminal-prints-id
+  # Use the framework's make_fmod_fakebin; override create+get-cwd responses
+  # so the call succeeds. The test verifies the function's stdout is the
+  # session id (captured by $(...)), which is the contract the orca
+  # secondmate spawn path depends on.
+  printf 'fm-secondmate-test\n' > "$RESP/1.out"   # fmod create -> session id
+  printf '/some/cwd\n' > "$RESP/2.out"             # fmod get-cwd -> matches caller cwd
+  local got
+  got=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_create_terminal "fm-secondmate-test" "/some/cwd" "fm-secondmate-test"' \
+    "$ROOT" ) || fail "create_terminal should succeed"
+  [ "$got" = "fm-secondmate-test" ] || fail "create_terminal stdout should be the session id, got: '$got'"
+  pass "fm_backend_orca_create_terminal: returns the session id on stdout for \$() capture"
+}
+
+# ---- orca secondmate: refusal is removed ----
+# (the original fm-spawn.sh had an explicit refuse for orca+secondmate.
+# Verify the script does NOT print "does not support --secondmate" anymore.)
+
+test_fm_spawn_does_not_refuse_orca_secondmate() {
+  fmod_case no-secondmate-refusal
+  local home data state config
+  home="$CASE_DIR/home"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  mkdir -p "$data/smoke" "$state" "$config"
+  # Write a marker so fm-spawn refuses as a real secondmate home (not as a project).
+  printf 'smoke\n' > "$home/.fm-secondmate-home"
+  printf 'brief\n' > "$data/smoke/brief.md"
+  # No registry entry -> fm-spawn would refuse, so we just verify the
+  # script does not contain the "does not support --secondmate" text
+  # for orca. The earlier code had:
+  #   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  #     echo "error: backend=orca does not support --secondmate spawns yet" >&2
+  #     exit 1
+  # Verify that block is gone.
+  if grep -q "backend=orca does not support --secondmate" "$ROOT/bin/fm-spawn.sh"; then
+    fail "fm-spawn.sh still refuses orca+secondmate; refusal should be removed"
+  fi
+  pass "fm-spawn.sh: orca+secondmate refusal is removed"
+}
+
 # ---- test runner ---------------------------------------------------------
 
 run_test() {

@@ -6,7 +6,7 @@ It is distinct from the crewmate harness: the harness is the agent process first
 ## Setup
 
 Pick Orca if you run the Orca AppImage as your terminal environment and want firstmate tasks to live in git worktrees and Orca daemon sessions instead of a treehouse/tmux pair.
-Orca is explicit-only (never auto-detected), experimental, and has no secondmate support.
+Orca is explicit-only (never auto-detected), experimental, and supports secondmates (each secondmate gets one persistent orca daemon session; see "Secondmates" below).
 
 Prerequisites:
 
@@ -30,7 +30,7 @@ You do not need to open the app for routine supervision: `bin/fm-peek.sh fm-<id>
 
 Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
 
-Limitations: `--secondmate` spawns refuse `backend=orca` (secondmate-home semantics need a separate design), Escape is unsupported, Orca is explicit-only, and its daemon protocol version can drift, so `bin/fmod` handles protocol discovery instead of relying on a CLI version floor - see "Limitations" below for the complete list.
+Limitations: Escape is unsupported, Orca is explicit-only, and its daemon protocol version can drift, so `bin/fmod` handles protocol discovery instead of relying on a CLI version floor - see "Limitations" below for the complete list.
 
 ## Status
 
@@ -94,10 +94,15 @@ Teardown:
 
 ## Limitations
 
-- `--secondmate` spawns still refuse `backend=orca`; secondmate-home semantics need a separate design.
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
 - Orca exposes no stable CLI version marker, but its daemon DOES speak a strict `PROTOCOL_VERSION` over its unix-socket hello. `bin/fmod` is now resilient to that drift: it tries the hardcoded default version first, falls through to discovery (any `daemon-v*.sock` in `~/.config/orca/daemon/`), and pins via `FMOD_PROTOCOL_VERSION` env override when set. See "Daemon protocol" below.
+
+## Secondmates
+
+`--backend orca --secondmate` is supported. Each secondmate maps to a single Orca daemon session whose id is `fm-secondmate-<basename-of-home>`; the home itself is a pre-existing git worktree of the primary repo, registered through `bin/fm-home-seed.sh`. The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd. A recovery respawn with the same id reattaches to the existing daemon session instead of creating a new one, so a crashed primary that comes back online does not leave orphan secondmate terminals behind.
+
+Spawn writes `orca_worktree_id=<home path>` and `terminal=<session id>` to meta, and the same `kind=secondmate` fields the other backends already record (`home=`, `projects=`). Teardown kills the orca terminal and removes the spawn state; the home directory and the `data/secondmates.md` registry entry are preserved so a re-spawn can re-create the orca session without re-seeding. This is intentionally different from the tmux/herdr/zellij teardown, which removes the home on a normal teardown - orca secondmates are persistent firstmate homes, and a re-spawn is the much more common case than a retire.
 
 ## Daemon protocol
 

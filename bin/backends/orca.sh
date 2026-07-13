@@ -102,8 +102,11 @@ fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
   # is not misclassified as a cwd mismatch and aborted.
   if [ "${actual_cwd%/}" != "${cwd%/}" ]; then
     echo "error: orca session $session_id attached at $actual_cwd, expected $cwd" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     return 1
   fi
+  # Return the session id on stdout so callers using $(...) capture it.
+  printf '%s' "$session_id"
 }
 
 # fm_backend_orca_worktree_create: see header. Returns TAB-separated

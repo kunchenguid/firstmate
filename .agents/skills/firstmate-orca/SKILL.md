@@ -29,6 +29,7 @@ Do NOT load for tmux, herdr, zellij, or cmux backends; those have their own adap
 - **Transport**: `bin/fmod` is a small Python client that talks NDJSON over the daemon's unix socket (`~/.config/orca/daemon/daemon-v<N>.sock`). The `orca` CLI is never used at spawn time.
 - **Protocol**: the daemon's hello is strict on `version` - `bin/fmod` tries the hardcoded default first, falls through to discovery (scans `daemon-v*.sock` in the daemon dir), and accepts `FMOD_PROTOCOL_VERSION=<n>` env override to pin.
 - **Supervisor**: `bin/fm-supervise-orca.sh` is the per-runtime daemon keeper, separate from `fm-watch.sh` (per-task supervisor). Different cadence, different escalation, different restart semantics.
+- **Secondmates**: `--backend orca --secondmate` is supported. Each secondmate maps to a single orca daemon session with id `fm-secondmate-<basename-of-home>`. The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd. A re-spawn reattaches to the same daemon session via the deterministic id.
 
 ## Commands the operator will reach for
 
@@ -149,8 +150,30 @@ If you see this error again, the patch is gone - re-apply or pull the fix.
 - It does not own `bin/fm-watch.sh` semantics - that's per-task supervision, separate concern. Orca tasks are routed through fmod inside the watcher's per-wake path; the watcher itself does not change.
 - It does not register the captain's project with orca. The daemon-direct adapter does not touch the orca repo registry; the project must be a real git repo.
 
+## Secondmate-specific recipes
+
+### Spawn a secondmate on orca
+```sh
+# 1. Seed the secondmate home (registers it in data/secondmates.md and writes
+#    the .fm-secondmate-home marker, then clones projects into it).
+bin/fm-home-seed.sh my-secondmate /path/to/secondmate-home my-project
+
+# 2. (Optional) drop a charter in <home>/data/charter.md so the spawn uses
+#    it as the brief.
+
+# 3. Spawn the secondmate on orca.
+bin/fm-spawn.sh my-secondmate /path/to/secondmate-home \
+  --backend orca --harness pi --secondmate
+```
+
+The spawn creates an orca daemon session `fm-secondmate-<basename-of-home>` at the home path, sends the launch command, and writes the meta. A re-spawn reattaches to the same session via the deterministic id.
+
+### Teardown semantics
+- For ship/scout orca tasks, teardown removes the git worktree + kills the orca terminal.
+- For orca secondmates, teardown kills the orca terminal and cleans spawn state, but PRESERVES the home and the `data/secondmates.md` registry entry. A re-spawn is the much more common case than a retire, so the home is treated as persistent state. Retire a secondmate by hand (remove its `data/secondmates.md` row and the home directory); there is no `bin/fm-secondmate-retire.sh` yet.
+
 ## See also
 
-- `docs/orca-backend.md` - full backend contract, daemon protocol details, and the daemon-supervision rationale.
+- `docs/orca-backend.md` - full backend contract, daemon protocol details, the secondmates section, and the daemon-supervision rationale.
 - `harness-adapters` - load before spawning any pi/claude/codex/opencode/grok crewmate on orca; trust-dialog handling is harness-specific.
 - `stuck-crewmate-recovery` - load on `stale`, looping, or unresponsive orca crewmates.

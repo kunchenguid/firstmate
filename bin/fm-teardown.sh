@@ -127,6 +127,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
+elif [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  # Secondmate on orca: orca_worktree_id in meta is the home path itself
+  # (not a per-spawn worktree); do not try to require it. Just grab the
+  # terminal id so the final kill below can close it.
+  T_ORCA=$(meta_value "$META" terminal)
+  [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
 
 remove_grok_turnend_auth() {
@@ -797,13 +803,26 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] || [ "$KIND" = secondmate ]; then
+  # Orca secondmates need the terminal killed too (the orca backend path
+  # above already kills the terminal for ship/scout; this branch covers
+  # the secondmate case where the home is the persistent target).
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
-  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
-  remove_secondmate_registry_entry "$ID"
+  if [ "$BACKEND" = orca ]; then
+    # Orca secondmate teardown: the orca terminal is the only ephemeral
+    # thing. The home is the secondmate's persistent state and was registered
+    # with fm-home-seed.sh, not acquired via treehouse get. Do not call
+    # remove_firstmate_home (which assumes a treehouse lease). Retire an
+    # orca secondmate by removing its data/secondmates.md entry and the
+    # home directory through the captain's normal secondmate-retire flow.
+    remove_secondmate_registry_entry "$ID"
+  else
+    [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+    remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
+    remove_secondmate_registry_entry "$ID"
+  fi
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
