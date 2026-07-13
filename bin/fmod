@@ -59,10 +59,88 @@ import uuid
 from typing import Any, Iterable, Optional
 
 
-PROTOCOL_VERSION = 18
+PROTOCOL_VERSION = 21
 HELLO_TIMEOUT_S = 5.0
 RPC_TIMEOUT_S = 30.0
 SOCKET_CHMOD = 0o600
+
+# PROTOCOL_VERSION discovery: the daemon refuses any hello whose `version`
+# does not match its own. When the installed AppImage daemon is newer than
+# the source tree this script was checked out from, the hardcoded
+# PROTOCOL_VERSION above can lag behind. To keep `fmod` working across that
+# skew without a code change, on the FIRST failed connect we scan
+# ~/.config/orca/daemon/ for any daemon-v*.sock file (each version writes
+# its own versioned socket) and try those in turn. The discovered version
+# is cached for the rest of the process lifetime so the per-call overhead
+# is one stat() per directory entry, not one connect attempt per call.
+#
+# Env override: FMOD_PROTOCOL_VERSION pins a specific version (skip the
+# discovery scan entirely).
+_DISCOVERED_VERSION: Optional[int] = None
+
+
+def discover_protocol_version() -> int:
+    """Return the protocol version the running daemon actually speaks.
+
+    Tries, in order:
+      1. The hardcoded PROTOCOL_VERSION above (the common case).
+      2. The FMOD_PROTOCOL_VERSION env override if set.
+      3. Any daemon-v*.sock files present in the daemon directory.
+    Returns the discovered version on success; raises on failure so the
+    caller surfaces the same hello error path it always has.
+    """
+    global _DISCOVERED_VERSION
+    if _DISCOVERED_VERSION is not None:
+        return _DISCOVERED_VERSION
+
+    env_v = os.environ.get("FMOD_PROTOCOL_VERSION")
+    if env_v and env_v.isdigit():
+        _DISCOVERED_VERSION = int(env_v)
+        return _DISCOVERED_VERSION
+
+    candidates: list[int] = [PROTOCOL_VERSION]
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    daemon_dir = os.path.join(config_home, "orca", "daemon")
+    try:
+        for name in os.listdir(daemon_dir):
+            # daemon-v21.sock -> 21
+            if name.startswith("daemon-v") and name.endswith(".sock"):
+                stem = name[len("daemon-v") : -len(".sock")]
+                if stem.isdigit():
+                    candidates.append(int(stem))
+    except OSError:
+        pass
+    # Dedupe while preserving order; remove the hardcoded default since it
+    # already came first (so it remains tried first).
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for v in candidates:
+        if v not in seen:
+            seen.add(v)
+            ordered.append(v)
+
+    for v in ordered:
+        sockets: list[socket.socket] = []
+        try:
+            sock = os.path.join(daemon_dir, f"daemon-v{v}.sock")
+            tok = os.path.join(daemon_dir, f"daemon-v{v}.token")
+            token = read_token(tok)
+            client_id = str(uuid.uuid4())
+            sockets.append(_hello(sock, client_id, token, "stream", HELLO_TIMEOUT_S, version=v))
+            sockets.append(_hello(sock, client_id, token, "control", HELLO_TIMEOUT_S, version=v))
+            _DISCOVERED_VERSION = v
+            return v
+        except (DaemonHelloError, DaemonConnError, FileNotFoundError, OSError):
+            continue
+        finally:
+            for s in sockets:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+    raise DaemonHelloError(
+        f"no reachable orca daemon (tried protocol versions {ordered} at {daemon_dir})"
+    )
 
 # ANSI strip: ESC [ ... <final-byte> sequences (CSI). Same shape awk would.
 # Used only for `snapshot --strip-ansi`. Box-drawing / line drawing glyphs
@@ -74,7 +152,17 @@ def daemon_paths() -> tuple[str, str, Optional[str]]:
     """Resolve socket path, token path, and pid path from env or defaults."""
     config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     daemon_dir = os.path.join(config_home, "orca", "daemon")
-    daemon_base = os.path.join(daemon_dir, f"daemon-v{PROTOCOL_VERSION}")
+    # Env override wins first: FMOD_PROTOCOL_VERSION pins a specific version
+    # (no discovery). Falls through to the discovered version (set by a
+    # previous failed connect), then the hardcoded constant.
+    env_v = os.environ.get("FMOD_PROTOCOL_VERSION")
+    if env_v and env_v.isdigit():
+        v = int(env_v)
+    elif _DISCOVERED_VERSION is not None:
+        v = _DISCOVERED_VERSION
+    else:
+        v = PROTOCOL_VERSION
+    daemon_base = os.path.join(daemon_dir, f"daemon-v{v}")
     sock = os.environ.get("FMOD_SOCKET", f"{daemon_base}.sock")
     token = os.environ.get("FMOD_TOKEN", f"{daemon_base}.token")
     pidfile = os.environ.get("FMOD_PIDFILE", f"{daemon_base}.pid")
@@ -134,12 +222,46 @@ class DaemonClient:
         self.close()
 
     def connect(self) -> None:
-        token = read_token(self.token_path)
-        # Stream socket first (daemon accepts control only after a paired stream).
-        # Per daemon-server.ts:177-186, a control socket needs a stream socket
-        # with the same clientId; the daemon destroys orphan stream sockets.
-        self._stream = _hello(self.sock_path, self.client_id, token, "stream", HELLO_TIMEOUT_S)
-        self._ctrl = _hello(self.sock_path, self.client_id, token, "control", HELLO_TIMEOUT_S)
+        try:
+            token = read_token(self.token_path)
+        except (FileNotFoundError, OSError):
+            # The hardcoded protocol-version socket/token is missing. The
+            # daemon may speak a newer version (orca AppImage bumped) or
+            # older (rare; would mean we shipped ahead of installed daemon).
+            # Probe the directory and retry once with the discovered version.
+            v = discover_protocol_version()
+            sock, tok, _ = daemon_paths()
+            self.sock_path = sock
+            self.token_path = tok
+            token = read_token(tok)
+            _ = v  # discovery side effect: _DISCOVERED_VERSION is cached
+
+        try:
+            self._connect_pair(token)
+        except (DaemonHelloError, DaemonConnError) as exc:
+            if isinstance(exc, DaemonHelloError):
+                msg = str(exc)
+                if "Protocol version mismatch" not in msg and "hello rejected" not in msg:
+                    raise
+            self.close()
+            v = discover_protocol_version()
+            sock, tok, _ = daemon_paths()
+            self.sock_path = sock
+            self.token_path = tok
+            token = read_token(tok)
+            _ = v
+            self._connect_pair(token)
+
+    def _connect_pair(self, token: str) -> None:
+        try:
+            self._stream = _hello(self.sock_path, self.client_id, token, "stream", HELLO_TIMEOUT_S)
+            self._ctrl = _hello(self.sock_path, self.client_id, token, "control", HELLO_TIMEOUT_S)
+        except (DaemonHelloError, DaemonConnError):
+            self.close()
+            raise
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         for s in (self._ctrl, self._stream):
@@ -220,11 +342,22 @@ class DaemonClient:
 
 
 def _hello(
-    sock_path: str, client_id: str, token: str, role: str, timeout: float
+    sock_path: str,
+    client_id: str,
+    token: str,
+    role: str,
+    timeout: float,
+    version: Optional[int] = None,
 ) -> socket.socket:
     s = _connect(sock_path, timeout)
     s.settimeout(timeout)
-    hello = {"type": "hello", "version": PROTOCOL_VERSION, "token": token, "clientId": client_id, "role": role}
+    # Use the discovered version if discovery has already run, else the
+    # hardcoded constant. This is what makes PROTOCOL_VERSION drift healable:
+    # when the installed AppImage daemon is newer than this script's constant,
+    # the first failed hello triggers discover_protocol_version(), and any
+    # subsequent hello on a fresh socket uses the cached discovery result.
+    v = version if version is not None else (_DISCOVERED_VERSION if _DISCOVERED_VERSION is not None else PROTOCOL_VERSION)
+    hello = {"type": "hello", "version": v, "token": token, "clientId": client_id, "role": role}
     s.sendall((json.dumps(hello) + "\n").encode("utf-8"))
     try:
         buf = b""
@@ -406,8 +539,8 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fmod", description=__doc__.splitlines()[1])
-    p.add_argument("--sock", help="Override daemon socket path (default: FMOD_SOCKET env or ~/.config/orca/daemon/daemon-v18.sock)")
-    p.add_argument("--token", help="Override daemon token path (default: FMOD_TOKEN env or ~/.config/orca/daemon/daemon-v18.token)")
+    p.add_argument("--sock", help="Override daemon socket path (default: FMOD_SOCKET env or ~/.config/orca/daemon/daemon-v21.sock)")
+    p.add_argument("--token", help="Override daemon token path (default: FMOD_TOKEN env or ~/.config/orca/daemon/daemon-v21.token)")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 

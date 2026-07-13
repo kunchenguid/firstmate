@@ -427,6 +427,38 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+
+# Orca runtime health: only relevant when the active or explicit backend is
+# orca (config/backend or FM_BACKEND). tmux/herdr/zellij/cmux never touch the
+# orca daemon, so we skip the probe entirely for those backends to keep
+# bootstrap quiet for users who do not use orca. When the backend is orca
+# and the daemon is unreachable, the supervisor (bin/fm-supervise-orca.sh)
+# can relaunch it on demand - we offer that here so a single fm-session-start
+# is enough to recover from a stale_bootstrap daemon.
+backend=""
+[ -n "${FM_BACKEND:-}" ] && backend="$FM_BACKEND"
+[ -z "$backend" ] && [ -f "$CONFIG/backend" ] && backend=$(tr -d '[:space:]' < "$CONFIG/backend" 2>/dev/null || true)
+if [ "$backend" = orca ]; then
+  if [ -x "$FM_ROOT/bin/fm-supervise-orca.sh" ]; then
+    if "$FM_ROOT/bin/fm-supervise-orca.sh" once 2>/dev/null; then
+      echo "ORCA: daemon reachable"
+    else
+      if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+        echo "ORCA: daemon unreachable (read-only session - the lock holder's next bootstrap can recover via bin/fm-supervise-orca.sh start)"
+      else
+        echo "ORCA: daemon unreachable - relaunching via bin/fm-supervise-orca.sh start"
+        "$FM_ROOT/bin/fm-supervise-orca.sh" start </dev/null >/dev/null 2>&1 || true
+        if "$FM_ROOT/bin/fm-supervise-orca.sh" once 2>/dev/null; then
+          echo "ORCA: daemon recovered"
+        else
+          echo "ORCA: daemon still unreachable after relaunch - inspect bin/fm-supervise-orca.sh status"
+        fi
+      fi
+    fi
+  else
+    echo "MISSING: bin/fm-supervise-orca.sh (the orca daemon supervisor - copy from upstream or restore from git)"
+  fi
+fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"

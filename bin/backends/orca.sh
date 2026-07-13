@@ -11,39 +11,56 @@
 # detection all see the same adapter contract they saw before, so they did not
 # need to change.
 #
-# Orca owns both the task worktree and the terminal endpoint. The worktree is
-# acquired through `git worktree add` (the daemon has no worktree primitive and
-# the broken `orca worktree create` CLI is what drove this rewrite); the
-# terminal is acquired through the daemon's `createOrAttach` RPC. Escape key
-# support remains unsupported because the daemon's write primitive cannot
-# distinguish Escape from any other byte sequence without a key-encoder the
-# daemon does not expose.
+# The Orca backend owns both the git worktree path and the terminal endpoint.
+# The worktree is acquired through `git worktree add` (the daemon has no
+# worktree primitive and the broken `orca worktree create` CLI is what drove
+# this rewrite); the terminal is acquired through the daemon's `createOrAttach`
+# RPC. Escape key support remains unsupported because the daemon's write
+# primitive cannot distinguish Escape from any other byte sequence without a
+# key-encoder the daemon does not expose.
 #
 # Target string shape: a stable Orca terminal id of the form `fm-<task-name>`.
 # The id is also the daemon session id, so reattach is automatic.
 
 fm_backend_orca_tool_check() {
+  local here_self here_dir bundled_fmod path_fmod
   if ! command -v python3 >/dev/null 2>&1; then
     echo "error: backend=orca selected but 'python3' is not installed" >&2
     return 1
   fi
-  if ! command -v fmod >/dev/null 2>&1; then
-    # Fall back to firstmate's own bin/fmod if it isn't on PATH. The adapter
-    # is sourced from bin/backends/orca.sh, so ../fmod from that location is
-    # bin/fmod relative to FM_HOME.
-    local here_self="${BASH_SOURCE[0]:-$0}"
-    local here_dir
-    here_dir=$(cd "$(dirname "$here_self")" && pwd)
-    local home_fmod="$here_dir/../fmod"
-    if [ -x "$home_fmod" ]; then
-      export PATH="$here_dir/..:$PATH"
-      hash -r 2>/dev/null || true
-    else
-      echo "error: backend=orca selected but 'fmod' is not installed (tried PATH and $home_fmod)" >&2
-      return 1
+
+  if [ -n "${FM_ORCA_FMOD:-}" ]; then
+    if [ -x "$FM_ORCA_FMOD" ]; then
+      FM_BACKEND_ORCA_FMOD=$FM_ORCA_FMOD
+      return 0
     fi
+    echo "error: backend=orca selected but FM_ORCA_FMOD is not executable: $FM_ORCA_FMOD" >&2
+    return 1
   fi
-  command -v fmod >/dev/null 2>&1 || { echo "error: backend=orca selected but 'fmod' is not installed" >&2; return 1; }
+
+  here_self="${BASH_SOURCE[0]:-$0}"
+  here_dir=$(cd "$(dirname "$here_self")" && pwd)
+  bundled_fmod="$here_dir/../fmod"
+  if [ -x "$bundled_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$bundled_fmod
+    return 0
+  fi
+
+  path_fmod=$(type -P fmod 2>/dev/null || true)
+  if [ -n "$path_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$path_fmod
+    return 0
+  fi
+
+  echo "error: backend=orca selected but 'fmod' is not installed (tried $bundled_fmod and PATH)" >&2
+  return 1
+}
+
+fmod() {
+  if [ -z "${FM_BACKEND_ORCA_FMOD:-}" ]; then
+    fm_backend_orca_tool_check || return 1
+  fi
+  "$FM_BACKEND_ORCA_FMOD" "$@"
 }
 
 # fm_backend_orca_runtime_check: verify the orca daemon is reachable and answers
@@ -74,15 +91,19 @@ fm_backend_orca_session_id_of() {  # <window-name>
 }
 
 fm_backend_orca_worktree_dir() {  # <project-path> <name>
-  local project=$1 name=$2 project_parent project_name home_guess
+  local project=$1 name=$2 project_parent project_name home_guess state_root
   project_parent=$(dirname "$project")
   project_name=$(basename "$project")
-  if [ "$(basename "$project_parent")" = projects ]; then
-    home_guess=$(dirname "$project_parent")
-  else
-    home_guess=$project_parent
+  state_root="${FM_STATE_OVERRIDE:-${STATE:-}}"
+  if [ -z "$state_root" ]; then
+    if [ "$(basename "$project_parent")" = projects ]; then
+      home_guess=$(dirname "$project_parent")
+    else
+      home_guess=$project_parent
+    fi
+    state_root="$home_guess/state"
   fi
-  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
+  printf '%s/orca-worktrees/%s/%s' "$state_root" "$project_name" "$name"
 }
 
 # fm_backend_orca_create_terminal <session-id> <cwd> <title>: createOrAttach
@@ -90,17 +111,23 @@ fm_backend_orca_worktree_dir() {  # <project-path> <name>
 # passes --shell-ready so the daemon's shell-ready barrier (bash/zsh rcfile
 # load) blocks until the prompt is actually visible, which keeps the post-
 # create `treehouse get` race out of the harness path. Note: the orca backend
-# does NOT run `treehouse get` — the worktree IS the project — so this only
+# does NOT run `treehouse get` - the worktree IS the project - so this only
 # protects against a `command` injected at create time (currently unused).
 fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
   local session_id=$1 cwd=$2 title=$3 actual_cwd
   fm_backend_orca_tool_check || return 1
   fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null || return 1
   actual_cwd=$(fmod get-cwd "$session_id") || return 1
-  if [ "$actual_cwd" != "$cwd" ]; then
+  # fmod get-cwd normalizes the path with a trailing slash; the caller-supplied
+  # $cwd never has one. Compare on the canonical stripped form so a sane create
+  # is not misclassified as a cwd mismatch and aborted.
+  if [ "${actual_cwd%/}" != "${cwd%/}" ]; then
     echo "error: orca session $session_id attached at $actual_cwd, expected $cwd" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     return 1
   fi
+  # Return the session id on stdout so callers using $(...) capture it.
+  printf '%s' "$session_id"
 }
 
 # fm_backend_orca_worktree_create: see header. Returns TAB-separated
@@ -157,6 +184,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
     echo "error: fmod get-cwd failed for $session_id after create:" >&2
     printf '%s\n' "$actual_cwd" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
     current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
     if [ "$current_head" = "$start_head" ]; then
@@ -164,7 +192,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
     fi
     return 1
   fi
-  if [ "$actual_cwd" != "$wt_path" ]; then
+  if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
     fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
       echo "error: fmod recreate failed for $session_id at $wt_path after stale attach at $actual_cwd:" >&2
@@ -179,6 +207,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
     if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
       echo "error: fmod get-cwd failed for $session_id after recreate:" >&2
       printf '%s\n' "$actual_cwd" >&2
+      fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
       git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
       current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
       if [ "$current_head" = "$start_head" ]; then
@@ -186,7 +215,7 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
       fi
       return 1
     fi
-    if [ "$actual_cwd" != "$wt_path" ]; then
+    if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
       echo "error: orca session $session_id attached at $actual_cwd, expected $wt_path" >&2
       fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
       git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true

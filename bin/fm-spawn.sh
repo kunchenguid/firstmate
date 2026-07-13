@@ -16,9 +16,11 @@
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   herdr, zellij, orca, and cmux. The Orca backend creates ship/scout task git
+#   worktrees directly and owns their terminals, so ship/scout Orca spawns do not
+#   run treehouse get; Orca secondmates attach a terminal to the existing
+#   secondmate home. cmux is a session provider only, exactly like herdr/zellij,
+#   so it does. An
 #   auto-detected herdr or cmux spawns print a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected
 #   (always explicit). Default tmux spawns do not write backend= to meta;
@@ -159,10 +161,6 @@ else
 fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
@@ -200,7 +198,10 @@ orca_spawn_abort_cleanup() {
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
   fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+  # For a secondmate, ORCA_WORKTREE_ID is the home path itself - never
+  # remove it. The home is the secondmate's persistent state; it survives
+  # any single spawn. The orca terminal is the only ephemeral thing.
+  if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$KIND" != secondmate ]; then
     if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       mkdir -p "$STATE" 2>/dev/null || true
       if [ -d "$STATE" ]; then
@@ -321,10 +322,15 @@ launch_template() {
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
     pi)
+      # -a / --approve (pi 0.80+): "Trust project-local files for this run" -
+      # auto-accepts pi's project-trust prompt so unattended spawns do not block
+      # on a keyboard dialog. We still use -e <external-file> for the turn-end
+      # extension so the extension itself lives outside the worktree and never
+      # needs trust re-acquisition (the -a flag is sufficient either way).
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -732,31 +738,58 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
-    set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
-    set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
-        fi
+    if [ "$KIND" = secondmate ]; then
+      # Secondmate on orca: the home IS a pre-existing git worktree of the
+      # primary repo (validated by validate_firstmate_home_for_spawn above).
+      # Skip worktree_create - we must not create a worktree of a worktree -
+      # and use create_terminal directly with the home path as cwd. The
+      # generated terminal id is recorded in meta as `terminal=` so a recovery
+      # respawn reattaches to the same orca daemon session instead of spawning
+      # a new one each time.
+      if [ -z "$PROJ_ABS" ] || [ ! -d "$PROJ_ABS" ]; then
+        echo "error: orca secondmate requires an existing home at $PROJ_ABS" >&2
+        exit 1
       fi
-      exit 1
+      SECONDMATE_HOME_REAL=$(cd "$PROJ_ABS" && pwd -P)
+      if command -v shasum >/dev/null 2>&1; then
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | shasum -a 256 | awk '{print substr($1,1,8)}')
+      elif command -v sha256sum >/dev/null 2>&1; then
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | sha256sum | awk '{print substr($1,1,8)}')
+      else
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | cksum | awk '{printf "%08x", $1}')
+      fi
+      SECONDMATE_TERMINAL_ID="fm-secondmate-$ID-$SECONDMATE_HOME_HASH"
+      ORCA_TERMINAL=$(fm_backend_orca_create_terminal "$SECONDMATE_TERMINAL_ID" "$PROJ_ABS" "$SECONDMATE_TERMINAL_ID") || exit 1
+      ORCA_WORKTREE_ID="$PROJ_ABS"  # the home IS the worktree; recorded for meta/inspection
+      ORCA_ABORT_CLEANUP=1
+      T="$ORCA_TERMINAL"
+    else
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+            ORCA_ABORT_CLEANUP=1
+          fi
+        fi
+        exit 1
+      fi
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      ORCA_ABORT_CLEANUP=1
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
+        echo "error: orca did not return a worktree id/path for $W" >&2
+        exit 1
+      fi
+      validate_spawn_worktree "orca worktree create" "$W"
+      ORCA_SPAWN_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+      ORCA_SPAWN_HEAD=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+      if [ -z "$ORCA_TERMINAL" ]; then
+        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      fi
+      T="$ORCA_TERMINAL"
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
-    ORCA_ABORT_CLEANUP=1
-    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-      echo "error: orca did not return a worktree id/path for $W" >&2
-      exit 1
-    fi
-    validate_spawn_worktree "orca worktree create" "$W"
-    ORCA_SPAWN_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-    ORCA_SPAWN_HEAD=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-    fi
-    T="$ORCA_TERMINAL"
     ;;
 esac
 spawn_send_text_line() {  # <target> <text>

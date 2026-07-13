@@ -27,9 +27,9 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# Orca tasks use the same safety checks, then close the recorded daemon session
+# with `bin/fmod kill` and remove the recorded git worktree; teardown never
+# guesses an Orca target from ambient CLI state.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -125,6 +125,12 @@ require_orca_terminal() {
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
+  T_ORCA=$(meta_value "$META" terminal)
+  [ -z "$T_ORCA" ] || T=$T_ORCA
+elif [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  # Secondmate on orca: orca_worktree_id in meta is the home path itself
+  # (not a per-spawn worktree); do not try to require it. Just grab the
+  # terminal id so the final kill below can close it.
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
@@ -280,7 +286,11 @@ backlog_refresh_reminder() {
         done_cmd="tasks-axi done $ID --report $report_path"
         ;;
       secondmate)
-        done_cmd="tasks-axi done $ID --note \"retired\""
+        if [ "$BACKEND" = orca ]; then
+          done_cmd=
+        else
+          done_cmd="tasks-axi done $ID --note \"retired\""
+        fi
         ;;
       *)
         if [ "$MODE" = local-only ]; then
@@ -295,9 +305,17 @@ backlog_refresh_reminder() {
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    if [ -n "$done_cmd" ]; then
+      printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    else
+      printf '%s\n' "Backlog: $ID terminal closed; secondmate registry retained. Do not mark Done unless retiring it through the normal secondmate-retire flow."
+    fi
   else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    if [ "$KIND" = secondmate ] && [ "$BACKEND" = orca ]; then
+      printf '%s\n' "Backlog: $ID terminal closed; secondmate registry retained. Do not mark Done unless retiring it through the normal secondmate-retire flow."
+    else
+      printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    fi
   fi
 }
 
@@ -797,13 +815,20 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] || [ "$KIND" = secondmate ]; then
+  # Orca secondmates need the terminal killed too (the orca backend path
+  # above already kills the terminal for ship/scout; this branch covers
+  # the secondmate case where the home is the persistent target).
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
-  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
-  remove_secondmate_registry_entry "$ID"
+  if [ "$BACKEND" = orca ]; then
+    :
+  else
+    [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+    remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
+    remove_secondmate_registry_entry "$ID"
+  fi
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.

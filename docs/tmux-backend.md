@@ -7,7 +7,7 @@ This is the setup guide; for the shared runtime-backend abstraction and selectio
 
 tmux is a terminal multiplexer.
 Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
-Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca and cmux are the backends that do not support secondmate spawns.
+Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca also supports secondmate spawns and cmux still does not.
 
 ## Prerequisites
 
@@ -73,4 +73,4 @@ You should see a `fm-<id>` window for the task, live and updating as the crewmat
 
 ## Limitations
 
-None specific to tmux - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
+None specific to tmux - it is the fully verified reference backend, while Orca's secondmate support remains experimental and cmux is the backend without secondmate support.

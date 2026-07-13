@@ -248,8 +248,10 @@ test_sweep_nudge_requires_instruction_change() {
   bump_primary "$w" readme
   base=$(primary_head_commit "$w/main")
 
+  # shellcheck disable=SC2034 # Read by sweep_live_secondmate_metas from fm-ff-lib.sh.
   FM_ROOT="$w/main" FM_HOME="$w/home"
   FF_NUDGE_WINDOWS=""
+  # shellcheck disable=SC2034 # Read by sweep_live_secondmate_metas from fm-ff-lib.sh.
   FF_SEEN_HOMES=""
   sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
 

@@ -61,6 +61,7 @@ fi
 # same condition it has always used.
 
 FF_NUDGE_WINDOWS=""
+# shellcheck disable=SC2034 # Read by sweep_live_secondmate_metas from fm-ff-lib.sh.
 FF_SEEN_HOMES=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the

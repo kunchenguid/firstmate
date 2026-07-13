@@ -20,19 +20,20 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
-Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
+Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; the Orca backend creates the task git worktree directly and attaches an Orca daemon terminal to it.
 New spawns choose the backend in this order: an explicit `--backend` flag firstmate passes when it spawns a task, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-auto-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
-`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
+`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `tmux`, `herdr`, `zellij`, and `orca` support `--secondmate`, while `backend=cmux` still refuses it until secondmate launch semantics are designed.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
+An Orca spawn additionally requires `python3`, the bundled executable `bin/fmod`, and a reachable Orca daemon that answers `bin/fmod info`; bootstrap can start `bin/fm-supervise-orca.sh` to recover a stale daemon when Orca is the active backend.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
-When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `orca`, keeps the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns both the worktree and terminal lifecycle.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it checks for `fmod`, `python3`, daemon reachability, and the universal `node` requirement, and skips the tmux/treehouse tool pair because Orca owns the terminal lifecycle and firstmate creates the git worktree directly.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -62,10 +63,11 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.lint` plus `commands.test` so no-mistakes runs shellcheck and firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+The lint command runs `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`.
+The test command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
+Together they mirror the shellcheck and behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating either gate step to an agent.
 
 ## Captain preferences (data/captain.md)
 
@@ -140,7 +142,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
+When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `fmod` and `python3`, keeps the universal `node` requirement, skips `tmux` and `treehouse`, and reports `ORCA:` daemon-supervision diagnostics.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
@@ -226,6 +228,16 @@ FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned to locate t
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after border/prompt stripping
 FM_BACKEND_ORCA_COMPOSER_LINES=200  # orca-only: terminal-read lines scanned to locate the composer row for submit verification
 FM_BACKEND_ORCA_IDLE_RE='^Type a message\.\.\.$'  # orca-only: empty-composer placeholder regex after border/prompt stripping
+FM_ORCA_CHECK_INTERVAL=30  # orca supervisor: seconds between daemon reachability checks
+FM_ORCA_BIN=              # orca supervisor/setup: explicit Orca executable path when `orca` is not on PATH
+FM_ORCA_FMOD=             # orca backend/supervisor/setup: explicit fmod executable path instead of bundled bin/fmod or PATH
+FM_ORCA_RUNTIME_FILE=     # orca supervisor: override runtime state file path for tests or non-default layouts
+FM_ORCA_SOCKET_DIR=       # orca supervisor: override daemon socket directory for tests or non-default layouts
+FM_ORCA_SMOKE_PROJECT=    # fm-use-orca/fm-use-tmux/fm-orca-test-suite: git repo to use for smoke spawns
+FMOD_PROTOCOL_VERSION=    # fmod: pin Orca daemon protocol version instead of discovery
+FMOD_SOCKET=              # fmod: explicit daemon socket path
+FMOD_TOKEN=               # fmod: explicit daemon token path
+FMOD_PIDFILE=             # fmod: explicit daemon pidfile path
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping

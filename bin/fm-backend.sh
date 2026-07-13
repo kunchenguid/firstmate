@@ -17,14 +17,15 @@
 # auto-detection (report.md's Open Question #2: start with a dedicated
 # background session for predictability, unlike tmux's/herdr's ambient-session
 # reuse); see report.md's "Zellij Backend" section and docs/zellij-backend.md
-# for its empirical basis. P4 makes Orca spawn-capable: Orca owns both the
-# task worktree and the terminal endpoint. P5 adds bin/backends/cmux.sh, also
+# for its empirical basis. P4 makes Orca spawn-capable: the Orca backend
+# creates the task git worktree directly and owns the terminal endpoint.
+# P5 adds bin/backends/cmux.sh, also
 # EXPERIMENTAL and spawn-capable, behind `--backend cmux`/`FM_BACKEND=cmux`/
 # `config/backend`, and behind runtime auto-detection when firstmate itself is
 # running inside a cmux-spawned terminal (primary CMUX_WORKSPACE_ID marker, or
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
-# never-auto-detected because it also owns the task worktree; see
+# never-auto-detected because it also bypasses treehouse worktree creation; see
 # docs/cmux-backend.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here

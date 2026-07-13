@@ -15,6 +15,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+: "${ROOT:?}"
 
 # make_fmod_fakebin: writes a fmod stub that logs every invocation with US
 # separators between args, returns canned stdout from $RESP/$N.out, and
@@ -89,6 +90,7 @@ fmod_case() {  # <name> -> sets CASE_DIR LOG RESP FB
   : > "$LOG"
   rm -f "$RESP/.count"
   FB=$(make_fmod_fakebin "$CASE_DIR")
+  export FM_ORCA_FMOD="$FB/fmod"
 }
 
 neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
@@ -107,8 +109,8 @@ SH
 #   eval "$(adapter_env)"
 #   bash -c '. "$ROOT/bin/backends/orca.sh"; ...'
 adapter_env() {
-  printf 'FMOD_FAKE_LOG=%q FMOD_FAKE_RESPONSES=%q PATH=%q:$PATH ROOT=%q' \
-    "$LOG" "$RESP" "$FB" "$ROOT"
+  printf 'FMOD_FAKE_LOG=%q FMOD_FAKE_RESPONSES=%q PATH=%q:%s ROOT=%q' \
+    "$LOG" "$RESP" "$FB" "\$PATH" "$ROOT"
 }
 
 # ---- runtime check --------------------------------------------------------
@@ -276,15 +278,19 @@ build_test_repo() {  # <dir> <name> -> echoes repo path
 }
 
 expected_orca_wt() {  # <repo> <name>
-  local repo=$1 name=$2 parent project_name home_guess
+  local repo=$1 name=$2 parent project_name home_guess state_root
   parent=$(dirname "$repo")
   project_name=$(basename "$repo")
-  if [ "$(basename "$parent")" = projects ]; then
-    home_guess=$(dirname "$parent")
-  else
-    home_guess=$parent
+  state_root="${FM_STATE_OVERRIDE:-}"
+  if [ -z "$state_root" ]; then
+    if [ "$(basename "$parent")" = projects ]; then
+      home_guess=$(dirname "$parent")
+    else
+      home_guess=$parent
+    fi
+    state_root="$home_guess/state"
   fi
-  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
+  printf '%s/orca-worktrees/%s/%s' "$state_root" "$project_name" "$name"
 }
 
 test_worktree_create_makes_git_worktree_and_fmod_session() {
@@ -403,6 +409,69 @@ assert b"fmod" + US + b"get-cwd" + US + b"fm-test-stale" in log, log
 assert b"fmod" + US + b"kill" + US + b"fm-test-stale" in log, log
 PY
   pass "fm_backend_orca_worktree_create: kills and recreates stale attached sessions"
+}
+
+test_worktree_create_accepts_trailing_slash_cwd() {
+  fmod_case wt-create-trailing-slash-cwd
+  local repo expected_wt
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-slash)
+  printf '%s/\n' "$expected_wt" > "$RESP/2.out"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-slash' "$ROOT" "$repo" > "$CASE_DIR/raw"
+  [ -d "$expected_wt" ] || fail "worktree path $expected_wt was not created"
+  python3 - "$LOG" "$expected_wt" <<'PY' || fail "worktree_create should accept fmod get-cwd trailing slash"
+import sys
+log = open(sys.argv[1], "rb").read()
+wt = sys.argv[2].encode()
+US = b"\x1f"
+create = b"fmod" + US + b"create" + US + b"fm-test-slash" + US + b"--cwd" + US + wt
+assert log.count(create) == 1, log
+assert b"fmod" + US + b"kill" + US + b"fm-test-slash" not in log, log
+PY
+  pass "fm_backend_orca_worktree_create: accepts fmod get-cwd trailing slash"
+}
+
+test_worktree_create_kills_session_when_initial_cwd_check_fails() {
+  fmod_case wt-create-cwd-fail
+  local repo expected_wt status
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-cwd-fail)
+  echo "7" > "$RESP/2.exit"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-cwd-fail' "$ROOT" "$repo" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree_create should fail when initial fmod get-cwd fails"
+  [ ! -d "$expected_wt" ] || fail "worktree_create should remove worktree after initial get-cwd failure"
+  python3 - "$LOG" <<'PY' || fail "initial get-cwd failure should kill the created session"
+import sys
+log = open(sys.argv[1], "rb").read()
+US = b"\x1f"
+assert b"fmod" + US + b"kill" + US + b"fm-test-cwd-fail" + US + b"--immediate" in log, log
+PY
+  pass "fm_backend_orca_worktree_create: kills session after initial get-cwd failure"
+}
+
+test_worktree_create_kills_session_when_recreated_cwd_check_fails() {
+  fmod_case wt-create-recreate-cwd-fail
+  local repo expected_wt status
+  repo=$(build_test_repo "$CASE_DIR" repo)
+  expected_wt=$(expected_orca_wt "$repo" fm-test-rec-cwd-fail)
+  printf '%s\n' "$CASE_DIR/stale-worktree" > "$RESP/2.out"
+  echo "7" > "$RESP/5.exit"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-test-rec-cwd-fail' "$ROOT" "$repo" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree_create should fail when recreated fmod get-cwd fails"
+  [ ! -d "$expected_wt" ] || fail "worktree_create should remove worktree after recreated get-cwd failure"
+  python3 - "$LOG" <<'PY' || fail "recreated get-cwd failure should kill the recreated session"
+import sys
+log = open(sys.argv[1], "rb").read()
+US = b"\x1f"
+needle = b"fmod" + US + b"kill" + US + b"fm-test-rec-cwd-fail" + US + b"--immediate"
+assert log.count(needle) == 2, log
+PY
+  pass "fm_backend_orca_worktree_create: kills session after recreated get-cwd failure"
 }
 
 test_remove_worktree_kills_session_and_removes_dir() {
@@ -560,6 +629,18 @@ test_worktree_dir_for_project_registry_path_uses_state_bucket() {
   pass "fm_backend_orca_worktree_dir: keeps registry project worktrees under state"
 }
 
+test_worktree_dir_honors_state_override() {
+  fmod_case wt-dir-state-override
+  local home="$CASE_DIR/home" repo state_override out
+  repo="$home/projects/repo"
+  state_override="$CASE_DIR/override-state"
+  mkdir -p "$repo"
+  out=$(FM_STATE_OVERRIDE="$state_override" bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_dir "$1" fm-test' "$ROOT" "$repo")
+  [ "$out" = "$state_override/orca-worktrees/repo/fm-test" ] \
+    || fail "worktree dir should honor FM_STATE_OVERRIDE, got '$out'"
+  pass "fm_backend_orca_worktree_dir: honors FM_STATE_OVERRIDE"
+}
+
 test_composer_state_empty_when_bare_prompt() {
   fmod_case composer-empty
   printf '╭──╮\n│ > │\n╰──╯\n' > "$RESP/1.out"
@@ -675,10 +756,32 @@ test_composer_state_uses_bundled_fmod_fallback() {
   cp "$FB/fmod" "$mini_root/bin/fmod"
   printf '╭──╮\n│ > │\n╰──╯\n' > "$RESP/1.out"
   local out
-  out=$( PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+  # shellcheck disable=SC2016 # $0 expands inside the child shell.
+  out=$( env -u FM_ORCA_FMOD PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$mini_root" )
   [ "$out" = "empty" ] || fail "composer_state should use bundled fmod fallback, got '$out'"
   pass "fm_backend_orca_composer_state: loads bundled fmod before snapshot"
+}
+
+test_tool_check_prefers_bundled_fmod_over_path() {
+  fmod_case prefer-bundled-fmod
+  local mini_root="$CASE_DIR/mini-root" stale_bin="$CASE_DIR/stale-bin"
+  mkdir -p "$mini_root/bin/backends" "$stale_bin"
+  cp "$ROOT/bin/backends/orca.sh" "$mini_root/bin/backends/orca.sh"
+  cp "$FB/fmod" "$mini_root/bin/fmod"
+  cat > "$stale_bin/fmod" <<'SH'
+#!/usr/bin/env bash
+printf 'stale-path-fmod\n' >> "$FMOD_FAKE_LOG"
+exit 88
+SH
+  chmod +x "$stale_bin/fmod"
+  printf '{"socket_exists":true,"token_exists":true,"daemon_reachable":true,"daemon_pong":{"pong":true}}\n' > "$RESP/1.out"
+  # shellcheck disable=SC2016 # $0 expands inside the child shell.
+  env -u FM_ORCA_FMOD PATH="$stale_bin:/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_runtime_check' "$mini_root"
+  assert_not_contains "$(cat "$LOG")" "stale-path-fmod" \
+    "tool_check should prefer bundled fmod over PATH fmod"
+  pass "fm_backend_orca_tool_check: prefers bundled fmod over PATH"
 }
 
 # ---- dispatcher ----------------------------------------------------------
@@ -729,8 +832,15 @@ test_orca_adapter_sources_clean_under_set_e() {
 
 test_fmod_defaults_follow_home_and_xdg_config_home() {
   fmod_case fmod-paths
-  local out
-  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME= python3 - "$ROOT/bin/fmod" <<'PY'
+  local out protocol
+  protocol=$(python3 - "$ROOT/bin/fmod" <<'PY'
+import runpy
+import sys
+mod = runpy.run_path(sys.argv[1])
+print(mod["PROTOCOL_VERSION"])
+PY
+)
+  out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME='' python3 - "$ROOT/bin/fmod" <<'PY'
 import os
 import runpy
 import sys
@@ -743,9 +853,9 @@ mod = runpy.run_path(sys.argv[1])
 print("\n".join(mod["daemon_paths"]()))
 PY
 )
-  [ "$out" = "$CASE_DIR/home/.config/orca/daemon/daemon-v18.sock
-$CASE_DIR/home/.config/orca/daemon/daemon-v18.token
-$CASE_DIR/home/.config/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under HOME, got: $out"
+  [ "$out" = "$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.sock
+$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.token
+$CASE_DIR/home/.config/orca/daemon/daemon-v$protocol.pid" ] || fail "fmod defaults should resolve under HOME, got: $out"
 
   out=$(HOME="$CASE_DIR/home" XDG_CONFIG_HOME="$CASE_DIR/xdg" python3 - "$ROOT/bin/fmod" <<'PY'
 import os
@@ -759,9 +869,9 @@ mod = runpy.run_path(sys.argv[1])
 print("\n".join(mod["daemon_paths"]()))
 PY
 )
-  [ "$out" = "$CASE_DIR/xdg/orca/daemon/daemon-v18.sock
-$CASE_DIR/xdg/orca/daemon/daemon-v18.token
-$CASE_DIR/xdg/orca/daemon/daemon-v18.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
+  [ "$out" = "$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.sock
+$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.token
+$CASE_DIR/xdg/orca/daemon/daemon-v$protocol.pid" ] || fail "fmod defaults should resolve under XDG_CONFIG_HOME, got: $out"
   pass "fmod daemon_paths: defaults follow HOME and XDG_CONFIG_HOME"
 }
 
@@ -836,6 +946,327 @@ assert out["daemon_reachable"] is False
 assert "missing-token" in out["daemon_error"], out
 PY
   pass "fmod info: missing token reports daemon_reachable=false JSON"
+}
+
+test_fmod_protocol_discovery_sends_candidate_version() {
+  fmod_case fmod-discovery-version
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod discovery should send each candidate protocol version"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+sent = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    sent.append((os.path.basename(sock_path), client_id, token, role, version))
+    if version == 23:
+        return FakeSocket()
+    raise mod["DaemonHelloError"]("Protocol version mismatch")
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["discover_protocol_version"].__globals__["_hello"] = fake_hello
+mod["discover_protocol_version"].__globals__["_DISCOVERED_VERSION"] = None
+
+discovered = mod["discover_protocol_version"]()
+assert discovered == 23, discovered
+assert ("daemon-v23.sock", "token-23", "stream", 23) in [(sock, token, role, version) for sock, client_id, token, role, version in sent], sent
+assert ("daemon-v23.sock", "token-23", "control", 23) in [(sock, token, role, version) for sock, client_id, token, role, version in sent], sent
+by_version = {}
+for sock, client_id, token, role, version in sent:
+    by_version.setdefault(version, []).append((sock, client_id, token, role))
+assert by_version[23][0][1] == by_version[23][1][1], sent
+assert [role for sock, client_id, token, role in by_version[23]] == ["stream", "control"], sent
+assert all(sock == f"daemon-v{version}.sock" for sock, client_id, token, role, version in sent), sent
+PY
+  pass "fmod discovery: sends candidate protocol version in hello"
+}
+
+test_fmod_protocol_discovery_skips_stale_socket() {
+  fmod_case fmod-discovery-stale
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod discovery should skip stale socket files"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+attempts = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    attempts.append((version, role))
+    if version == protocol:
+        raise mod["DaemonConnError"]("connect failed")
+    return FakeSocket()
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["discover_protocol_version"].__globals__["_hello"] = fake_hello
+mod["discover_protocol_version"].__globals__["_DISCOVERED_VERSION"] = None
+
+discovered = mod["discover_protocol_version"]()
+assert discovered == 23, discovered
+assert (protocol, "stream") in attempts, attempts
+assert (23, "stream") in attempts, attempts
+assert (23, "control") in attempts, attempts
+PY
+  pass "fmod discovery: skips stale socket candidates"
+}
+
+test_fmod_connect_discovers_after_default_stale_socket() {
+  fmod_case fmod-connect-stale-default
+  python3 - "$ROOT/bin/fmod" "$CASE_DIR" <<'PY' || fail "fmod connect should discover after stale default socket"
+import os
+import runpy
+import sys
+
+mod = runpy.run_path(sys.argv[1])
+case_dir = sys.argv[2]
+daemon_dir = os.path.join(case_dir, "xdg", "orca", "daemon")
+os.makedirs(daemon_dir, exist_ok=True)
+protocol = mod["PROTOCOL_VERSION"]
+for version in (protocol, 23):
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.sock"), "w", encoding="utf-8") as f:
+        f.write("")
+    with open(os.path.join(daemon_dir, f"daemon-v{version}.token"), "w", encoding="utf-8") as f:
+        f.write(f"token-{version}")
+
+attempts = []
+
+class FakeSocket:
+    def close(self):
+        pass
+
+def fake_hello(sock_path, client_id, token, role, timeout, version=None):
+    sock_name = os.path.basename(sock_path)
+    attempts.append((sock_name, token, role, version))
+    if sock_name == f"daemon-v{protocol}.sock":
+        raise mod["DaemonConnError"]("connect failed")
+    return FakeSocket()
+
+os.environ["XDG_CONFIG_HOME"] = os.path.join(case_dir, "xdg")
+os.environ.pop("FMOD_PROTOCOL_VERSION", None)
+mod["DaemonClient"].connect.__globals__["_hello"] = fake_hello
+mod["DaemonClient"].connect.__globals__["_DISCOVERED_VERSION"] = None
+
+client = mod["DaemonClient"]()
+client.connect()
+
+assert client.sock_path.endswith("daemon-v23.sock"), client.sock_path
+assert client.token_path.endswith("daemon-v23.token"), client.token_path
+assert (f"daemon-v{protocol}.sock", f"token-{protocol}", "stream", None) in attempts, attempts
+assert (f"daemon-v{protocol}.sock", f"token-{protocol}", "stream", protocol) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "stream", 23) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "control", 23) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "stream", None) in attempts, attempts
+assert ("daemon-v23.sock", "token-23", "control", None) in attempts, attempts
+client.close()
+PY
+  pass "fmod connect: discovers after stale default socket"
+}
+
+# ---- orca secondmate: create_terminal returns the session id on stdout ----
+# (the orca secondmate path uses fm_backend_orca_create_terminal with
+# $() capture; the function must printf the session id, not just create
+# it and verify cwd silently. Earlier this function returned empty,
+# which made ORCA_TERMINAL unset and the launch send went to "".)
+
+test_fm_backend_orca_create_terminal_prints_session_id() {
+  fmod_case create-terminal-prints-id
+  # Use the framework's make_fmod_fakebin; override create+get-cwd responses
+  # so the call succeeds. The test verifies the function's stdout is the
+  # session id (captured by $(...)), which is the contract the orca
+  # secondmate spawn path depends on.
+  printf 'fm-secondmate-test\n' > "$RESP/1.out"   # fmod create -> session id
+  printf '/some/cwd\n' > "$RESP/2.out"             # fmod get-cwd -> matches caller cwd
+  local got
+  got=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_create_terminal "fm-secondmate-test" "/some/cwd" "fm-secondmate-test"' \
+    "$ROOT" ) || fail "create_terminal should succeed"
+  [ "$got" = "fm-secondmate-test" ] || fail "create_terminal stdout should be the session id, got: '$got'"
+  pass "fm_backend_orca_create_terminal: returns the session id on stdout for \$() capture"
+}
+
+test_fm_spawn_orca_secondmate_sessions_include_id_and_home_hash() {
+  fmod_case secondmate-session-id
+  local primary data state config base_a base_b home_a home_b
+  primary="$CASE_DIR/primary"
+  data="$primary/data"
+  state="$primary/state"
+  config="$primary/config"
+  base_a="$CASE_DIR/a"
+  base_b="$CASE_DIR/b"
+  home_a="$base_a/shared"
+  home_b="$base_b/shared"
+  mkdir -p "$data/sm-a" "$data/sm-b" "$state" "$config" \
+    "$home_a/bin" "$home_a/data" "$home_a/state" "$home_a/config" "$home_a/projects" \
+    "$home_b/bin" "$home_b/data" "$home_b/state" "$home_b/config" "$home_b/projects"
+  cat > "$FB/fmod" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FMOD_FAKE_LOG:?}"
+RESP="${FMOD_FAKE_RESPONSES:?}"
+{
+  printf 'fmod'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+case "${1:-}" in
+  info)
+    printf '{"socket_exists":true,"token_exists":true,"daemon_reachable":true,"daemon_pong":{"pong":true}}\n'
+    ;;
+  create)
+    session=${2:?}
+    cwd=
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cwd) shift; cwd=${1:-} ;;
+      esac
+      shift || break
+    done
+    printf '%s\n' "$cwd" > "$RESP/cwd-$session"
+    printf '{"isNew":true,"pid":12345,"shellState":"ready"}\n'
+    ;;
+  get-cwd)
+    cat "$RESP/cwd-${2:?}"
+    ;;
+  write|kill)
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+SH
+  chmod +x "$FB/fmod"
+  printf 'brief\n' > "$data/sm-a/brief.md"
+  printf 'brief\n' > "$data/sm-b/brief.md"
+  printf 'sm-a\n' > "$home_a/.fm-secondmate-home"
+  printf 'sm-b\n' > "$home_b/.fm-secondmate-home"
+  printf '# agents\n' > "$home_a/AGENTS.md"
+  printf '# agents\n' > "$home_b/AGENTS.md"
+
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm-a "$home_a" --backend orca --harness codex --secondmate >/dev/null \
+    || fail "first orca secondmate spawn failed"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm-b "$home_b" --backend orca --harness codex --secondmate >/dev/null \
+    || fail "second orca secondmate spawn failed"
+
+  python3 - "$LOG" <<'PY' || fail "secondmate fmod create session ids were not unique"
+import sys
+US = "\x1f"
+ids = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    parts = line.rstrip("\n").split(US)
+    if len(parts) >= 3 and parts[0] == "fmod" and parts[1] == "create":
+        ids.append(parts[2])
+secondmate_ids = [s for s in ids if s.startswith("fm-secondmate-")]
+assert len(secondmate_ids) == 2, secondmate_ids
+assert secondmate_ids[0] != secondmate_ids[1], secondmate_ids
+assert secondmate_ids[0].startswith("fm-secondmate-sm-a-"), secondmate_ids
+assert secondmate_ids[1].startswith("fm-secondmate-sm-b-"), secondmate_ids
+assert all(s != "fm-secondmate-shared" for s in secondmate_ids), secondmate_ids
+PY
+  rm -rf /tmp/fm-sm-a /tmp/fm-sm-b
+  pass "fm-spawn.sh: Orca secondmate session ids include id and home hash"
+}
+
+test_fm_teardown_orca_secondmate_preserves_registry_and_home() {
+  fmod_case secondmate-teardown-preserve
+  local primary data state config home out
+  primary="$CASE_DIR/primary"
+  data="$primary/data"
+  state="$primary/state"
+  config="$primary/config"
+  home="$CASE_DIR/secondmate-home"
+  mkdir -p "$data" "$state" "$config" "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'manual\n' > "$config/backlog-backend"
+  printf 'sm-orca\n' > "$home/.fm-secondmate-home"
+  printf '# agents\n' > "$home/AGENTS.md"
+  cat > "$state/sm-orca.meta" <<EOF
+window=fm-sm-orca
+worktree=$home
+project=$home
+backend=orca
+terminal=fm-secondmate-sm-orca-12345678
+harness=codex
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$home
+projects=alpha
+EOF
+  printf '%s\n' "- sm-orca - scope (home: $home; scope: alpha; projects: alpha; added 2026-07-13)" > "$data/secondmates.md"
+
+  out=$(PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" sm-orca)
+  assert_contains "$out" "registry retained" "orca secondmate teardown should report preserved registry"
+  [ -d "$home" ] || fail "orca secondmate teardown removed the persistent home"
+  assert_grep "- sm-orca " "$data/secondmates.md" "orca secondmate teardown removed the registry route"
+  [ ! -e "$state/sm-orca.meta" ] || fail "orca secondmate teardown did not clear volatile meta"
+  assert_contains "$(cat "$LOG")" $'fmod\x1f''kill'$'\x1f''fm-secondmate-sm-orca-12345678' \
+    "orca secondmate teardown did not close the terminal"
+  pass "fm-teardown.sh: Orca secondmate teardown preserves persistent routing"
+}
+
+# ---- orca secondmate: refusal is removed ----
+# (the original fm-spawn.sh had an explicit refuse for orca+secondmate.
+# Verify the script does NOT print "does not support --secondmate" anymore.)
+
+test_fm_spawn_does_not_refuse_orca_secondmate() {
+  fmod_case no-secondmate-refusal
+  local home data state config
+  home="$CASE_DIR/home"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  mkdir -p "$data/smoke" "$state" "$config"
+  # Write a marker so fm-spawn refuses as a real secondmate home (not as a project).
+  printf 'smoke\n' > "$home/.fm-secondmate-home"
+  printf 'brief\n' > "$data/smoke/brief.md"
+  # No registry entry -> fm-spawn would refuse, so we just verify the
+  # script does not contain the "does not support --secondmate" text
+  # for orca. The earlier code had:
+  #   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+  #     echo "error: backend=orca does not support --secondmate spawns yet" >&2
+  #     exit 1
+  # Verify that block is gone.
+  if grep -q "backend=orca does not support --secondmate" "$ROOT/bin/fm-spawn.sh"; then
+    fail "fm-spawn.sh still refuses orca+secondmate; refusal should be removed"
+  fi
+  pass "fm-spawn.sh: orca+secondmate refusal is removed"
 }
 
 # ---- test runner ---------------------------------------------------------
