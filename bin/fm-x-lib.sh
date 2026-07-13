@@ -300,13 +300,14 @@ fmx_context_registry_clear() {
 #      and concurrent requests - the primary source after this fix);
 #   2. the still-present inbox payload;
 #   3. when <allow-relay> is 1, an AUTHORITATIVE relay lookup by request_id.
-# Prints {"platform":"...","reply_max_chars":"..."}; the FIRST source yielding a
-# non-empty platform OR explicit limit wins, else the empty shape. <allow-relay>
+# Prints {"platform":"...","reply_max_chars":"..."}; each axis is filled from
+# the first source that provides it, continuing through later sources until both
+# are present or the sources are exhausted. <allow-relay>
 # must be 0 in dry-run / no-token / no-network contexts; the caller gates it
 # (typically: follow-up + live + token) so the answer path and dry-run stay
 # network-free. Requires fmx_load_config to have run when <allow-relay> is 1.
 fmx_resolve_reply_context() {
-  local state=$1 rid=$2 allow_relay=${3:-0} src ctx p m
+  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m p= m=
   for src in registry inbox relay; do
     case "$src" in
       registry) ctx=$(fmx_context_registry_get "$state" "$rid" 2>/dev/null) || ctx= ;;
@@ -317,15 +318,14 @@ fmx_resolve_reply_context() {
         ;;
     esac
     [ -n "$ctx" ] || continue
-    p=$(printf '%s' "$ctx" | jq -r '.platform // ""' 2>/dev/null) || p=
-    m=$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""' 2>/dev/null) || m=
-    if [ -n "$p" ] || [ -n "$m" ]; then
-      jq -cn --arg platform "$p" --arg max "$m" \
-        '{platform:$platform, reply_max_chars:$max}'
-      return 0
-    fi
+    source_p=$(printf '%s' "$ctx" | jq -r '.platform // ""' 2>/dev/null) || source_p=
+    source_m=$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""' 2>/dev/null) || source_m=
+    case "$source_p" in discord|x) [ -n "$p" ] || p=$source_p ;; esac
+    case "$source_m" in ''|*[!0-9]*) ;; *) [ -n "$m" ] || m=$source_m ;; esac
+    [ -n "$p" ] && [ -n "$m" ] && break
   done
-  printf '{"platform":"","reply_max_chars":""}\n'
+  jq -cn --arg platform "$p" --arg max "$m" \
+    '{platform:$platform, reply_max_chars:$max}'
   return 0
 }
 

@@ -50,9 +50,9 @@
 # dry-run stay network-free. This is what keeps a delayed request-id follow-up on
 # the ORIGINAL platform's budget even after the inbox is drained and with no task
 # link surviving. FAIL-SAFE: if a --followup reply's platform/budget cannot be
-# authoritatively resolved AND the reply would split under the fallback X 280-char
-# budget, this REFUSES with exit 8 (distinct from the 409 exit 9) rather than
-# wrongly threading a possibly-Discord reply - firstmate holds and retries it.
+# authoritatively resolved, this REFUSES with exit 8 (distinct from the 409 exit
+# 9) rather than posting with a locally defaulted budget - firstmate holds and
+# retries it.
 #
 # Long replies auto-split into a numbered thread. X stays within
 # FMX_X_REPLY_MAX_CHARS, default 280. Discord uses
@@ -235,8 +235,16 @@ esac
 # Was the platform/budget authoritatively resolved by any source (override,
 # registry, inbox, or relay)? Drives the follow-up fail-safe below.
 CONTEXT_RESOLVED=0
-if [ -n "$REQ_PLATFORM" ] || [ -n "$REQ_EXPLICIT_MAX" ]; then
+if [ -n "$REQ_PLATFORM" ] && [ -n "$REQ_EXPLICIT_MAX" ]; then
   CONTEXT_RESOLVED=1
+fi
+
+if [ "$FOLLOWUP" = 1 ] && [ "$CONTEXT_RESOLVED" = 0 ]; then
+  relay_note=
+  [ "$ALLOW_RELAY" = 1 ] && relay_note=", and the relay did not supply the missing value by request_id"
+  printf 'fm-x-reply: refusing follow-up for %s: could not authoritatively determine both the reply platform and explicit budget (local per-request context was incomplete%s). Hold and retry once both values are recoverable.\n' \
+    "$REQ" "$relay_note" >&2
+  exit 8
 fi
 REPLY_MAX=$(fmx_reply_limit_for_platform "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX")
 
@@ -262,23 +270,6 @@ CHUNKS=$(printf '%s' "$TEXT" | fmx_split_thread "$REPLY_MAX" "$FMX_THREAD_MAX") 
 N=$(printf '%s' "$CHUNKS" | jq 'length' 2>/dev/null) || N=
 case "$N" in ''|*[!0-9]*) echo "fm-x-reply: failed to split reply into a thread" >&2; exit 1 ;; esac
 [ "$N" -gt 0 ] || { echo "fm-x-reply: empty reply text" >&2; exit 2; }
-
-# Fail-safe (follow-up only): if the reply platform/budget could NOT be
-# authoritatively resolved (no per-request context, no inbox payload, and - live -
-# no relay answer) AND the reply is long enough that the fallback X 280-char
-# budget would split it, REFUSE rather than post. Splitting a possibly-Discord
-# follow-up at the X budget is the exact regression this guards; holding it
-# (exit 8, distinct from the 409 cap-exhaustion exit 9) lets firstmate retry once
-# the platform is recoverable instead of publishing a wrongly threaded reply. A
-# reply that fits one message is safe either way and still posts. This fires
-# before the dry-run record too, so a refused follow-up leaves no outbox preview.
-if [ "$FOLLOWUP" = 1 ] && [ "$CONTEXT_RESOLVED" = 0 ] && [ "$N" -gt 1 ]; then
-  relay_note=
-  [ "$ALLOW_RELAY" = 1 ] && relay_note=", and the relay did not resolve it by request_id"
-  printf 'fm-x-reply: refusing follow-up for %s: could not authoritatively determine the reply platform/budget (no per-request context, no inbox payload%s), and the reply would split under the default X 280-char budget. Refusing rather than risk wrongly threading a Discord follow-up; hold and retry once the platform is recoverable (or link the task before the inbox is drained).\n' \
-    "$REQ" "$relay_note" >&2
-  exit 8
-fi
 
 # Build the body with jq so the text and optional image object are correctly
 # JSON-escaped. A single message sends {request_id, text}; a thread also sends
