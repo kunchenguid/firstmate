@@ -8,6 +8,7 @@ set -u
 HELPER="$ROOT/bin/fm-slack-dm.mjs"
 TMP_ROOT=$(fm_test_tmproot fm-slack-dm-tests)
 SLACK_SERVER_PIDS=()
+SLACK_API_URL=""  # set by start_fake_slack in the parent shell
 
 cleanup_slack_dm_tests() {
   local pid
@@ -41,7 +42,13 @@ write_dm_message() {  # <dir> [body]
   printf '%s\n' "$body" > "$dir/message.txt"
 }
 
-start_fake_slack() {  # <dir> <mode>
+# Start the fake Slack server, record its PID in the PARENT shell's
+# SLACK_SERVER_PIDS (so cleanup_slack_dm_tests reaps it), and set the parent-shell
+# variable SLACK_API_URL for the caller. MUST NOT be called in a command
+# substitution: `$(start_fake_slack ...)` runs it in a subshell, so the PID append
+# is discarded and the backgrounded node reparents to PID 1 and leaks. Call as
+# `start_fake_slack "$dir" <mode>; api=$SLACK_API_URL` instead.
+start_fake_slack() {  # <dir> <mode> -> sets SLACK_API_URL in the caller's shell
   local dir=$1 mode=$2 port_file req_file script pid
   port_file="$dir/port"
   req_file="$dir/requests.jsonl"
@@ -79,7 +86,7 @@ JS
   pid=$!
   SLACK_SERVER_PIDS+=("$pid")
   while [ ! -s "$port_file" ]; do sleep 0.05; done
-  printf 'http://127.0.0.1:%s/api/chat.postMessage\n' "$(cat "$port_file")"
+  SLACK_API_URL="http://127.0.0.1:$(cat "$port_file")/api/chat.postMessage"
 }
 
 test_slack_dm_success_posts_chat_message() {
@@ -89,7 +96,7 @@ test_slack_dm_success_posts_chat_message() {
   printf 'xoxb-test-success\n' > "$token_file"
   write_dm_config "$dir" U123ABC "file:$token_file"
   write_dm_message "$dir"
-  api=$(start_fake_slack "$dir" success)
+  start_fake_slack "$dir" success; api=$SLACK_API_URL
 
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
   status=$?
@@ -113,7 +120,7 @@ test_slack_dm_named_attribution_accepts_named_prefix() {
   printf 'xoxb-named-secret\n' > "$token_file"
   write_dm_config "$dir" U123ABC "file:$token_file" Tim
   write_dm_message "$dir" "AI agent for Tim here — update from your fleet:"$'\n'"- done: ready"
-  api=$(start_fake_slack "$dir" success)
+  start_fake_slack "$dir" success; api=$SLACK_API_URL
 
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
   status=$?
@@ -171,7 +178,7 @@ test_slack_dm_api_error_fails_without_leaking_token() {
   write_dm_config "$dir" U123ABC "file:$token_file"
   write_dm_message "$dir"
   FAKE_SLACK_ERROR='xoxb-api-secret'
-  api=$(start_fake_slack "$dir" api-error)
+  start_fake_slack "$dir" api-error; api=$SLACK_API_URL
   unset FAKE_SLACK_ERROR
 
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
@@ -206,7 +213,7 @@ test_slack_dm_missing_token_degrades_without_request() {
   dir=$(make_slack_case missing-token)
   write_dm_config "$dir" U123ABC "file:$dir/no-token-here"
   write_dm_message "$dir"
-  api=$(start_fake_slack "$dir" success)
+  start_fake_slack "$dir" success; api=$SLACK_API_URL
 
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
   status=$?
@@ -224,7 +231,7 @@ test_slack_dm_rejects_channel_destination() {
   printf 'xoxb-invalid-secret\n' > "$token_file"
   write_dm_config "$dir" C123CHANNEL "file:$token_file"
   write_dm_message "$dir"
-  api=$(start_fake_slack "$dir" success)
+  start_fake_slack "$dir" success; api=$SLACK_API_URL
 
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
   status=$?
@@ -260,7 +267,7 @@ test_slack_dm_token_not_in_process_args() {
   printf 'xoxb-argv-secret\n' > "$token_file"
   write_dm_config "$dir" U123ABC "file:$token_file"
   write_dm_message "$dir"
-  api=$(start_fake_slack "$dir" slow-success)
+  start_fake_slack "$dir" slow-success; api=$SLACK_API_URL
 
   FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" >"$dir/helper.out" 2>&1 &
   pid=$!
@@ -282,7 +289,7 @@ test_slack_dm_command_token_not_in_process_args() {
   secret=xoxb-command-argv-secret
   write_dm_config "$dir" U123ABC "command:sleep 1; printf '%s\\n' $secret"
   write_dm_message "$dir"
-  api=$(start_fake_slack "$dir" success)
+  start_fake_slack "$dir" success; api=$SLACK_API_URL
 
   FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" >"$dir/helper.out" 2>&1 &
   pid=$!
@@ -301,7 +308,47 @@ test_slack_dm_command_token_not_in_process_args() {
   pass "fm-slack-dm keeps command token output out of process args"
 }
 
+test_fake_slack_pid_recorded_in_parent_and_reaped() {
+  # Regression for the fake-slack process leak. start_fake_slack must record its
+  # server PID in the PARENT shell's SLACK_SERVER_PIDS and start the node as a
+  # direct child of this shell. A command-substitution call site would run it in a
+  # subshell, discard the PID append, and reparent the node to PID 1 (the leak the
+  # cleanup trap can then never reap). Prove parent recording, direct parentage,
+  # and reaping.
+  local dir before after last_pid parent_pid
+  dir=$(make_slack_case leak-regression)
+  before=${#SLACK_SERVER_PIDS[@]}
+  start_fake_slack "$dir" success
+  after=${#SLACK_SERVER_PIDS[@]}
+  [ -n "$SLACK_API_URL" ] || fail "start_fake_slack did not set SLACK_API_URL in the parent shell"
+  [ "$after" -eq "$((before + 1))" ] || fail "server PID not recorded in parent SLACK_SERVER_PIDS (before=$before after=$after)"
+  last_pid=${SLACK_SERVER_PIDS[$((after - 1))]}
+  kill -0 "$last_pid" 2>/dev/null || fail "recorded fake-slack PID $last_pid is not a live process"
+  parent_pid=$(ps -o ppid= -p "$last_pid" 2>/dev/null | tr -d ' ')
+  [ "$parent_pid" = "$$" ] || fail "fake-slack node ppid=$parent_pid, expected this shell $$ (a command-substitution call site would reparent it to 1 and leak)"
+  # Reap exactly this server the way the EXIT trap does, then prove it is gone and
+  # drop it from the array so the trap does not double-wait a dead PID.
+  kill "$last_pid" 2>/dev/null || true
+  wait "$last_pid" 2>/dev/null || true
+  kill -0 "$last_pid" 2>/dev/null && fail "fake-slack node $last_pid survived cleanup kill"
+  unset "SLACK_SERVER_PIDS[$((after - 1))]"
+  pass "start_fake_slack records its PID in the parent shell and is reaped by cleanup (no PID=1 leak)"
+}
+
+test_no_fake_slack_command_substitution_callsites() {
+  # Static guard so the leak anti-pattern cannot silently return: no call site may
+  # invoke start_fake_slack inside a command substitution. Callers use
+  # `start_fake_slack "$dir" <mode>; api=$SLACK_API_URL`.
+  local self hits
+  self="$ROOT/tests/fm-slack-dm.test.sh"
+  hits=$(grep -nE '=[[:space:]]*\$\([[:space:]]*start_fake_slack' "$self" || true)
+  [ -z "$hits" ] || fail "command-substitution call site(s) of start_fake_slack (leak anti-pattern): $hits"
+  pass "no start_fake_slack call site uses command substitution (leak anti-pattern absent)"
+}
+
 test_slack_dm_success_posts_chat_message
+test_fake_slack_pid_recorded_in_parent_and_reaped
+test_no_fake_slack_command_substitution_callsites
 test_slack_dm_named_attribution_accepts_named_prefix
 test_slack_dm_named_config_rejects_generic_prefix
 test_slack_dm_no_name_rejects_hardcoded_name_prefix
