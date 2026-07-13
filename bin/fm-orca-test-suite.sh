@@ -68,6 +68,18 @@ while [ "$#" -gt 0 ]; do
   shift || break
 done
 
+json_append_result() {
+  local name=$1 passed=$2 log=$3
+  printf '%s' "$JSON_RESULTS" | python3 -c '
+import json
+import sys
+
+arr = json.load(sys.stdin)
+arr.append({"name": sys.argv[1], "pass": sys.argv[2] == "1", "log": sys.argv[3]})
+print(json.dumps(arr))
+' "$name" "$passed" "$log"
+}
+
 # Run a check: $1 = name, $2 = expected pass condition (0/1), $3 = log
 # Returns 0 if pass, 1 if fail; prints check line; updates counters.
 run_check() {
@@ -76,12 +88,7 @@ run_check() {
   if [ "$result" -eq 0 ]; then
     SUITE_PASS=$((SUITE_PASS + 1))
     if [ "$JSON_OUT" -eq 1 ]; then
-      JSON_RESULTS=$(printf '%s' "$JSON_RESULTS" | python3 -c "
-import json,sys
-arr=json.load(sys.stdin)
-arr.append({'name':'$name','pass':True,'log':'$log'})
-print(json.dumps(arr))
-")
+      JSON_RESULTS=$(json_append_result "$name" 1 "$log")
     else
       printf '  ✓ %-40s %s\n' "$name" "$log"
     fi
@@ -89,12 +96,7 @@ print(json.dumps(arr))
   fi
   SUITE_FAIL=$((SUITE_FAIL + 1))
   if [ "$JSON_OUT" -eq 1 ]; then
-    JSON_RESULTS=$(printf '%s' "$JSON_RESULTS" | python3 -c "
-import json,sys
-arr=json.load(sys.stdin)
-arr.append({'name':'$name','pass':False,'log':'$log'})
-print(json.dumps(arr))
-")
+    JSON_RESULTS=$(json_append_result "$name" 0 "$log")
   else
     printf '  ✗ %-40s %s\n' "$name" "$log" >&2
   fi
@@ -184,12 +186,14 @@ fi
 
 # 10. fmod list sanity
 if [ -x "$FMOD" ]; then
-  list=$(timeout 5 "$FMOD" list 2>/dev/null) || list="[]"
-  count=$(printf '%s' "$list" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
-  if [ "$count" -ge 0 ]; then
-    run_check "fmod-list" 0 "$count session(s) visible"
+  if list=$(timeout 5 "$FMOD" list 2>&1); then
+    if count=$(printf '%s' "$list" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null); then
+      run_check "fmod-list" 0 "$count session(s) visible"
+    else
+      run_check "fmod-list" 1 "unparsable JSON: $(printf '%s' "$list" | head -c 80)"
+    fi
   else
-    run_check "fmod-list" 1 "fmod list failed"
+    run_check "fmod-list" 1 "$(printf '%s' "$list" | head -c 80)"
   fi
 else
   run_check "fmod-list" 1 "bin/fmod missing"
@@ -266,6 +270,8 @@ fi
 # Final summary
 if [ "$JSON_OUT" -eq 1 ]; then
   printf '%s\n' "$JSON_RESULTS"
+  [ "$SUITE_FAIL" -eq 0 ] && exit 0
+  exit 1
 else
   printf '\n'
   if [ "$SUITE_FAIL" -eq 0 ]; then

@@ -189,6 +189,7 @@ test_use_orca_autostart_install_then_remove() {
   XDG_CONFIG_HOME="$TMP_ROOT/$case_dir" FM_HOME="$home" PATH="$fb:$PATH" \
     "$USE_ORCA" autostart install 2>&1 | tail -3
   [ -f "$autostart_dir/fm-supervise-orca.desktop" ] || fail "autostart install did not write the .desktop file"
+  assert_grep "\"FM_HOME=$home\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should preserve the active FM_HOME"
   pass "autostart install wrote $autostart_dir/fm-supervise-orca.desktop"
 
   # Idempotent: a second install must not fail and the file must still exist.
@@ -302,6 +303,59 @@ SH
   pass "orca test suite reads config from FM_HOME"
 }
 
+test_orca_test_suite_json_survives_quoted_multiline_logs() {
+  local case_dir=fm-orca-suite-json-quoting
+  local home fakebin fmod out rc
+  home=$(fake_home "$case_dir")
+  fakebin="$TMP_ROOT/$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  printf 'orca\n' > "$home/config/backend"
+  printf 'pi\n' > "$home/config/crew-harness"
+
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  fmod="$fakebin/fmod"
+  cat > "$fmod" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ping) printf '{"pong":true}\n' ;;
+  info) printf '{"daemon_reachable":true}\n' ;;
+  list) printf 'rpc "down"\nsecond line\n'; exit 7 ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fmod"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fmod" \
+    "$ROOT/bin/fm-orca-test-suite.sh" --no-spawn --no-unit --expected-backend orca --json 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "suite should fail when fmod list fails"
+  printf '%s' "$out" | python3 -c '
+import json
+import sys
+
+arr = json.load(sys.stdin)
+match = [item for item in arr if item["name"] == "fmod-list"]
+if not match:
+    raise SystemExit("missing fmod-list result")
+if match[0]["pass"]:
+    raise SystemExit("fmod-list unexpectedly passed")
+if "rpc \"down\"" not in match[0]["log"]:
+    raise SystemExit("quoted fmod-list log was not preserved")
+'
+  pass "orca test suite JSON handles quoted multiline failure logs"
+}
+
 # Build the test plan.
 test_use_orca_status_reports_state_without_mutating
 test_use_orca_status_does_not_leak_paths
@@ -310,6 +364,7 @@ test_use_orca_autostart_install_then_remove
 test_use_orca_stop_when_no_supervisor
 test_use_orca_smoke_uses_configured_project_and_fm_home_data
 test_orca_test_suite_reads_config_from_fm_home
+test_orca_test_suite_json_survives_quoted_multiline_logs
 
 if [ "${FAIL_COUNT:-0}" -eq 0 ]; then
   printf 'all use-orca tests passed\n'

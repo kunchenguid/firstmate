@@ -52,6 +52,13 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 fail() { printf '  ✗ %s\n' "$*" >&2; FAILS=$((FAILS + 1)); }
 FAILS=0
 
+desktop_quote() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  printf '"%s"' "$value"
+}
+
 require_orca() {
   command -v orca >/dev/null 2>&1 || { fail "orca binary not on PATH"; return 1; }
   ok "orca at $(command -v orca)"
@@ -93,13 +100,16 @@ stop_supervisor() {
 }
 
 install_autostart() {
+  local fm_home_arg supervisor_arg
+  fm_home_arg=$(desktop_quote "FM_HOME=$FM_HOME")
+  supervisor_arg=$(desktop_quote "$FM_ROOT/bin/fm-supervise-orca.sh")
   mkdir -p "$AUTOSTART_DIR" 2>/dev/null || { fail "cannot create $AUTOSTART_DIR"; return 1; }
   cat > "$AUTOSTART_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Firstmate Orca Supervisor
 Comment=Keeps the orca terminal daemon alive so firstmate orca spawns never hit stale_bootstrap.
-Exec=$FM_ROOT/bin/fm-supervise-orca.sh start
+Exec=env $fm_home_arg $supervisor_arg start
 Terminal=false
 Categories=Development;Utility;
 X-GNOME-Autostart-enabled=true
@@ -157,7 +167,7 @@ BRIEF
   else
     fail "turn-end extension did NOT fire within 60s (state/smoke-use-orca.turn-ended missing)"
   fi
-  if "$FM_ROOT/bin/fm-teardown.sh" smoke-use-orca 2>&1 | grep -q "complete"; then
+  if FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-teardown.sh" smoke-use-orca 2>&1 | grep -q "complete"; then
     ok "teardown clean"
   else
     fail "teardown reported an issue"

@@ -90,14 +90,27 @@ clear_config_backend() {
 
 smoke() {
   step "smoke: trivial tmux+pi spawn"
-  mkdir -p "$FM_ROOT/data/smoke-use-tmux" 2>/dev/null || true
-  cat > "$FM_ROOT/data/smoke-use-tmux/brief.md" <<'BRIEF'
+  local smoke_project candidate
+  smoke_project=${FM_TMUX_SMOKE_PROJECT:-}
+  if [ -z "$smoke_project" ] && [ -d "$FM_HOME/projects" ]; then
+    for candidate in "$FM_HOME"/projects/*; do
+      [ -d "$candidate/.git" ] || git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
+      smoke_project=$candidate
+      break
+    done
+  fi
+  if [ -z "$smoke_project" ]; then
+    fail "no smoke project found (set FM_TMUX_SMOKE_PROJECT or add a git repo under $FM_HOME/projects)"
+    return 1
+  fi
+  mkdir -p "$FM_HOME/data/smoke-use-tmux" 2>/dev/null || true
+  cat > "$FM_HOME/data/smoke-use-tmux/brief.md" <<'BRIEF'
 # smoke-use-tmux
 
 Firstmate use-tmux smoke. Confirm you are alive in one short sentence.
 Do not modify any files.
 BRIEF
-  if ! out=$(FM_HOME="$FM_ROOT" "$FM_ROOT/bin/fm-spawn.sh" smoke-use-tmux projects/falkordb-stak --harness pi 2>&1); then
+  if ! out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-spawn.sh" smoke-use-tmux "$smoke_project" --harness pi 2>&1); then
     fail "spawn refused: $out"
     return 1
   fi
@@ -108,7 +121,7 @@ BRIEF
   else
     fail "turn-end extension did NOT fire"
   fi
-  if "$FM_ROOT/bin/fm-teardown.sh" smoke-use-tmux 2>&1 | grep -q "complete"; then
+  if FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-teardown.sh" smoke-use-tmux 2>&1 | grep -q "complete"; then
     ok "teardown clean"
   else
     fail "teardown reported an issue"
