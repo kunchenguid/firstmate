@@ -311,7 +311,9 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
+- When you start the run with \`no-mistakes axi run --intent "..."\`, write the intent string as structured markdown, not a run-on paragraph: one short lead sentence, a blank line, then a numbered or bulleted list of the distinct changes (one line per item).
+  no-mistakes renders \`--intent\` verbatim as the PR's \`## Intent\` section, so the intent string's readability IS the PR's readability.
 - ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.

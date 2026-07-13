@@ -83,6 +83,25 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_no_mistakes_intent_formatting_bullet() {
+  local home id brief
+  home="$TMP_ROOT/intent-fmt-home"
+  mkdir -p "$home/data"
+  id="brief-intent-fmt-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "Three firstmate-specific rules" "$brief" \
+    "no-mistakes DOD still says Two instead of Three after intent bullet was added"
+  assert_grep "no-mistakes axi run --intent" "$brief" \
+    "no-mistakes DOD missing the intent-formatting bullet"
+  assert_grep "intent string as structured markdown" "$brief" \
+    "intent-formatting bullet missing structured-markdown instruction"
+  assert_grep "readability IS the PR" "$brief" \
+    "intent-formatting bullet missing the why: renders verbatim as PR Intent section"
+  pass "fm-brief.sh: no-mistakes DOD carries the intent-formatting bullet"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -264,6 +283,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_no_mistakes_intent_formatting_bullet
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
