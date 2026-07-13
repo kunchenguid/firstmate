@@ -75,8 +75,10 @@ test_use_orca_status_reports_state_without_mutating() {
   out_before=$(ls "$config" 2>&1; ls "$state" 2>&1)
   # Stub supervisor out so the script does not actually talk to fmod.
   local fake_status="$TMP_ROOT/$case_dir/fake-supervisor"
+  local fmod_log="$TMP_ROOT/$case_dir/fmod.log"
   cat > "$fake_status" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_FMOD_LOG:?}"
 case "${1:-}" in
   status)
     printf 'supervisor: not running\n'
@@ -88,10 +90,11 @@ esac
 SH
   chmod +x "$fake_status"
 
-  out=$(FM_HOME="$home" FM_ORCA_FMOD="$fake_status" "$USE_ORCA" status 2>&1)
+  out=$(FM_HOME="$home" FM_ORCA_FMOD="$fake_status" FM_TEST_FMOD_LOG="$fmod_log" "$USE_ORCA" status 2>&1)
   assert_contains "$out" "config/backend" "status should mention config/backend"
   assert_contains "$out" "orca" "status should show orca backend"
   assert_contains "$out" "supervisor" "status should mention supervisor"
+  assert_grep "ping" "$fmod_log" "status should probe daemon through FM_ORCA_FMOD"
 
   out_after=$(ls "$config" 2>&1; ls "$state" 2>&1)
   [ "$out_before" = "$out_after" ] || fail "status should not mutate state (before: $out_before, after: $out_after)"
@@ -184,12 +187,19 @@ test_use_orca_autostart_install_then_remove() {
 
   local fb
   fb=$(fakebin_full "$case_dir")
+  local state_override="$TMP_ROOT/$case_dir/state-override"
+  local orca_override="$fb/orca"
+  local fmod_override="$fb/fmod"
 
   # Install
-  XDG_CONFIG_HOME="$TMP_ROOT/$case_dir" FM_HOME="$home" PATH="$fb:$PATH" \
+  XDG_CONFIG_HOME="$TMP_ROOT/$case_dir" FM_HOME="$home" FM_STATE_OVERRIDE="$state_override" \
+    FM_ORCA_BIN="$orca_override" FM_ORCA_FMOD="$fmod_override" PATH="$fb:$PATH" \
     "$USE_ORCA" autostart install 2>&1 | tail -3
   [ -f "$autostart_dir/fm-supervise-orca.desktop" ] || fail "autostart install did not write the .desktop file"
   assert_grep "\"FM_HOME=$home\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should preserve the active FM_HOME"
+  assert_grep "\"FM_STATE_OVERRIDE=$state_override\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should preserve FM_STATE_OVERRIDE"
+  assert_grep "\"FM_ORCA_BIN=$orca_override\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should preserve FM_ORCA_BIN"
+  assert_grep "\"FM_ORCA_FMOD=$fmod_override\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should preserve FM_ORCA_FMOD"
   pass "autostart install wrote $autostart_dir/fm-supervise-orca.desktop"
 
   # Idempotent: a second install must not fail and the file must still exist.

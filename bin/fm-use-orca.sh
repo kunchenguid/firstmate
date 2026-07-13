@@ -60,19 +60,50 @@ desktop_quote() {
   printf '"%s"' "$value"
 }
 
-require_orca() {
-  command -v orca >/dev/null 2>&1 || { fail "orca binary not on PATH"; return 1; }
-  ok "orca at $(command -v orca)"
-  command -v python3 >/dev/null 2>&1 || { fail "python3 not on PATH (fmod and orca adapter use it)"; return 1; }
-  ok "python3 at $(command -v python3)"
+resolve_orca_bin() {
+  if [ -n "${FM_ORCA_BIN:-}" ]; then
+    [ -x "$FM_ORCA_BIN" ] && printf '%s\n' "$FM_ORCA_BIN"
+    return 0
+  fi
+  command -v orca 2>/dev/null || true
+}
+
+resolve_fmod() {
+  if [ -n "${FM_ORCA_FMOD:-}" ]; then
+    [ -x "$FM_ORCA_FMOD" ] && printf '%s\n' "$FM_ORCA_FMOD"
+    return 0
+  fi
   if [ -x "$FM_ROOT/bin/fmod" ]; then
-    ok "fmod at $FM_ROOT/bin/fmod"
-  elif command -v fmod >/dev/null 2>&1; then
-    ok "fmod at $(command -v fmod)"
-  else
-    fail "fmod not found (expected $FM_ROOT/bin/fmod or PATH)"
+    printf '%s\n' "$FM_ROOT/bin/fmod"
+    return 0
+  fi
+  command -v fmod 2>/dev/null || true
+}
+
+require_orca() {
+  local orca_bin fmod_bin
+  orca_bin=$(resolve_orca_bin)
+  if [ -z "$orca_bin" ]; then
+    if [ -n "${FM_ORCA_BIN:-}" ]; then
+      fail "FM_ORCA_BIN is not executable: $FM_ORCA_BIN"
+    else
+      fail "orca binary not on PATH"
+    fi
     return 1
   fi
+  ok "orca at $orca_bin"
+  command -v python3 >/dev/null 2>&1 || { fail "python3 not on PATH (fmod and orca adapter use it)"; return 1; }
+  ok "python3 at $(command -v python3)"
+  fmod_bin=$(resolve_fmod)
+  if [ -z "$fmod_bin" ]; then
+    if [ -n "${FM_ORCA_FMOD:-}" ]; then
+      fail "FM_ORCA_FMOD is not executable: $FM_ORCA_FMOD"
+    else
+      fail "fmod not found (expected $FM_ROOT/bin/fmod or PATH)"
+    fi
+    return 1
+  fi
+  ok "fmod at $fmod_bin"
   command -v setsid >/dev/null 2>&1 || { fail "setsid missing (install util-linux)"; return 1; }
   ok "setsid available"
   return 0
@@ -101,8 +132,13 @@ stop_supervisor() {
 }
 
 install_autostart() {
-  local fm_home_arg supervisor_arg
-  fm_home_arg=$(desktop_quote "FM_HOME=$FM_HOME")
+  local env_args env_name env_value supervisor_arg
+  env_args=$(desktop_quote "FM_HOME=$FM_HOME")
+  for env_name in FM_STATE_OVERRIDE FM_ORCA_BIN FM_ORCA_FMOD; do
+    env_value=${!env_name:-}
+    [ -n "$env_value" ] || continue
+    env_args="$env_args $(desktop_quote "$env_name=$env_value")"
+  done
   supervisor_arg=$(desktop_quote "$FM_ROOT/bin/fm-supervise-orca.sh")
   mkdir -p "$AUTOSTART_DIR" 2>/dev/null || { fail "cannot create $AUTOSTART_DIR"; return 1; }
   cat > "$AUTOSTART_FILE" <<EOF
@@ -110,7 +146,7 @@ install_autostart() {
 Type=Application
 Name=Firstmate Orca Supervisor
 Comment=Keeps the orca terminal daemon alive so firstmate orca spawns never hit stale_bootstrap.
-Exec=env $fm_home_arg $supervisor_arg start
+Exec=env $env_args $supervisor_arg start
 Terminal=false
 Categories=Development;Utility;
 X-GNOME-Autostart-enabled=true
@@ -197,7 +233,9 @@ status_report() {
     printf 'not running\n'
   fi
   printf '  daemon:           '
-  if timeout 5 "$FM_ROOT/bin/fmod" ping >/dev/null 2>&1; then
+  local fmod_bin
+  fmod_bin=$(resolve_fmod)
+  if [ -n "$fmod_bin" ] && timeout 5 "$fmod_bin" ping >/dev/null 2>&1; then
     printf 'reachable\n'
   else
     printf 'unreachable\n'
