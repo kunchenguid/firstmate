@@ -43,6 +43,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PIDFILE="$STATE/.orca-supervisor.pid"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/fm-supervise-orca.desktop"
@@ -142,8 +143,8 @@ smoke() {
     fail "no smoke project found (set FM_ORCA_SMOKE_PROJECT or add a git repo under $FM_HOME/projects)"
     return 1
   fi
-  mkdir -p "$FM_HOME/data/smoke-use-orca" 2>/dev/null || true
-  cat > "$FM_HOME/data/smoke-use-orca/brief.md" <<'BRIEF'
+  mkdir -p "$DATA/smoke-use-orca" 2>/dev/null || true
+  cat > "$DATA/smoke-use-orca/brief.md" <<'BRIEF'
 # smoke-use-orca
 
 Firstmate use-orca smoke. Confirm you are alive in one short sentence and identify the model/provider.

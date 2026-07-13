@@ -74,15 +74,19 @@ fm_backend_orca_session_id_of() {  # <window-name>
 }
 
 fm_backend_orca_worktree_dir() {  # <project-path> <name>
-  local project=$1 name=$2 project_parent project_name home_guess
+  local project=$1 name=$2 project_parent project_name home_guess state_root
   project_parent=$(dirname "$project")
   project_name=$(basename "$project")
-  if [ "$(basename "$project_parent")" = projects ]; then
-    home_guess=$(dirname "$project_parent")
-  else
-    home_guess=$project_parent
+  state_root="${FM_STATE_OVERRIDE:-${STATE:-}}"
+  if [ -z "$state_root" ]; then
+    if [ "$(basename "$project_parent")" = projects ]; then
+      home_guess=$(dirname "$project_parent")
+    else
+      home_guess=$project_parent
+    fi
+    state_root="$home_guess/state"
   fi
-  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
+  printf '%s/orca-worktrees/%s/%s' "$state_root" "$project_name" "$name"
 }
 
 # fm_backend_orca_create_terminal <session-id> <cwd> <title>: createOrAttach

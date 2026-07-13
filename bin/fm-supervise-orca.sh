@@ -42,6 +42,7 @@ FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PIDFILE="$STATE/.orca-supervisor.pid"
+PIDIDENTITY="$PIDFILE.identity"
 
 CHECK_INTERVAL=${FM_ORCA_CHECK_INTERVAL:-30}
 ORCA_BIN=${FM_ORCA_BIN:-$(command -v orca 2>/dev/null || true)}
@@ -115,10 +116,32 @@ ensure_healthy() {
 
 already_supervised() {
   [ -f "$PIDFILE" ] || return 1
-  local pid
+  local pid current_identity stored_identity
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  current_identity=$(supervisor_pid_identity "$pid") || return 1
+  stored_identity=$(cat "$PIDIDENTITY" 2>/dev/null || true)
+  [ -n "$stored_identity" ] || return 1
+  [ "$current_identity" = "$stored_identity" ]
+}
+
+supervisor_pid_identity() {
+  local pid=$1 command identity
+  identity=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  command=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$command" in
+    *fm-supervise-orca.sh*"--follow"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$identity" | sed 's/^[[:space:]]*//'
+}
+
+clear_pidfile() {
+  rm -f "$PIDFILE" "$PIDIDENTITY"
 }
 
 status() {
@@ -138,7 +161,7 @@ status() {
 
 stop() {
   if ! already_supervised; then
-    rm -f "$PIDFILE"
+    clear_pidfile
     echo "supervisor: not running"
     exit 0
   fi
@@ -151,7 +174,7 @@ stop() {
     sleep 1
   done
   kill -KILL "$pid" 2>/dev/null || true
-  rm -f "$PIDFILE"
+  clear_pidfile
   echo "supervisor: stopped (pid=$pid)"
 }
 
@@ -168,7 +191,7 @@ case "${1:-status}" in
     # Make sure the daemon is healthy before we fork ourselves; otherwise
     # the supervisor's first poll would just report what we already saw.
     ensure_healthy || exit 2
-    rm -f "$PIDFILE"
+    clear_pidfile
     setsid --fork "$0" --follow </dev/null >/tmp/fm-supervise-orca.log 2>&1 &
     disown
     for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -185,9 +208,10 @@ case "${1:-status}" in
     # Foreground loop: written for harness-tracked background invocation.
     # Trap signals so a SIGTERM (from `stop` or session tear-down) exits
     # cleanly without leaving a stale pidfile behind.
-    rm -f "$PIDFILE"
+    clear_pidfile
+    supervisor_pid_identity "$$" > "$PIDIDENTITY" 2>/dev/null || true
     echo $$ > "$PIDFILE"
-    trap 'rm -f "$PIDFILE"; exit 0' TERM INT
+    trap 'rm -f "$PIDFILE" "$PIDIDENTITY"; exit 0' TERM INT
     log "loop entered, interval=${CHECK_INTERVAL}s, bin=$ORCA_BIN"
     while :; do
       ensure_healthy || log "warning: ensure_healthy returned non-zero"

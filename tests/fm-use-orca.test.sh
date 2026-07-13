@@ -233,11 +233,12 @@ SH
 
 test_use_orca_smoke_uses_configured_project_and_fm_home_data() {
   local case_dir=fm-use-orca-smoke-project
-  local home fake_root project log
+  local home fake_root project log data_override
   home=$(fake_home "$case_dir")
   fake_root="$TMP_ROOT/$case_dir/fakeroot"
   project="$TMP_ROOT/$case_dir/project"
   log="$TMP_ROOT/$case_dir/spawn.log"
+  data_override="$TMP_ROOT/$case_dir/data-override"
   mkdir -p "$fake_root/bin" "$project" "$home/data" "$home/state"
   fm_git_init_commit "$project"
 
@@ -255,12 +256,14 @@ printf 'teardown %s complete\n' "$1"
 SH
   chmod +x "$fake_root/bin/fm-teardown.sh"
 
-  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_TEST_SPAWN_LOG="$log" FM_ORCA_SMOKE_PROJECT="$project" \
+  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" \
+    FM_TEST_SPAWN_LOG="$log" FM_ORCA_SMOKE_PROJECT="$project" \
     "$USE_ORCA" smoke >/dev/null
   assert_grep "$project" "$log" "smoke should pass the configured smoke project to fm-spawn"
   assert_no_grep "projects/falkordb-stak" "$log" "smoke should not use a hardcoded project path"
-  assert_present "$home/data/smoke-use-orca/brief.md" "smoke brief should be written under FM_HOME/data"
-  pass "use-orca smoke uses configured project and FM_HOME data"
+  assert_present "$data_override/smoke-use-orca/brief.md" "smoke brief should be written under FM_DATA_OVERRIDE"
+  assert_absent "$home/data/smoke-use-orca/brief.md" "smoke brief should not be written under FM_HOME/data when data is overridden"
+  pass "use-orca smoke uses configured project and resolved data dir"
 }
 
 test_orca_test_suite_reads_config_from_fm_home() {

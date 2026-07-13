@@ -277,15 +277,19 @@ build_test_repo() {  # <dir> <name> -> echoes repo path
 }
 
 expected_orca_wt() {  # <repo> <name>
-  local repo=$1 name=$2 parent project_name home_guess
+  local repo=$1 name=$2 parent project_name home_guess state_root
   parent=$(dirname "$repo")
   project_name=$(basename "$repo")
-  if [ "$(basename "$parent")" = projects ]; then
-    home_guess=$(dirname "$parent")
-  else
-    home_guess=$parent
+  state_root="${FM_STATE_OVERRIDE:-}"
+  if [ -z "$state_root" ]; then
+    if [ "$(basename "$parent")" = projects ]; then
+      home_guess=$(dirname "$parent")
+    else
+      home_guess=$parent
+    fi
+    state_root="$home_guess/state"
   fi
-  printf '%s/state/orca-worktrees/%s/%s' "$home_guess" "$project_name" "$name"
+  printf '%s/orca-worktrees/%s/%s' "$state_root" "$project_name" "$name"
 }
 
 test_worktree_create_makes_git_worktree_and_fmod_session() {
@@ -622,6 +626,18 @@ test_worktree_dir_for_project_registry_path_uses_state_bucket() {
   [ "$out" = "$home/state/orca-worktrees/repo/fm-test" ] \
     || fail "project registry worktree dir should use state bucket, got '$out'"
   pass "fm_backend_orca_worktree_dir: keeps registry project worktrees under state"
+}
+
+test_worktree_dir_honors_state_override() {
+  fmod_case wt-dir-state-override
+  local home="$CASE_DIR/home" repo state_override out
+  repo="$home/projects/repo"
+  state_override="$CASE_DIR/override-state"
+  mkdir -p "$repo"
+  out=$(FM_STATE_OVERRIDE="$state_override" bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_dir "$1" fm-test' "$ROOT" "$repo")
+  [ "$out" = "$state_override/orca-worktrees/repo/fm-test" ] \
+    || fail "worktree dir should honor FM_STATE_OVERRIDE, got '$out'"
+  pass "fm_backend_orca_worktree_dir: honors FM_STATE_OVERRIDE"
 }
 
 test_composer_state_empty_when_bare_prompt() {

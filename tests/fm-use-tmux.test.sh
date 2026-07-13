@@ -9,12 +9,13 @@ USE_TMUX="$ROOT/bin/fm-use-tmux.sh"
 
 test_use_tmux_smoke_uses_configured_project_and_fm_home_data() {
   local case_dir=fm-use-tmux-smoke-project
-  local home fake_root project fakebin log out
+  local home fake_root project fakebin log out data_override
   home="$TMP_ROOT/$case_dir/home"
   fake_root="$TMP_ROOT/$case_dir/fakeroot"
   project="$TMP_ROOT/$case_dir/project"
   fakebin="$TMP_ROOT/$case_dir/fakebin"
   log="$TMP_ROOT/$case_dir/spawn.log"
+  data_override="$TMP_ROOT/$case_dir/data-override"
   mkdir -p "$home/config" "$home/state" "$home/data" "$fake_root/bin" "$fakebin"
   fm_git_init_commit "$project"
 
@@ -42,15 +43,17 @@ SH
   chmod +x "$fake_root/bin/fm-teardown.sh"
 
   out=$(PATH="$fakebin:$PATH" TMUX=/tmp/tmux-test XDG_CONFIG_HOME="$TMP_ROOT/$case_dir/xdg" \
-    FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_TEST_SPAWN_LOG="$log" FM_TMUX_SMOKE_PROJECT="$project" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" \
+    FM_TEST_SPAWN_LOG="$log" FM_TMUX_SMOKE_PROJECT="$project" \
     "$USE_TMUX" start 2>&1)
   assert_contains "$out" "tmux daily-driver ready" "tmux start should complete"
   assert_grep "FM_HOME=$home" "$log" "smoke should pass active FM_HOME to fm-spawn"
   assert_grep "$project" "$log" "smoke should pass the configured smoke project to fm-spawn"
   assert_no_grep "projects/falkordb-stak" "$log" "smoke should not use a hardcoded project path"
-  assert_present "$home/data/smoke-use-tmux/brief.md" "smoke brief should be written under FM_HOME/data"
+  assert_present "$data_override/smoke-use-tmux/brief.md" "smoke brief should be written under FM_DATA_OVERRIDE"
+  assert_absent "$home/data/smoke-use-tmux/brief.md" "smoke brief should not be written under FM_HOME/data when data is overridden"
   assert_absent "$fake_root/data/smoke-use-tmux/brief.md" "smoke brief should not be written under FM_ROOT/data"
-  pass "use-tmux smoke uses configured project and FM_HOME data"
+  pass "use-tmux smoke uses configured project and resolved data dir"
 }
 
 test_use_tmux_smoke_selects_project_under_fm_home() {

@@ -43,12 +43,16 @@ SH
 }
 
 test_status_pidfile_uses_active_fm_home() {
-  local case_dir home fakebin out
+  local case_dir home fakebin out pid identity
   case_dir="$TMP_ROOT/status-fm-home"
   home="$case_dir/home"
   fakebin=$(fm_fakebin "$case_dir")
   mkdir -p "$home/state"
-  printf '%s\n' "$$" > "$home/state/.orca-supervisor.pid"
+  bash -c 'exec -a "fm-supervise-orca.sh --follow" sleep 60' &
+  pid=$!
+  identity=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null | sed 's/^[[:space:]]*//') || fail "could not read fake supervisor identity"
+  printf '%s\n' "$pid" > "$home/state/.orca-supervisor.pid"
+  printf '%s\n' "$identity" > "$home/state/.orca-supervisor.pid.identity"
   cat > "$fakebin/fmod" <<'SH'
 #!/usr/bin/env bash
 printf '{"daemon_reachable":true,"daemon_pong":{"pong":true}}\n'
@@ -57,9 +61,31 @@ SH
   chmod +x "$fakebin/fmod"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fakebin/fmod" "$SUPERVISOR" status)
-  assert_contains "$out" "supervisor: live pid=$$" "status should read pidfile from FM_HOME/state"
+  kill "$pid" 2>/dev/null || true
+  assert_contains "$out" "supervisor: live pid=$pid" "status should read pidfile from FM_HOME/state"
   assert_contains "$out" "daemon:     reachable" "status should report reachable daemon"
   pass "fm-supervise-orca status: pidfile is scoped by FM_HOME"
+}
+
+test_status_rejects_stale_reused_pidfile() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/status-stale-pid"
+  home="$case_dir/home"
+  fakebin=$(fm_fakebin "$case_dir")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.orca-supervisor.pid"
+  printf 'old identity\n' > "$home/state/.orca-supervisor.pid.identity"
+  cat > "$fakebin/fmod" <<'SH'
+#!/usr/bin/env bash
+printf '{"daemon_reachable":true,"daemon_pong":{"pong":true}}\n'
+exit 0
+SH
+  chmod +x "$fakebin/fmod"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fakebin/fmod" "$SUPERVISOR" status)
+  assert_contains "$out" "supervisor: not running" "status should reject a live pid with the wrong identity"
+  assert_contains "$out" "daemon:     reachable" "status should still report daemon health"
+  pass "fm-supervise-orca status: rejects stale reused pidfile"
 }
 
 test_reap_scopes_orca_ide_pkill_to_user() {
