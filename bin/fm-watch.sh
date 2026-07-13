@@ -181,6 +181,14 @@ hash_pane() {
 # its path is unchanged byte-for-byte). <tail40> is the same bounded capture
 # already read for hashing, so this adds no extra backend calls on the
 # regex-fallback path.
+#
+# DELIBERATELY hint-only: it does NOT accept the live-spinner signature the other
+# busy readers use (fm_pane_is_busy, bin/fm-tmux-lib.sh). It is consulted only
+# where the pane hash has ALREADY repeated across polls, so any spinner visible
+# here is by definition a frozen frame - exactly the wedge this backbone exists to
+# catch. Adding the spinner pattern here would let a dead harness's last painted
+# frame suppress stale detection forever. The other readers can accept a spinner
+# only because they prove liveness with a second capture.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 bs
   bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
@@ -342,7 +350,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.surfaced-$key"
 }
 
 pause_state_class() {  # <window> <task>
@@ -369,11 +377,19 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Surface a stale pane and remember that THIS hash has now been surfaced
+# (.surfaced-<key>). The marker is what makes "each distinct stale hash surfaces
+# at most once" true on the repeat-poll path: without it, a crew whose last status
+# line declares a pause but whose absorb class is not `paused` re-entered
+# pause_state_class on every single poll and woke firstmate every time (verified
+# 2026-07-13: nm-6951-fullflow-e2e, a stale wake every ~40s), and paid a costly
+# crew-state read for each one.
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
+  printf '%s' "$h" > "$STATE/.surfaced-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   wake "stale: $win"
 }
@@ -429,7 +445,10 @@ run_check() {
 # surface and absorb), .hb-surfaced is advanced ONLY on surface, so the heartbeat
 # fleet-scan can tell apart a captain-relevant status that already woke firstmate
 # from one that has not - the latter being a per-wake-path miss it must surface.
-_hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+# The path itself is owned by the shared classifier (hb_surfaced_path), because
+# the away-mode daemon reads these markers to avoid re-escalating a status this
+# watcher already surfaced.
+_hb_surfaced_path() { hb_surfaced_path "$1" "$STATE"; }
 
 # Record a status file's captain-relevant last line as surfaced (no-op for a
 # non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
@@ -592,6 +611,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
+    suf="$STATE/.surfaced-$key"  # the stale hash already surfaced once (never twice)
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -683,6 +703,12 @@ EOF
                 surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
+          elif [ "$(cat "$suf" 2>/dev/null || true)" = "$h" ]; then
+            # This exact hash was already surfaced once. Never surface it again:
+            # age it toward wedge escalation like any other already-classified
+            # stale hash. This is the guard that turns the per-poll re-surface
+            # loop into one wake plus the normal wedge cadence.
+            wedge_timer_check "$w" "$ssf" "non-terminal stale (already surfaced)" "$ewf"
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
@@ -709,7 +735,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
+      rm -f "$ssf" "$ewf" "$suf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in

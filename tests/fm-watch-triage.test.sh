@@ -39,16 +39,8 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
-# Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
-wait_live() {
-  local pid=$1 limit=${2:-30} i=0
-  while [ "$i" -lt "$limit" ]; do
-    kill -0 "$pid" 2>/dev/null || return 1
-    sleep 0.1
-    i=$((i + 1))
-  done
-  return 0
-}
+# wait_live, reap, seen_sig, and file_mtime are shared with the other
+# watcher-driving tests and live in tests/wake-helpers.sh.
 
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
@@ -63,20 +55,6 @@ wait_numeric_file() {
   done
   return 1
 }
-
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
-file_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
-}
-
-# Signature a primed .seen-* marker must hold so the per-poll signal scan does not
-# fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
-seen_sig() {
-  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
-}
-
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -111,6 +89,13 @@ test_stale_is_terminal_classifier() {
 test_scan_captain_relevant_statuses_classifier() {
   local dir state out
   dir=$(make_case classify-scan); state="$dir/state"
+  # Each of these is a task still ON THE BOOKS, so each has the meta fm-spawn
+  # writes and fm-teardown removes. The scan requires it: a status file with no
+  # meta belongs to a torn-down task, and re-escalating one of those is exactly
+  # the false positive fm-supervision-falsepos.test.sh (2a) pins.
+  fm_write_meta "$state/one.meta" "window=sess:fm-one" "kind=ship"
+  fm_write_meta "$state/two.meta" "window=sess:fm-two" "kind=ship"
+  fm_write_meta "$state/three.meta" "window=sess:fm-three" "kind=ship"
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
@@ -983,7 +968,10 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # A captain-relevant status whose .seen-* signature ALREADY matches (so the
   # per-poll signal scan stays quiet) but which was never surfaced (no
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
-  # fleet-scan backstop must catch it and wake firstmate.
+  # fleet-scan backstop must catch it and wake firstmate. The meta is what puts the
+  # task on the books - the scan skips a status file with no meta, since that one
+  # belongs to a task teardown already retired.
+  fm_write_meta "$state/miss.meta" "window=sess:fm-miss" "kind=ship"
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \

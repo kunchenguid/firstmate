@@ -604,14 +604,29 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # pre-existing fm_pane_is_busy, since fm_backend_capture's tmux arm runs the
 # exact same `tmux capture-pane -p -t <target> -S -40`).
 pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} bs tail40
+  local target=$1 backend=${2:-tmux} bs
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  backend_pane_regex_busy "$backend" "$target" ""
+}
+
+# The shared regex-over-capture busy reader, for any backend, with the SAME two
+# signatures fm_pane_is_busy uses (bin/fm-tmux-lib.sh): an interrupt hint in the
+# footer, or a spinner line proven live by a second capture. The liveness rule is
+# what lets the spinner signature exist without weakening wedge detection - a
+# wedged harness keeps painting nothing, so its frozen spinner never counts.
+# Returns 2 when the pane cannot be read at all (caller decides what that means).
+backend_pane_regex_busy() {  # <backend> <target> [label]
+  local backend=$1 target=$2 label=${3:-} t0 t1
+  t0=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 2
+  fm_busy_hint_in_text "$t0" && return 0
+  fm_spinner_in_text "$t0" || return 1
+  sleep "${FM_BUSY_LIVENESS_SECS:-$FM_TMUX_BUSY_LIVENESS_SECS_DEFAULT}"
+  t1=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 2
+  fm_spinner_in_text "$t1" || return 1
+  fm_pane_text_advanced "$t0" "$t1"
 }
 
 # pane_input_pending: the standalone "is there real unsubmitted text" predicate,
@@ -644,17 +659,20 @@ task_window_backend() {  # <window> <state>
   fm_backend_of_meta "$meta"
 }
 
+# 0 = busy (a crew that RESUMED: drop its wedge marker), 2 = pane gone, else idle.
+# The busy read is the shared two-signature one (see backend_pane_regex_busy):
+# before 2026-07-13 it was hint-only, so a working claude crew - whose footer
+# carries no interrupt hint since 2.1.207 - read as idle here and got escalated as
+# a possible wedge while it was mid-turn.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend label tail40 bs
+  local win=$1 state=$2 backend label bs
   backend=$(task_window_backend "$win" "$state")
   label="fm-$(window_to_task "$win" "$state")"
-  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  backend_pane_regex_busy "$backend" "$win" "$label"
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -1087,7 +1105,8 @@ housekeeping() {  # <state>
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
   #     classifier may have missed). Cheap: status files only, no tmux. The
   #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  #     scan_captain_relevant_statuses (which also drops any task no longer in the
+  #     fleet); the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
     local seen
@@ -1095,6 +1114,17 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      # Cross-supervisor dedupe. This daemon's own seen-markers are EMPTY on a
+      # fresh start, so without this check the first scan of every away-mode
+      # session re-escalates every captain-relevant line still sitting in the
+      # fleet's status logs - including events firstmate handled hours ago, which
+      # the crew (by the sparse status contract) never appends over. Adopt what
+      # the always-on watcher already surfaced instead of raising it again.
+      if status_already_surfaced "$task" "$last" "$state"; then
+        log "catch-all scan: adopting already-surfaced status for $task (no re-escalation)"
+        mark_status_seen "$state" "$task" "$last"
+        continue
+      fi
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")

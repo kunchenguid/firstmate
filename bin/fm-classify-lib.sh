@@ -151,6 +151,15 @@ crew_absorb_class() {  # <id>
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
+  # A run PARKED at a gate whose pane is busy: the crew is actively composing its
+  # gate response. fm-crew-state.sh reports that pane fact only for a parked run,
+  # and only after proving the pane is really repainting (fm_pane_is_busy's
+  # liveness rule), so this is positive working evidence, not a frozen frame. A
+  # parked crew with an IDLE pane still falls through to `none` and surfaces -
+  # that one genuinely owes an answer, or is wedged.
+  if [ "$state" = parked ]; then
+    case "$line" in *"pane busy"*) printf 'working'; return ;; esac
+  fi
   printf 'none'
 }
 
@@ -205,18 +214,48 @@ stale_is_terminal() {  # <window> <state>
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
+# 0 if <task> is still ON THE BOOKS in this home: state/<task>.meta is what makes
+# a task part of the fleet, and bin/fm-teardown.sh removes it when the task is
+# retired. A status file with no meta belongs to a task that no longer exists, so
+# nothing about it can need supervision.
+task_in_fleet() {  # <task> <state>
+  [ -f "$2/$1.meta" ]
+}
+
+# Path of the watcher's surfaced-marker for <task>: the last captain-relevant
+# status line the ALWAYS-ON watcher actually woke firstmate for. Owned here so the
+# watcher (which writes it) and the away-mode daemon (which must not re-escalate
+# what it records) cannot drift on the naming.
+hb_surfaced_path() {  # <task> <state>
+  printf '%s/.hb-surfaced-%s' "$2" "$(printf '%s' "$1" | tr ':/.' '___')"
+}
+
+# 0 if the watcher already surfaced this EXACT status line to firstmate. The
+# daemon's catch-all scan uses it as a cross-supervisor dedupe: its own
+# .subsuper-seen-status markers are empty on a fresh daemon start, so without this
+# the first away-mode scan re-escalates every captain-relevant line still sitting
+# in state/ - including a needs-decision firstmate answered hours ago, which the
+# crew, by the sparse status contract, never appends over. That is what happened
+# to coze-obj-rename-fix-y3 on 2026-07-12. A line the watcher never surfaced is
+# still escalated, so nothing is swallowed.
+status_already_surfaced() {  # <task> <line> <state>
+  [ "$(cat "$(hb_surfaced_path "$1" "$3")" 2>/dev/null || true)" = "$2" ]
+}
+
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
-# captain-relevant. This is the cheap fleet-scan both supervisors run as a
-# catch-all backstop for a captain-relevant status the per-wake path might miss.
+# captain-relevant AND whose task is still in the fleet. This is the cheap
+# fleet-scan both supervisors run as a catch-all backstop for a captain-relevant
+# status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
 # daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    task_in_fleet "$task" "$state" || continue
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
