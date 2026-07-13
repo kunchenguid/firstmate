@@ -421,6 +421,16 @@ ROWS
   pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
 }
 
+test_herdr_install_requires_manual_action() {
+  local out status
+  out=$("$ROOT/bin/fm-bootstrap.sh" install herdr 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "install herdr should fail instead of evaluating its manual-install hint"
+  [ "$out" = "error: herdr requires manual installation (see https://herdr.dev for install instructions)" ] \
+    || fail "install herdr should return actionable manual-install guidance, got: $out"
+  pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
+}
+
 test_json_backends_require_jq_not_tmux() {
   local backend case_dir fakebin bash_env out
   # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
@@ -640,6 +650,7 @@ test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
+test_herdr_install_requires_manual_action
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
