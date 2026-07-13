@@ -44,6 +44,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 PIDFILE="$STATE/.orca-supervisor.pid"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/fm-supervise-orca.desktop"
@@ -192,15 +193,15 @@ smoke() {
   step "smoke: trivial orca+pi spawn"
   local smoke_project candidate
   smoke_project=${FM_ORCA_SMOKE_PROJECT:-}
-  if [ -z "$smoke_project" ] && [ -d "$FM_HOME/projects" ]; then
-    for candidate in "$FM_HOME"/projects/*; do
+  if [ -z "$smoke_project" ] && [ -d "$PROJECTS" ]; then
+    for candidate in "$PROJECTS"/*; do
       [ -d "$candidate/.git" ] || git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
       smoke_project=$candidate
       break
     done
   fi
   if [ -z "$smoke_project" ]; then
-    fail "no smoke project found (set FM_ORCA_SMOKE_PROJECT or add a git repo under $FM_HOME/projects)"
+    fail "no smoke project found (set FM_ORCA_SMOKE_PROJECT or add a git repo under $PROJECTS)"
     return 1
   fi
   mkdir -p "$DATA/smoke-use-orca" 2>/dev/null || true

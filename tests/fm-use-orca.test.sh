@@ -306,6 +306,119 @@ SH
   pass "use-orca smoke uses configured project and resolved data dir"
 }
 
+test_use_orca_smoke_selects_project_under_projects_override() {
+  local case_dir=fm-use-orca-smoke-projects-override
+  local home fake_root projects_override project log
+  home=$(fake_home "$case_dir")
+  fake_root="$TMP_ROOT/$case_dir/fakeroot"
+  projects_override="$TMP_ROOT/$case_dir/projects-override"
+  project="$projects_override/alpha"
+  log="$TMP_ROOT/$case_dir/spawn.log"
+  mkdir -p "$fake_root/bin" "$home/data" "$home/state"
+  fm_git_init_commit "$project"
+
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_SPAWN_LOG:?}"
+mkdir -p "$FM_HOME/state"
+touch "$FM_HOME/state/$1.turn-ended"
+printf 'spawned %s\n' "$1"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  cat > "$fake_root/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'teardown %s complete\n' "$1"
+SH
+  chmod +x "$fake_root/bin/fm-teardown.sh"
+
+  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects_override" \
+    FM_TEST_SPAWN_LOG="$log" "$USE_ORCA" smoke >/dev/null
+  assert_grep "$project" "$log" "smoke should auto-select a git repo under FM_PROJECTS_OVERRIDE"
+  pass "use-orca smoke auto-selects a project under FM_PROJECTS_OVERRIDE"
+}
+
+test_orca_test_suite_spawn_uses_projects_override() {
+  local case_dir=fm-orca-suite-projects-override
+  local fake_root home fakebin fmod projects_override project log out
+  fake_root="$TMP_ROOT/$case_dir/root"
+  home="$TMP_ROOT/$case_dir/home"
+  fakebin="$TMP_ROOT/$case_dir/fakebin"
+  projects_override="$TMP_ROOT/$case_dir/projects-override"
+  project="$projects_override/alpha"
+  log="$TMP_ROOT/$case_dir/spawn.log"
+  mkdir -p "$fake_root/bin" "$fakebin" "$home/config" "$home/state" "$home/data"
+  cp "$ROOT/bin/fm-orca-test-suite.sh" "$fake_root/bin/fm-orca-test-suite.sh"
+  chmod +x "$fake_root/bin/fm-orca-test-suite.sh"
+  printf 'orca\n' > "$home/config/backend"
+  printf 'pi\n' > "$home/config/crew-harness"
+  fm_git_init_commit "$project"
+
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_SPAWN_LOG:?}"
+mkdir -p "$FM_HOME/state"
+touch "$FM_HOME/state/$1.turn-ended"
+printf 'spawned %s\n' "$1"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  cat > "$fake_root/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-teardown.sh"
+  cat > "$fake_root/bin/fm-supervise-orca.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf 'supervisor: not running\n'; exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fake_root/bin/fm-supervise-orca.sh"
+  cat > "$fake_root/bin/fm-bootstrap.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ORCA: daemon reachable\n'
+SH
+  chmod +x "$fake_root/bin/fm-bootstrap.sh"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  fmod="$fakebin/fmod"
+  cat > "$fmod" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ping) printf '{"pong":true}\n' ;;
+  info) printf '{"daemon_reachable":true,"daemon_pong":{"pong":true}}\n' ;;
+  list) printf '[]\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fmod"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects_override" \
+    FM_ORCA_FMOD="$fmod" FM_TEST_SPAWN_LOG="$log" \
+    "$fake_root/bin/fm-orca-test-suite.sh" --json --no-unit --expected-backend orca 2>/dev/null || true)
+  assert_grep "$project" "$log" "orca suite spawn should auto-select a git repo under FM_PROJECTS_OVERRIDE"
+  printf '%s' "$out" | python3 -c '
+import json
+import sys
+
+arr = json.load(sys.stdin)
+match = [item for item in arr if item["name"] == "spawn-turn-end"]
+if not match:
+    raise SystemExit("missing spawn-turn-end result")
+if not match[0]["pass"]:
+    raise SystemExit("spawn-turn-end failed")
+'
+  pass "orca test suite spawn auto-selects a project under FM_PROJECTS_OVERRIDE"
+}
+
 test_orca_test_suite_reads_config_from_fm_home() {
   local case_dir=fm-orca-suite-fm-home
   local home fakebin fmod out
@@ -550,6 +663,8 @@ test_use_orca_start_writes_config_backend
 test_use_orca_autostart_install_then_remove
 test_use_orca_stop_when_no_supervisor
 test_use_orca_smoke_uses_configured_project_and_fm_home_data
+test_use_orca_smoke_selects_project_under_projects_override
+test_orca_test_suite_spawn_uses_projects_override
 test_orca_test_suite_reads_config_from_fm_home
 test_orca_test_suite_json_survives_quoted_multiline_logs
 test_orca_test_suite_bootstrap_probe_is_detect_only

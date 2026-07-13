@@ -47,6 +47,7 @@ TESTS_DIR="$FM_ROOT/tests"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
 NO_UNIT=0
 NO_SPAWN=0
@@ -205,8 +206,8 @@ if [ "$NO_SPAWN" -eq 0 ]; then
   suite_id="fm-orca-test-$$"
   data_dir="$DATA/$suite_id"
   smoke_project=${FM_ORCA_SMOKE_PROJECT:-}
-  if [ -z "$smoke_project" ] && [ -d "$FM_HOME/projects" ]; then
-    for candidate in "$FM_HOME"/projects/*; do
+  if [ -z "$smoke_project" ] && [ -d "$PROJECTS" ]; then
+    for candidate in "$PROJECTS"/*; do
       [ -d "$candidate/.git" ] || git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
       smoke_project=$candidate
       break
