@@ -193,8 +193,14 @@ WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
 SLACK_DM_CONFIG_NAME="afk-slack-dm"
 SLACK_DM_FAIL_MARKER_NAME=".subsuper-slack-dm-failed"
+# Per-attempt failure marker (above) records the real delivery reason; this
+# separate wedge marker throttles and records the loud persistent-failure alarm,
+# so the alarm fires at most once per max-defer window and never clobbers the
+# failure reason. It is written ONLY by afk_slack_dm_wedge_alarm (mirroring
+# .subsuper-inject-wedged for the pane path), so its mtime is a true throttle
+# rather than being reset by every failed send.
+SLACK_DM_WEDGE_MARKER_NAME=".subsuper-slack-dm-wedged"
 SLACK_DM_STATUS_DIGEST_REQUEST_NAME=".subsuper-status-digest-dm-request"
-SLACK_DM_PREFIX_DEFAULT="AI agent here —"
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -630,18 +636,44 @@ afk_slack_dm_marker() {  # <state>
   printf '%s/%s' "$1" "$SLACK_DM_FAIL_MARKER_NAME"
 }
 
-# Attribution prefix for outgoing DMs. The optional `name` key in
-# config/afk-slack-dm personalizes it; unset stays the generic default so no
-# personal name ever lives in tracked files. bin/fm-slack-dm.mjs derives its
-# required-prefix validation from the SAME config key, so the two always agree.
-afk_slack_dm_prefix() {
-  local cfg name
-  cfg=$(afk_slack_dm_config_path)
-  name=$(sed -n 's/^name[[:space:]]*=[[:space:]]*//p' "$cfg" 2>/dev/null | head -n 1)
+afk_slack_dm_wedge_marker() {  # <state>
+  printf '%s/%s' "$1" "$SLACK_DM_WEDGE_MARKER_NAME"
+}
+
+# Attribution name from config, derived identically to fm-slack-dm.mjs parseConfig
+# so the message the daemon builds always satisfies the helper's required-prefix
+# check: the LAST non-comment `name=` line wins, and the value is stripped of a
+# trailing CR (CRLF files) and surrounding whitespace. A first-occurrence or
+# untrimmed read here would build a prefix the helper rejects (exit 3), silently
+# breaking DM delivery despite valid config.
+afk_slack_dm_name() {  # <config-path>
+  local cfg=$1
+  [ -r "$cfg" ] || return 0
+  awk '
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^[[:space:]]*#/ { next }
+    {
+      eq = index(line, "=")
+      if (eq < 2) next
+      key = substr(line, 1, eq - 1)
+      val = substr(line, eq + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      if (key == "name") { gsub(/^[[:space:]]+|[[:space:]]+$/, "", val); found = val }
+    }
+    END { if (found != "") printf "%s", found }
+  ' "$cfg"
+}
+
+# "AI agent for <name> here —" when config declares a name, else the generic
+# shared default "AI agent here —". The shared template never hardcodes one
+# adopter's name; only a local config/afk-slack-dm names the captain.
+afk_slack_dm_prefix() {  # <config-path>
+  local name
+  name=$(afk_slack_dm_name "$1")
   if [ -n "$name" ]; then
     printf 'AI agent for %s here —' "$name"
   else
-    printf '%s' "$SLACK_DM_PREFIX_DEFAULT"
+    printf 'AI agent here —'
   fi
 }
 
@@ -678,9 +710,9 @@ afk_slack_dm_sanitize_item() {  # <buffer-line>
   printf '%s' "$item"
 }
 
-afk_slack_dm_message_from_buffer() {  # <buffer-file>
-  local buf=$1 line cleaned n=0
-  printf '%s update from your fleet:\n' "$(afk_slack_dm_prefix)"
+afk_slack_dm_message_from_buffer() {  # <buffer-file> <config-path>
+  local buf=$1 cfg=$2 line cleaned n=0
+  printf '%s update from your fleet:\n' "$(afk_slack_dm_prefix "$cfg")"
   while IFS= read -r line || [ -n "$line" ]; do
     cleaned=$(afk_slack_dm_sanitize_item "$line")
     [ -n "$cleaned" ] || continue
@@ -703,16 +735,20 @@ afk_slack_dm_send_buffer() {  # <state> <buffer-file>
     afk_slack_dm_write_failure_marker "$state" "message-tempfile-failed"
     return 1
   }
-  afk_slack_dm_message_from_buffer "$buf" > "$msg_tmp"
-  if "$helper" --config "$cfg" --message-file "$msg_tmp" >/dev/null 2>&1; then
-    rm -f "$msg_tmp"
-    rm -f "$(afk_slack_dm_marker "$state")"
+  afk_slack_dm_message_from_buffer "$buf" "$cfg" > "$msg_tmp"
+  # Capture the helper's real exit code directly. A `if helper; then...; fi`
+  # followed by `rc=$?` records 0 even on failure, because a false `if` with no
+  # else branch leaves $? at 0 - so the failure marker would always claim
+  # helper-exit-0 and mask the actual reason (1 network/api, 2 config-absent,
+  # 3 config-error).
+  "$helper" --config "$cfg" --message-file "$msg_tmp" >/dev/null 2>&1
+  rc=$?
+  rm -f "$msg_tmp"
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$(afk_slack_dm_marker "$state")" "$(afk_slack_dm_wedge_marker "$state")"
     log "slack dm delivered: buffered escalation acknowledged"
     return 0
-  else
-    rc=$?
   fi
-  rm -f "$msg_tmp"
   afk_slack_dm_write_failure_marker "$state" "helper-exit-$rc"
   log "slack dm failed: helper exited $rc; buffer preserved"
   return 1
@@ -1051,6 +1087,40 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   fi
 }
 
+# DM-mode counterpart of inject_wedge_alarm: persistent Slack-DM delivery failure
+# is a captain-delivery wedge exactly like a wedged pane, so it enters the SAME
+# loud bounded alarm path (log + backend-independent wedge_alarm_notify) instead
+# of only leaving a passive marker. It writes its OWN marker (.subsuper-slack-dm-
+# wedged), which throttles re-alarming to once per max-defer window; the per-
+# attempt reason stays in .subsuper-slack-dm-failed and is never overwritten. No
+# pane injection is attempted in DM mode, so the marker text says so (rather than
+# inject_wedge_alarm's "supervisor pane could not accept" wording).
+afk_slack_dm_wedge_alarm() {  # <state> <age-seconds>
+  local state=$1 age=$2 marker max_defer now notify=1
+  marker=$(afk_slack_dm_wedge_marker "$state")
+  max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
+  # Re-alarm at most once per max-defer window so a long wedge does not spam.
+  if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
+    return 0
+  fi
+  now=$(_now)
+  if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
+    notify=0
+  else
+    WEDGE_ALARM_LAST_EPOCH=$now
+    log "ERROR: away-mode Slack DM undelivered ${age}s; delivery could not be confirmed. Buffer + wake-queue preserved; failure marker retained."
+  fi
+  {
+    printf 'fm away-mode Slack DM WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Slack DM delivery to the captain failed repeatedly; no pane injection is attempted in DM mode.\n'
+    printf 'Per-attempt reason: see %s. Buffered items:\n' "$SLACK_DM_FAIL_MARKER_NAME"
+    cat "$state/.subsuper-escalations" 2>/dev/null
+  } 2>/dev/null > "$marker" || true
+  if [ "$notify" -eq 1 ]; then
+    wedge_alarm_notify "away-mode Slack DM WEDGED ${age}s undelivered - see $marker" "$marker"
+  fi
+}
+
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
   [ -s "$f" ] || { echo 999999; return; }
@@ -1098,19 +1168,25 @@ housekeeping() {  # <state>
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    defer_marker="$state/.subsuper-inject-wedged"
-    # Throttle the alarm to once per max-defer window off the wedge marker in
-    # BOTH modes. The Slack failure marker is unusable as a throttle: every
-    # batch-tick DM failure rewrites it, resetting its age. The wedge marker is
-    # written only by inject_wedge_alarm and cleared on a successful flush, so
-    # it is the stable once-per-window signal. In DM mode the per-attempt
-    # failure reason stays in the Slack failure marker untouched; the wedge
-    # alarm fires the same loud out-of-band channels as injection mode.
+    # Throttle the max-defer escape to once per window via the mode's dedicated
+    # wedge marker - written ONLY by the alarm, so its mtime is a true throttle.
+    # The DM path must NOT throttle on .subsuper-slack-dm-failed: that marker is
+    # rewritten by every failed send, so reusing it as the throttle would keep the
+    # alarm permanently deferred.
+    if afk_slack_dm_configured; then
+      defer_marker=$(afk_slack_dm_wedge_marker "$state")
+    else
+      defer_marker="$state/.subsuper-inject-wedged"
+    fi
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$defer_marker")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
-        rm -f "$state/.subsuper-inject-wedged"
+        log "delivery recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        rm -f "$state/.subsuper-inject-wedged" "$(afk_slack_dm_wedge_marker "$state")"
+      elif afk_slack_dm_configured; then
+        # Persistent DM failure enters the same loud bounded alarm path as a
+        # wedged pane; the real per-attempt reason stays in the failure marker.
+        afk_slack_dm_wedge_alarm "$state" "$oldest"
       else
         inject_wedge_alarm "$state" "$oldest"
       fi

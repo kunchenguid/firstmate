@@ -10,7 +10,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_PREFIX = "AI agent here —";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TOKEN_OUTPUT_BYTES = 64 * 1024;
 
@@ -19,9 +18,9 @@ function usage() {
 
 Reads local config/afk-slack-dm:
   destination=U0123456789
+  name=Alex                 optional; attribution becomes "AI agent for Alex here —"
   token-source=file:/absolute/path/to/token
   token-source=command:/absolute/path/to/print-token
-  name=Captain            # optional; personalizes the required attribution prefix
 
 Environment:
   FM_SLACK_DM_CONFIG   override config file path
@@ -75,6 +74,16 @@ function parseConfig(text) {
     config[key] = value;
   }
   return config;
+}
+
+// The attribution prefix is config-driven so the shared template never hardcodes
+// one adopter's name. A local `name=` value yields "AI agent for <name> here —";
+// with no `name` key the generic default "AI agent here —" applies. The daemon's
+// afk_slack_dm_prefix derives the same string from the same key, so the message it
+// builds always satisfies the required-prefix check here.
+function attributionPrefix(config) {
+  const name = (config.name || "").trim();
+  return name ? `AI agent for ${name} here —` : "AI agent here —";
 }
 
 function isSlackUserId(value) {
@@ -199,8 +208,8 @@ async function main() {
     console.error("config error: message file is unreadable");
     return 3;
   }
-  const requiredPrefix = config.name ? `AI agent for ${config.name} here —` : DEFAULT_PREFIX;
   message = message.replace(/\s+$/g, "");
+  const requiredPrefix = attributionPrefix(config);
   if (!message.startsWith(requiredPrefix)) {
     console.error("config error: message must begin with the required AI agent attribution");
     return 3;

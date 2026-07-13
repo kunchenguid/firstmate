@@ -100,30 +100,29 @@ When the file is absent, away-mode behavior is unchanged.
 When the file exists, `bin/fm-supervise-daemon.sh` still uses its existing classification, batching, dedupe, retry, and durable buffer, but `escalate_flush` calls `bin/fm-slack-dm.mjs` at the same flush boundary.
 A successful Slack DM is the acknowledgement that clears `state/.subsuper-escalations`.
 A failed Slack DM leaves the buffer and sidecar timestamp intact for the next daemon retry, and writes the secret-free marker `state/.subsuper-slack-dm-failed` for catch-up.
+Persistent DM failure past `FM_MAX_DEFER_SECS` enters the same loud bounded wedge-alarm path as a wedged pane: the daemon fires the configured `wedge_alarm_notify` channel (see the wedge-alarm section below) and writes its own throttle marker `state/.subsuper-slack-dm-wedged`, so the alarm fires at most once per max-defer window while the real per-attempt reason stays in `state/.subsuper-slack-dm-failed`.
 Terminal injection is not counted as captain delivery while this config is active.
 
 The config format is key-value, one setting per non-comment line:
 
 ```text
 destination=U0123456789
+name=Alex
 sender=slack-api
 token-source=file:/absolute/path/to/dedicated-slack-bot-token
 # Or:
 # token-source=command:/absolute/path/to/print-dedicated-slack-bot-token
-# Optional:
-# name=Captain
 ```
 
 `destination` is required and must be a Slack user ID beginning with `U` or `W`.
 Channel IDs, group IDs, and DM conversation IDs beginning with `C`, `G`, or `D` are rejected.
+`name` is optional and drives the message attribution prefix: with a `name` the DM begins `AI agent for <name> here —`, and with no `name` the generic shared default `AI agent here —` is used.
+The shared template never hardcodes a personal name; the attribution name lives only in this local, gitignored config, and the daemon and `bin/fm-slack-dm.mjs` derive the identical prefix from it (last `name=` line wins, surrounding whitespace and a trailing CR are stripped) so the built message always satisfies the helper's required-prefix check.
 `sender` is optional today and defaults to `slack-api`, the only implemented sender, which posts JSON `{channel, text}` to Slack `chat.postMessage` with Bearer auth.
 `token-source` is required for real delivery and may be `file:<absolute path>`, `command:<command>`, or `none`.
 The token is read inside the helper process and is never passed as an argv value to another command.
 Do not put token literals in this config; command sources should invoke a local credential reader that prints the token on stdout.
 Empty output, an absent file, or a non-zero token command degrades gracefully as a failed delivery: no token is logged, the buffer is retained, and the daemon retries.
-`name` is optional and personalizes the required message attribution prefix: `AI agent for <name> here —` when set, and the generic `AI agent here —` when unset.
-The daemon composes the prefix and the helper validates it from the same config key, so the two always agree, and no personal name lives in tracked files.
-If persistent Slack DM failure keeps the buffer undelivered past the max-defer window, the daemon fires the same loud out-of-band wedge alarm as injection mode (`config/wedge-alarm` / Notification Center) while preserving the buffer and the specific failure reason in the marker.
 
 Do not source broad production or staging firehose tokens for this file.
 Unattended daemon delivery requires either a dedicated least-privilege Slack bot token or a future MCP-call token-source plugin that performs the send without exposing a general-purpose token.
