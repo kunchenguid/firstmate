@@ -742,9 +742,9 @@ EOF
       # primary repo (validated by validate_firstmate_home_for_spawn above).
       # Skip worktree_create - we must not create a worktree of a worktree -
       # and use create_terminal directly with the home path as cwd. The
-      # terminal id is `fm-secondmate-<basename-of-home>` so a recovery
-      # respawn reattaches to the same orca daemon session instead of
-      # spawning a new one each time.
+      # generated terminal id is recorded in meta as `terminal=` so a recovery
+      # respawn reattaches to the same orca daemon session instead of spawning
+      # a new one each time.
       if [ -z "$PROJ_ABS" ] || [ ! -d "$PROJ_ABS" ]; then
         echo "error: orca secondmate requires an existing home at $PROJ_ABS" >&2
         exit 1

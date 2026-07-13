@@ -29,7 +29,10 @@ Do NOT load for tmux, herdr, zellij, or cmux backends; those have their own adap
 - **Transport**: `bin/fmod` is a small Python client that talks NDJSON over the daemon's unix socket (`~/.config/orca/daemon/daemon-v<N>.sock`). The `orca` CLI is never used at spawn time.
 - **Protocol**: the daemon's hello is strict on `version` - `bin/fmod` tries the hardcoded default first, falls through to discovery (scans `daemon-v*.sock` in the daemon dir), and accepts `FMOD_PROTOCOL_VERSION=<n>` env override to pin.
 - **Supervisor**: `bin/fm-supervise-orca.sh` is the per-runtime daemon keeper, separate from `fm-watch.sh` (per-task supervisor). Different cadence, different escalation, different restart semantics.
-- **Secondmates**: `--backend orca --secondmate` is supported. Each secondmate maps to a single orca daemon session with id `fm-secondmate-<basename-of-home>`. The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd. A re-spawn reattaches to the same daemon session via the deterministic id.
+- **Secondmates**: `--backend orca --secondmate` is supported.
+  Each secondmate maps to a single orca daemon session whose generated id is recorded as `terminal=` in meta.
+  The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd.
+  A re-spawn reattaches to the same daemon session via that recorded deterministic id.
 
 ## Commands the operator will reach for
 
@@ -166,7 +169,8 @@ bin/fm-spawn.sh my-secondmate /path/to/secondmate-home \
   --backend orca --harness pi --secondmate
 ```
 
-The spawn creates an orca daemon session `fm-secondmate-<basename-of-home>` at the home path, sends the launch command, and writes the meta. A re-spawn reattaches to the same session via the deterministic id.
+The spawn creates an orca daemon session at the home path, sends the launch command, and records the generated session id as `terminal=` in meta.
+A re-spawn reattaches to the same session via that deterministic id.
 
 ### Teardown semantics
 - For ship/scout orca tasks, teardown removes the git worktree + kills the orca terminal.

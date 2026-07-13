@@ -100,7 +100,10 @@ Teardown:
 
 ## Secondmates
 
-`--backend orca --secondmate` is supported. Each secondmate maps to a single Orca daemon session whose id is `fm-secondmate-<basename-of-home>`; the home itself is a pre-existing git worktree of the primary repo, registered through `bin/fm-home-seed.sh`. The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd. A recovery respawn with the same id reattaches to the existing daemon session instead of creating a new one, so a crashed primary that comes back online does not leave orphan secondmate terminals behind.
+`--backend orca --secondmate` is supported.
+Each secondmate maps to a single Orca daemon session whose generated id is recorded as `terminal=` in meta; the home itself is a pre-existing git worktree of the primary repo, registered through `bin/fm-home-seed.sh`.
+The orca adapter does not call `worktree_create` for secondmates (it must not create a worktree of a worktree); it uses `create_terminal` directly with the home path as cwd.
+A recovery respawn with the same recorded id reattaches to the existing daemon session instead of creating a new one, so a crashed primary that comes back online does not leave orphan secondmate terminals behind.
 
 Spawn writes `orca_worktree_id=<home path>` and `terminal=<session id>` to meta, and the same `kind=secondmate` fields the other backends already record (`home=`, `projects=`). Teardown kills the orca terminal and removes the spawn state; the home directory and the `data/secondmates.md` registry entry are preserved so a re-spawn can re-create the orca session without re-seeding. This is intentionally different from the tmux/herdr/zellij teardown, which removes the home on a normal teardown - orca secondmates are persistent firstmate homes, and a re-spawn is the much more common case than a retire.
 
