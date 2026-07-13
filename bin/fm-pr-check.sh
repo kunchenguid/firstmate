@@ -3,6 +3,10 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
+# When pr= is NEWLY recorded, also runs the best-effort pr-ready hook point
+# (bin/fm-hooks-lib.sh; docs/extension-points.md), so the hook fires once per
+# (task, PR URL) - a re-run, including the recording re-run inside
+# bin/fm-pr-merge.sh, never re-fires it.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -10,6 +14,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -34,6 +41,13 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+
+# Detect whether pr=<url> is already recorded so the pr-ready hook fires exactly
+# once per (task, PR URL), even across the recording re-run in fm-pr-merge.sh.
+PR_NEWLY_RECORDED=1
+if grep -qxF "pr=$URL" "$META"; then
+  PR_NEWLY_RECORDED=0
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
@@ -85,6 +99,13 @@ fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
   && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+
+# Fire the pr-ready hook once per (task, PR URL), only when pr= was newly recorded.
+if [ "$PR_NEWLY_RECORDED" = 1 ]; then
+  fm_hook_run "$CONFIG" pr-ready \
+    "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
+    -- "$ID" "$URL"
+fi
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2

@@ -588,6 +588,37 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# post-teardown hook point (bin/fm-hooks-lib.sh; docs/extension-points.md): a
+# completed teardown runs config/hooks/post-teardown with the task id and kind,
+# and a failing hook never fails the teardown.
+test_post_teardown_hook_fires_and_failure_is_non_fatal() {
+  local case_dir rc wt_head
+  case_dir=$(make_case post-teardown-hook)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/config/hooks"
+  cat > "$case_dir/config/hooks/post-teardown" <<SH
+#!/usr/bin/env bash
+printf 'args:%s env:%s %s\n' "\$*" "\${FM_HOOK_TASK_ID:-unset}" "\${FM_HOOK_KIND:-unset}" > '$case_dir/hook.log'
+exit 1
+SH
+  chmod +x "$case_dir/config/hooks/post-teardown"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "post-teardown-hook: a failing hook must not fail teardown"
+  assert_grep 'args:task-x1 ship env:task-x1 ship' "$case_dir/hook.log" \
+    "post-teardown-hook: hook did not receive the task id and kind"
+  assert_grep 'post-teardown hook failed' "$case_dir/stderr" \
+    "post-teardown-hook: failing hook was not warned to stderr"
+  pass "teardown fires post-teardown with id and kind and survives a failing hook"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1268,6 +1299,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_post_teardown_hook_fires_and_failure_is_non_fatal
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

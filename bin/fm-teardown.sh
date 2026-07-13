@@ -94,6 +94,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1141,4 +1143,10 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+# post-teardown hook point (bin/fm-hooks-lib.sh; docs/extension-points.md): the
+# task's worktree, endpoint, and state files are gone; only the id and kind
+# remain as identifiers. Best-effort: a failing hook never fails the teardown.
+fm_hook_run "$CONFIG" post-teardown \
+  "FM_HOOK_TASK_ID=$ID" "FM_HOOK_KIND=$KIND" \
+  -- "$ID" "$KIND"
 backlog_refresh_reminder

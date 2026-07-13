@@ -102,6 +102,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1055,5 +1057,13 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+
+# post-spawn hook point (bin/fm-hooks-lib.sh; docs/extension-points.md): the
+# task is fully launched and state/<id>.meta is written, for every kind. A
+# batch spawn re-execs this script per pair, so the hook fires once per task.
+# Best-effort local wiring: absent = no-op, a failing hook never blocks the spawn.
+fm_hook_run "$CONFIG" post-spawn \
+  "FM_HOOK_TASK_ID=$ID" "FM_HOOK_META=$STATE/$ID.meta" "FM_HOOK_KIND=$KIND" \
+  -- "$ID" "$STATE/$ID.meta"
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
