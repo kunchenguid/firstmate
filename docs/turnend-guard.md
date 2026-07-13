@@ -3,7 +3,8 @@
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
 The shared predicate lives in `bin/fm-turnend-guard.sh`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
-Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`), which shares this guard's primary detection and, like this guard, keeps guarding a secondmate's own home while exempting only its child worktrees.
+Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`).
+Each seatbelt's own document defines its scope; they do not share the turn-end guard's marker-aware primary detection.
 
 ## Gap Closed
 

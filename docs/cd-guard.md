@@ -19,19 +19,19 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: the real primary checkout only
+## Scope: plain firstmate checkouts only
 
-The guard fires only in the actual primary firstmate checkout.
+The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
 It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
 
-`bin/fm-cd-pretool-check.sh` reuses the turn-end guard's primary detection (`docs/turnend-guard.md`).
+`bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
 A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
-The one deliberate difference from the turn-end guard: the cd-guard does **not** exclude secondmate homes.
-A secondmate is a firstmate in its own home, so its own primary session is a primary and its firstmate-owned commands must stay in its home too; the guard applies there.
-Only a secondmate's child crew and scout worktrees are exempt, and they are exempt automatically by the same linked-worktree test.
+The cd-guard does not inspect `.fm-secondmate-home`.
+It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
+Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
 
 ## Block vs allow
 
@@ -125,7 +125,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the primary-checkout scoping (fires in a secondmate home, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:
 

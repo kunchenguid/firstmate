@@ -123,16 +123,15 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 
-# Scope to the ACTUAL primary firstmate checkout. This reuses the turn-end
-# guard's primary detection (docs/turnend-guard.md): a plain, non-worktree
-# checkout has git-dir equal to git-common-dir, while a crewmate/scout task
-# worktree - the shape bin/fm-spawn.sh always hands out - is a linked git
-# worktree where the two differ. Unlike the turn-end guard, the cd-guard does
-# NOT exclude secondmate homes (the .fm-secondmate-home marker): a secondmate's
-# OWN primary session is a primary and must be guarded too; only its child
-# crew/scout worktrees are exempt, and they are exempt here by the same
-# linked-worktree test. Any failure to confirm the primary is inert (exit 0),
-# never a block, so a broken environment never denies a shell command.
+# Scope to a plain, non-worktree firstmate checkout, where git-dir equals
+# git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
+# always hands out - is a linked git worktree where the two differ. This guard
+# does not inspect .fm-secondmate-home, so it applies in a git-cloned secondmate
+# home but remains inert when the secondmate home is itself a treehouse-leased
+# linked worktree. docs/cd-guard.md owns this scope; docs/turnend-guard.md owns
+# the turn-end guard's separate marker-aware scope. Any failure to confirm the
+# checkout is inert (exit 0), never a block, so a broken environment never
+# denies a shell command.
 [ -f "$FM_ROOT/AGENTS.md" ] || exit 0
 [ -d "$FM_ROOT/bin" ] || exit 0
 command -v git >/dev/null 2>&1 || exit 0

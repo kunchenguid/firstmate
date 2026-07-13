@@ -613,7 +613,7 @@ If a crewmate sent to work firstmate-on-itself branches or commits in the primar
 Only a named non-default branch checked out in the primary alarms: detached HEAD (the legitimate resting state of crewmate worktrees and secondmate homes) and the default branch never do.
 The same assertion runs at session start as the bootstrap `TANGLE:` line (handled via `bootstrap-diagnostics`), and two upstream guards prevent the tangle: `fm-spawn`'s isolated-worktree assertion and the ship brief's opening isolation check (section 11).
 
-On every verified primary harness, "no turn ends blind" has a structural backstop beyond the pull-based banner: `bin/fm-turnend-guard.sh` blocks the turn end (or forces one bounded follow-up on passive harnesses) when tasks are in flight without a live identity-matched watcher lock and fresh beacon, fires only in the actual primary checkout, and stays silent when supervision is healthy.
+On every verified primary harness, "no turn ends blind" has a structural backstop beyond the pull-based banner: `bin/fm-turnend-guard.sh` blocks the turn end (or forces one bounded follow-up on passive harnesses) when tasks are in flight without a live identity-matched watcher lock and fresh beacon, guards both the main primary and a secondmate's own primary session, and stays silent when supervision is healthy.
 `docs/turnend-guard.md` owns the per-harness hook mechanisms, empirical validation, scoping details, and documented fail-open tradeoffs.
 Watcher liveness is harness-aware.
 Do not assume one primary harness can use another harness's foreground or background shape.
