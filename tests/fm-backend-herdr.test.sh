@@ -35,11 +35,13 @@ LOG="${FM_HERDR_LOG:?}"
 RESP="${FM_HERDR_RESPONSES:?}"
 COUNT_FILE="$RESP/.count"
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-{
-  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
-  for a in "$@"; do printf '\x1f%s' "$a"; done
-  printf '\n'
-} >> "$LOG"
+# Build the whole log line in memory and append it with ONE printf (a single
+# O_APPEND write, atomic). server_ensure backgrounds `herdr server &`, so this
+# stub can run concurrently with a foreground poll; multiple printf write()s
+# per invocation would interleave and corrupt the logged tokens.
+line="HERDR_SESSION=${HERDR_SESSION:-}"
+for a in "$@"; do line="$line"$'\x1f'"$a"; done
+printf '%s\n' "$line" >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
@@ -84,11 +86,11 @@ make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state fi
 set -u
 LOG="${FM_HERDR_LOG:?}"
 STATE="${FM_FAKE_HERDR_STATE:?}"
-{
-  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
-  for a in "$@"; do printf '\x1f%s' "$a"; done
-  printf '\n'
-} >> "$LOG"
+# Single-printf (atomic O_APPEND) log write; see make_herdr_fakebin for why a
+# backgrounded `herdr server &` makes multi-write log lines race and interleave.
+line="HERDR_SESSION=${HERDR_SESSION:-}"
+for a in "$@"; do line="$line"$'\x1f'"$a"; done
+printf '%s\n' "$line" >> "$LOG"
 
 jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
