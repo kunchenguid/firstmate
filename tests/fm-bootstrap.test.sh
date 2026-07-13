@@ -169,10 +169,10 @@ run_bootstrap_timeout_case() {
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
-      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
-        FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
-        command sleep 0.01
-      fi
+      # Advance fake time quickly, but yield on every tick so the background
+      # fleet-sync process can deterministically write its partial output before
+      # the simulated timeout kills it, even on a busy full-suite runner.
+      command sleep 0.01
     }
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {

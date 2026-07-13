@@ -193,6 +193,72 @@ Herdr tasks additionally record:
 | Workspace create / tab create (focus) | `herdr workspace create --no-focus`, `herdr tab create --no-focus` | Verified: neither focuses by default once a workspace already exists in the session, matching pre-P3 (flagless) behavior; `--no-focus` is passed anyway for defense in depth, since the very first workspace ever created in a brand-new session focuses regardless of the flag. `--focus` was separately verified to reliably focus, confirming the flag has real effect. |
 | Session targeting for DESTRUCTIVE calls | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json`; never `herdr server stop` | Owned by `bin/fm-herdr-lab.sh` (which `tests/herdr-test-safety.sh` sources), re-querying `herdr session list --json` before every destructive call. See "Session targeting" below - `HERDR_SESSION` alone is not reliably honored once another herdr server is already running on the machine. |
 
+## Incident (2026-07-13): the ASCII request separator erased the secondmate marker
+
+A routed request reached a Pi/Herdr secondmate without the visible `[fm-from-firstmate]` label, so the secondmate correctly treated it as direct captain conversation and returned nothing to the parent status path.
+The initial suspicion was selector classification, but a real isolated reproduction disproved that: exact-id lookup found the right metadata, read `kind=secondmate`, selected the recorded Herdr endpoint, and still delivered an unmarked Pi prompt.
+
+The reproduction used Herdr 0.7.3 (protocol 16), Pi 0.80.6, a task-local sender home, a real `fm-spawn.sh --secondmate --harness pi --backend herdr` endpoint, and a generated non-`default` session from `bin/fm-herdr-lab.sh`.
+Every adapter call was routed through the lab helper, and teardown verified the default-session fleet-state tripwire.
+The end-user command was run with normal `FM_SEND_SETTLE`:
+
+```sh
+FM_HOME=<isolated-sender-home> bin/fm-send.sh marker-pi-sm \
+  'FM_MARKER_E2E_CURRENT exact-id request'
+```
+
+Immediately before submission, the authoritative selector helpers reported:
+
+```text
+resolved-meta=<isolated-sender-home>/state/marker-pi-sm.meta
+kind=secondmate
+target=<generated-lab-session>:w1:p2
+backend=herdr
+expected-label=fm-marker-pi-sm
+```
+
+Pi's separator-only idle composer is outside the Herdr structural classifier's recognized bordered/bare shapes, so composer state was conservatively `unknown` both before and after the send.
+The endpoint's native agent state was idle before submission, and the normal idle-to-working confirmation made `fm-send.sh` return successfully.
+A task-local Pi `before_agent_start` hook then captured the exact received prompt and UTF-8 bytes:
+
+```json
+{"prompt":"FM_MARKER_E2E_CURRENT exact-id request","hex":"464d5f4d41524b45525f4532455f43555252454e542065786163742d69642072657175657374"}
+```
+
+The old marker should instead have started with label bytes `5b666d2d66726f6d2d66697273746d6174655d`, followed by ASCII `1f` and then those request bytes.
+The Pi transcript independently rendered only `FM_MARKER_E2E_CURRENT exact-id request`, and the agent answered it conversationally as captain input.
+
+The failure was in marker transport, not backend selection or metadata classification.
+`fm-send.sh` correctly passed `[fm-from-firstmate]`, ASCII unit separator `0x1f`, and the request to `herdr pane send-text`.
+Herdr's terminal input path treated the C0 byte as a control action rather than text, removing the preceding label before Pi submitted the remaining request.
+A tmux-stub unit test could not expose this because it logged the string argument without driving a real terminal editor.
+
+The single marker owner, `bin/fm-marker-lib.sh`, now uses U+2063 INVISIBLE SEPARATOR (UTF-8 `e2 81 a3`) after the visible label.
+U+2063 has no normal keyboard keystroke but travels through terminal input as text rather than a C0 control byte.
+The same owner now provides the idempotent marker transformation, so an already-marked request is not prefixed twice.
+No Herdr-specific injection or classification branch was added.
+
+The opt-in regression command is:
+
+```sh
+FM_SEND_MARKER_HERDR_E2E=1 tests/fm-send-secondmate-marker-herdr-e2e.test.sh
+```
+
+The real post-fix Pi capture reported exactly one marker followed by the request:
+
+```text
+evidence: exact-id received-hex=5b666d2d66726f6d2d66697273746d6174655de281a3464d5f4d41524b45525f48455244525f4532452065786163742d69642072657175657374
+```
+
+The same run injected direct terminal text without `fm-send.sh` and captured it byte-exact with no marker:
+
+```text
+evidence: direct-input received-hex=464d5f4d41524b45525f48455244525f444952454354206361707461696e20696e707574
+```
+
+Unit coverage in `tests/fm-send-secondmate-marker.test.sh` pins exact-id and stable-label secondmates, exact-id and stable-label ordinary crewmates, explicit endpoints with and without local metadata, key-only sends, direct unmarked input, exact U+2063 bytes, and idempotence.
+Strict unresolved-selector behavior remains covered by `tests/fm-send-strict.test.sh`.
+
 ## Verified bug: `pane read --lines N` returns empty for small N
 
 This was the most significant finding of this verification pass.
