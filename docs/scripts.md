@@ -45,7 +45,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-afk-start.sh`        | Enter away mode and run the sub-supervisor daemon as a tracked foreground process    |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
-| `fm-dashboard.sh`        | Generate a read-only, self-contained fleet dashboard HTML page; `--open` opens it, `--serve [port]` regenerates per request |
+| `fm-dashboard.sh`        | Generate the read-only, self-contained HTML fleet dashboard                          |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |

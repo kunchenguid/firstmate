@@ -7,10 +7,12 @@
 #   bin/fm-dashboard.sh --open           # also open it in the default browser
 #   bin/fm-dashboard.sh --serve [port]   # HTTP-serve it, regenerating per request
 #                                        # (default port 8737, binds 127.0.0.1)
+# The generated page is a read-only view; see the full script header for fields
+# and progress semantics.
 #
 # Renders one self-contained HTML page (inline CSS, no CDN, renders offline;
-# dark theme). At the top, a "Decisions needed" section lists everything
-# waiting on the captain, oldest first (by status-file mtime), with
+# dark theme). At the top, a "Decisions needed" section lists actionable
+# decisions detected from task state, oldest first (by status-file mtime), with
 # warning-accent styling: tasks whose current state is parked (needs-decision)
 # or blocked, showing the latest needs-decision:/blocked: status line as the
 # ask; and tasks with pr= in meta whose checks are green, where the pending
