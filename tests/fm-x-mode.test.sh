@@ -1171,6 +1171,7 @@ test_poll_records_context_registry_from_relay_platform() {
   # An explicit Discord mention: the registry must capture platform=discord.
   body=$(jq -cn '{request_id:"req-disc",platform:"discord",reply_max_chars:1900,text:"question from discord"}')
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 \
     FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "poll discord registry exit"
   [ "$out" = "x-mention req-disc" ] || fail "poll must still print the wake marker (got: $out)"
@@ -1178,6 +1179,7 @@ test_poll_records_context_registry_from_relay_platform() {
   assert_present "$reg" "poll must record the durable per-request context"
   [ "$(jq -r .platform "$reg")" = "discord" ] || fail "registry must capture the Discord platform"
   [ "$(jq -r .reply_max_chars "$reg")" = "1900" ] || fail "registry must capture the Discord reply budget"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] || fail "registry must timestamp the context locally"
   # A numeric-tweet_id X mention: the registry must capture platform=x.
   body=$(jq -cn '{request_id:"req-x",tweet_id:"1234567890",reply_max_chars:280,text:"question from x"}')
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
@@ -1194,6 +1196,85 @@ test_poll_records_context_registry_from_relay_platform() {
   assert_absent "$home/state/x-context/req-unk.json" \
     "no registry record is written when the platform is unknown (no dead entry)"
   pass "fm-x-poll records the durable per-request reply context from the relay payload"
+}
+
+test_context_registry_prunes_expired_records() {
+  local home dir fakebin keep preserved legacy malformed future out rc
+  home="$TMP_ROOT/registry-retention"
+  dir="$home/state/x-context"
+  mkdir -p "$dir"
+  keep="$dir/req-keep.json"
+  preserved="$dir/req-iP49shRy-8ue4dtxEo87Yw.json"
+  legacy="$dir/req-legacy.json"
+  malformed="$dir/req-malformed.json"
+  future="$dir/req-future.json"
+  jq -cn '{request_id:"req-expired",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-expired.json"
+  jq -cn '{request_id:"req-keep",platform:"discord",reply_max_chars:"1900",recorded_at:1699395200}' \
+    > "$keep"
+  jq -cn '{request_id:"req-iP49shRy-8ue4dtxEo87Yw",platform:"x",reply_max_chars:"280",recorded_at:1700000000}' \
+    > "$preserved"
+  jq -cn '{request_id:"req-legacy",platform:"discord",reply_max_chars:"1900"}' > "$legacy"
+  printf '{not-json\n' > "$malformed"
+  jq -cn '{request_id:"req-future",platform:"x",reply_max_chars:"280",recorded_at:"9999999999999999999"}' \
+    > "$future"
+  touch -t 202001010000 "$legacy" "$malformed" "$future"
+  out=$(FMX_NOW_OVERRIDE=1700000000 bash -c \
+    '. "$1/bin/fm-x-lib.sh"; fmx_context_registry_get "$2" req-keep' _ "$ROOT" "$home/state")
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "discord" ] \
+    || fail "a record exactly seven days old must remain usable"
+  assert_absent "$dir/req-expired.json" "a registry record beyond seven days must be pruned"
+  assert_present "$keep" "a registry record at the seven-day boundary must remain"
+  assert_present "$preserved" "the preserved request must remain while it is within the follow-up window"
+  assert_absent "$legacy" "an expired legacy record must be pruned using its file timestamp"
+  assert_absent "$malformed" "an expired malformed record must be pruned using its file timestamp"
+  assert_absent "$future" "an absurd future timestamp must fall back to bounded file age"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-retention\n' > "$home/.env"
+  jq -cn '{request_id:"req-poll-expired",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-poll-expired.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll retention sweep exit"
+  [ -z "$out" ] || fail "a 204 poll retention sweep must stay silent (got: $out)"
+  assert_absent "$dir/req-poll-expired.json" "a recurring empty poll must prune expired registry records"
+  jq -cn '{request_id:"req-short-window",platform:"x",reply_max_chars:"280",recorded_at:1699999899}' \
+    > "$dir/req-short-window.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_FOLLOWUP_MAX_AGE_SECS=100 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "short retention window poll exit"
+  assert_absent "$dir/req-short-window.json" "a smaller configured follow-up window must prune earlier"
+  jq -cn '{request_id:"req-overlong-window",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-overlong-window.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_FOLLOWUP_MAX_AGE_SECS=999999999 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "capped retention window poll exit"
+  assert_absent "$dir/req-overlong-window.json" "a configured window must not extend retention past seven days"
+  pass "context registry retention is bounded to the seven-day follow-up window"
+}
+
+test_context_registry_preserves_first_seen_timestamp() {
+  local home fakebin out rc reg
+  home="$TMP_ROOT/registry-first-seen"
+  mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-first-seen\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-repeat","platform":"x","reply_max_chars":280,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "first registry poll exit"
+  reg="$home/state/x-context/req-repeat.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000100 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-repeat","platform":"x","reply_max_chars":280,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated registry poll exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "repeated writes must preserve the request's first-seen timestamp"
+  pass "context registry rewrites preserve the first-seen timestamp"
 }
 
 # Regression case 1: a Discord follow-up >280 but < the Discord budget stays ONE
@@ -2111,6 +2192,8 @@ test_reply_followup_dry_run_marks_endpoint
 test_reply_followup_thread_dry_run
 test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
 test_poll_records_context_registry_from_relay_platform
+test_context_registry_prunes_expired_records
+test_context_registry_preserves_first_seen_timestamp
 test_regression_discord_followup_survives_inbox_cleanup
 test_regression_x_followup_still_splits_after_cleanup
 test_regression_unresolved_followup_fails_safe

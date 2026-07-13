@@ -56,6 +56,8 @@ clear_error() {
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
 command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; exit 0; }
 
+fmx_context_registry_prune "$STATE"
+
 BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-x-poll.XXXXXX") || exit 0
 AUTH_HEADER_FILE=
 trap 'rm -f "$BODY_FILE" "$AUTH_HEADER_FILE"' EXIT

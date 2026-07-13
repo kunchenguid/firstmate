@@ -22,6 +22,7 @@
 #   fmx_context_registry_set <state> <request_id> <platform> <reply-max> - persist
 #                                the durable per-request reply context (no-op when
 #                                neither platform nor budget is known)
+#   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
 #   fmx_context_registry_clear <state> <request_id> - drop the durable record
@@ -227,9 +228,68 @@ fmx_request_relay_context() {
 # inbox cleanup, process restart, and concurrent requests, so
 # fmx_resolve_reply_context can always recover the ORIGINAL platform/budget for a
 # request without depending on task-link state. Entries are volatile runtime
-# state under state/; a stray one (a request that never gets a follow-up) is a
-# few bytes and bounded in relevance by the 7-day follow-up window - dismiss and
-# the resolver's live relay fallback keep it from mattering.
+# state under state/ and are pruned after the relay's 7-day follow-up window.
+
+fmx_context_registry_mtime() {
+  local file=$1 mtime
+  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$mtime"
+}
+
+fmx_context_registry_recorded_at() {
+  local file=$1 now=${2:-} recorded_at
+  recorded_at=$(jq -r '
+    .recorded_at
+    | if type == "number" and floor == . and . >= 0 then tostring
+      elif type == "string" and test("^[0-9]+$") then .
+      else "" end
+  ' "$file" 2>/dev/null) || recorded_at=
+  case "$recorded_at" in
+    ''|*[!0-9]*) recorded_at= ;;
+  esac
+  [ "${#recorded_at}" -le 18 ] || recorded_at=
+  if [ -n "$recorded_at" ] && [ -n "$now" ] && [ "$recorded_at" -gt "$now" ]; then
+    recorded_at=
+  fi
+  if [ -z "$recorded_at" ]; then
+    recorded_at=$(fmx_context_registry_mtime "$file") || return 1
+    if [ -n "$now" ] && [ "$recorded_at" -gt "$now" ]; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "$recorded_at"
+}
+
+fmx_context_registry_prune() {
+  local state=$1 dir now max_age file recorded_at age
+  dir="$state/x-context"
+  [ -d "$dir" ] || return 0
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 0
+  max_age=${FMX_FOLLOWUP_MAX_AGE_SECS:-604800}
+  case "$max_age" in
+    ''|*[!0-9]*) max_age=604800 ;;
+  esac
+  [ "${#max_age}" -le 18 ] || max_age=604800
+  [ "$max_age" -le 604800 ] || max_age=604800
+  while IFS= read -r -d '' file; do
+    if ! recorded_at=$(fmx_context_registry_recorded_at "$file" "$now"); then
+      rm -f -- "$file" 2>/dev/null || true
+      continue
+    fi
+    age=$((10#$now - 10#$recorded_at))
+    if [ "$age" -gt "$max_age" ]; then
+      rm -f -- "$file" 2>/dev/null || true
+    fi
+  done < <(find "$dir" -type f -name '*.json' -print0 2>/dev/null)
+  return 0
+}
 
 # fmx_context_registry_set <state> <request_id> <platform> <reply-max>: persist
 # the durable per-request reply context atomically. Normalizes platform (twitter
@@ -238,7 +298,7 @@ fmx_request_relay_context() {
 # an empty, useless record. Returns non-zero only on an unsafe id or a write
 # failure; callers treat the write as best-effort.
 fmx_context_registry_set() {
-  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} dir file tmp
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} dir file tmp now recorded_at
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -255,10 +315,24 @@ fmx_context_registry_set() {
   fi
   dir="$state/x-context"
   mkdir -p "$dir" 2>/dev/null || return 1
+  fmx_context_registry_prune "$state"
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
   file="$dir/$rid.json"
+  recorded_at=
+  if [ -f "$file" ]; then
+    recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=
+  fi
+  if [ -z "$recorded_at" ]; then
+    recorded_at=$now
+  fi
   tmp=$(mktemp "$dir/.${rid}.fm-x.XXXXXX" 2>/dev/null) || return 1
   if jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
-      '{request_id:$rid, platform:$platform, reply_max_chars:$max}' > "$tmp" 2>/dev/null; then
+      --argjson recorded_at "$recorded_at" \
+      '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
   else
     rm -f "$tmp"; return 1
@@ -273,6 +347,7 @@ fmx_context_registry_get() {
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
   esac
+  fmx_context_registry_prune "$state"
   file="$state/x-context/$rid.json"
   if [ ! -f "$file" ]; then
     printf '{"platform":"","reply_max_chars":""}\n'
