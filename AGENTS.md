@@ -159,7 +159,7 @@ Do not add model-specific versions of that policy.
 
 `secondmate-provisioning` owns secondmate harness pins and config inheritance, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
-A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
+A missing dependency, authentication failure, unsupported backend, version refusal, or failed provider-credential fetch is a blocker; never silently retry on another backend.
 
 ## 5. Recovery
 
