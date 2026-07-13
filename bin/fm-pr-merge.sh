@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -38,8 +39,17 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
-GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
 GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
+
+github_quota_check() {
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true
+}
+
+mark_github_quota_from_file() {
+  local source=$1 file=$2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+    --source "$source" --file "$file" >/dev/null 2>&1 || true
+}
 
 caller_has_merge_method() {
   local arg
@@ -78,7 +88,7 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
-quota_out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+quota_out=$(github_quota_check)
 quota_state=$(printf '%s\n' "$quota_out" | sed -n 's/^state=//p' | tail -1)
 if [ "$quota_state" = defer ]; then
   echo "error: GitHub shared quota cooldown is active; refusing gh-axi pr merge before reset" >&2
@@ -105,7 +115,7 @@ if gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${
 else
   status=$?
   [ ! -s "$merge_err" ] || cat "$merge_err" >&2
-  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" --source "fm-pr-merge:$URL" --file "$merge_err" >/dev/null 2>&1 || true
+  mark_github_quota_from_file "fm-pr-merge:$URL" "$merge_err"
   rm -f "$merge_err"
   exit "$status"
 fi

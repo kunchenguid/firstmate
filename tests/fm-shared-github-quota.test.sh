@@ -11,6 +11,7 @@ PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-shared-github-quota)
 PR_URL=https://github.com/example/repo/pull/9
+TEST_ACCOUNT=12345678
 
 make_fakebin() {
   local dir=$1 fakebin
@@ -54,6 +55,7 @@ arm_check() {
   FM_CONFIG_OVERRIDE="$home/config" \
   FM_SHARED_STATE_OVERRIDE="$shared" \
   FM_SHARED_QUOTA_NOW_EPOCH="$now" \
+  FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
   FM_TEST_GH_LOG="$home/gh.log" \
   PATH="$fakebin:$PATH" \
     "$PR_CHECK" task-x1 "$PR_URL" >/dev/null 2>"$home/pr-check.err"
@@ -61,8 +63,11 @@ arm_check() {
 
 run_check_script() {
   local home=$1 fakebin=$2 shared=$3 now=$4
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" \
   FM_SHARED_STATE_OVERRIDE="$shared" \
   FM_SHARED_QUOTA_NOW_EPOCH="$now" \
+  FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
   FM_TEST_GH_LOG="$home/gh.log" \
   PATH="$fakebin:$PATH" \
     bash "$home/state/task-x1.check.sh"
@@ -71,21 +76,21 @@ run_check_script() {
 mark_cooldown() {
   local shared=$1 reset=$2 now=$3
   FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH="$now" \
-    "$QUOTA" mark --provider github --account 94498628 --route default --reset-epoch "$reset" --source test >/dev/null
+    "$QUOTA" mark --provider github --account "$TEST_ACCOUNT" --route default --reset-epoch "$reset" --source test >/dev/null
 }
 
 test_mark_from_text_records_observed_account_and_reset() {
   local shared out active
   shared="$TMP_ROOT/shared-text"
-  out=$(printf '%s\n' 'GitHub user/account 94498628 is rate-limited until 2026-07-13T02:23:23Z.' \
+  out=$(printf 'GitHub user/account %s is rate-limited until 2026-07-13T02:23:23Z.\n' "$TEST_ACCOUNT" \
     | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
       "$QUOTA" mark-from-text --provider github --route default --source incident)
   assert_contains "$out" "provider=github" "mark-from-text should preserve provider"
-  assert_contains "$out" "account=94498628" "mark-from-text should extract the GitHub account"
+  assert_contains "$out" "account=$TEST_ACCOUNT" "mark-from-text should extract the GitHub account"
   assert_contains "$out" "reset_at=2026-07-13T02:23:23Z" "mark-from-text should preserve observed reset time"
 
   active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
-    "$QUOTA" check --provider github --account 94498628 --route default)
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
   assert_contains "$active" "state=defer" "observed GitHub cooldown should be active"
   assert_contains "$active" "reset_at=2026-07-13T02:23:23Z" "active cooldown should report reset evidence"
   pass "observed GitHub account/reset text records a shared cooldown"
@@ -162,7 +167,7 @@ test_cached_read_is_used_during_cooldown_without_gh() {
   home=$(make_home cache-home)
   : > "$home/gh.log"
   printf '%s\n' MERGED | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=900 \
-    "$QUOTA" cache-put --provider github --account 94498628 --route default --key "pr-state:$PR_URL"
+    "$QUOTA" cache-put --provider github --account "$TEST_ACCOUNT" --route default --key "pr-state:$PR_URL"
   mark_cooldown "$shared" 2000 1000
   arm_check "$home" "$fakebin" "$shared" 1000
 
@@ -182,11 +187,11 @@ test_merge_escalates_with_exact_account_and_reset() {
   home=$(make_home merge-home)
   : > "$home/gh.log"
   FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
-    "$QUOTA" mark --provider github --account 94498628 --route default --reset-at 2026-07-13T02:23:23Z --source test >/dev/null
+    "$QUOTA" mark --provider github --account "$TEST_ACCOUNT" --route default --reset-at 2026-07-13T02:23:23Z --source test >/dev/null
 
   set +e
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
     FM_TEST_GH_LOG="$home/gh.log" PATH="$fakebin:$PATH" \
     "$PR_MERGE" task-x1 "$PR_URL" > "$home/merge.out" 2> "$home/merge.err"
   status=$?
@@ -196,7 +201,7 @@ test_merge_escalates_with_exact_account_and_reset() {
   err=$(cat "$home/merge.err")
   assert_contains "$err" "escalation=github_shared_quota" "merge refusal should be a structured escalation"
   assert_contains "$err" "provider=github" "merge escalation should name provider"
-  assert_contains "$err" "account=94498628" "merge escalation should name account"
+  assert_contains "$err" "account=$TEST_ACCOUNT" "merge escalation should name account"
   assert_contains "$err" "reset_at=2026-07-13T02:23:23Z" "merge escalation should name reset time"
   assert_contains "$err" "needed_action=wait until reset" "merge escalation should name the required action"
   calls=$(grep -c '^gh-axi pr merge' "$home/gh.log" || true)

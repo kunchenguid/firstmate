@@ -96,7 +96,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
-GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
 GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -270,9 +269,15 @@ remove_pr_poll_artifacts() {
 
 github_quota_deferred() {
   local out state
-  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
   [ "$state" = defer ]
+}
+
+mark_github_quota_from_file() {
+  local source=$1 file=$2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+    --source "$source" --file "$file" >/dev/null 2>&1 || true
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -352,7 +357,7 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current gh_err
   github_quota_deferred && return 1
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
@@ -360,7 +365,13 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  gh_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-teardown-pr.XXXXXXXX") || return 1
+  if ! view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>"$gh_err"); then
+    mark_github_quota_from_file "fm-teardown:$ID pr_is_merged" "$gh_err"
+    rm -f "$gh_err"
+    return 1
+  fi
+  rm -f "$gh_err"
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1

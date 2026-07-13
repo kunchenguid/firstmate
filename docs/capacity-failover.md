@@ -121,15 +121,15 @@ Its state is intentionally independent of any one `FM_HOME`.
 By default it uses `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/shared-github-quota/`; tests and unusual deployments can set `FM_SHARED_STATE_OVERRIDE`.
 
 Cooldown records are keyed by `(provider, account, route)`.
-For the 2026-07-13 incident the provider/account key is `github` / `94498628`, with reset evidence `2026-07-13T02:23:23Z`.
+The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account learned from prior rate-limit evidence, or a best-effort `gh api user` derivation.
 `mark` and `mark-from-text` write the cooldown.
 `check` prints `state=allow` or `state=defer` with provider, account, route, reset time, and remaining seconds.
 Expired records are removed by `check`, so polling resumes only at or after the recorded reset time.
 
-`fm-pr-check.sh` uses this guard when it records PR metadata and in the generated `state/<id>.check.sh` poller.
-During a shared cooldown, generated PR pollers do not call `gh`.
+`fm-pr-check.sh` uses this guard when it records PR metadata and in the static `fm-pr-poll.sh` poller.
+During a shared cooldown, PR pollers do not call `gh`.
 They return silence unless a cached PR state already proves `MERGED`; that preserves local ownership and avoids repeated wake spam while GitHub is cooling down.
-When no cooldown is active, the generated poller keeps the existing live `gh pr view` behavior and refreshes the small cache after a successful read.
+When no cooldown is active, the poller keeps the existing live `gh pr view` behavior and refreshes the small cache after a successful read.
 
 `fm-pr-merge.sh` refuses an explicit merge during a known shared cooldown.
 That refusal is a structured escalation naming the provider, account, route, reset time, attempted operation, and required action.

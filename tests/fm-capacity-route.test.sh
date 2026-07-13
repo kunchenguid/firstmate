@@ -44,6 +44,34 @@ test_quota_wall_records_cooldown_and_selects_alternate_route() {
   pass "quota output records cooldown and selects another verified route with headroom"
 }
 
+test_partial_wall_key_blocks_every_route_for_same_harness() {
+  local home routes out status active
+  home="$TMP_ROOT/partial/home"
+  routes="$home/config/capacity-failover"
+  mkdir -p "$home/state" "$home/config"
+  write_routes "$routes" \
+    "route=codex|acct-a|gpt-5.5|gpt-5.5|xhigh" \
+    "route=codex|acct-b|gpt-5.6|gpt-5.6|high" \
+    "route=claude|acct-c|sonnet|sonnet|high"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_CAPACITY_NOW_EPOCH=2000 \
+    "$ROUTE" handle-wall --task task-rate --harness codex \
+    --routes-file "$routes" --file "$FIXTURES/rate-limit-retry-after.txt")
+  status=$?
+
+  expect_code 0 "$status" "partial quota wall should still select an alternate route"
+  assert_contains "$out" "route_1_status=blocked" "first codex route should be blocked by partial key"
+  assert_contains "$out" "route_2_status=blocked" "second codex route should be blocked by partial key"
+  assert_contains "$out" "selected_harness=claude" "partial codex wall should not reselect another codex route"
+  assert_not_contains "$out" "selected_harness=codex" "partial codex wall should block every codex route"
+
+  active=$(FM_STATE_OVERRIDE="$home/state" FM_CAPACITY_NOW_EPOCH=2001 "$COOLDOWN" active \
+    --harness codex --profile default)
+  assert_contains "$active" "account=" "partial cooldown should record the omitted account as empty"
+  assert_contains "$active" "profile=default" "partial cooldown should record the default profile"
+  pass "partial wall keys block every route for the walled harness"
+}
+
 test_expired_cooldown_route_becomes_selectable() {
   local home routes out status
   home="$TMP_ROOT/expiry/home"
@@ -182,6 +210,7 @@ test_dispatch_profile_backstop_blocks_unapproved_selection() {
 }
 
 test_quota_wall_records_cooldown_and_selects_alternate_route
+test_partial_wall_key_blocks_every_route_for_same_harness
 test_expired_cooldown_route_becomes_selectable
 test_auth_wall_records_manual_block_and_escalates_without_route
 test_login_required_records_provider_action_and_escalates_without_route

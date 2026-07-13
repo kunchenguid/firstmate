@@ -244,6 +244,25 @@ fm_capacity_cooldown_active() {  # <state-dir> <harness> <account> <profile>
   printf 'remaining_secs=%s\n' "$remaining"
 }
 
+fm_capacity_cooldown_active_for_route() {  # <state-dir> <harness> <account> <profile>
+  local state=$1 harness=$2 account=$3 profile=$4 dir file rec_harness rec_account rec_profile
+  if fm_capacity_cooldown_active "$state" "$harness" "$account" "$profile"; then
+    return 0
+  fi
+  dir=$(fm_capacity_cooldown_dir "$state")
+  [ -d "$dir" ] || return 1
+  for file in "$dir"/*.env; do
+    [ -f "$file" ] || continue
+    rec_harness=$(sed -n 's/^harness=//p' "$file" | tail -1)
+    [ "$rec_harness" = "$harness" ] || continue
+    rec_account=$(sed -n 's/^account=//p' "$file" | tail -1)
+    rec_profile=$(sed -n 's/^profile=//p' "$file" | tail -1)
+    [ -z "$rec_account" ] || [ -z "$rec_profile" ] || [ "$rec_profile" = default ] || continue
+    fm_capacity_cooldown_active "$state" "$rec_harness" "$rec_account" "$rec_profile" && return 0
+  done
+  return 1
+}
+
 fm_capacity_opposite_harness_ok() {  # <meta-file> <candidate-harness>
   local meta=$1 candidate=$2 forbidden
   [ -f "$meta" ] || return 0

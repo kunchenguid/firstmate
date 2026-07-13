@@ -110,7 +110,7 @@ select_route() {
       printf 'route_%s_harness=%s\n' "$idx" "$harness"
       continue
     fi
-    if active_out=$(fm_capacity_cooldown_active "$STATE" "$harness" "$account" "$profile" 2>/dev/null); then
+    if active_out=$(fm_capacity_cooldown_active_for_route "$STATE" "$harness" "$account" "$profile" 2>/dev/null); then
       exhausted=$((exhausted + 1))
       printf 'route_%s_status=blocked\n' "$idx"
       printf 'route_%s_harness=%s\n' "$idx" "$harness"
