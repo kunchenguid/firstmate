@@ -307,8 +307,7 @@ fm_backend_validate_spawn() {  # <name>
 #     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
-# 1 and prints nothing for an unknown backend (no verified dependency set to
-# assert - such a value is rejected loudly at spawn by fm_backend_validate_spawn).
+# 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
   case "$1" in
     tmux)   printf '%s' 'tmux treehouse' ;;
@@ -317,6 +316,19 @@ fm_backend_required_tools() {  # <backend>
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
+  esac
+}
+
+fm_backend_required_tool_available() {  # <backend> <tool>
+  local backend=$1 tool=$2 required
+  required=$(fm_backend_required_tools "$backend") || return 1
+  fm_backend_list_contains "$required" "$tool" || return 1
+  case "$backend:$tool" in
+    cmux:cmux)
+      fm_backend_source cmux >/dev/null 2>&1 || return 1
+      fm_backend_cmux_bin >/dev/null 2>&1
+      ;;
+    *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
 }
 
