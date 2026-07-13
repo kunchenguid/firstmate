@@ -101,6 +101,7 @@ When the file exists, `bin/fm-supervise-daemon.sh` still uses its existing class
 A successful Slack DM is the acknowledgement that clears `state/.subsuper-escalations`.
 A failed Slack DM leaves the buffer and sidecar timestamp intact for the next daemon retry, and writes the secret-free marker `state/.subsuper-slack-dm-failed` for catch-up.
 Persistent DM failure past `FM_MAX_DEFER_SECS` enters the same loud bounded wedge-alarm path as a wedged pane: the daemon fires the configured `wedge_alarm_notify` channel (see the wedge-alarm section below) and writes its own throttle marker `state/.subsuper-slack-dm-wedged`, so the alarm fires at most once per max-defer window while the real per-attempt reason stays in `state/.subsuper-slack-dm-failed`.
+The daemon shutdown flush never delivers a DM: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still set (the exit-ordering fix that keeps the injection-mode shutdown flush from being a no-op), so in DM mode the shutdown flush preserves the buffer for firstmate's in-chat catch-up on return, or the next daemon start's safe delivery, rather than DMing a now-present captain.
 Terminal injection is not counted as captain delivery while this config is active.
 
 The config format is key-value, one setting per non-comment line:

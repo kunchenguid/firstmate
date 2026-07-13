@@ -191,6 +191,11 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Set to 1 by cleanup() on daemon shutdown so escalate_flush's DM channel
+# preserves the buffer instead of delivering (bin/fm-afk-launch.sh stop SIGTERMs
+# the daemon while state/.afk is still set; a DM flush then would hit a present
+# captain). Injection-mode shutdown flush is unaffected.
+DAEMON_SHUTTING_DOWN=0
 SLACK_DM_CONFIG_NAME="afk-slack-dm"
 SLACK_DM_FAIL_MARKER_NAME=".subsuper-slack-dm-failed"
 # Per-attempt failure marker (above) records the real delivery reason; this
@@ -797,11 +802,22 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if afk_slack_dm_configured; then
-    # Presence-gate the DM path exactly like inject_msg (below) gates the pane
-    # path: deliver only while away mode is active. On the captain's return the
-    # afk flag is cleared BEFORE the daemon is stopped, so the shutdown flush
-    # (cleanup) must NOT fire a Slack DM at a now-present captain; the buffer is
-    # preserved for firstmate's in-chat "while you were out" catch-up instead.
+    # The shutdown/cleanup flush must NEVER deliver a Slack DM. The sanctioned
+    # captain-return stop path (bin/fm-afk-launch.sh stop) deliberately SIGTERMs
+    # the daemon WHILE state/.afk is still set and clears the flag LAST (the #490
+    # exit-ordering fix, so the injection-mode shutdown flush is not a no-op). A
+    # DM here would therefore hit the now-present captain and drain the buffer,
+    # defeating firstmate's in-chat "while you were out" catch-up. So in DM mode
+    # the shutdown flush preserves the buffer for catch-up (in-chat on return, or
+    # the next daemon start's safe delivery) instead of sending. Injection mode
+    # intentionally still flushes into the pane on shutdown; only the DM channel,
+    # which reaches the captain out of band, defers here.
+    if [ "${DAEMON_SHUTTING_DOWN:-0}" = 1 ]; then
+      log "slack dm deferred: daemon shutdown — buffer preserved for catch-up"
+      return 1
+    fi
+    # Otherwise presence-gate the DM path exactly like inject_msg gates the pane
+    # path: deliver only while away mode is active.
     afk_active "$state" || { log "slack dm deferred: afk inactive"; return 1; }
     if afk_slack_dm_send_buffer "$state" "$buf"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
     return 1
@@ -1612,6 +1628,10 @@ fm_super_main() {
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
+    # Mark shutdown so the DM channel preserves the buffer instead of delivering:
+    # bin/fm-afk-launch.sh stop SIGTERMs the daemon while state/.afk is still set,
+    # so an unguarded DM flush here would hit the returning captain (escalate_flush).
+    DAEMON_SHUTTING_DOWN=1
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then

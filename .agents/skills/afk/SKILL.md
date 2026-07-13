@@ -181,6 +181,7 @@ The config schema and token-source contract live in `docs/configuration.md` "Awa
 A successful DM is the captain-facing acknowledgement and clears `state/.subsuper-escalations`.
 A failed DM retains the buffer and sidecar timestamp for retry, and writes the secret-free catch-up marker `state/.subsuper-slack-dm-failed`.
 Persistent DM failure past `FM_MAX_DEFER_SECS` enters the same loud bounded wedge-alarm path as a wedged pane and writes `state/.subsuper-slack-dm-wedged` (its own throttle marker), while the per-attempt reason stays in `state/.subsuper-slack-dm-failed`.
+The daemon shutdown flush never sends a DM: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still set (so the injection-mode shutdown flush is not a no-op), so in DM mode the shutdown flush preserves the buffer for in-chat catch-up on return or the next daemon start's safe delivery instead of DMing the now-present captain.
 Terminal injection is not counted as captain delivery while Slack DM mode is configured.
 Messages sent by the helper carry a config-driven attribution prefix: `AI agent for <name> here —` when local `config/afk-slack-dm` declares a `name`, otherwise the generic shared default `AI agent here —`; the shared template never hardcodes a personal name.
 The helper rejects Slack channel, group, and DM-conversation IDs.

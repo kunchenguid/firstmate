@@ -774,9 +774,10 @@ test_slack_dm_afk_inactive_defers_and_preserves_buffer() {
   helper=$(make_fake_slack_dm_helper "$dir")
   write_fake_slack_dm_config "$dir"
   escalate_add "$state" "done: PR https://github.example/pr/9"
-  # afk flag deliberately NOT set: this mirrors the captain-returned shutdown
-  # flush, where .afk is cleared before the daemon is stopped. The DM path must
-  # defer just like inject_msg, preserving the buffer for in-chat catch-up.
+  # afk flag deliberately NOT set: the DM path must defer just like inject_msg,
+  # preserving the buffer for catch-up. (The captain-return shutdown case, where
+  # bin/fm-afk-launch.sh stop leaves .afk SET during the shutdown flush, is
+  # covered separately by test_slack_dm_shutdown_flush_preserves_buffer_no_dm.)
   if FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
     escalate_flush "$state"; then
     fail "Slack DM escalate_flush succeeded while afk inactive"
@@ -785,6 +786,52 @@ test_slack_dm_afk_inactive_defers_and_preserves_buffer() {
   [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved for catch-up when afk inactive"
   [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "afk-inactive defer wrote a delivery-failure marker"
   pass "afk inactive: Slack DM path defers and preserves the buffer, like the injection path"
+}
+
+test_slack_dm_shutdown_flush_preserves_buffer_no_dm() {
+  # The sanctioned captain-return stop path (bin/fm-afk-launch.sh stop, #490)
+  # SIGTERMs the daemon while state/.afk is STILL SET. The cleanup shutdown flush
+  # must NOT send a Slack DM at the now-present captain; it must preserve the
+  # buffer for firstmate's in-chat catch-up. Modeled by afk ACTIVE + the
+  # DAEMON_SHUTTING_DOWN marker cleanup() sets before its escalate_flush.
+  local dir state helper dm_log
+  dir=$(make_supercase slack-shutdown-flush)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  afk_enter "$state"
+
+  if DAEMON_SHUTTING_DOWN=1 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state"; then
+    fail "shutdown Slack DM flush succeeded (must defer and preserve the buffer)"
+  fi
+  [ ! -s "$dm_log" ] || fail "daemon sent a Slack DM during shutdown while afk still active"
+  [ -s "$state/.subsuper-escalations" ] || fail "shutdown flush dropped the buffer instead of preserving it for catch-up"
+  [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "shutdown defer wrote a delivery-failure marker (it is not a failure)"
+  pass "DM shutdown flush preserves the buffer and sends no DM even while afk is still active"
+}
+
+test_shutdown_flush_still_injects_when_no_dm_config() {
+  # The shutdown gate is DM-specific: with no Slack DM config, injection mode must
+  # STILL flush its final digest into the pane on shutdown (the #490 behavior the
+  # DM gate must not regress).
+  local dir state fakebin sent capture
+  dir=$(make_supercase shutdown-inject)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+
+  DAEMON_SHUTTING_DOWN=1 PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    escalate_flush "$state" || fail "injection-mode shutdown flush failed"
+
+  grep -F "Supervisor escalate" "$sent" >/dev/null || fail "injection mode did not flush into the pane on shutdown"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "injection shutdown flush did not clear the delivered buffer"
+  pass "injection-mode shutdown flush still delivers into the pane (DM gate is channel-specific)"
 }
 
 test_slack_dm_failure_marker_redacts_helper_output() {
@@ -2017,6 +2064,8 @@ test_slack_dm_persistent_failure_fires_wedge_alarm
 test_slack_dm_wedge_alarm_throttled_within_window
 test_slack_dm_config_absent_keeps_terminal_injection_path
 test_slack_dm_afk_inactive_defers_and_preserves_buffer
+test_slack_dm_shutdown_flush_preserves_buffer_no_dm
+test_shutdown_flush_still_injects_when_no_dm_config
 test_slack_dm_failure_marker_redacts_helper_output
 test_status_digest_dm_request_is_explicit_only
 test_heartbeat_scan_dedup
