@@ -43,6 +43,15 @@ bin/fm-use-orca.sh restart    # stop + start
 bin/fm-use-tmux.sh start      # symmetric switch back to tmux
 ```
 
+Health check (run before any critical orca session, or after a daemon change):
+```sh
+bin/fm-orca-test-suite.sh         # 15 checks, exits 0 on PASS, 1 on FAIL
+bin/fm-orca-test-suite.sh --json  # machine-readable output (one JSON array)
+bin/fm-orca-test-suite.sh --no-spawn     # skip the live end-to-end spawn
+bin/fm-orca-test-suite.sh --no-unit      # skip the three unit-test suites
+bin/fm-orca-test-suite.sh --expected-backend tmux   # assert not-orca
+```
+
 Daemon liveness:
 ```sh
 bin/fm-supervise-orca.sh status        # supervisor + daemon state
