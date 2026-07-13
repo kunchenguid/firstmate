@@ -12,6 +12,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
+
+# Skip a GitHub read while the shared quota guard says this account/route is in
+# a cooldown, so a walled account is not hammered for optional PR head data.
+github_quota_deferred() {
+  local out state
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
+  [ "$state" = defer ]
+}
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -63,11 +74,15 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && ! github_quota_deferred && command -v gh >/dev/null 2>&1; then
+  GH_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-head.XXXXXXXX") || exit 1
+  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>"$GH_ERR") \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  else
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" --source "fm-pr-check:$URL head" --file "$GH_ERR" >/dev/null 2>&1 || true
   fi
+  rm -f "$GH_ERR"
 fi
 
 META_TMP=

@@ -38,6 +38,8 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
+GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 
 caller_has_merge_method() {
   local arg
@@ -76,9 +78,34 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
+quota_out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+quota_state=$(printf '%s\n' "$quota_out" | sed -n 's/^state=//p' | tail -1)
+if [ "$quota_state" = defer ]; then
+  echo "error: GitHub shared quota cooldown is active; refusing gh-axi pr merge before reset" >&2
+  printf 'escalation=github_shared_quota\n' >&2
+  printf 'provider=github\n' >&2
+  printf 'account=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^account=//p' | tail -1)" >&2
+  printf 'route=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^route=//p' | tail -1)" >&2
+  printf 'reset_at=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^reset_at=//p' | tail -1)" >&2
+  printf 'reset_epoch=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^reset_epoch=//p' | tail -1)" >&2
+  printf 'operation=pr merge %s --repo %s/%s\n' "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" >&2
+  printf 'needed_action=wait until reset or use an alternate verified GitHub account/route with headroom\n' >&2
+  exit 1
+fi
+
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+merge_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-merge.XXXXXXXX") || exit 1
+if gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>"$merge_err"; then
+  [ ! -s "$merge_err" ] || cat "$merge_err" >&2
+  rm -f "$merge_err"
+else
+  status=$?
+  [ ! -s "$merge_err" ] || cat "$merge_err" >&2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" --source "fm-pr-merge:$URL" --file "$merge_err" >/dev/null 2>&1 || true
+  rm -f "$merge_err"
+  exit "$status"
+fi

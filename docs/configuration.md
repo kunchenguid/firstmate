@@ -236,10 +236,10 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `config/capacity-failover` is reserved for future opt-in automatic capacity failover.
 Absent this file, spawn and dispatch behavior is unchanged.
-The current implementation is substrate only: `bin/fm-capacity-classify.sh`, `bin/fm-capacity-cooldown.sh`, `bin/fm-capacity-route.sh`, `bin/fm-rehome-quota-wall.sh`, and `bin/fm-host-pressure.sh`.
+The current implementation is substrate only: `bin/fm-capacity-classify.sh`, `bin/fm-capacity-cooldown.sh`, `bin/fm-capacity-route.sh`, `bin/fm-rehome-quota-wall.sh`, `bin/fm-host-pressure.sh`, and `bin/fm-shared-github-quota.sh`.
 `host-pressure=on` enables bounded memory, disk-floor, and active-task spawn backpressure; without that line, even a present config file does not change spawn pressure behavior.
 `route=<harness>|<account-or-provider>|<profile>|<model>|<effort>` lines define optional verified routes for the manual route selector.
-See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signatures, cooldown record format, route-selection contract, manual rehome contract, host-pressure thresholds, and opposite-harness constraint.
+See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signatures, cooldown record format, route-selection contract, manual rehome contract, host-pressure thresholds, shared GitHub quota guard, and opposite-harness constraint.
 
 ## Toolchain
 

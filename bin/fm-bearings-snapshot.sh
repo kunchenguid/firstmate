@@ -73,6 +73,8 @@ FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
+GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
@@ -200,8 +202,22 @@ gh_bounded() {  # <args...>
   fi
 }
 
+github_quota_deferred_status() {
+  local out state account reset_at reset_epoch
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
+  [ "$state" = defer ] || return 1
+  account=$(printf '%s\n' "$out" | sed -n 's/^account=//p' | tail -1)
+  reset_at=$(printf '%s\n' "$out" | sed -n 's/^reset_at=//p' | tail -1)
+  reset_epoch=$(printf '%s\n' "$out" | sed -n 's/^reset_epoch=//p' | tail -1)
+  PR_STATUS="deferred (github account ${account:-$GITHUB_ACCOUNT} rate-limited until ${reset_at:-reset_epoch:$reset_epoch})"
+  return 0
+}
+
 if [ "$INCLUDE_PRS" = 1 ]; then
-  if ! command -v gh >/dev/null 2>&1; then
+  if github_quota_deferred_status; then
+    :
+  elif ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
   else
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.

@@ -96,6 +96,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+GITHUB_ACCOUNT=${FM_GITHUB_ACCOUNT_ID:-94498628}
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -266,12 +268,20 @@ remove_pr_poll_artifacts() {
   fi
 }
 
+github_quota_deferred() {
+  local out state
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --account "$GITHUB_ACCOUNT" --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
+  [ "$state" = defer ]
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  github_quota_deferred && return 1
   out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
@@ -343,6 +353,7 @@ EOF
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state head current
+  github_quota_deferred && return 1
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else

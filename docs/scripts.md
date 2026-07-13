@@ -43,6 +43,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-capacity-cooldown.sh` | Write and read passive per-harness/account/profile cooldown records under state/ |
 | `fm-capacity-route.sh` | Record classified route walls, select a verified non-cooled route, or print exact escalation evidence |
 | `fm-host-pressure.sh`    | Report opt-in memory, disk, and active-task pressure for capacity-failover spawn backpressure |
+| `fm-shared-github-quota.sh` | Coordinate fleet-wide GitHub API cooldowns and cached gh-heavy reads across homes |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
