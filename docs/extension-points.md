@@ -25,7 +25,7 @@ The first positional argument is always the task id.
 
 | hook | fires from | moment | args | environment |
 | --- | --- | --- | --- | --- |
-| `post-spawn` | `bin/fm-spawn.sh` | a task (any kind: `ship`, `scout`, `secondmate`) is fully launched and its `state/<id>.meta` is written; once per task in a batch | `$1` task id, `$2` absolute meta path | `FM_HOOK_TASK_ID`, `FM_HOOK_META`, `FM_HOOK_KIND` |
+| `post-spawn` | `bin/fm-spawn.sh` | a task (any kind: `ship`, `scout`, `secondmate`) is fully launched and its `state/<id>.meta` is written; once per task in a batch, and also on an automatic secondmate liveness respawn (see below) | `$1` task id, `$2` absolute meta path | `FM_HOOK_TASK_ID`, `FM_HOOK_META`, `FM_HOOK_KIND` |
 | `pr-ready` | `bin/fm-pr-check.sh` | a PR URL is first recorded (`pr=` newly appended) for the task; re-runs, including `bin/fm-pr-merge.sh`'s internal recording re-run, never re-fire it | `$1` task id, `$2` PR URL | `FM_HOOK_TASK_ID`, `FM_HOOK_PR_URL` |
 | `post-merge` | `bin/fm-pr-merge.sh`, `bin/fm-merge-local.sh` | firstmate itself merged the task's work: it merged the PR (ref = PR URL) or fast-forwarded the local-only branch into the local default branch (ref = branch name) | `$1` task id, `$2` ref | `FM_HOOK_TASK_ID`, `FM_HOOK_REF` |
 | `post-teardown` | `bin/fm-teardown.sh` | the task's worktree, endpoint, and state files are gone; only id and kind remain as identifiers | `$1` task id, `$2` kind | `FM_HOOK_TASK_ID`, `FM_HOOK_KIND` |
@@ -34,6 +34,8 @@ This set is deliberately small: a hook point is added only where the lifecycle m
 A `pr-ready` hook may fire from `bin/fm-pr-merge.sh` instead of `bin/fm-pr-check.sh` when the merge is the first time the PR is recorded (the yolo-merge-on-no-CI-repo flow); the once-per-(task, PR URL) guarantee is what a hook should rely on, not which script fired it.
 `post-merge` fires only for a merge firstmate performed through those two scripts.
 A PR merged outside firstmate - the captain clicking Merge in the GitHub UI, say, which the watcher's merge poll only detects afterwards - does not fire it, so a `post-merge` hook must not be relied on as a universal merge notification.
+`post-spawn` fires on every launch of a task, not only on a newly dispatched one: firstmate respawns a dead secondmate through the same `bin/fm-spawn.sh --secondmate` path during the session-start liveness sweep, so a recovery fires the hook exactly like a fresh dispatch.
+A `post-spawn` hook must therefore treat "this task is now running" rather than "this is new work" as its trigger, and stay idempotent for a task id it has already seen.
 
 Hooks run with the invoking script's working directory and stdio, so a hook that produces output should write to its own log or a display surface rather than polluting the calling script's stdout.
 Hooks are per-home local configuration and are not propagated into secondmate homes.

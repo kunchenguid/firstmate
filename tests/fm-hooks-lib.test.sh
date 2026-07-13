@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-hooks-lib.sh (the shared best-effort lifecycle hook runner)
-# and its pr-ready / post-merge call sites (docs/extension-points.md).
+# and its post-spawn / pr-ready / post-merge call sites (docs/extension-points.md).
 #
 # The contract under test: an absent or non-executable hook is a silent no-op,
 # a present hook runs with the documented positional args and FM_HOOK_* env, a
@@ -16,6 +16,8 @@
 #     (e) timeout invocation shape         -> 'timeout -k 5 <budget> <hook> <args>'
 #     (f) hook timed out (exit 124)        -> "timed out" warning, returns 0
 #   integration:
+#     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
+#         the task's kind and meta path; a failing hook does not fail the spawn
 #     (g) fm-pr-check fires pr-ready on first pr= record only; a failing hook
 #         does not break fm-pr-check (exit 0, merge poll still armed)
 #     (h) fm-pr-merge fires post-merge with the PR URL after a successful
@@ -30,6 +32,7 @@ fm_git_identity fmtest fmtest@example.invalid
 # shellcheck source=bin/fm-hooks-lib.sh
 . "$ROOT/bin/fm-hooks-lib.sh"
 
+SPAWN="$ROOT/bin/fm-spawn.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
@@ -238,6 +241,92 @@ test_pr_merge_fires_post_merge_after_merge() {
   pass "fm-pr-merge fires post-merge with the PR URL and survives a failing hook"
 }
 
+# Build a firstmate home that fm-spawn can launch into: a fake tmux pane whose
+# reported path is the task worktree, a stubbed treehouse, a real isolated git
+# worktree, a crew harness, and a brief per task id. Echoes the home dir.
+make_spawn_home() {
+  local case_dir=$1 home proj wt id
+  shift
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  mkdir -p "$home/data" "$home/projects" "$home/state"
+  # The hooks live in the case dir's config/, which the spawn runs point at.
+  printf 'claude\n' > "$case_dir/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  fm_fake_exit0 "$case_dir/fakebin" treehouse
+  fm_git_worktree "$proj" "$wt" wt-spawn
+  for id in "$@"; do
+    mkdir -p "$home/data/$id"
+    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  done
+  printf '%s\n' "$home"
+}
+
+run_spawn() {
+  local case_dir=$1 home=$2
+  shift 2
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$case_dir/wt" PATH="$case_dir/fakebin:$PATH" \
+    "$SPAWN" "$@"
+}
+
+# A hook that appends one line per invocation, so a batch's per-task firing is
+# countable; write_logging_hook truncates and cannot show repeat calls.
+write_appending_hook() {
+  local case_dir=$1 hook_name=$2 exit_status=$3
+  cat > "$case_dir/config/hooks/$hook_name" <<SH
+#!/usr/bin/env bash
+printf 'fired:%s|%s|%s\n' "\$1" "\${FM_HOOK_KIND:-unset}" "\${FM_HOOK_META:-unset}" \
+  >> '$case_dir/hook.log'
+exit $exit_status
+SH
+  chmod +x "$case_dir/config/hooks/$hook_name"
+}
+
+test_spawn_fires_post_spawn_per_task_and_survives_failure() {
+  local case_dir home rc
+  case_dir=$(make_case spawn)
+  home=$(make_spawn_home "$case_dir" spawn-hook-a-z1 spawn-hook-b-z2)
+  # The hook fails, so this also pins that a failing post-spawn hook never fails
+  # the spawn: both pairs must still be reported as spawned and the batch exit 0.
+  write_appending_hook "$case_dir" post-spawn 1
+
+  set +e
+  run_spawn "$case_dir" "$home" \
+    "spawn-hook-a-z1=$case_dir/project" "spawn-hook-b-z2=$case_dir/project" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "spawn: a failing post-spawn hook must not fail the spawn: $(cat "$case_dir/stderr")"
+  assert_grep "fired:spawn-hook-a-z1|ship|$home/state/spawn-hook-a-z1.meta" "$case_dir/hook.log" \
+    "spawn: post-spawn did not fire for the first task with its kind and meta path"
+  assert_grep "fired:spawn-hook-b-z2|ship|$home/state/spawn-hook-b-z2.meta" "$case_dir/hook.log" \
+    "spawn: post-spawn did not fire for the second task of the batch"
+  expect_code 2 "$(grep -c '^fired:' "$case_dir/hook.log")" \
+    "spawn: post-spawn should fire exactly once per spawned task"
+  assert_grep 'post-spawn hook failed' "$case_dir/stderr" \
+    "spawn: failing hook was not warned to stderr"
+  assert_grep 'spawned spawn-hook-b-z2' "$case_dir/stdout" \
+    "spawn: the spawn did not complete despite the failing hook"
+  pass "fm-spawn fires post-spawn once per spawned task and survives a failing hook"
+}
+
 test_merge_local_fires_post_merge_with_branch_ref() {
   local case_dir
   case_dir=$(make_case merge-local)
@@ -267,6 +356,7 @@ test_present_hook_gets_args_and_env
 test_failing_hook_warns_and_returns_zero
 test_timeout_invocation_shape
 test_timed_out_hook_warns_and_returns_zero
+test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_fires_post_merge_after_merge
 test_merge_local_fires_post_merge_with_branch_ref
