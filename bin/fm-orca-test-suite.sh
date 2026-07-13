@@ -43,7 +43,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FMOD=${FM_ORCA_FMOD:-"$FM_ROOT/bin/fmod"}
 SUPERVISOR="$FM_ROOT/bin/fm-supervise-orca.sh"
 FM_BOOTSTRAP="$FM_ROOT/bin/fm-bootstrap.sh"
-TESTS_DIR="$FM_ROOT/tests"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -105,14 +104,28 @@ run_check() {
 }
 
 # 1. orca binary
-[ -x "$(command -v orca 2>/dev/null)" ] || true
-run_check "orca-binary" $([ -x "$(command -v orca 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v orca 2>/dev/null || echo 'missing')"
+orca_bin=$(command -v orca 2>/dev/null || true)
+if [ -x "$orca_bin" ]; then
+  run_check "orca-binary" 0 "$orca_bin"
+else
+  run_check "orca-binary" 1 "missing"
+fi
 
 # 2. python3
-run_check "python3-binary" $([ -x "$(command -v python3 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v python3 2>/dev/null || echo 'missing')"
+python_bin=$(command -v python3 2>/dev/null || true)
+if [ -x "$python_bin" ]; then
+  run_check "python3-binary" 0 "$python_bin"
+else
+  run_check "python3-binary" 1 "missing"
+fi
 
 # 3. setsid
-run_check "setsid-available" $([ -x "$(command -v setsid 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v setsid 2>/dev/null || echo 'missing')"
+setsid_bin=$(command -v setsid 2>/dev/null || true)
+if [ -x "$setsid_bin" ]; then
+  run_check "setsid-available" 0 "$setsid_bin"
+else
+  run_check "setsid-available" 1 "missing"
+fi
 
 # 4. config/backend
 actual_backend=$(tr -d '[:space:]' < "$CONFIG/backend" 2>/dev/null || true)

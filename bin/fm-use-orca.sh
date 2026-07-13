@@ -42,10 +42,8 @@ SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-PIDFILE="$STATE/.orca-supervisor.pid"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/fm-supervise-orca.desktop"
 
@@ -159,11 +157,11 @@ install_autostart() {
   env_args=$(desktop_quote "FM_HOME=$FM_HOME")
   env_args="$env_args $(desktop_quote "FM_ORCA_BIN=$orca_bin")"
   env_args="$env_args $(desktop_quote "FM_ORCA_FMOD=$fmod_bin")"
-  for env_name in FM_STATE_OVERRIDE; do
-    env_value=${!env_name:-}
-    [ -n "$env_value" ] || continue
+  env_name=FM_STATE_OVERRIDE
+  env_value=${!env_name:-}
+  if [ -n "$env_value" ]; then
     env_args="$env_args $(desktop_quote "$env_name=$env_value")"
-  done
+  fi
   supervisor_arg=$(desktop_quote "$FM_ROOT/bin/fm-supervise-orca.sh")
   mkdir -p "$AUTOSTART_DIR" 2>/dev/null || { fail "cannot create $AUTOSTART_DIR"; return 1; }
   cat > "$AUTOSTART_FILE" <<EOF

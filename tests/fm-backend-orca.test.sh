@@ -756,6 +756,7 @@ test_composer_state_uses_bundled_fmod_fallback() {
   cp "$FB/fmod" "$mini_root/bin/fmod"
   printf '╭──╮\n│ > │\n╰──╯\n' > "$RESP/1.out"
   local out
+  # shellcheck disable=SC2016 # $0 expands inside the child shell.
   out=$( env -u FM_ORCA_FMOD PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$mini_root" )
   [ "$out" = "empty" ] || fail "composer_state should use bundled fmod fallback, got '$out'"
@@ -775,6 +776,7 @@ exit 88
 SH
   chmod +x "$stale_bin/fmod"
   printf '{"socket_exists":true,"token_exists":true,"daemon_reachable":true,"daemon_pong":{"pong":true}}\n' > "$RESP/1.out"
+  # shellcheck disable=SC2016 # $0 expands inside the child shell.
   env -u FM_ORCA_FMOD PATH="$stale_bin:/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_runtime_check' "$mini_root"
   assert_not_contains "$(cat "$LOG")" "stale-path-fmod" \
