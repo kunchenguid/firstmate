@@ -208,6 +208,16 @@ run_bootstrap_timeout_case() {
   )
 }
 
+assert_timeout_report() {
+  local out=$1 expected_timeout=$2 timing timeout elapsed
+  timing=$(printf '%s\n' "$out" | sed -n 's/^FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=\([0-9][0-9]*\)s elapsed=\([0-9][0-9]*\)s)$/\1 \2/p')
+  [ -n "$timing" ] || fail "missing fleet-sync timeout report"
+  timeout=${timing%% *}
+  elapsed=${timing#* }
+  [ "$timeout" -eq "$expected_timeout" ] || fail "expected timeout=${expected_timeout}s, got timeout=${timeout}s"
+  [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -624,7 +634,8 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
 
   [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "launch-order case should still enforce the computed timeout"
+  assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "launch-order case should relay partial fleet-sync output before reporting its timeout"
+  assert_timeout_report "$out" 20
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
