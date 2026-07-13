@@ -19,9 +19,9 @@
 #   fmx_request_relay_context <request_id> - resolve reply platform/limit
 #                                AUTHORITATIVELY from the relay by request_id when
 #                                no local inbox payload survives
-#   fmx_context_registry_set <state> <request_id> <platform> <reply-max> - persist
-#                                the durable per-request reply context (no-op when
-#                                neither platform nor budget is known)
+#   fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]
+#                                - persist the durable per-request reply context;
+#                                refresh=1 resets its retention timestamp
 #   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
@@ -291,14 +291,15 @@ fmx_context_registry_prune() {
   return 0
 }
 
-# fmx_context_registry_set <state> <request_id> <platform> <reply-max>: persist
-# the durable per-request reply context atomically. Normalizes platform (twitter
-# -> x, anything unrecognized -> empty) and requires a numeric budget. A no-op
-# (success) when neither a platform nor a budget is known, so callers never write
-# an empty, useless record. Returns non-zero only on an unsafe id or a write
-# failure; callers treat the write as best-effort.
+# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]:
+# persist the durable per-request reply context atomically. Normalizes platform
+# (twitter -> x, anything unrecognized -> empty) and requires a numeric budget.
+# A refresh value of 1 resets the retention timestamp; ordinary writes preserve
+# it. A no-op (success) when neither a platform nor a budget is known, so callers
+# never write an empty, useless record. Returns non-zero only on invalid input or
+# a write failure; callers treat the write as best-effort.
 fmx_context_registry_set() {
-  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} dir file tmp now recorded_at
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file tmp now recorded_at
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -309,6 +310,10 @@ fmx_context_registry_set() {
   esac
   case "$reply_max" in
     ''|*[!0-9]*) reply_max= ;;
+  esac
+  case "$refresh" in
+    0|1) ;;
+    *) return 1 ;;
   esac
   if [ -z "$platform" ] && [ -z "$reply_max" ]; then
     return 0
@@ -323,7 +328,7 @@ fmx_context_registry_set() {
   [ "${#now}" -le 18 ] || return 1
   file="$dir/$rid.json"
   recorded_at=
-  if [ -f "$file" ]; then
+  if [ "$refresh" = 0 ] && [ -f "$file" ]; then
     recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=
   fi
   if [ -z "$recorded_at" ]; then

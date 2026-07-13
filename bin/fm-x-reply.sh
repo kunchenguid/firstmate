@@ -330,7 +330,13 @@ case "$post_rc" in
 esac
 
 case "$code" in
-  2[0-9][0-9]) printf '%s\n' "$REQ" ;;
+  2[0-9][0-9])
+    if [ "$FOLLOWUP" = 0 ]; then
+      fmx_context_registry_set "$STATE" "$REQ" "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX" 1 2>/dev/null \
+        || echo "fm-x-reply: warning: could not retain reply context for $REQ" >&2
+    fi
+    printf '%s\n' "$REQ"
+    ;;
   409)
     if [ "$FOLLOWUP" = 1 ]; then
       if [ -s "$RESPONSE_BODY_FILE" ] && {

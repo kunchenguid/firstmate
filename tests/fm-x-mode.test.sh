@@ -1277,6 +1277,53 @@ test_context_registry_preserves_first_seen_timestamp() {
   pass "context registry rewrites preserve the first-seen timestamp"
 }
 
+test_context_registry_retention_starts_on_successful_live_answer() {
+  local home fakebin out rc reg
+  home="$TMP_ROOT/registry-answer-window"
+  mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-answer-window\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-answer-window","platform":"discord","reply_max_chars":1900,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "answer-window poll exit"
+  reg="$home/state/x-context/req-answer-window.json"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "the pending context must start at poll time"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000100 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-answer-window","platform":"discord","reply_max_chars":1900,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated answer-window poll exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "repeated polling must not move the pending context window"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000200 \
+    FMX_RELAY_URL="https://relay.test" FAKE_ANSWER_CODE=500 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it." 2>/dev/null); rc=$?
+  [ "$rc" -ne 0 ] || fail "the failed answer fixture must fail"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "a failed answer must not refresh context retention"
+  out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=1700000300 FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "answer-window dry-run exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "an answer dry-run must not refresh context retention"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700604900 \
+    FMX_RELAY_URL="https://relay.test" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it."); rc=$?
+  expect_code 0 "$rc" "successful answer-window answer exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700604900" ] \
+    || fail "a late successful live initial answer must recreate and start the retained follow-up window"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700605000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window --followup "Still working."); rc=$?
+  expect_code 0 "$rc" "answer-window follow-up exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700604900" ] \
+    || fail "a follow-up must not refresh context retention"
+  pass "context retention starts only when a live initial answer succeeds"
+}
+
 # Regression case 1: a Discord follow-up >280 but < the Discord budget stays ONE
 # message even after the inbox is deleted AND posted late by request_id.
 test_regression_discord_followup_survives_inbox_cleanup() {
@@ -2194,6 +2241,7 @@ test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
 test_poll_records_context_registry_from_relay_platform
 test_context_registry_prunes_expired_records
 test_context_registry_preserves_first_seen_timestamp
+test_context_registry_retention_starts_on_successful_live_answer
 test_regression_discord_followup_survives_inbox_cleanup
 test_regression_x_followup_still_splits_after_cleanup
 test_regression_unresolved_followup_fails_safe
