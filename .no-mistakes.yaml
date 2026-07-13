@@ -6,7 +6,7 @@
 # identity or drives the fleet. Trusted-only: a pushed branch cannot turn this off,
 # so it is honored only from the default-branch copy of this file. Layered above
 # the NO_MISTAKES_GATE lifecycle refusal (bin/fm-gate-refuse-lib.sh) and the
-# HEAD-continuity guard; see data/nm-gate-ambient-authority-containment-c3/.
+# HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
 # Pin lint and test to the SAME deterministic commands CI runs, instead of
