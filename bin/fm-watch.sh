@@ -406,6 +406,92 @@ scan_signals() {
   return 0
 }
 
+# 0 if any .turn-ended wake in the changed-file set is both:
+#   - unaccompanied by a same-task .status change (no structured status delta),
+#   - likely idle in its pane,
+#   - and not a secondmate.
+#
+# This is a fail-closed guard for the exact "turn ended with no status" case
+# where the status log has no captain-relevant verb for us to inspect. In that
+# case, pane idleness is the practical signal that the task may have finished or
+# waited on an interactive request and needs firstmate eyes; a live busy pane and
+# secondmate are treated as non-actionable.
+signal_ended_without_status_idle() {  # <file> ...
+  local f base task meta kind window backend tail has_status_delta g
+  [ $# -eq 0 ] && return 1
+
+  f=$1
+  [ -e "$f" ] || return 1
+  base=${f##*/}
+  case "$base" in
+    *.turn-ended) task=${base%.turn-ended} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$task" ] || return 1
+
+  # Ignore explicit ended-without-status candidates that also wrote a same-task
+  # .status delta in this coalesced wake batch.
+  has_status_delta=0
+  for g in "$@"; do
+    [ "${g##*/}" = "$task.status" ] && has_status_delta=1 && break
+  done
+  [ "$has_status_delta" -eq 1 ] && return 1
+
+  meta="$STATE/$task.meta"
+  if [ -e "$meta" ]; then
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$kind" = secondmate ] && return 1
+
+    window=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      [ -n "$backend" ] || backend=tmux
+      tail=$(fm_backend_capture "$backend" "$window" 40 "$(window_label "$window")" 2>/dev/null)
+      if [ -n "$tail" ]; then
+        if window_is_busy "$window" "$tail"; then
+          return 1
+        fi
+        crew_is_provably_working "$task" && return 1
+        return 0
+      fi
+    fi
+  fi
+
+  # Fallback to authoritative state in the absence of an active window capture.
+  crew_is_provably_working "$task" && return 1
+  return 0
+}
+
+# 0 if every task referenced by a no-verb signal is clearly provable for the
+# watcher. This is the watcher-local variant of signal_crew_provably_working with
+# one additional secondmate override: secondmate task markers are suppressed in the
+# no-verb signal path (direct secondmate wakeups are handled by its own status
+# lifecycle and explicit status signals).
+watch_signal_crew_provably_working() {  # <file> ...
+  local f base task seen="" meta kind
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status) task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+
+    meta="$STATE/$task.meta"
+    if [ -f "$meta" ]; then
+      kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ "$kind" = secondmate ] && continue
+    fi
+
+    crew_is_provably_working "$task" || return 1
+  done
+  [ -n "$seen" ] || return 1
+  return 0
+}
+
 run_check() {
   local c=$1
   if command -v timeout >/dev/null 2>&1; then
@@ -665,6 +751,8 @@ $pending
 EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
+    #   - a turn-ended wake with no corresponding status delta for that same task
+    #     and an idle pane (ended-without-status);
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
@@ -678,29 +766,59 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-      done <<EOF
+    ended_without_status=0
+    ended_without_status_files=""
+    for f in $files; do
+      signal_ended_without_status_idle "$f" $files && ended_without_status_files="$ended_without_status_files $f"
+    done
+    [ -n "$ended_without_status_files" ] && ended_without_status=1
+    batch_reason=""
+    for f in $files; do
+      if [ -n "$batch_reason" ]; then
+        batch_reason="$batch_reason "
+      fi
+        case " $ended_without_status_files " in
+        *" $f "*) batch_reason="${batch_reason}ended-without-status: $f" ;;
+        *) batch_reason="${batch_reason}signal: $f" ;;
+      esac
+    done
+    if afk_present || [ "$ended_without_status" -eq 1 ] || signal_reason_is_actionable $files || ! watch_signal_crew_provably_working $files; then
+      if [ "$ended_without_status" -eq 1 ] && [ "$ended_without_status_files" = "$files" ]; then
+        batch_reason="ended-without-status:$ended_without_status_files"
+      fi
+      for f in $files; do
+        sf=""
+        sig=""
+        while IFS=$(printf '\t') read -r sf_line sig_line path; do
+          [ -n "$sf_line" ] || continue
+          [ "$path" = "$f" ] || continue
+          sf=$sf_line
+          sig=$sig_line
+        done <<EOF
 $pending
 EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
+        file_reason="signal:$f"
+        case " $ended_without_status_files " in *" $f "* ) file_reason="ended-without-status:$f" ;; esac
+        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        [ -n "$sig" ] && printf '%s' "$sig" > "$sf"
         mark_surfaced "$f"
-      done <<EOF
-$pending
-EOF
-      wake "$reason"
+      done
+      wake "$batch_reason"
     else
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-      done <<EOF
+      for f in $files; do
+        sf=""
+        sig=""
+        while IFS=$(printf '\t') read -r sf_line sig_line path; do
+          [ -n "$sf_line" ] || continue
+          [ "$path" = "$f" ] || continue
+          sf=$sf_line
+          sig=$sig_line
+        done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+        [ -n "$sf" ] && printf '%s' "$sig" > "$sf"
+      done
+      triage_log "absorbed benign $batch_reason"
     fi
   fi
 

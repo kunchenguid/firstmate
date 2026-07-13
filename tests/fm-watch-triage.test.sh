@@ -304,10 +304,85 @@ test_turn_ended_not_working_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
-  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
+  grep -F "ended-without-status: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced ended-without-status turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
+}
+
+test_turn_ended_no_status_idle_blackbox() {
+  local dir state fakebin out capture_file window drain_out pid
+  dir=$(make_case ended-without-status-blackbox); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; drain_out="$dir/drain.out"
+  window="test:fm-personal-brain-redesign-k7"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/task.meta"
+  printf 'idle: waiting for captain in the pane\n' > "$capture_file"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "watcher did not surface the bare turn-ended idle event"
+  grep -F "ended-without-status: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not emit an ended-without-status reason: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ended-without-status event failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "ended-without-status" | grep -F "$state/task.turn-ended" >/dev/null || fail "ended-without-status event was not queued"
+  pass "a bare turn-ended with no status and idle pane surfaces as ended-without-status (black-box)"
+}
+
+test_turn_ended_capture_running_runstep_is_absorbed_blackbox() {
+  local dir state fakebin out capture_file window drain_out pid
+  dir=$(make_case ended-runstep-capture-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; drain_out="$dir/drain.out"
+  window="test:fm-personal-brain-redesign-k7"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/task.meta"
+  printf 'idle: waiting for completion\n' > "$capture_file"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validation still running'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "turn-ended with active run-step and idle pane surfaced instead of being absorbed: $(cat "$out")"
+  fi
+  i=0
+  while [ "$i" -lt 160 ]; do
+    [ -s "$state/.seen-task_turn-ended" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$state/.seen-task_turn-ended" ]; then
+    reap "$pid"; fail "an absorbed turn-ended did not advance its .seen-* suppressor in time"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "active run-step with idle pane printed an actionable wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "active run-step turn-ended queued an unwanted wake: $(cat "$out")"; }
+  [ -e "$state/.last-watcher-beat" ] || { reap "$pid"; fail "watcher beacon was not touched while absorbing"; }
+  reap "$pid"
+  pass "a turn-ended with capture-only idle pane and run-step state is still absorbed"
+}
+
+test_turn_ended_and_status_coalesced_reason_split_blackbox() {
+  local dir state fakebin out capture_file window drain_out pid
+  dir=$(make_case coalesced-ended-status-reason-split); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; drain_out="$dir/drain.out"
+  window="test:fm-personal-brain-redesign-k7"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/ended.meta"
+  printf 'idle: waiting for captain\n' > "$capture_file"
+  printf 'needs-decision: confirm the rollback path\n' > "$state/status.status"
+  : > "$state/ended.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "watcher did not exit for a coalesced ended-without-status + actionable status batch"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the coalesced batch failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/ended.turn-ended" | grep -F "ended-without-status:$state/ended.turn-ended" >/dev/null \
+    || fail "ended-without-status turn-end did not keep its per-task reason in coalesced queue payload"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/status.status" | grep -F "signal:$state/status.status" >/dev/null \
+    || fail "coalesced actionable status was wrongly tagged as ended-without-status"
+  pass "coalesced no-status turn-end and actionable status wake in one batch keeps per-task reason labels"
 }
 
 test_working_note_not_working_surfaced() {
@@ -1107,6 +1182,9 @@ test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_no_status_idle_blackbox
+test_turn_ended_capture_running_runstep_is_absorbed_blackbox
+test_turn_ended_and_status_coalesced_reason_split_blackbox
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
