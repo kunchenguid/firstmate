@@ -21,6 +21,9 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+Teardown closes a finished task's row itself rather than leaving the write to the agent: `bin/fm-teardown.sh` moves the row to Done through the selected backend, and falls back to printing a manual reminder only when the backend is `manual` or `tasks-axi` is missing or incompatible (its `backlog_refresh` header owns the link-flag rule and the failure behavior).
+Bootstrap backstops that write with a purely local orphan-row check: an item still under `## In flight` whose `state/<id>.meta` is gone is reported as `BACKLOG_ORPHAN: <id> ...`, because a task with no runtime record and an open row is finished work firstmate would otherwise keep re-reporting as still open.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

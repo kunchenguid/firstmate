@@ -43,7 +43,14 @@
 #   (q4) Codebase lookup error + content absent                 -> REFUSE (fail-safe)
 #   (q5) Codebase lookup error + content already in default     -> ALLOW  (quiet fallback)
 #
-# Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
+# Also covers the backlog write teardown owns (bin/fm-teardown.sh's backlog_refresh),
+# which used to be a printed reminder the agent dropped four times, leaving merged
+# tasks under `## In flight`:
+#   (z1) PR-based ship task     -> row actually moves to Done, PR link recorded
+#   (z2) Codebase MR ship task  -> link lands via --note, never the rejected --pr
+#   (z3) backlog write fails    -> loud banner, never swallowed
+#
+# Also covers teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
@@ -57,7 +64,23 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# fm_backlog_inflight_ids: the same In-flight row reader bootstrap's orphan check
+# uses, so the backlog assertions below read rows exactly as firstmate does.
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+
+# The backlog-write cases delegate to the real tasks-axi binary (a stub that exits
+# 0 would prove nothing about the row moving), matching tests/fm-backlog-handoff.
+# Only those cases need it; the landed-work safety cases below still run without it.
+HAVE_TASKS_AXI=0
+fm_tasks_axi_compatible && HAVE_TASKS_AXI=1
+
+require_tasks_axi() {
+  [ "$HAVE_TASKS_AXI" = 1 ] && return 0
+  echo "skip: compatible tasks-axi not found (required by the teardown backlog write)"
+  return 1
+}
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -134,7 +157,46 @@ SH
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
 
+  # The case dir doubles as the firstmate home teardown writes its backlog through
+  # (run_teardown passes FM_HOME), so give it the same tasks-axi config the real
+  # home has. Without this, teardown's backlog write would reach the real repo.
+  mkdir -p "$case_dir/data"
+  cat > "$case_dir/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+
   printf '%s\n' "$case_dir"
+}
+
+# Seed the case home's backlog with the task in flight, so teardown has a row to
+# close. Args: case_dir
+seed_backlog_in_flight() {
+  local case_dir=$1
+  cat > "$case_dir/data/backlog.md" <<'MD'
+# Backlog
+
+## In flight
+- [ ] task-x1 - ship the thing (repo: project) (kind: ship) (since 2026-07-13)
+## Queued
+## Done
+MD
+}
+
+# Task ids still under `## In flight` in the case home's backlog. Args: case_dir
+in_flight_ids() {
+  local case_dir=$1
+  fm_backlog_inflight_ids "$case_dir/data/backlog.md"
+}
+
+# Everything under `## Done` in the case home's backlog. Args: case_dir
+done_block() {
+  local case_dir=$1
+  awk '/^## Done/ { d = 1; next } /^## / { d = 0 } d' "$case_dir/data/backlog.md"
 }
 
 add_compatible_tasks_axi() {
@@ -535,6 +597,7 @@ SH
 run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -558,23 +621,78 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
-test_teardown_prompts_tasks_axi_done_when_compatible() {
+# Defect 1: teardown used to only PRINT a `tasks-axi done` command, and the agent
+# dropped that step four times in a row, leaving merged tasks under `## In flight`.
+# Teardown must now perform the write itself. Exercises the real tasks-axi binary,
+# because a stub that exits 0 would prove nothing about the row actually moving.
+test_teardown_moves_github_pr_row_to_done() {
   local case_dir out
-  case_dir=$(make_case tasks-axi-reminder)
+  require_tasks_axi || return 0
+  case_dir=$(make_case tasks-axi-write-pr)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  add_compatible_tasks_axi "$case_dir"
+  seed_backlog_in_flight "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
+
+  in_flight_ids "$case_dir" | grep -qx task-x1 \
+    && fail "teardown left task-x1 under ## In flight: $(cat "$case_dir/data/backlog.md")"
+  done_block "$case_dir" | grep -F 'https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "teardown did not record the PR link in Done: $(cat "$case_dir/data/backlog.md")"
+  printf '%s\n' "$out" | grep -F 'moved task-x1 to Done' >/dev/null \
+    || fail "teardown did not report the backlog write: $out"
   printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
+    || fail "teardown dropped the queue re-scan guidance: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
-    || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
-    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
-  pass "teardown prompts tasks-axi backlog refresh when compatible"
+    || fail "teardown dropped the date-gate check: $out"
+  pass "teardown moves a PR-based ship task's row to Done itself"
+}
+
+# Defect 2: the emitted command hardcoded --pr, which tasks-axi rejects for a
+# Codebase MR URL (it validates --pr as an http(s) URL ending in /pull/<number>).
+# Every fleet project is on Codebase, so the link has to go in --note instead.
+test_teardown_records_codebase_mr_via_note() {
+  local case_dir out mr
+  require_tasks_axi || return 0
+  mr='https://code.byted.org/example/repo/merge_requests/14'
+  case_dir=$(make_case tasks-axi-write-mr)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "pr=$mr" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed for a Codebase MR task"
+
+  in_flight_ids "$case_dir" | grep -qx task-x1 \
+    && fail "teardown left the Codebase MR task under ## In flight: $(cat "$case_dir/data/backlog.md")"
+  done_block "$case_dir" | grep -F "$mr" >/dev/null \
+    || fail "teardown did not record the MR link in Done: $(cat "$case_dir/data/backlog.md")"
+  printf '%s\n' "$out" | grep -F 'VALIDATION_ERROR' >/dev/null \
+    && fail "teardown passed a Codebase MR URL to --pr: $out"
+  pass "teardown records a Codebase MR link via --note, not the rejected --pr"
+}
+
+# A backlog write that fails must be loud: the worktree is already gone, so a
+# swallowed failure recreates exactly the orphan-row bug.
+test_teardown_reports_backlog_write_failure_loudly() {
+  local case_dir rc
+  require_tasks_axi || return 0
+  case_dir=$(make_case tasks-axi-write-fails)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # A backlog that exists but never carried this task: tasks-axi done -> NOT_FOUND.
+  printf '%s\n' '# Backlog' '' '## In flight' '## Queued' '## Done' > "$case_dir/data/backlog.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "backlog-write failure must not abort a completed teardown"
+  grep -F 'BACKLOG NOT UPDATED' "$case_dir/stderr" >/dev/null \
+    || fail "teardown swallowed the backlog write failure: $(cat "$case_dir/stderr")"
+  grep -F 'FAILED to move task-x1 to Done' "$case_dir/stdout" >/dev/null \
+    || fail "teardown did not report the failed backlog write on stdout: $(cat "$case_dir/stdout")"
+  pass "teardown reports a failed backlog write loudly instead of swallowing it"
 }
 
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
@@ -1383,7 +1501,9 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_moves_github_pr_row_to_done
+test_teardown_records_codebase_mr_via_note
+test_teardown_reports_backlog_write_failure_loudly
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

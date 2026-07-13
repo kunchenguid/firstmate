@@ -2,8 +2,11 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# tasks, then move the task's data/backlog.md row to Done for ship and scout
+# teardowns (a secondmate teardown touches no backlog row, since secondmates are
+# not backlog items). Teardown performs that backlog write itself - see
+# backlog_refresh below for why, for the --pr/--note/--report link rule, and for
+# the manual-reminder fallback when there is no backlog backend to write through.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -292,32 +295,89 @@ work_is_landed() {
   content_in_default
 }
 
-backlog_refresh_reminder() {
-  local pr done_cmd report_path
-  [ "$KIND" = secondmate ] && return 0
-  if fm_tasks_axi_backend_available "$CONFIG"; then
-    case "$KIND" in
-      scout)
-        report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
-        ;;
-      *)
-        if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
-        else
-          pr=$PR_URL
-          if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
-          else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
-          fi
-        fi
-        ;;
-    esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
-  else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+# Which link flag records this task's Done entry, per AGENTS.md section 10:
+#   scout            -> --report data/<id>/report.md
+#   local-only ship  -> --note "local main"
+#   PR-based ship    -> --pr <url> ONLY for a GitHub pull-request URL; every other
+#                       link shape, notably a Codebase MR (.../merge_requests/<n>),
+#                       goes in --note, because `tasks-axi done --pr` validates its
+#                       argument as an http(s) URL ending in /pull/<number> and
+#                       rejects anything else with VALIDATION_ERROR.
+# Prints one flag per line (flag, then value); prints nothing when a PR-based ship
+# task has no pr= recorded, so the row still closes and the link can be backfilled.
+backlog_done_link_args() {
+  if [ "$KIND" = scout ]; then
+    printf '%s\n%s\n' --report "data/$ID/report.md"
+    return 0
   fi
+  if [ "$MODE" = local-only ]; then
+    printf '%s\n%s\n' --note "local main"
+    return 0
+  fi
+  [ -n "$PR_URL" ] || return 0
+  if [[ "$PR_URL" =~ ^https?://.*/pull/[0-9]+$ ]]; then
+    printf '%s\n%s\n' --pr "$PR_URL"
+  else
+    printf '%s\n%s\n' --note "$PR_URL"
+  fi
+}
+
+backlog_failure_banner() {
+  local detail=$1 rule
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  BACKLOG NOT UPDATED - %s IS STILL OPEN IN data/backlog.md\n' "$ID"
+    printf '●  Teardown removed the worktree, branch, and state for %s, so nothing else\n' "$ID"
+    printf '●  will ever close its row. Close it by hand NOW.\n'
+    printf '●  %s\n' "$detail"
+    printf '●%s\n' "$rule"
+  } >&2
+}
+
+# Move this task's backlog row to Done. Teardown owns the write rather than
+# printing a command for the agent to run: by this point the worktree, branch, and
+# state/<id>.meta are gone, so a skipped update leaves a row nothing else can close
+# (four merged tasks were re-reported to the captain as still awaiting approval,
+# days after they landed). Falls back to a printed reminder only when there is no
+# backlog backend to write through: config/backlog-backend=manual, or tasks-axi
+# missing/incompatible. Failures are loud, never swallowed; bootstrap's
+# BACKLOG_ORPHAN check is the backstop that catches whatever still slips.
+# Re-scanning Queued and dispatching unblocked work stays an agent decision and is
+# printed, never automated here.
+backlog_refresh() {
+  local backlog next_step out link_args=()
+  [ "$KIND" = secondmate ] && return 0
+  next_step="Then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+  backlog="$DATA/backlog.md"
+
+  if ! fm_tasks_axi_backend_available "$CONFIG"; then
+    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    return 0
+  fi
+
+  if [ ! -f "$backlog" ]; then
+    printf '%s\n' "Backlog: $ID just finished; no backlog at $backlog, so no row to close. $next_step"
+    return 0
+  fi
+
+  while IFS= read -r arg; do
+    link_args+=("$arg")
+  done < <(backlog_done_link_args)
+
+  # tasks-axi reads done_keep/archive from the home's .tasks.toml, so run it there
+  # while pointing --file at this home's backlog explicitly.
+  if out=$( cd "$FM_HOME" && tasks-axi "done" "$ID" --file "$backlog" ${link_args[@]+"${link_args[@]}"} 2>&1 ); then
+    printf '%s\n' "Backlog: moved $ID to Done in data/backlog.md. $next_step"
+    if [ "$KIND" != scout ] && [ "$MODE" != local-only ] && [ -z "$PR_URL" ]; then
+      printf '%s\n' "Backlog: no PR/MR URL was recorded for $ID, so its Done entry has no link. Backfill it with: tasks-axi done $ID --pr <github pull url> (or --note <codebase MR url>)."
+    fi
+    return 0
+  fi
+
+  printf '%s\n' "$out" >&2
+  backlog_failure_banner "Fix the cause above, then run: tasks-axi done $ID (add --pr <github pull url>, --note <other link>, or --report <path>)."
+  printf '%s\n' "Backlog: FAILED to move $ID to Done - see the banner above. $next_step"
 }
 
 registry_home_for_line() {
@@ -1108,4 +1168,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
-backlog_refresh_reminder
+backlog_refresh
