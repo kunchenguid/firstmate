@@ -14,7 +14,7 @@
 # signal and is completely unaffected.
 #
 # Each entrypoint is exercised in three scenarios, isolating exactly ONE signal:
-#   - env-marker refuse : neutral cwd + NO_MISTAKES_GATE=1        -> exit 3, no mutation
+#   - env-marker refuse : neutral cwd + NO_MISTAKES_GATE set      -> exit 3, no mutation
 #   - path-backstop refuse: gate-worktree cwd + marker UNSET      -> exit 3, no mutation
 #   - no-regression      : neutral cwd + marker UNSET             -> succeeds, no gate error
 # The marker is UNSET explicitly in the no-regression/backstop runs (env -u) and
@@ -77,7 +77,7 @@ NORMAL_CWD=$(make_normal_repo "$TMP/normal-cwd")
 
 # --- the shared helper, tested directly -------------------------------------
 
-# run_guard_lib <cwd> [set] : from <cwd>, source the lib and call the guard under
+# run_guard_lib <cwd> [set|empty] : from <cwd>, source the lib and call the guard under
 # set -eu in a subshell (proving set -eu safety). NO_MISTAKES_GATE is unset first;
 # a literal "set" second argument re-exports it, so callers pick the signal under
 # test. Echoes combined output; the guard's exit is the caller's $?.
@@ -86,7 +86,10 @@ run_guard_lib() {
   (
     cd "$cwd" || exit 111
     unset NO_MISTAKES_GATE FM_GATE_REFUSE_BYPASS
-    [ "$marker" = set ] && export NO_MISTAKES_GATE=1
+    case "$marker" in
+      set) export NO_MISTAKES_GATE=1 ;;
+      empty) export NO_MISTAKES_GATE= ;;
+    esac
     set -eu
     # shellcheck source=bin/fm-gate-refuse-lib.sh
     . "$GATE_LIB"
@@ -100,6 +103,14 @@ test_helper_env_marker_refuses() {
   expect_code 3 "$rc" "helper: env marker must exit 3"
   assert_contains "$out" "$ENV_MSG" "helper: env-marker refusal message"
   pass "fm-gate-refuse-lib: refuses when NO_MISTAKES_GATE is set"
+}
+
+test_helper_empty_env_marker_refuses() {
+  local out rc
+  out=$(run_guard_lib "$NORMAL_CWD" empty); rc=$?
+  expect_code 3 "$rc" "helper: empty env marker must exit 3"
+  assert_contains "$out" "$ENV_MSG" "helper: empty env-marker refusal message"
+  pass "fm-gate-refuse-lib: refuses when NO_MISTAKES_GATE is set empty"
 }
 
 test_helper_path_backstop_refuses() {
@@ -378,6 +389,7 @@ test_no_mistakes_yaml_disables_project_settings() {
 }
 
 test_helper_env_marker_refuses
+test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
 test_helper_normal_is_noop
 test_spawn_refuses_and_admits

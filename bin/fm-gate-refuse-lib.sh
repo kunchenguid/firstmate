@@ -70,7 +70,7 @@ fm_refuse_if_gate_agent() {
   if [ "${FM_GATE_REFUSE_BYPASS:-}" = 1 ]; then
     return 0
   fi
-  if [ -n "${NO_MISTAKES_GATE:-}" ]; then
+  if [ "${NO_MISTAKES_GATE+x}" = x ]; then
     echo "error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)" >&2
     exit "$FM_GATE_REFUSE_EXIT"
   fi
