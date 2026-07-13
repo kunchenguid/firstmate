@@ -16,6 +16,13 @@ ID=$1
 SESSION=$2
 
 META="$STATE/$ID.meta"
+PREV_SESSION=""
+if [ -f "$META" ]; then
+  PREV_SESSION=$(grep '^jules_session=' "$META" | tail -1 | cut -d= -f2-)
+fi
+if [ "$PREV_SESSION" != "$SESSION" ]; then
+  rm -f "$STATE/$ID.jules.state"
+fi
 if [ -f "$META" ] && ! grep -qxF "jules_session=$SESSION" "$META"; then
   echo "jules_session=$SESSION" >> "$META"
 fi

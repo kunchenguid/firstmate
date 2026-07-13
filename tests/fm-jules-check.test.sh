@@ -160,9 +160,41 @@ test_check_sh_exits_zero_without_jules_axi() {
   pass "check.sh exits 0 silently when jules-axi is not on PATH"
 }
 
+test_rearm_new_session_clears_stale_watermark() {
+  local case_dir
+  case_dir=$(make_case rearm-new-session)
+
+  arm_jules_check "$case_dir" "sesh-old" >/dev/null 2>&1
+  echo "stale-watermark-from-old-session" > "$case_dir/state/task-x1.jules.state"
+
+  arm_jules_check "$case_dir" "sesh-new" >/dev/null 2>&1
+
+  [ ! -e "$case_dir/state/task-x1.jules.state" ] || \
+    fail "rearm-new-session: stale watermark should be removed when session changes"
+  assert_grep 'jules_session=sesh-new' "$case_dir/state/task-x1.meta" \
+    "rearm-new-session: meta should record the new session"
+  pass "fm-jules-check clears the stale watermark on a genuine re-arm"
+}
+
+test_rearm_same_session_keeps_watermark() {
+  local case_dir
+  case_dir=$(make_case rearm-same-session)
+
+  arm_jules_check "$case_dir" "sesh-same" >/dev/null 2>&1
+  echo "in-progress-watermark" > "$case_dir/state/task-x1.jules.state"
+
+  arm_jules_check "$case_dir" "sesh-same" >/dev/null 2>&1
+
+  assert_present "$case_dir/state/task-x1.jules.state" \
+    "rearm-same-session: watermark should survive an idempotent re-arm"
+  pass "fm-jules-check preserves the watermark when the session is unchanged"
+}
+
 test_first_arm_appends_jules_session
 test_second_arm_idempotent
 test_check_sh_invokes_jules_axi_watch
 test_check_sh_silent_on_no_output
 test_check_sh_echoes_transition
 test_check_sh_exits_zero_without_jules_axi
+test_rearm_new_session_clears_stale_watermark
+test_rearm_same_session_keeps_watermark
