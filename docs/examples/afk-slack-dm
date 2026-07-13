@@ -21,6 +21,11 @@ sender=slack-api
 # token-source=file:/absolute/path/to/dedicated-slack-bot-token
 # token-source=command:/absolute/path/to/print-dedicated-slack-bot-token
 
+# Optional attribution name.
+# When set, DMs begin "AI agent for <name> here —"; when unset, the generic
+# "AI agent here —" prefix is used.
+# name=Captain
+
 # Do not point this at broad production/staging firehose tokens.
 # For unattended daemon delivery, provision a dedicated least-privilege Slack bot
 # token or add a future MCP-call token-source adapter instead.

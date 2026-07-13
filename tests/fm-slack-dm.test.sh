@@ -26,12 +26,13 @@ make_slack_case() {
   printf '%s\n' "$dir"
 }
 
-write_dm_config() {  # <dir> <destination> <token-source>
-  local dir=$1 dest=$2 source=$3
+write_dm_config() {  # <dir> <destination> <token-source> [name|-]
+  local dir=$1 dest=$2 source=$3 name=${4:-Tim}
   {
     printf 'destination=%s\n' "$dest"
     printf 'sender=slack-api\n'
     printf 'token-source=%s\n' "$source"
+    [ "$name" = - ] || printf 'name=%s\n' "$name"
   } > "$dir/config/afk-slack-dm"
 }
 
@@ -195,6 +196,40 @@ test_slack_dm_requires_message_prefix() {
   pass "fm-slack-dm requires the AI agent attribution prefix"
 }
 
+test_slack_dm_generic_prefix_when_name_unset() {
+  local dir token_file api out status body
+  dir=$(make_slack_case generic-prefix)
+  token_file="$dir/token"
+  printf 'xoxb-generic-success\n' > "$token_file"
+  write_dm_config "$dir" U123ABC "file:$token_file" -
+  write_dm_message "$dir" "AI agent here — update from your fleet:"$'\n'"- done: ready"
+  api=$(start_fake_slack "$dir" success)
+
+  out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
+  status=$?
+
+  expect_code 0 "$status" "helper generic-prefix success"
+  body=$(tail -1 "$dir/requests.jsonl" | node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(0,"utf8")); console.log(JSON.parse(r.body).text)')
+  assert_contains "$body" "AI agent here —" "request body missing generic prefix"
+  pass "fm-slack-dm accepts the generic prefix when config name is unset"
+}
+
+test_slack_dm_named_config_rejects_generic_prefix() {
+  local dir token_file out status
+  dir=$(make_slack_case named-rejects-generic)
+  token_file="$dir/token"
+  printf 'xoxb-named-secret\n' > "$token_file"
+  write_dm_config "$dir" U123ABC "file:$token_file"
+  printf 'AI agent here — update from your fleet:\n- done: ready\n' > "$dir/message.txt"
+
+  out=$("$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "helper should reject a generic prefix when config sets name"
+  assert_contains "$out" "required AI agent attribution" "named-config prefix rejection missing"
+  pass "fm-slack-dm derives the required prefix from the config name"
+}
+
 test_slack_dm_token_not_in_process_args() {
   local dir token_file api out pid args status
   dir=$(make_slack_case process-args)
@@ -249,5 +284,7 @@ test_slack_dm_network_error_fails
 test_slack_dm_missing_token_degrades_without_request
 test_slack_dm_rejects_channel_destination
 test_slack_dm_requires_message_prefix
+test_slack_dm_generic_prefix_when_name_unset
+test_slack_dm_named_config_rejects_generic_prefix
 test_slack_dm_token_not_in_process_args
 test_slack_dm_command_token_not_in_process_args

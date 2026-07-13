@@ -110,6 +110,8 @@ sender=slack-api
 token-source=file:/absolute/path/to/dedicated-slack-bot-token
 # Or:
 # token-source=command:/absolute/path/to/print-dedicated-slack-bot-token
+# Optional:
+# name=Captain
 ```
 
 `destination` is required and must be a Slack user ID beginning with `U` or `W`.
@@ -119,6 +121,9 @@ Channel IDs, group IDs, and DM conversation IDs beginning with `C`, `G`, or `D` 
 The token is read inside the helper process and is never passed as an argv value to another command.
 Do not put token literals in this config; command sources should invoke a local credential reader that prints the token on stdout.
 Empty output, an absent file, or a non-zero token command degrades gracefully as a failed delivery: no token is logged, the buffer is retained, and the daemon retries.
+`name` is optional and personalizes the required message attribution prefix: `AI agent for <name> here —` when set, and the generic `AI agent here —` when unset.
+The daemon composes the prefix and the helper validates it from the same config key, so the two always agree, and no personal name lives in tracked files.
+If persistent Slack DM failure keeps the buffer undelivered past the max-defer window, the daemon fires the same loud out-of-band wedge alarm as injection mode (`config/wedge-alarm` / Notification Center) while preserving the buffer and the specific failure reason in the marker.
 
 Do not source broad production or staging firehose tokens for this file.
 Unattended daemon delivery requires either a dedicated least-privilege Slack bot token or a future MCP-call token-source plugin that performs the send without exposing a general-purpose token.

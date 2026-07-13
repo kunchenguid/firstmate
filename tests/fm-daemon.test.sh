@@ -583,13 +583,14 @@ SH
   printf '%s\n' "$helper"
 }
 
-write_fake_slack_dm_config() {  # <dir> [destination]
-  local dir=$1 dest=${2:-U123ABC}
+write_fake_slack_dm_config() {  # <dir> [destination] [name|-]
+  local dir=$1 dest=${2:-U123ABC} name=${3:-Tim}
   mkdir -p "$dir/config"
   {
     printf 'destination=%s\n' "$dest"
     printf 'sender=slack-api\n'
     printf 'token-source=none\n'
+    [ "$name" = - ] || printf 'name=%s\n' "$name"
   } > "$dir/config/afk-slack-dm"
 }
 
@@ -616,6 +617,42 @@ test_slack_dm_flush_success_acknowledges_without_terminal_injection() {
   assert_contains "$(cat "$dm_log")" "done: PR https://github.example/pr/1" "DM message missing sanitized outcome"
   assert_not_contains "$(cat "$dm_log")" "job.status" "DM message leaked status filename"
   pass "Slack DM flush success acknowledges the buffer without terminal injection"
+}
+
+test_slack_dm_generic_prefix_when_name_unset() {
+  local dir state helper dm_log
+  dir=$(make_supercase slack-generic-prefix)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir" U123ABC -
+  escalate_add "$state" "done: PR https://github.example/pr/7"
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "generic-prefix Slack DM flush failed"
+
+  assert_contains "$(cat "$dm_log")" "AI agent here —" "DM message missing generic default prefix"
+  assert_not_contains "$(cat "$dm_log")" "AI agent for " "unset name still produced a personalized prefix"
+  pass "Slack DM uses the generic attribution prefix when config name is unset"
+}
+
+test_slack_dm_failure_marker_records_real_helper_exit() {
+  local dir state helper dm_log
+  dir=$(make_supercase slack-exit-code)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "failed: pipeline broke"
+  afk_enter "$state"
+
+  if FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=3 escalate_flush "$state"; then
+    fail "Slack DM helper exit 3 should make escalate_flush fail"
+  fi
+  assert_grep "helper-exit-3" "$state/.subsuper-slack-dm-failed" "failure marker did not record the real helper exit code"
+  pass "Slack DM failure marker records the helper's real exit code"
 }
 
 test_slack_dm_failure_preserves_buffer_for_retry() {
@@ -746,6 +783,59 @@ test_status_digest_dm_request_is_explicit_only() {
   assert_contains "$(cat "$dm_log")" "status digest requested" "status digest DM was not sent"
   assert_contains "$(cat "$dm_log")" "working: still building" "status digest omitted routine status"
   pass "explicit status-digest DM request does not broaden routine classification"
+}
+
+test_slack_dm_max_defer_fires_out_of_band_wedge_alarm() {
+  local dir state helper dm_log alarm_log
+  dir=$(make_supercase slack-maxdefer-alarm)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  alarm_log="$dir/alarm.log"; : > "$alarm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=1 FM_WEDGE_ALARM_LOG="$alarm_log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "DM-mode max-defer did not write the wedge marker"
+  assert_grep "WEDGED" "$alarm_log" "DM-mode max-defer did not fire the out-of-band wedge alarm channel"
+  assert_grep "helper-exit-1" "$state/.subsuper-slack-dm-failed" "generic max-defer reason overwrote the specific per-attempt failure reason"
+  assert_no_grep "max-defer-" "$state/.subsuper-slack-dm-failed" "failure marker overwritten with the generic max-defer reason"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost on DM-mode max-defer"
+  pass "DM-mode max-defer fires the loud out-of-band wedge alarm and preserves the specific failure reason"
+}
+
+test_slack_dm_max_defer_alarm_throttles_despite_marker_rewrites() {
+  local dir state helper dm_log alarm_log count
+  dir=$(make_supercase slack-maxdefer-throttle)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  alarm_log="$dir/alarm.log"; : > "$alarm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "blocked: waiting on credentials"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=1 FM_WEDGE_ALARM_LOG="$alarm_log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  # A batch-tick failure rewrites the Slack failure marker; the alarm throttle
+  # must survive that and stay once-per-window on the second pass.
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=1 FM_WEDGE_ALARM_LOG="$alarm_log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+
+  count=$(grep -c 'WEDGED' "$alarm_log" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || fail "expected exactly one out-of-band alarm per max-defer window, got $count"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost across throttled max-defer passes"
+  pass "DM-mode max-defer alarm throttles once per window despite failure-marker rewrites"
 }
 
 test_heartbeat_scan_dedup() {
@@ -1930,7 +2020,11 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_slack_dm_flush_success_acknowledges_without_terminal_injection
+test_slack_dm_generic_prefix_when_name_unset
+test_slack_dm_failure_marker_records_real_helper_exit
 test_slack_dm_failure_preserves_buffer_for_retry
+test_slack_dm_max_defer_fires_out_of_band_wedge_alarm
+test_slack_dm_max_defer_alarm_throttles_despite_marker_rewrites
 test_slack_dm_no_double_send_after_ack
 test_slack_dm_config_absent_keeps_terminal_injection_path
 test_slack_dm_afk_inactive_defers_and_preserves_buffer

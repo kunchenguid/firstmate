@@ -181,7 +181,7 @@ The config schema and token-source contract live in `docs/configuration.md` "Awa
 A successful DM is the captain-facing acknowledgement and clears `state/.subsuper-escalations`.
 A failed DM retains the buffer and sidecar timestamp for retry, and writes the secret-free catch-up marker `state/.subsuper-slack-dm-failed`.
 Terminal injection is not counted as captain delivery while Slack DM mode is configured.
-Messages sent by the helper must begin `AI agent for Tim here —` and the helper rejects Slack channel, group, and DM-conversation IDs.
+Messages sent by the helper must begin with the AI agent attribution prefix - `AI agent for <name> here —` when the config sets the optional `name` key, otherwise the generic `AI agent here —` - and the helper rejects Slack channel, group, and DM-conversation IDs.
 An explicit status digest DM request is represented by `state/.subsuper-status-digest-dm-request`; housekeeping converts it into one buffered digest item, then removes the marker.
 This explicit request does not broaden routine classification: ordinary `working:` and other non-captain-relevant statuses still self-handle unless that marker exists.
 

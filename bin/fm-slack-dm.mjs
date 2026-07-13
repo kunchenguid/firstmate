@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REQUIRED_PREFIX = "AI agent for Tim here —";
+const DEFAULT_PREFIX = "AI agent here —";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TOKEN_OUTPUT_BYTES = 64 * 1024;
 
@@ -21,6 +21,7 @@ Reads local config/afk-slack-dm:
   destination=U0123456789
   token-source=file:/absolute/path/to/token
   token-source=command:/absolute/path/to/print-token
+  name=Captain            # optional; personalizes the required attribution prefix
 
 Environment:
   FM_SLACK_DM_CONFIG   override config file path
@@ -198,8 +199,9 @@ async function main() {
     console.error("config error: message file is unreadable");
     return 3;
   }
+  const requiredPrefix = config.name ? `AI agent for ${config.name} here —` : DEFAULT_PREFIX;
   message = message.replace(/\s+$/g, "");
-  if (!message.startsWith(REQUIRED_PREFIX)) {
+  if (!message.startsWith(requiredPrefix)) {
     console.error("config error: message must begin with the required AI agent attribution");
     return 3;
   }
