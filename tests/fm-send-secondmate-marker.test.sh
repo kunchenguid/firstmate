@@ -206,13 +206,29 @@ test_marker_is_label_plus_invisible_separator() {
 
 test_marker_transformation_is_idempotent() {
   local once twice
-  once=$(fm_message_mark_from_firstmate "do the work")
-  twice=$(fm_message_mark_from_firstmate "$once")
+  fm_message_mark_from_firstmate "do the work" once
+  fm_message_mark_from_firstmate "$once" twice
   [ "$once" = "$twice" ] \
     || fail "already-marked content was double-prefixed"$'\n'"--- once ---"$'\n'"$(printf '%s' "$once" | od -An -tx1)"$'\n'"--- twice ---"$'\n'"$(printf '%s' "$twice" | od -An -tx1)"
   [ "$once" = "${FM_FROMFIRST_MARK}do the work" ] \
     || fail "marker transformation did not prefix bare content exactly once"
   pass "fm-marker: from-firstmate transformation is idempotent"
+}
+
+test_marked_send_preserves_trailing_newlines() {
+  local dir fb log home rc payload expected_hex got_hex
+  dir="$TMP_ROOT/sm-trailing-newlines"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-trailing-newlines)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  payload=$'audit the build\n\n'
+  run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
+  expect_code 0 "$rc" "marked send with trailing newlines should succeed"
+  expected_hex=$(printf '%s%s' "$FM_FROMFIRST_MARK" "$payload" | od -An -tx1 | tr -d ' \n')
+  got_hex=$(od -An -tx1 "$log" | tr -d ' \n')
+  [ "$got_hex" = "$expected_hex" ] \
+    || fail "marked send changed trailing newline bytes: expected $expected_hex, got $got_hex"
+  pass "fm-send: marked secondmate payload preserves trailing newline bytes"
 }
 
 test_secondmate_target_is_marked
@@ -222,3 +238,4 @@ test_explicit_window_is_not_marked
 test_key_path_is_not_marked
 test_marker_is_label_plus_invisible_separator
 test_marker_transformation_is_idempotent
+test_marked_send_preserves_trailing_newlines

@@ -211,7 +211,7 @@ if [ "${1:-}" = "--key" ]; then
 else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
-    MESSAGE=$(fm_message_mark_from_firstmate "$MESSAGE")
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before

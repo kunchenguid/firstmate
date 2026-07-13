@@ -60,14 +60,17 @@ fm_message_from_firstmate() {  # <message>
   return 1
 }
 
-# fm_message_mark_from_firstmate: print <message> with exactly one leading
+# fm_message_mark_from_firstmate: assign <message> with exactly one leading
 # from-firstmate marker. This is the single owner of marker transformation, so
 # callers cannot drift on separator bytes or double-prefix an already-marked
-# message. Prints no trailing newline.
-fm_message_mark_from_firstmate() {  # <message>
+# message.
+fm_message_mark_from_firstmate() {  # <message> <result-var>
+  local message=${1-} result_var=${2-} transformed
+  [ -n "$result_var" ] || return 2
   if fm_message_from_firstmate "$1"; then
-    printf '%s' "$1"
+    transformed=$message
   else
-    printf '%s%s' "$FM_FROMFIRST_MARK" "$1"
+    transformed="${FM_FROMFIRST_MARK}${message}"
   fi
+  printf -v "$result_var" '%s' "$transformed"
 }
