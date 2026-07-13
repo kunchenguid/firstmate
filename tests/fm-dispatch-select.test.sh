@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+JQ=$(command -v jq) || fail "jq is required for dispatch selection tests"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 mkdir -p "$TMP_ROOT"
 
@@ -63,6 +64,7 @@ test_exact_tie_uses_first_profile() {
 test_quota_missing_falls_back_to_first() {
   local fakebin out err status
   fakebin=$(fm_fakebin "$TMP_ROOT/missing")
+  ln -s "$JQ" "$fakebin/jq"
   out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles" 2>"$TMP_ROOT/missing.err")
   status=$?
   err=$(cat "$TMP_ROOT/missing.err")
@@ -76,6 +78,7 @@ test_quota_missing_falls_back_to_first() {
 test_quota_error_falls_back_to_first() {
   local fakebin out err status
   fakebin=$(fm_fakebin "$TMP_ROOT/error")
+  ln -s "$JQ" "$fakebin/jq"
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 exit 42
@@ -153,6 +156,7 @@ JSON
 test_backward_compatible_first_selection() {
   local fakebin marker out single array_rule
   fakebin=$(fm_fakebin "$TMP_ROOT/no-call")
+  ln -s "$JQ" "$fakebin/jq"
   marker="$TMP_ROOT/quota-called"
   cat > "$fakebin/quota-axi" <<SH
 #!/usr/bin/env bash

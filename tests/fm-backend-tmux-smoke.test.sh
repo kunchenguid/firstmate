@@ -48,6 +48,11 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+# The adapter is shell-agnostic, while this smoke sends POSIX shell syntax.
+# Pin the fixture shell so a user's fish/default-shell setting cannot rewrite
+# the commands under test into unrelated parser errors.
+tmux set-option -t "$SESSION" default-command /bin/sh \
+  || fail "real tmux: could not pin the test shell"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \

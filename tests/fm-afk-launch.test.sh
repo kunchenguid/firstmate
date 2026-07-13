@@ -238,20 +238,31 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker ready child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  ready="$st/ready"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_SIGNAL_READY="$ready" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() {
+      : > "$FM_AFK_SIGNAL_READY"
+      while :; do sleep 0.05; done
+    }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
   for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+    [ -e "$ready" ] && break
     sleep 0.05
   done
+  if [ ! -e "$ready" ]; then
+    kill -KILL "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "launcher signal: lifecycle never reached its guarded start"
+    rm -rf "$st"
+    return
+  fi
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
@@ -767,10 +778,21 @@ unit_flag_write_failure_aborts() {
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
 e2e_herdr() {
+  local herdr_lab_status
   command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found (herdr e2e)"; return 0; }
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
   # shellcheck source=tests/herdr-test-safety.sh
   . "$ROOT/tests/herdr-test-safety.sh"
+  herdr_test_lab_available
+  herdr_lab_status=$?
+  if [ "$herdr_lab_status" -ne 0 ]; then
+    if [ "$herdr_lab_status" -eq 1 ]; then
+      echo "skip: running default Herdr session required for lab safety"
+    else
+      fail "herdr e2e: lab safety preflight failed"
+    fi
+    return 0
+  fi
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
 

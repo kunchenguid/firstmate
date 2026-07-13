@@ -53,6 +53,12 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+herdr_test_lab_available
+herdr_lab_status=$?
+[ "$herdr_lab_status" -eq 0 ] || {
+  [ "$herdr_lab_status" -eq 1 ] && echo "skip: running default Herdr session required for lab safety"
+  exit $((herdr_lab_status == 1 ? 0 : 1))
+}
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) for the same
 # low-noise scratch fixture shape used by

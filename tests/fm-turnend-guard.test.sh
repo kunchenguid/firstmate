@@ -87,6 +87,7 @@ install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-turnend-guard-codex.sh" "$dir/bin/fm-turnend-guard-codex.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
@@ -94,7 +95,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-codex.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -616,9 +617,135 @@ test_codex_hook_invokes_shared_guard() {
   [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
   assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
   assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
-  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must preserve the shared guard entrypoint for cached sessions"
+  assert_not_contains "$command" 'fm-turnend-guard-codex.sh' "codex hook must let the shared guard route Codex payloads"
+  assert_contains "$(cat "$ROOT/bin/fm-turnend-guard-codex.sh")" 'fm-turnend-guard.sh' "codex adapter must invoke the shared guard"
   assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
+}
+
+test_codex_hook_never_blocks_when_watcher_is_unhealthy() {
+  local settings command dir payload out err status queue
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-unhealthy")
+  mkdir -p "$dir/.codex"
+  cp "$settings" "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","turn_id":"turn-test","hook_event_name":"Stop","stop_hook_active":false}'
+  err="$dir/codex-hook.err"
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>"$err"); status=$?
+  expect_code 0 "$status" "Codex Stop adapter must never block when the shared predicate finds an unhealthy watcher"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("TURN WOULD END BLIND"))' >/dev/null \
+    || fail "Codex adapter must return valid non-blocking JSON with a systemMessage: $out"
+  [ ! -s "$err" ] || fail "Codex adapter must keep stderr clean on the expected unhealthy-watcher path: $(cat "$err")"
+  queue="$dir/state/.wake-queue"
+  [ -s "$queue" ] || fail "Codex adapter must leave a durable wake when it cannot block"
+  assert_contains "$(cat "$queue")" "codex-turnend-guard" "Codex adapter durable wake must identify its source"
+  assert_contains "$out" "warning queued durably" "Codex adapter must report successful durable wake delivery"
+  assert_not_contains "$out" 'decision:block' "Codex adapter output must not request a blocking decision"
+  assert_not_contains "$command" 'decision:block' "Codex Stop adapter must not return a blocking decision"
+  pass ".codex/hooks.json: unhealthy watcher returns systemMessage JSON and queues durably without blocking Codex"
+}
+
+test_cached_codex_direct_guard_self_routes_without_blocking() {
+  local command dir payload out err status queue
+  # The cached hook command must remain literal so the nested shell expands it at execution time.
+  # shellcheck disable=SC2016
+  command='bash -lc '\''payload=$(cat 2>/dev/null || true); [ -n "$payload" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x "$root/bin/fm-turnend-guard.sh" ] || exit 0; [ -f "$root/AGENTS.md" ] || exit 0; [ -f "$root/.codex/hooks.json" ] || exit 0; jq -e "any(.hooks.Stop[]?.hooks[]?.command?; type == \"string\" and contains(\"fm-turnend-guard.sh\"))" "$root/.codex/hooks.json" >/dev/null 2>&1 || exit 0; printf "%s" "$payload" | "$root/bin/fm-turnend-guard.sh"'\'''
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-cached-direct")
+  mkdir -p "$dir/.codex"
+  cp "$ROOT/.codex/hooks.json" "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","turn_id":"turn-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","model":"gpt-test","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  err="$dir/cached-codex.err"
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>"$err"); status=$?
+  expect_code 0 "$status" "a cached Codex hook that directly invokes the shared guard must fail open"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("openai/codex#20783"))' >/dev/null \
+    || fail "cached Codex direct guard must return valid non-blocking warning JSON: $out"
+  [ ! -s "$err" ] || fail "cached Codex direct guard must keep stderr clean: $(cat "$err")"
+  queue="$dir/state/.wake-queue"
+  [ -s "$queue" ] || fail "cached Codex direct guard must leave a durable wake"
+  assert_contains "$(cat "$queue")" "codex-turnend-guard" "cached Codex durable wake must identify its source"
+  pass "fm-turnend-guard: cached Codex direct command self-routes through the fail-open adapter"
+}
+
+test_codex_adapter_reports_durable_wake_failure() {
+  local settings command dir payload out err status
+  settings="$ROOT/.codex/hooks.json"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-wake-failure")
+  mkdir -p "$dir/.codex"
+  cp "$settings" "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","turn_id":"turn-test","hook_event_name":"Stop","stop_hook_active":false}'
+  err="$dir/codex-wake-failure.err"
+  out=$(printf '%s' "$payload" | (cd "$dir" && FM_WAKE_QUEUE="$dir/state" bash -c "$command") 2>"$err"); status=$?
+  expect_code 0 "$status" "Codex adapter must fail open when durable wake delivery fails"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("durable warning could not be queued"))' >/dev/null \
+    || fail "Codex adapter must report durable wake delivery failure: $out"
+  assert_not_contains "$out" "warning queued durably" "Codex adapter must not claim failed wake delivery succeeded"
+  [ ! -s "$err" ] || fail "Codex adapter must keep stderr clean after wake delivery failure: $(cat "$err")"
+  pass "fm-turnend-guard-codex: reports durable wake delivery failure"
+}
+
+test_codex_adapter_bounds_durable_wake_contention() {
+  local settings command dir payload out err status owner holder start elapsed
+  settings="$ROOT/.codex/hooks.json"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-wake-contention")
+  mkdir -p "$dir/.codex"
+  cp "$settings" "$dir/.codex/hooks.json"
+  : > "$dir/state/task1.meta"
+  owner="$dir/state/held-wake-owner"
+  mkdir -p "$owner"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$owner/pid"
+  ln -s "$owner" "$dir/state/.wake-queue.lock"
+  payload='{"session_id":"session-test","turn_id":"turn-test","hook_event_name":"Stop","stop_hook_active":false}'
+  err="$dir/codex-wake-contention.err"
+  start=$SECONDS
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>"$err"); status=$?
+  elapsed=$((SECONDS - start))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "Codex adapter must fail open when durable wake delivery times out"
+  [ "$elapsed" -lt 4 ] || fail "Codex adapter spent ${elapsed}s waiting for the durable wake lock"
+  printf '%s' "$out" | jq -e '.continue == true and (.systemMessage | contains("durable warning timed out"))' >/dev/null \
+    || fail "Codex adapter must report bounded wake lock contention: $out"
+  [ ! -s "$err" ] || fail "Codex adapter must keep stderr clean after wake contention: $(cat "$err")"
+  pass "fm-turnend-guard-codex: bounds and reports durable wake contention"
+}
+
+test_cached_codex_direct_guard_ignores_adapter_failure() {
+  local dir payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-cached-adapter-failure")
+  cat > "$dir/bin/fm-turnend-guard-codex.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 2
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard-codex.sh"
+  payload='{"session_id":"session-test","turn_id":"turn-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","model":"gpt-test","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  out=$(printf '%s' "$payload" | bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cached Codex compatibility boundary must fail open even when its adapter exits 2"
+  [ -z "$out" ] || fail "failing Codex adapter stub unexpectedly produced output: $out"
+  pass "fm-turnend-guard: cached Codex compatibility route ignores adapter failure status"
+}
+
+test_claude_direct_guard_still_blocks_without_codex_turn_id() {
+  local dir payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/claude-hook-direct")
+  : > "$dir/state/task1.meta"
+  payload='{"session_id":"session-test","transcript_path":null,"cwd":"/tmp","hook_event_name":"Stop","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}'
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "Claude direct Stop guard must retain blocking exit status"
+  assert_contains "$out" "TURN WOULD END BLIND" "Claude direct Stop guard must preserve its continuation reason"
+  assert_not_contains "$out" '"continue":true' "Claude direct Stop guard must not return the Codex fail-open result"
+  pass "fm-turnend-guard: Claude direct command still blocks without Codex's turn_id extension"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
@@ -916,6 +1043,12 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
+test_codex_hook_never_blocks_when_watcher_is_unhealthy
+test_codex_adapter_reports_durable_wake_failure
+test_codex_adapter_bounds_durable_wake_contention
+test_cached_codex_direct_guard_self_routes_without_blocking
+test_cached_codex_direct_guard_ignores_adapter_failure
+test_claude_direct_guard_still_blocks_without_codex_turn_id
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup

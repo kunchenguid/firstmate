@@ -61,6 +61,20 @@ command -v jq >/dev/null 2>&1 || exit 0
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
+# Compatibility for Codex sessions that cached the former hook command before
+# .codex/hooks.json was changed to call the fail-open adapter. Codex's generated
+# Stop schema requires turn_id and documents it as a Codex extension; Claude's
+# direct blocking Stop payload and the passive harness adapters do not carry it.
+# Route only that exact Codex-shaped payload, and mark the adapter's call back
+# into this shared predicate so it cannot recurse.
+if [ "${FM_CODEX_TURNEND_ADAPTER_ACTIVE:-0}" != "1" ] \
+  && printf '%s' "$PAYLOAD" | jq -e \
+    '.hook_event_name == "Stop" and (.turn_id | type == "string" and length > 0)' \
+    >/dev/null 2>&1; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard-codex.sh" || true
+  exit 0
+fi
+
 # Return 0 when $1 (a firstmate root) carries a GENUINE secondmate-home marker.
 # bin/fm-home-seed.sh writes .fm-secondmate-home at a seeded secondmate home's
 # root (gitignored, so it never propagates into a child worktree); its content is
