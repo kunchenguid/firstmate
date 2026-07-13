@@ -167,12 +167,10 @@ fmx_request_inbox_context() {
 }
 
 # fmx_request_relay_context <request_id>: resolve the reply platform/limit
-# AUTHORITATIVELY from the relay by request_id, for when no local inbox payload
-# survives - e.g. the task is linked to its mention AFTER the inbox file was
-# drained (posting the ack reply removes it), which otherwise strands the link
-# with no platform and silently defaults follow-ups to the X 280-char budget.
-# The request_id is the durable key the relay still holds within the follow-up
-# window, so this makes the local ordering of link-vs-cleanup irrelevant.
+# AUTHORITATIVELY from the relay by request_id when local per-request registry or
+# inbox context is missing an axis. The request_id is the durable key the relay
+# still holds within the follow-up window, so live follow-ups can recover missing
+# context without using a local platform or budget default.
 #
 # POSTs {request_id} to $RELAY/connector/request-context and prints
 # {"platform":"...","reply_max_chars":"..."} in the SAME shape as
@@ -387,6 +385,8 @@ fmx_context_registry_clear() {
 # (typically: follow-up + live + token) so the answer path and dry-run stay
 # network-free. Requires fmx_load_config to have run when <allow-relay> is 1.
 fmx_resolve_reply_context() {
+  # Bash local accepts p= and m= as explicit empty assignment arguments.
+  # shellcheck disable=SC1007
   local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m p= m=
   for src in registry inbox relay; do
     case "$src" in
