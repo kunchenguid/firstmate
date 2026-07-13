@@ -20,6 +20,8 @@
 
 <h3 align="center">Talk to one agent. Ship with a crew.</h3>
 
+<p align="center">中文文档：<a href="README-zh.md">README-zh.md</a></p>
+
 <p align="center">
   <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
