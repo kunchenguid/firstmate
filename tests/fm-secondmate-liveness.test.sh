@@ -96,6 +96,13 @@ SH
 
 test_tmux_agent_state_classifies() {
   local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-devin" devin)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
+    || fail "a live devin foreground process should classify as alive"
+
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-zsh" zsh)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = dead ] \
+    || fail "a bare zsh foreground process should classify as dead"
 
   for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-$harness" "$harness")

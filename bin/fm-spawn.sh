@@ -69,6 +69,7 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|devin)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -114,6 +115,8 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+#     __DEVINCONFIG__ absolute path to state/<task-id>.devin-config.json
+# Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -424,6 +427,7 @@ FIRSTMATE_HOME=
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|grok|devin)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -489,6 +493,17 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # Devin CLI: --prompt-file avoids shell interpolation of the brief, dangerous
+    # is the unattended equivalent of the other adapters' bypass modes, and the
+    # per-task config carries the Stop turn-end hook without touching project config.
+    devin)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust false __MODELFLAG__--prompt-file __BRIEF__'
+      else
+        printf '%s' 'DEVIN_CLI=1 devin --config __DEVINCONFIG__ --permission-mode dangerous --respect-workspace-trust false __MODELFLAG__--prompt-file __BRIEF__'
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -613,6 +628,7 @@ model_flag_for_harness() {
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|grok|devin)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1520,6 +1536,12 @@ EOF
       # wiring is installed. The turn-end NOTIFICATION marker still rides
       # the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    devin*)
+      # Devin auto-loads project hooks, but use an isolated state-owned config for
+      # crewmates so firstmate never overwrites a project's own .devin/config.json.
+      # The same config is harmless for a secondmate, whose tracked primary hooks
+      # are loaded from its repository after the launch-time override is omitted.
+      ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
@@ -1588,6 +1610,15 @@ EOF
 fi
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
+DEVIN_CONFIG="$STATE/$ID.devin-config.json"
+if [ "$HARNESS" = devin ]; then
+  if [ "$KIND" != secondmate ]; then
+    turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
+    printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
+  fi
+fi
+
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
@@ -1654,6 +1685,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_devinconfig=$(shell_quote "$DEVIN_CONFIG")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1664,6 +1696,7 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__DEVINCONFIG__/$sq_devinconfig}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

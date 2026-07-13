@@ -76,6 +76,9 @@ While OpenCode is mid-turn, Enter queues the message but leaves its text visible
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+- `alive` - the name contains `claude`, `codex`, `opencode`, `grok`, or `devin`. The first four were confirmed on 2026-07-07; Devin CLI 3000.1.27 was confirmed on 2026-07-13 to remain the literal `devin` foreground process throughout an interactive turn.
+- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
+- `unknown` - anything else, including an unreadable pane.
 
 ## Limits and regression entry points
 

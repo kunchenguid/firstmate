@@ -59,6 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
+- A verified agent harness: Claude Code, Grok, Pi, Codex, OpenCode, or Devin CLI.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -72,7 +73,7 @@ Claude Code uses a tracked Stop hook for tokenless watcher re-arm and rewake, Gr
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 
-Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Codex, OpenCode, and Devin CLI are also verified and supported as primary harnesses; Codex and Devin use bounded foreground checkpoints, and OpenCode uses a TUI plugin, so all three carry more harness-specific supervision tradeoffs than the three co-primaries.
 
 ### Install and launch
 
@@ -110,6 +111,18 @@ Pi's `/calm` toggle hides supported transcript chrome, including canonically cla
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+
+The other verified primary harnesses launch normally from the repository root:
+
+```sh
+codex
+opencode
+devin
+```
+
+Install Devin CLI with Cognition's official installer when needed: `curl -fsSL https://cli.devin.ai/install.sh | bash`.
+Approve Devin's workspace-trust prompt once per clone so it loads the tracked `.devin/config.json` safety hooks.
+Devin uses bounded foreground supervision checkpoints.
 
 ### Talk to it
 
@@ -211,6 +224,15 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's current "no turn ends blind" backstop, scope, loop safety, and compatibility limits.
 - [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, and unknown harness fallback.
+- [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for a wedged away-mode escalation delivery.
+- [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
+- [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.
+- [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.
+- [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
+- [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
+- [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
+- [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
+- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, Devin, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
 - [`AGENTS.md`](AGENTS.md) - the distro's always-loaded operating contract and routing index for conditional procedures.

@@ -1,6 +1,7 @@
 ---
 name: harness-adapters
 description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and devin.
 user-invocable: false
 metadata:
   internal: true
@@ -60,6 +61,10 @@ Grok selects native blocking or its pre-native bounded resume fallback from the 
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
+Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
+`claude`, `codex`, and `devin` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+`opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Primary pre-arm (PreToolUse) seatbelt
@@ -67,6 +72,9 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+`claude`, `codex`, and `devin` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
+`opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 ## Primary delegation-shape guard
@@ -147,6 +155,7 @@ Use the discovery surface in the current authenticated environment because suppo
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
+| devin | `--model <model>` | none | Verified on Devin CLI 3000.1.27. The interactive CLI exposes no effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -168,6 +177,37 @@ Natural language is acceptable if uncertain.
 A send or key action reporting success is not proof that the intended action happened.
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
+- pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- devin: `/<skill>`. Devin CLI exposes skills as slash commands and discovers repository skills under `.devin/skills/`; use natural language if a specific installed skill is not listed.
+
+## devin (VERIFIED 2026-07-13, Devin CLI 3000.1.27)
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to interrupt` |
+| Exit command | `/exit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` |
+| Autonomy | `--permission-mode dangerous` |
+| Process name | `devin` |
+| Resume | `devin --resume <session-id>` or `devin --continue` |
+
+Launch with `DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust false --prompt-file <brief>`.
+Firstmate-launched crewmates add `--config <state-owned-config>` so their Stop hook never overwrites a project's own `.devin/config.json`.
+Secondmates omit that override and load the tracked primary hooks from their Firstmate home.
+
+Devin automatically loads repository `.devin/config.json`.
+Its shell tool is named `exec`, and the `PreToolUse` payload carries the exact command at `.tool_input.command`.
+Its native `Stop` hook fires at every completed turn and accepts the Claude-compatible command-hook schema.
+The tracked primary adapter uses direct blocking hooks for the watcher-arm seatbelt, cd guard, and turn-end guard.
+
+The primary supervision protocol uses bounded foreground checkpoints.
+No Devin background-task completion auto-wake contract has been verified, so do not substitute Claude or Grok background-notify supervision.
+
+The first launch may print the logged-in account and organization before the TUI.
+For a primary session launched normally, approve the workspace-trust prompt once per clone so repository hooks load.
+`--respect-workspace-trust false` suppresses the workspace-trust gate for unattended Firstmate launches.
 
 ## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
 

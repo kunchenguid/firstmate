@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "exec",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-arm-pretool-check.sh\" --claude'"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-cd-pretool-check.sh\" --claude'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; exec \"$root/bin/fm-turnend-guard.sh\"'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -3,7 +3,7 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
+# This suite drives the stable shell transport through all six harness entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
@@ -156,7 +156,7 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
-    claude)
+    claude|devin)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
       printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
@@ -185,8 +185,8 @@ run_matrix_entry() {
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ]; then
-    [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
+  if [ "$entry" = claude ] || [ "$entry" = devin ]; then
+    [ ! -s "$out_file" ] || fail "$id via $entry deny must leave stdout empty: $(cat "$out_file")"
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
@@ -196,10 +196,10 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude devin grok opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all six entry forms"
   done
 }
 

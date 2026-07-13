@@ -83,6 +83,7 @@ fi
 case "$HARNESS" in
   claude|codex|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
+  claude|codex|opencode|pi|grok|devin) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
@@ -142,6 +143,11 @@ repair_line() {
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
+    devin)
+      printf '%s%s%s%s\n' "$prefix" 'resume supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      ;;
+    pi)
+      printf '%s%s%s%s%s%s\n' "$prefix" 'resume supervision with the Pi tool fm_watch_arm_pi or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extension is not loaded.'
       ;;
     opencode)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'

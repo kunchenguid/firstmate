@@ -155,6 +155,18 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_devin_uses_foreground_checkpoint() {
+  local out
+  out=$($RENDER --harness devin)
+  assert_contains "$out" "Mode: Devin foreground checkpoint." "devin snippet missing foreground mode"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 180" "devin snippet missing checkpoint command"
+  assert_contains "$out" ".devin/config.json" "devin snippet missing native hook seatbelt"
+  assert_not_contains "$out" "background: true" "devin must not claim an unverified background wake"
+  out=$($RENDER --harness devin --repair-line)
+  assert_contains "$out" "foreground checkpoint" "devin repair line is not checkpoint-shaped"
+  pass "devin supervision uses bounded foreground checkpoints"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -179,4 +191,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_devin_uses_foreground_checkpoint
 test_pi_snippet_uses_effective_extension_path

@@ -454,6 +454,8 @@ secondmate_liveness_sweep() {
       *)
         case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
+      claude|codex|opencode|pi|grok|devin) ;;
+      *) [ "$verdict" = dead ] && verdict=unknown ;;
     esac
     case "$agent_state" in
       alive)
@@ -735,6 +737,7 @@ crew_dispatch_validate() {
   fi
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","grok","devin"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -743,6 +746,8 @@ crew_dispatch_validate() {
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" then false
+      elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
+      elif ($h == "opencode" or $h == "devin") then false
       else true
       end;
     def profiles($value):
