@@ -114,6 +114,21 @@ async function readToken(source) {
   throw new Error("unsupported token-source mode");
 }
 
+const pendingKillGroups = new Set();
+process.on("exit", () => {
+  for (const pid of pendingKillGroups) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+});
+
 function readCommandToken(command) {
   return new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-s"], {
@@ -136,6 +151,7 @@ function readCommandToken(command) {
       }
     };
     const abort = () => {
+      pendingKillGroups.add(child.pid);
       killGroup("SIGTERM");
       killTimer = setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
       killTimer.unref();
@@ -161,6 +177,8 @@ function readCommandToken(command) {
     });
     child.on("error", () => settle(""));
     child.on("close", (code) => {
+      clearTimeout(killTimer);
+      pendingKillGroups.delete(child.pid);
       settle(code === 0 ? cleanToken(stdout) : "");
     });
     child.stdin.end(command.endsWith("\n") ? command : `${command}\n`);
