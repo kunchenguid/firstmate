@@ -402,7 +402,10 @@ fm_backend_cmux_fetch_secret() {  # <secret-name> [region]
     echo "error: failed to fetch secret '$secret_name' from $where - ${aws_err:-check that AWS credentials/profile are configured}" >&2
     return 1
   fi
-  [ -n "$value" ] && [ "$value" != None ] || { echo "error: secret '$secret_name' from $where returned an empty value" >&2; return 1; }
+  if [ -z "$value" ] || [ "$value" = None ]; then
+    echo "error: secret '$secret_name' from $where returned an empty value" >&2
+    return 1
+  fi
   printf '%s' "$value"
 }
 
