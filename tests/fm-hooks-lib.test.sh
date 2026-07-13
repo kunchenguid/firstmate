@@ -59,7 +59,7 @@ write_logging_hook() {
   shift 3
   local var lines=""
   for var in "$@"; do
-    lines="$lines\${$var:-unset}\n"
+    lines="$lines$var=\${$var:-unset}\n"
   done
   cat > "$case_dir/config/hooks/$hook_name" <<SH
 #!/usr/bin/env bash
@@ -110,9 +110,9 @@ test_present_hook_gets_args_and_env() {
   expect_code 0 "$rc" "args-env: fm_hook_run should return 0"
   assert_grep 'args:task-x1 /some/meta' "$case_dir/hook.log" \
     "args-env: hook did not receive positional args"
-  assert_grep 'task-x1' "$case_dir/hook.log" "args-env: FM_HOOK_TASK_ID missing"
-  assert_grep '/some/meta' "$case_dir/hook.log" "args-env: FM_HOOK_META missing"
-  assert_grep 'ship' "$case_dir/hook.log" "args-env: FM_HOOK_KIND missing"
+  assert_grep 'FM_HOOK_TASK_ID=task-x1' "$case_dir/hook.log" "args-env: FM_HOOK_TASK_ID missing"
+  assert_grep 'FM_HOOK_META=/some/meta' "$case_dir/hook.log" "args-env: FM_HOOK_META missing"
+  assert_grep 'FM_HOOK_KIND=ship' "$case_dir/hook.log" "args-env: FM_HOOK_KIND missing"
   [ ! -s "$case_dir/stderr" ] || fail "args-env: unexpected stderr: $(cat "$case_dir/stderr")"
   pass "a present hook runs with positional args and FM_HOOK_* env"
 }

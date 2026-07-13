@@ -27,11 +27,13 @@ The first positional argument is always the task id.
 | --- | --- | --- | --- | --- |
 | `post-spawn` | `bin/fm-spawn.sh` | a task (any kind: `ship`, `scout`, `secondmate`) is fully launched and its `state/<id>.meta` is written; once per task in a batch | `$1` task id, `$2` absolute meta path | `FM_HOOK_TASK_ID`, `FM_HOOK_META`, `FM_HOOK_KIND` |
 | `pr-ready` | `bin/fm-pr-check.sh` | a PR URL is first recorded (`pr=` newly appended) for the task; re-runs, including `bin/fm-pr-merge.sh`'s internal recording re-run, never re-fire it | `$1` task id, `$2` PR URL | `FM_HOOK_TASK_ID`, `FM_HOOK_PR_URL` |
-| `post-merge` | `bin/fm-pr-merge.sh`, `bin/fm-merge-local.sh` | the task's work landed: its PR merged (ref = PR URL) or its local-only branch fast-forwarded into the local default branch (ref = branch name) | `$1` task id, `$2` ref | `FM_HOOK_TASK_ID`, `FM_HOOK_REF` |
+| `post-merge` | `bin/fm-pr-merge.sh`, `bin/fm-merge-local.sh` | firstmate itself merged the task's work: it merged the PR (ref = PR URL) or fast-forwarded the local-only branch into the local default branch (ref = branch name) | `$1` task id, `$2` ref | `FM_HOOK_TASK_ID`, `FM_HOOK_REF` |
 | `post-teardown` | `bin/fm-teardown.sh` | the task's worktree, endpoint, and state files are gone; only id and kind remain as identifiers | `$1` task id, `$2` kind | `FM_HOOK_TASK_ID`, `FM_HOOK_KIND` |
 
 This set is deliberately small: a hook point is added only where the lifecycle moment has clear personal-automation value and a single clean insertion, not scattered through every script.
 A `pr-ready` hook may fire from `bin/fm-pr-merge.sh` instead of `bin/fm-pr-check.sh` when the merge is the first time the PR is recorded (the yolo-merge-on-no-CI-repo flow); the once-per-(task, PR URL) guarantee is what a hook should rely on, not which script fired it.
+`post-merge` fires only for a merge firstmate performed through those two scripts.
+A PR merged outside firstmate - the captain clicking Merge in the GitHub UI, say, which the watcher's merge poll only detects afterwards - does not fire it, so a `post-merge` hook must not be relied on as a universal merge notification.
 
 Hooks run with the invoking script's working directory and stdio, so a hook that produces output should write to its own log or a display surface rather than polluting the calling script's stdout.
 Hooks are per-home local configuration and are not propagated into secondmate homes.
