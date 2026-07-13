@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TOKEN_OUTPUT_BYTES = 64 * 1024;
+const KILL_GRACE_MS = 2_000;
 
 function usage() {
   console.log(`Usage: fm-slack-dm.mjs [--config <file>] --message-file <file>
@@ -117,10 +118,29 @@ function readCommandToken(command) {
   return new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-s"], {
       stdio: ["pipe", "pipe", "ignore"],
+      detached: true,
     });
     let stdout = "";
     let settled = false;
     let timer;
+    let killTimer;
+    const killGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    const abort = () => {
+      killGroup("SIGTERM");
+      killTimer = setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
+      killTimer.unref();
+      child.stdout.destroy();
+    };
     const settle = (value) => {
       if (settled) return;
       settled = true;
@@ -128,14 +148,14 @@ function readCommandToken(command) {
       resolve(value);
     };
     timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      abort();
       settle("");
     }, DEFAULT_TIMEOUT_MS);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
       if (Buffer.byteLength(stdout, "utf8") > MAX_TOKEN_OUTPUT_BYTES) {
-        child.kill("SIGTERM");
+        abort();
         settle("");
       }
     });
@@ -268,8 +288,8 @@ async function main() {
 }
 
 main().then((code) => {
-  process.exitCode = code;
+  process.exit(code);
 }).catch(() => {
   console.error("slack-dm failed: internal-error");
-  process.exitCode = 1;
+  process.exit(1);
 });
