@@ -175,11 +175,13 @@ if [ -n "$CARRY_TS" ] && [ -z "$REQ_PLATFORM" ] && [ -z "$REQ_REPLY_MAX" ]; then
 fi
 
 # Loud, never-silent warning: a fresh link with no resolvable platform (inbox
-# payload absent and the relay could not answer by request_id) means completion
-# follow-ups will fall back to the X 280-char split budget, which wrongly threads
-# a longer Discord reply. Record the link anyway, but make the loss visible.
+# payload absent and the relay could not answer by request_id) means a completion
+# follow-up long enough to split cannot be posted safely - fm-x-reply's fail-safe
+# will REFUSE it (hold for retry) rather than risk threading a longer Discord
+# reply at the X 280-char budget. Record the link anyway, but make the gap
+# visible so it gets fixed.
 if [ -z "$CARRY_TS" ] && [ -z "$REQ_PLATFORM" ] && [ -z "$REQ_REPLY_MAX" ]; then
-  echo "fm-x-link: WARNING: no reply-platform context for request $RID (inbox payload absent and the relay did not resolve it by request_id); completion follow-ups will use the default X 280-char split budget and may wrongly split a longer Discord reply into a numbered thread. Link the task before the inbox file is drained, or ensure the relay request-context lookup is available." >&2
+  echo "fm-x-link: WARNING: no reply-platform context for request $RID (inbox payload absent and the relay did not resolve it by request_id); a completion follow-up long enough to split will be HELD (refused) rather than risk wrongly threading a Discord reply at the X 280-char budget. Link the task before the inbox file is drained, or ensure the relay request-context lookup is available." >&2
 fi
 
 FOLLOWUPS=0

@@ -99,6 +99,7 @@ state/               volatile runtime signals; gitignored
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
+  x-context/         generated X-mode durable per-request reply context (platform/budget), keyed by request_id; survives inbox cleanup so a delayed follow-up recovers the original platform (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
