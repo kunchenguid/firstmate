@@ -69,7 +69,11 @@ try {
   fs.mkdirSync(project, { recursive: true });
   fs.writeFileSync(path.join(fmHome, "state", "task.meta"), "");
 
-  for (const name of ["auth.json", ".credentials.json", "config.toml", "installation_id", "models_cache.json"]) {
+  fs.writeFileSync(
+    path.join(codexHome, "config.toml"),
+    "[analytics]\nenabled = false\n\n[features]\nhooks = true\n",
+  );
+  for (const name of authCandidates) {
     const source = path.join(realCodexHome, name);
     if (fs.existsSync(source) && fs.statSync(source).isFile()) {
       fs.copyFileSync(source, path.join(codexHome, name));
@@ -229,6 +233,7 @@ try {
 
   const started = await request("thread/start", {
     cwd: project,
+    sandbox: "workspace-write",
     config: { bypass_hook_trust: true, features: { item_ids: true } },
     developerInstructions: "Reply with OK only. Do not use tools.",
   });
