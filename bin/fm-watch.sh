@@ -581,6 +581,14 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# Before acquiring the watcher lock or enumerating any runnable check, replace
+# or quarantine checks created by older versions. The migration compares bytes
+# and reads data only; it never invokes legacy check files through Bash.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" || {
+  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+  exit 1
+}
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then

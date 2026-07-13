@@ -63,8 +63,11 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
+| `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll artifact publication |
+| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR-poll sidecars              |
+| `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

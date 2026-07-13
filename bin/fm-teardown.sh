@@ -91,6 +91,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -175,6 +177,16 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2 quarantine
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll"
+  if fm_pr_task_id_valid "$id"; then
+    quarantine="$state_dir/.pr-check-quarantine"
+    rm -f -- "$quarantine/$id."* 2>/dev/null || true
+    rmdir "$quarantine" 2>/dev/null || true
+  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -922,7 +934,8 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_pr_poll_artifacts "$sub_state" "$child_id"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
 }
 
@@ -1050,7 +1063,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+remove_pr_poll_artifacts "$STATE" "$ID"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
