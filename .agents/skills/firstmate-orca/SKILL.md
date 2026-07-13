@@ -32,6 +32,17 @@ Do NOT load for tmux, herdr, zellij, or cmux backends; those have their own adap
 
 ## Commands the operator will reach for
 
+Daily-driver setup (run once per host):
+```sh
+bin/fm-use-orca.sh start      # full setup: verify, write config, start
+                              # supervisor, install XDG autostart, end-to-end
+                              # smoke. Idempotent and safe to re-run.
+bin/fm-use-orca.sh status     # current backend wiring + supervisor + autostart
+bin/fm-use-orca.sh stop       # stop supervisor and remove autostart
+bin/fm-use-orca.sh restart    # stop + start
+bin/fm-use-tmux.sh start      # symmetric switch back to tmux
+```
+
 Daemon liveness:
 ```sh
 bin/fm-supervise-orca.sh status        # supervisor + daemon state
@@ -62,7 +73,7 @@ Session-target shape:
 ### `ORCA: daemon unreachable` at bootstrap
 
 1. `bin/fm-supervise-orca.sh status` - supervisor running? daemon reachable?
-2. If supervisor is not running: `bin/fm-supervise-orca.sh start` - this runs `once` first and only succeeds if recovery is possible.
+2. If supervisor is not running: `bin/fm-use-orca.sh start` for the full re-setup (config + supervisor + autostart + smoke), or `bin/fm-supervise-orca.sh start` for just the supervisor. Both run `once` first and only succeed if recovery is possible.
 3. If supervisor is running but daemon is dead: wait one tick (`FM_ORCA_CHECK_INTERVAL`, default 30s), then `bin/fm-supervise-orca.sh status` again.
 4. If recovery fails: read `/tmp/fm-supervise-orca.log` for the supervisor's last action. Common causes:
    - `setsid` missing - install `util-linux`.
