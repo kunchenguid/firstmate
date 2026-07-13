@@ -264,3 +264,26 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## rovo (VERIFIED 2026-07-13, Rovo CLI 202607.8.1)
+
+Atlassian Rovo Dev CLI: the standalone `rovo` binary at `~/.local/bin/rovo`, distinct from `acli rovodev`.
+Verified as a CREWMATE/scout harness only.
+Secondmate use is UNVERIFIED: rovo's `#{pane_current_command}` was not confirmed, so `bin/backends/tmux.sh`'s agent-liveness match deliberately omits rovo and the session-start liveness sweep reads a rovo pane as `unknown`, never a confident `dead`, so do not rely on secondmate respawn for rovo until that is verified.
+
+| Fact | Value |
+|---|---|
+| Launch | `rovo run --yolo -i "$(cat <brief>)"` (positional message = initial instruction; `-i` forces the interactive TUI to stay live even when a message is passed) |
+| Autonomy | `--yolo` (alias `--disable-permission-checks`): auto-approves file CRUD and bash. Atlassian-data and user-MCP tools STILL prompt, so a task depending on those can stall - keep rovo crews on file/bash work or expect a gate |
+| Busy-pane signature | `Rovo is thinking` (also `Starting Rovo` at startup), preceded by a ⬡ glyph. Idle shows a Tip line plus `? for shortcuts` and no "thinking" |
+| Interrupt | single Escape (pane shows `Agent cancelled`) |
+| Exit command | `/exit` (opens a slash-autocomplete popup, the same submit hazard as claude/codex/grok - give the popup a settle before Enter) |
+| Resume | `rovo run --resume [<session-id>]` (no id restores the most recent session) |
+| Env marker | `ROVODEV_CLI=1` (also `AGENT=rovodev_cli`, `ATLASSIAN_AGENT_TYPE=rovo`); `bin/fm-harness.sh` keys on `ROVODEV_CLI` |
+| Model/effort | `rovo run` exposes no `--model` or effort flag; the model is env/config-driven (`ROVODEV_MODEL_ID`, `anthropic:claude-opus-4-8` in this build). `fm-spawn` passes no model/effort flag for rovo, and dispatch validation treats any effort for rovo as unsupported |
+| Turn-end | no verified firstmate turn-end hook. Supervision relies on the crewmate status-file protocol (signal wakes) plus the busy-signature/stale detection above. rovo exposes a `/hooks` capability, but a firstmate-compatible turn-end hook is unverified/future work |
+
+Trust dialog: none observed - a fresh `rovo run` inside a git repo launches straight into work (verified in a scratch repo; the project-picker gate seen with `acli rovodev` did not appear for the standalone `rovo` launched inside a repo).
+Steering while busy: the composer footer reads `Enter to queue, Ctrl+Enter to steer` - a plain Enter QUEUES the message for after the current turn, Ctrl+Enter steers mid-turn.
+`fm-send` on tmux sends plain Enter, so a steer to a busy rovo crew lands as a queued follow-up (fine for most steers); type into the pane directly if an immediate mid-turn steer is required.
+rovo is NOT a verified PRIMARY firstmate harness: it has no supervision-protocol or primary turn-end-guard adapter, so firstmate itself keeps running on claude/codex/opencode/pi/grok.

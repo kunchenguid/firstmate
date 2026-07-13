@@ -279,7 +279,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|rovo)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -340,6 +340,14 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # rovo (Atlassian Rovo Dev CLI): a positional message is the initial instruction;
+    # --yolo (aka --disable-permission-checks) auto-approves file CRUD + bash so an
+    # unattended crewmate runs without prompts (Atlassian-data/MCP tools still gate;
+    # verified 2026-07-13, Rovo CLI 202607.8.1). -i forces the interactive TUI to stay
+    # live for supervision even though a message is passed. rovo takes no firstmate
+    # model/effort flag, and its turn-end has no verified firstmate hook - the watcher
+    # uses the crewmate status-file signals plus busy-signature/stale detection.
+    rovo) printf '%s' 'rovo run --yolo -i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -962,6 +970,12 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    rovo*)
+      # rovo (Atlassian Rovo Dev CLI) has no verified firstmate turn-end hook. The
+      # crewmate reports phase changes via the status-file protocol (echo >> status),
+      # which drives signal wakes, and the watcher's busy-signature/stale detection
+      # catches an idle pane. No worktree or global hook is installed.
       ;;
   esac
 fi
