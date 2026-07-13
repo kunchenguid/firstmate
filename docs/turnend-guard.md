@@ -64,7 +64,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it poin
 
 ## Empirical Validation
 
-All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.
+Initial harness coverage was validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state; later re-validations are dated below.
 
 Claude Code 2.1.204 preserved the existing behavior.
 Hook file used: `.claude/settings.json`.
@@ -83,7 +83,7 @@ Current upstream source and the available `0.145` alpha remained unfixed on 2026
 The tracked Codex adapter therefore records the alarm durably and exits 0 until upstream fixes the item-id serialization path.
 Command run for the isolated live adapter regression on 2026-07-10 with `codex-cli 0.144.1`: `FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs`.
 Observed output: `FIRST_TURN_COMPLETED`, `SYSTEM_MESSAGE_WARNING_OBSERVED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`, and `SECOND_AGENT_MESSAGE_OBSERVED`.
-The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, the literal pre-adapter Stop command that calls `fm-turnend-guard.sh` directly, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
+The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, a minimal test-owned Codex config that disables analytics and enables hooks, the literal pre-adapter Stop command that calls `fm-turnend-guard.sh` directly, `sandbox=workspace-write`, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
 It requires both turn notifications to report `status=completed` with no turn error, requires a nonempty agent message from each turn, and requires the Stop-hook notification to contain the openai/codex#20783 system warning.
 It never opens or modifies the live Codex session directory, and it deletes the temporary fixture on exit.
 The Stop payload included `cwd`.

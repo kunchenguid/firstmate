@@ -6,6 +6,7 @@ It is the herdr equivalent of the tmux facts recorded in the `harness-adapters` 
 Herdr is [an agent-native terminal multiplexer](https://herdr.dev) with a socket API, CLI wrappers, and native per-pane agent-state detection.
 Verified against the real installed binary: herdr 0.7.1, protocol 14, macOS aarch64.
 Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
+The real-herdr suites preflight the fleet state before provisioning: exactly one valid running `default` session allows the tripwire, a valid but stopped default session skips the suite, and malformed or unreadable fleet state fails loudly.
 A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the `--session` flag, not `HERDR_SESSION` alone" below.
 All real-herdr verification in this document uses isolated sessions and guarded cleanup; the captain's default herdr session and live tmux fleet were never intended targets.
 
