@@ -243,7 +243,7 @@ unit_signal_exits_with_lock_cleanup() {
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() { while :; do sleep 0.2; done; }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
