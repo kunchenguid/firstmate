@@ -23,27 +23,44 @@
 # The id is also the daemon session id, so reattach is automatic.
 
 fm_backend_orca_tool_check() {
+  local here_self here_dir bundled_fmod path_fmod
   if ! command -v python3 >/dev/null 2>&1; then
     echo "error: backend=orca selected but 'python3' is not installed" >&2
     return 1
   fi
-  if ! command -v fmod >/dev/null 2>&1; then
-    # Fall back to firstmate's own bin/fmod if it isn't on PATH. The adapter
-    # is sourced from bin/backends/orca.sh, so ../fmod from that location is
-    # bin/fmod relative to FM_HOME.
-    local here_self="${BASH_SOURCE[0]:-$0}"
-    local here_dir
-    here_dir=$(cd "$(dirname "$here_self")" && pwd)
-    local home_fmod="$here_dir/../fmod"
-    if [ -x "$home_fmod" ]; then
-      export PATH="$here_dir/..:$PATH"
-      hash -r 2>/dev/null || true
-    else
-      echo "error: backend=orca selected but 'fmod' is not installed (tried PATH and $home_fmod)" >&2
-      return 1
+
+  if [ -n "${FM_ORCA_FMOD:-}" ]; then
+    if [ -x "$FM_ORCA_FMOD" ]; then
+      FM_BACKEND_ORCA_FMOD=$FM_ORCA_FMOD
+      return 0
     fi
+    echo "error: backend=orca selected but FM_ORCA_FMOD is not executable: $FM_ORCA_FMOD" >&2
+    return 1
   fi
-  command -v fmod >/dev/null 2>&1 || { echo "error: backend=orca selected but 'fmod' is not installed" >&2; return 1; }
+
+  here_self="${BASH_SOURCE[0]:-$0}"
+  here_dir=$(cd "$(dirname "$here_self")" && pwd)
+  bundled_fmod="$here_dir/../fmod"
+  if [ -x "$bundled_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$bundled_fmod
+    return 0
+  fi
+
+  path_fmod=$(type -P fmod 2>/dev/null || true)
+  if [ -n "$path_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$path_fmod
+    return 0
+  fi
+
+  echo "error: backend=orca selected but 'fmod' is not installed (tried $bundled_fmod and PATH)" >&2
+  return 1
+}
+
+fmod() {
+  if [ -z "${FM_BACKEND_ORCA_FMOD:-}" ]; then
+    fm_backend_orca_tool_check || return 1
+  fi
+  "$FM_BACKEND_ORCA_FMOD" "$@"
 }
 
 # fm_backend_orca_runtime_check: verify the orca daemon is reachable and answers

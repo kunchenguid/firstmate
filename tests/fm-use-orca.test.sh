@@ -359,6 +359,54 @@ if "rpc \"down\"" not in match[0]["log"]:
   pass "orca test suite JSON handles quoted multiline failure logs"
 }
 
+test_orca_test_suite_bootstrap_probe_is_detect_only() {
+  local case_dir=fm-orca-suite-bootstrap-detect
+  local fake_root home fakebin fmod log out
+  fake_root="$TMP_ROOT/$case_dir/root"
+  home="$TMP_ROOT/$case_dir/home"
+  fakebin="$TMP_ROOT/$case_dir/fakebin"
+  log="$TMP_ROOT/$case_dir/bootstrap.log"
+  mkdir -p "$fake_root/bin" "$fakebin" "$home/config" "$home/state"
+  cp "$ROOT/bin/fm-orca-test-suite.sh" "$fake_root/bin/fm-orca-test-suite.sh"
+  chmod +x "$fake_root/bin/fm-orca-test-suite.sh"
+  printf 'orca\n' > "$home/config/backend"
+  printf 'pi\n' > "$home/config/crew-harness"
+
+  cat > "$fake_root/bin/fm-bootstrap.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_BOOTSTRAP_DETECT_ONLY:-unset}" > "$FM_TEST_BOOTSTRAP_LOG"
+printf 'ORCA: daemon reachable\n'
+SH
+  chmod +x "$fake_root/bin/fm-bootstrap.sh"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  fmod="$fakebin/fmod"
+  cat > "$fmod" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ping) printf '{"pong":true}\n' ;;
+  info) printf '{"daemon_reachable":true}\n' ;;
+  list) printf '[]\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fmod"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fmod" FM_TEST_BOOTSTRAP_LOG="$log" \
+    "$fake_root/bin/fm-orca-test-suite.sh" --no-spawn --no-unit --expected-backend orca 2>&1 || true)
+  assert_contains "$out" "bootstrap-ORCA-line" "suite should run the bootstrap diagnostic check"
+  [ "$(cat "$log")" = "1" ] || fail "bootstrap probe should set FM_BOOTSTRAP_DETECT_ONLY=1, got $(cat "$log")"
+  pass "orca test suite bootstrap probe is detect-only"
+}
+
 # Build the test plan.
 test_use_orca_status_reports_state_without_mutating
 test_use_orca_status_does_not_leak_paths
@@ -368,6 +416,7 @@ test_use_orca_stop_when_no_supervisor
 test_use_orca_smoke_uses_configured_project_and_fm_home_data
 test_orca_test_suite_reads_config_from_fm_home
 test_orca_test_suite_json_survives_quoted_multiline_logs
+test_orca_test_suite_bootstrap_probe_is_detect_only
 
 if [ "${FAIL_COUNT:-0}" -eq 0 ]; then
   printf 'all use-orca tests passed\n'

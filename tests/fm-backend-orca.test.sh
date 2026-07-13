@@ -90,6 +90,7 @@ fmod_case() {  # <name> -> sets CASE_DIR LOG RESP FB
   : > "$LOG"
   rm -f "$RESP/.count"
   FB=$(make_fmod_fakebin "$CASE_DIR")
+  export FM_ORCA_FMOD="$FB/fmod"
 }
 
 neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
@@ -755,10 +756,30 @@ test_composer_state_uses_bundled_fmod_fallback() {
   cp "$FB/fmod" "$mini_root/bin/fmod"
   printf '╭──╮\n│ > │\n╰──╯\n' > "$RESP/1.out"
   local out
-  out=$( PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+  out=$( env -u FM_ORCA_FMOD PATH="/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state fm-x' "$mini_root" )
   [ "$out" = "empty" ] || fail "composer_state should use bundled fmod fallback, got '$out'"
   pass "fm_backend_orca_composer_state: loads bundled fmod before snapshot"
+}
+
+test_tool_check_prefers_bundled_fmod_over_path() {
+  fmod_case prefer-bundled-fmod
+  local mini_root="$CASE_DIR/mini-root" stale_bin="$CASE_DIR/stale-bin"
+  mkdir -p "$mini_root/bin/backends" "$stale_bin"
+  cp "$ROOT/bin/backends/orca.sh" "$mini_root/bin/backends/orca.sh"
+  cp "$FB/fmod" "$mini_root/bin/fmod"
+  cat > "$stale_bin/fmod" <<'SH'
+#!/usr/bin/env bash
+printf 'stale-path-fmod\n' >> "$FMOD_FAKE_LOG"
+exit 88
+SH
+  chmod +x "$stale_bin/fmod"
+  printf '{"socket_exists":true,"token_exists":true,"daemon_reachable":true,"daemon_pong":{"pong":true}}\n' > "$RESP/1.out"
+  env -u FM_ORCA_FMOD PATH="$stale_bin:/usr/bin:/bin:/usr/sbin:/sbin" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_runtime_check' "$mini_root"
+  assert_not_contains "$(cat "$LOG")" "stale-path-fmod" \
+    "tool_check should prefer bundled fmod over PATH fmod"
+  pass "fm_backend_orca_tool_check: prefers bundled fmod over PATH"
 }
 
 # ---- dispatcher ----------------------------------------------------------
