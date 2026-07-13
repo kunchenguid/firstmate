@@ -259,7 +259,7 @@ fi
 # 15. bootstrap diagnostic
 if [ -x "$FM_BOOTSTRAP" ]; then
   bootstrap_line=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_HOME="$FM_HOME" FM_BACKEND=orca "$FM_BOOTSTRAP" 2>&1 | grep "^ORCA:" | head -1)
-  if printf '%s' "$bootstrap_line" | grep -q "reachable\|recovered"; then
+  if printf '%s\n' "$bootstrap_line" | grep -Eq "^ORCA: daemon (reachable|recovered)$"; then
     run_check "bootstrap-ORCA-line" 0 "$bootstrap_line"
   else
     run_check "bootstrap-ORCA-line" 1 "$bootstrap_line"

@@ -238,6 +238,8 @@ BRIEF
 
 status_report() {
   step "current state"
+  local fmod_bin supervisor_status supervisor_line
+  fmod_bin=$(resolve_fmod)
   printf '  config/backend:   '
   if [ -f "$CONFIG/backend" ]; then
     printf '%s\n' "$(tr -d '[:space:]' < "$CONFIG/backend" 2>/dev/null)"
@@ -251,14 +253,14 @@ status_report() {
     printf '(unset; mirrors firstmate)\n'
   fi
   printf '  supervisor:       '
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-    printf 'live pid=%s\n' "$(cat "$PIDFILE")"
+  supervisor_status=$(FM_HOME="$FM_HOME" FM_ORCA_FMOD="$fmod_bin" "$FM_ROOT/bin/fm-supervise-orca.sh" status 2>&1)
+  supervisor_line=$(printf '%s\n' "$supervisor_status" | sed -n '1p')
+  if [ "${supervisor_line#supervisor: }" != "$supervisor_line" ]; then
+    printf '%s\n' "${supervisor_line#supervisor: }"
   else
-    printf 'not running\n'
+    printf '%s\n' "${supervisor_line:-not running}"
   fi
   printf '  daemon:           '
-  local fmod_bin
-  fmod_bin=$(resolve_fmod)
   if [ -n "$fmod_bin" ] && timeout 5 "$fmod_bin" ping >/dev/null 2>&1; then
     printf 'reachable\n'
   else

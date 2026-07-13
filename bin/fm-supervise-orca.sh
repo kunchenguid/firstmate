@@ -23,9 +23,9 @@
 #   FM_ORCA_BIN             path to the orca binary (default: which orca)
 #   FM_ORCA_FMOD            path to bin/fmod (default: bin/fmod next to this script)
 #   FM_ORCA_RUNTIME_FILE    runtime state file to clear on stale (default
-#                           ~/.config/orca/orca-runtime.json)
+#                           ${XDG_CONFIG_HOME:-~/.config}/orca/orca-runtime.json)
 #   FM_ORCA_SOCKET_DIR      daemon socket dir to clear on stale (default
-#                           ~/.config/orca/daemon)
+#                           ${XDG_CONFIG_HOME:-~/.config}/orca/daemon)
 #
 # Exit codes: 0 healthy / relaunch succeeded; 1 supervisor failed to start;
 # 2 daemon unhealthy AND relaunch failed; 3 already supervised.
@@ -47,8 +47,10 @@ PIDIDENTITY="$PIDFILE.identity"
 CHECK_INTERVAL=${FM_ORCA_CHECK_INTERVAL:-30}
 ORCA_BIN=${FM_ORCA_BIN:-$(command -v orca 2>/dev/null || true)}
 FMOD=${FM_ORCA_FMOD:-"$SCRIPT_DIR/fmod"}
-RUNTIME_FILE=${FM_ORCA_RUNTIME_FILE:-"$HOME/.config/orca/orca-runtime.json"}
-SOCKET_DIR=${FM_ORCA_SOCKET_DIR:-"$HOME/.config/orca/daemon"}
+ORCA_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/orca"
+RUNTIME_FILE=${FM_ORCA_RUNTIME_FILE:-"$ORCA_CONFIG_DIR/orca-runtime.json"}
+SOCKET_DIR=${FM_ORCA_SOCKET_DIR:-"$ORCA_CONFIG_DIR/daemon"}
+SINGLE_INSTANCE_LOCK="$ORCA_CONFIG_DIR/single-instance.lock"
 
 log() { printf '[orca-supervisor] %s\n' "$*"; }
 
@@ -73,7 +75,7 @@ reap_stale_state() {
   # the durable state a fresh orca daemon will refuse to reuse if it sees them
   # mid-handshake. Clear them so the relaunch starts on a clean slate.
   rm -f "$RUNTIME_FILE" 2>/dev/null || true
-  rm -f "$HOME/.config/orca/single-instance.lock" 2>/dev/null || true
+  rm -f "$SINGLE_INSTANCE_LOCK" 2>/dev/null || true
   if [ -d "$SOCKET_DIR" ]; then
     find "$SOCKET_DIR" -maxdepth 1 -type f \( -name '*.sock' -o -name '*.pid' -o -name '*.token' \) -delete 2>/dev/null || true
   fi

@@ -89,9 +89,66 @@ SH
 }
 
 test_reap_scopes_orca_ide_pkill_to_user() {
-  assert_contains "$(sed -n '55,67p' "$SUPERVISOR")" "pkill -TERM -u \"\$USER\" -x 'orca-ide'" "TERM pkill for orca-ide should be user-scoped"
-  assert_contains "$(sed -n '55,67p' "$SUPERVISOR")" "pkill -KILL -u \"\$USER\" -x 'orca-ide'" "KILL pkill for orca-ide should be user-scoped"
+  assert_contains "$(sed -n '/reap_orca_user_procs()/,/^}/p' "$SUPERVISOR")" "pkill -TERM -u \"\$USER\" -x 'orca-ide'" "TERM pkill for orca-ide should be user-scoped"
+  assert_contains "$(sed -n '/reap_orca_user_procs()/,/^}/p' "$SUPERVISOR")" "pkill -KILL -u \"\$USER\" -x 'orca-ide'" "KILL pkill for orca-ide should be user-scoped"
   pass "fm-supervise-orca reap: orca-ide pkill is scoped to current user"
+}
+
+test_reap_stale_state_honors_xdg_config_home() {
+  local case_dir home xdg fakebin output status
+  case_dir="$TMP_ROOT/reap-xdg-config-home"
+  home="$case_dir/home"
+  xdg="$case_dir/xdg"
+  fakebin=$(fm_fakebin "$case_dir")
+  mkdir -p "$home/state" "$home/.config/orca/daemon" "$xdg/orca/daemon"
+  printf 'runtime\n' > "$xdg/orca/orca-runtime.json"
+  printf 'lock\n' > "$xdg/orca/single-instance.lock"
+  printf 'sock\n' > "$xdg/orca/daemon/daemon-v21.sock"
+  printf 'pid\n' > "$xdg/orca/daemon/daemon-v21.pid"
+  printf 'token\n' > "$xdg/orca/daemon/daemon-v21.token"
+  printf 'home-runtime\n' > "$home/.config/orca/orca-runtime.json"
+  printf 'home-lock\n' > "$home/.config/orca/single-instance.lock"
+  printf 'home-sock\n' > "$home/.config/orca/daemon/daemon-v21.sock"
+
+  cat > "$fakebin/fmod" <<'SH'
+#!/usr/bin/env bash
+printf '{"daemon_reachable":false,"daemon_pong":{}}\n'
+exit 0
+SH
+  chmod +x "$fakebin/fmod"
+  cat > "$fakebin/pkill" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/pkill"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+
+  output=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" XDG_CONFIG_HOME="$xdg" FM_ORCA_BIN="$fakebin/orca" FM_ORCA_FMOD="$fakebin/fmod" "$SUPERVISOR" start 2>&1)
+  status=$?
+  [ "$status" -eq 2 ] || fail "start should fail after fake relaunch stays unreachable, got $status: $output"
+  [ ! -e "$xdg/orca/orca-runtime.json" ] || fail "runtime file under XDG_CONFIG_HOME should be removed"
+  [ ! -e "$xdg/orca/single-instance.lock" ] || fail "single-instance lock under XDG_CONFIG_HOME should be removed"
+  [ ! -e "$xdg/orca/daemon/daemon-v21.sock" ] || fail "daemon socket under XDG_CONFIG_HOME should be removed"
+  [ ! -e "$xdg/orca/daemon/daemon-v21.pid" ] || fail "daemon pid under XDG_CONFIG_HOME should be removed"
+  [ ! -e "$xdg/orca/daemon/daemon-v21.token" ] || fail "daemon token under XDG_CONFIG_HOME should be removed"
+  [ -e "$home/.config/orca/orca-runtime.json" ] || fail "default-home runtime should not be touched when XDG_CONFIG_HOME is set"
+  [ -e "$home/.config/orca/single-instance.lock" ] || fail "default-home lock should not be touched when XDG_CONFIG_HOME is set"
+  [ -e "$home/.config/orca/daemon/daemon-v21.sock" ] || fail "default-home socket should not be touched when XDG_CONFIG_HOME is set"
+  pass "fm-supervise-orca reap: honors XDG_CONFIG_HOME"
 }
 
 test_start_lets_follow_process_own_pidfile() {
