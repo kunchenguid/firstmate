@@ -12,7 +12,8 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.
+When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, Claude blocks the turn end and the passive harness adapters force a bounded follow-up turn that tells the primary to resume supervision.
+Codex is the temporary fail-open exception while openai/codex#20783 is unresolved: its adapter returns a visible non-blocking warning and records a durable wake for the next foreground checkpoint or session start.
 
 ## Shared Predicate
 
@@ -37,16 +38,18 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
-- `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
+- `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard-codex.sh` adapter.
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
 
-Claude and Codex support a direct blocking Stop hook.
-For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
-Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
+Claude supports a direct blocking Stop hook, where exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
+Codex's blocking Stop path is disabled while openai/codex#20783 is unresolved because the generated continuation corrupts later Desktop follow-ups.
+The Codex adapter still runs the shared predicate, returns its warning as a valid `{continue:true,systemMessage:<warning>}` result, appends a durable `codex-turnend-guard` wake, and always exits 0 without spawning or resuming Codex.
+Long-lived Codex sessions may retain the former command that invokes the shared predicate directly. The shared guard recognizes Codex's required `turn_id` Stop-payload extension and self-routes those cached calls through the same fail-open adapter; Claude payloads do not carry that field and retain direct blocking semantics.
+Claude and Codex payloads include `stop_hook_active`; when it is true, the shared guard exits 0.
 
 OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
@@ -69,6 +72,16 @@ Codex `codex-cli 0.142.1` was validated with a scratch `.codex/hooks.json` Stop 
 Hook file used: `.codex/hooks.json`.
 Command run: `codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Say hi in exactly one word.'`.
 Observed output: the first model output was `Hi`, the Stop hook exited 2, Codex logged `hook: Stop Blocked`, the model continued with `CODEXHOOK`, and the second hook call had `stop_hook_active=true`.
+That blocking behavior is no longer safe for a Desktop-resumable primary session.
+On 2026-07-10, Codex `0.144.1` persisted the synthetic `<hook_prompt>` continuation with a bare UUID and a later Codex Desktop follow-up failed with `[invalid_id_prefix] Expected an ID that begins with 'msg'`.
+The persisted UUID mapped exactly to the earlier blocking Stop continuation, matching upstream issue [openai/codex#20783](https://github.com/openai/codex/issues/20783).
+Current upstream source and the available `0.145` alpha remained unfixed on 2026-07-10.
+The tracked Codex adapter therefore records the alarm durably and exits 0 until upstream fixes the item-id serialization path.
+Command run for the isolated live adapter regression on 2026-07-10 with `codex-cli 0.144.1`: `FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs`.
+Observed output: `FIRST_TURN_COMPLETED`, `SYSTEM_MESSAGE_WARNING_OBSERVED`, `NO_HOOK_PROMPT_PERSISTED`, `DURABLE_WAKE_QUEUED`, `SECOND_DESKTOP_STYLE_FOLLOWUP_COMPLETED`, and `SECOND_AGENT_MESSAGE_OBSERVED`.
+The live regression uses `codex app-server --stdio`, a temporary plain Git project, temporary `CODEX_HOME` and `FM_HOME`, copied runtime auth files without printing them, the literal pre-adapter Stop command that calls `fm-turnend-guard.sh` directly, `bypass_hook_trust=true`, `features.item_ids=true`, an unhealthy watcher fixture, and two `turn/start` calls.
+It requires both turn notifications to report `status=completed` with no turn error, requires a nonempty agent message from each turn, and requires the Stop-hook notification to contain the openai/codex#20783 system warning.
+It never opens or modifies the live Codex session directory, and it deletes the temporary fixture on exit.
 The Stop payload included `cwd`.
 Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --output-last-message last.txt 'Use the shell tool to run mkdir -p outside && cd outside && pwd, then use the shell tool again to run pwd. Your final answer must include the two observed outputs.'`.
 Observed output: the first command printed `<scratch>/outside`, the second command printed `<scratch>`, the Stop hook process `pwd -P` printed `<scratch>`, payload `cwd` printed `<scratch>`, and `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, and `CODEX_CWD` were empty.
@@ -114,6 +127,9 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the Codex adapter's non-blocking durable warning, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+Command run on 2026-07-10: `tests/fm-turnend-guard.test.sh`.
+Observed Codex regression output: `ok - .codex/hooks.json: unhealthy watcher returns systemMessage JSON and queues durably without blocking Codex`.
 The default behavior suite does not invoke live language-model harnesses.
+`FM_CODEX_LIVE_E2E=1 node tests/fm-codex-turnend-live-e2e.mjs` opts into the isolated Codex app-server regression recorded above and fails clearly when Codex auth is unavailable.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

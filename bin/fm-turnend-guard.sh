@@ -7,9 +7,9 @@
 # fleet-touching command itself, can sit blind for hours.
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
-# Claude and codex can block directly by preserving exit status 2 and stderr.
-# OpenCode, pi, and grok adapters use the same predicate and force one bounded
-# follow-up because their turn-end events are passive.
+# Claude blocks directly by preserving exit status 2 and stderr.
+# Codex fails open through a durable-warning adapter while openai/codex#20783 is
+# unresolved, and OpenCode, pi, and grok force one bounded passive follow-up.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -20,12 +20,12 @@
 # (treehouse-leased or git-cloned). It must therefore scope itself to the
 # PRIMARY at runtime and stay a silent, fast no-op everywhere else.
 #
-# Loop-guard: never block twice in the same turn. Claude Code and codex Stop
+# Loop-guard: never block twice in the same turn. Claude Code and Codex Stop
 # payloads carry stop_hook_active=true when the CURRENT stop attempt was itself
 # already forced by an earlier block this turn; on that signal we always allow
-# the stop, whether or not watcher supervision actually got resumed. Passive
-# harness adapters provide their own one-follow-up guard before calling this
-# script.
+# the stop, whether or not watcher supervision actually got resumed. The Codex
+# adapter currently never propagates a block, and passive harness adapters
+# provide their own one-follow-up guard before calling this script.
 # That bounds this to at most one forced continuation per turn - never a wedged,
 # un-endable session - while still nagging again on a later turn if the problem
 # persists.
@@ -54,6 +54,20 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
+
+# Compatibility for Codex sessions that cached the former hook command before
+# .codex/hooks.json was changed to call the fail-open adapter. Codex's generated
+# Stop schema requires turn_id and documents it as a Codex extension; Claude's
+# direct blocking Stop payload and the passive harness adapters do not carry it.
+# Route only that exact Codex-shaped payload, and mark the adapter's call back
+# into this shared predicate so it cannot recurse.
+if [ "${FM_CODEX_TURNEND_ADAPTER_ACTIVE:-0}" != "1" ] \
+  && printf '%s' "$PAYLOAD" | jq -e \
+    '.hook_event_name == "Stop" and (.turn_id | type == "string" and length > 0)' \
+    >/dev/null 2>&1; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard-codex.sh" || true
+  exit 0
+fi
 
 # --- scope precisely to the PRIMARY checkout --------------------------------
 # Excludes secondmate homes (the .fm-secondmate-home marker is written at seed

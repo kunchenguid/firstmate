@@ -50,7 +50,8 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 ## Primary turn-end guard
 
 Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
-`claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+`claude` blocks directly through a Stop hook that preserves exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+`codex` temporarily returns a non-blocking `systemMessage` and durable wake because openai/codex#20783 makes its blocking Stop continuation corrupt later Desktop follow-ups.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -153,12 +154,13 @@ The decision persists for the repo, so later worktrees of the same project skip 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 
-**Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
-The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.
-Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-block loop safety Claude uses.
+**Primary-session guard fact (verified 2026-07-10, codex-cli 0.144.1).**
+The firstmate PRIMARY's own `.codex/hooks.json` pipes Codex's Stop payload through `bin/fm-turnend-guard-codex.sh`, which runs the shared predicate, returns a non-blocking `systemMessage`, durably queues an unhealthy-watcher alarm, and always exits 0.
+Blocking Codex Stop continuations are disabled because [openai/codex#20783](https://github.com/openai/codex/issues/20783) persists their synthetic `<hook_prompt>` with a bare UUID and later Desktop follow-ups fail `invalid_id_prefix` instead of accepting the required `msg_` id.
+Codex Stop hooks expose `stop_hook_active`, but the adapter does not propagate the shared predicate's exit 2 while the upstream bug is unresolved.
 Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
 Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
-The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
+The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard-codex.sh` with the original payload.
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
 
