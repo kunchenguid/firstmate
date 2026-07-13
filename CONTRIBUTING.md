@@ -76,8 +76,9 @@ for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior te
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
 
-Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+Discover most tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
+The opt-in live Codex app-server regression lives at `tests/fm-codex-turnend-live-e2e.mjs` and is documented in `docs/turnend-guard.md`.
+Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Codex app-server regression, and the live Pi regression) skip themselves or stay outside the run-all loop and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
 
 ## Questions
 
