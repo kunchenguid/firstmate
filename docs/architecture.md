@@ -19,6 +19,9 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code or a backend busy signature.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+For an authoritative `parked` run-step, the watcher applies that same pause classification only when the latest status line is an explicit `paused:` acknowledgement; without it, the first unacknowledged gate remains actionable.
+Active `running`, `fixing`, or `ci` run-step evidence and a busy-pane verdict retain working precedence, while a later non-pause status clears the parked-run exception.
+The pause acknowledgement changes only stale-wake cadence; `status_open_decisions` in `bin/fm-classify-lib.sh` remains the owner of durable decision state.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.

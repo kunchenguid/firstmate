@@ -274,10 +274,8 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
 }
 
-# crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
-# reasons - working (active run/busy pane), paused (declared external wait), or none
-# (surface it) - so the watcher's stale path gets both for one bounded call.
-# crew_is_paused delegates to it exactly as crew_is_provably_working does.
+# crew_absorb_class owns the exact working/paused/none decision; this test covers
+# its projections, parked-gate exception, precedence, and durable-decision boundary.
 test_crew_absorb_class_classifier() {
   local dir fakebin state open FM_STATE_OVERRIDE
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"; state="$dir/state"
@@ -617,14 +615,10 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
-# --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
-#     cadence, never wedge-escalated ------------------------------------------
-# The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
-# release (paused: ...) whose idle pane tripped repeated possible-wedge escalations
-# all day. With the paused verb, its stale is absorbed like a working crew but never
-# uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
-# the pause's own status-file age, so a churny idle pane cannot reset the cadence)
-# for a recheck, so a forgotten pause cannot rot invisibly.
+# --- parked gate plus latest pause: long-cadence recheck, never a wedge ------
+# An unacknowledged needs-decision remains actionable; once a latest explicit
+# paused: acknowledges the authoritative parked run, stale handling uses the
+# existing PAUSE_RESURFACE_SECS cadence without closing the durable decision.
 test_parked_gate_latest_pause_absorbed_then_resurfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
