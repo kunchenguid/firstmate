@@ -66,6 +66,7 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
+config/capacity-failover  optional capacity-failover substrate controls; LOCAL, gitignored; absent = no spawn or dispatch behavior change. `host-pressure=on` enables bounded memory, disk-floor, and active-task spawn backpressure; `route=` lines feed the manual capacity route selector; details live in docs/capacity-failover.md
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
@@ -235,7 +236,7 @@ Implementation requires a separate request or other clear implementation scope.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
-Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
+Dispatch independent work immediately with no concurrency cap unless opt-in `config/capacity-failover` host-pressure backpressure refuses a new spawn, serialize coarse overlaps, and record blockers durably.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff

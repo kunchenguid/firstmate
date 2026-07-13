@@ -45,6 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -112,6 +113,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+HOST_PRESSURE_INTERVAL=${FM_HOST_PRESSURE_INTERVAL:-300}  # seconds between opt-in disk-pressure alerts
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -536,6 +538,15 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+run_host_pressure_alert() {
+  local cfg out
+  cfg="$CONFIG/capacity-failover"
+  [ -f "$cfg" ] || return 0
+  out=$("$SCRIPT_DIR/fm-host-pressure.sh" periodic-alert --config "$cfg" --home "$FM_HOME" --state "$STATE" 2>/dev/null || true)
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
 # captain-relevant status line it SURFACED (woke firstmate for) in
 # .hb-surfaced-<task>, the watcher's analogue of the daemon's
@@ -821,6 +832,19 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+  fi
+
+  # Opt-in host-pressure alerting: config/capacity-failover with host-pressure=on
+  # may emit a bounded disk-floor alert. It never kills work or mutates task owner
+  # metadata; the helper's own cooldown/hysteresis markers prevent alert flapping.
+  if [ "$(age_of "$STATE/.last-host-pressure-alert")" -ge "$HOST_PRESSURE_INTERVAL" ]; then
+    out=$(run_host_pressure_alert)
+    touch "$STATE/.last-host-pressure-alert"
+    if [ -n "$out" ]; then
+      reason="check: host-pressure: $out"
+      fm_wake_append check host-pressure "$reason" || exit 1
+      wake "$reason"
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

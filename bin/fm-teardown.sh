@@ -159,7 +159,7 @@ default_branch() {
 
 meta_value() {
   local meta=$1 key=$2
-  fm_meta_get "$meta" "$key"
+  fm_meta_get "$meta" "$key" || true
 }
 
 require_orca_worktree_id() {

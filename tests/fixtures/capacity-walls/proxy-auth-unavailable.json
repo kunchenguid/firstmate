@@ -1,0 +1,1 @@
+{"error":{"message":"auth_unavailable: no auth available (providers=codex, model=gpt-5.6-luna)","type":"server_error","code":"internal_server_error"}}
