@@ -60,24 +60,36 @@ desktop_quote() {
   printf '"%s"' "$value"
 }
 
+absolute_executable() {
+  local path=$1 dir base
+  [ -x "$path" ] || return 1
+  dir=$(cd "$(dirname -- "$path")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename -- "$path")
+  printf '%s/%s\n' "$dir" "$base"
+}
+
 resolve_orca_bin() {
+  local found
   if [ -n "${FM_ORCA_BIN:-}" ]; then
-    [ -x "$FM_ORCA_BIN" ] && printf '%s\n' "$FM_ORCA_BIN"
+    absolute_executable "$FM_ORCA_BIN"
     return 0
   fi
-  command -v orca 2>/dev/null || true
+  found=$(command -v orca 2>/dev/null || true)
+  [ -n "$found" ] && absolute_executable "$found"
 }
 
 resolve_fmod() {
+  local found
   if [ -n "${FM_ORCA_FMOD:-}" ]; then
-    [ -x "$FM_ORCA_FMOD" ] && printf '%s\n' "$FM_ORCA_FMOD"
+    absolute_executable "$FM_ORCA_FMOD"
     return 0
   fi
   if [ -x "$FM_ROOT/bin/fmod" ]; then
-    printf '%s\n' "$FM_ROOT/bin/fmod"
+    absolute_executable "$FM_ROOT/bin/fmod"
     return 0
   fi
-  command -v fmod 2>/dev/null || true
+  found=$(command -v fmod 2>/dev/null || true)
+  [ -n "$found" ] && absolute_executable "$found"
 }
 
 require_orca() {
@@ -132,9 +144,21 @@ stop_supervisor() {
 }
 
 install_autostart() {
-  local env_args env_name env_value supervisor_arg
+  local env_args env_name env_value supervisor_arg orca_bin fmod_bin
+  orca_bin=$(resolve_orca_bin)
+  if [ -z "$orca_bin" ]; then
+    fail "cannot install autostart: orca binary not found"
+    return 1
+  fi
+  fmod_bin=$(resolve_fmod)
+  if [ -z "$fmod_bin" ]; then
+    fail "cannot install autostart: fmod not found"
+    return 1
+  fi
   env_args=$(desktop_quote "FM_HOME=$FM_HOME")
-  for env_name in FM_STATE_OVERRIDE FM_ORCA_BIN FM_ORCA_FMOD; do
+  env_args="$env_args $(desktop_quote "FM_ORCA_BIN=$orca_bin")"
+  env_args="$env_args $(desktop_quote "FM_ORCA_FMOD=$fmod_bin")"
+  for env_name in FM_STATE_OVERRIDE; do
     env_value=${!env_name:-}
     [ -n "$env_value" ] || continue
     env_args="$env_args $(desktop_quote "$env_name=$env_value")"

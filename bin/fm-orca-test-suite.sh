@@ -160,11 +160,12 @@ else
 fi
 
 # 8. supervisor running
-pidfile="$STATE/.orca-supervisor.pid"
-if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
-  run_check "supervisor-live" 0 "pid=$(cat "$pidfile")"
+supervisor_status=$("$SUPERVISOR" status 2>&1)
+supervisor_line=$(printf '%s\n' "$supervisor_status" | sed -n '1p')
+if printf '%s\n' "$supervisor_status" | grep -q '^supervisor: live pid='; then
+  run_check "supervisor-live" 0 "${supervisor_line#supervisor: live }"
 else
-  run_check "supervisor-live" 1 "no live pid (run bin/fm-supervise-orca.sh start)"
+  run_check "supervisor-live" 1 "${supervisor_line:-no live pid (run bin/fm-supervise-orca.sh start)}"
 fi
 
 # 9. supervisor log fresh + no recent errors

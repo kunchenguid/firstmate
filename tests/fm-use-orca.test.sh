@@ -206,6 +206,8 @@ test_use_orca_autostart_install_then_remove() {
   XDG_CONFIG_HOME="$TMP_ROOT/$case_dir" FM_HOME="$home" PATH="$fb:$PATH" \
     "$USE_ORCA" autostart install 2>&1 | tail -3
   [ -f "$autostart_dir/fm-supervise-orca.desktop" ] || fail "autostart re-install removed the file"
+  assert_grep "\"FM_ORCA_BIN=$fb/orca\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should pin discovered orca path"
+  assert_grep "\"FM_ORCA_FMOD=$ROOT/bin/fmod\"" "$autostart_dir/fm-supervise-orca.desktop" "autostart should pin discovered fmod path"
   pass "autostart install is idempotent"
 
   # Remove
@@ -417,6 +419,46 @@ SH
   pass "orca test suite bootstrap probe is detect-only"
 }
 
+test_orca_test_suite_rejects_stale_supervisor_pid() {
+  local case_dir=fm-orca-suite-stale-supervisor
+  local home fakebin fmod out
+  home=$(fake_home "$case_dir")
+  fakebin="$TMP_ROOT/$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  printf 'orca\n' > "$home/config/backend"
+  printf 'pi\n' > "$home/config/crew-harness"
+  printf '%s\n' "$$" > "$home/state/.orca-supervisor.pid"
+  printf 'old identity\n' > "$home/state/.orca-supervisor.pid.identity"
+
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  fmod="$fakebin/fmod"
+  cat > "$fmod" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ping) printf '{"pong":true}\n' ;;
+  info) printf '{"daemon_reachable":true,"daemon_pong":{"pong":true}}\n' ;;
+  list) printf '[]\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fmod"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fmod" \
+    "$ROOT/bin/fm-orca-test-suite.sh" --no-spawn --no-unit --expected-backend orca 2>&1 || true)
+  assert_contains "$out" "supervisor-live" "suite should print supervisor-live check"
+  assert_contains "$out" "supervisor: not running" "suite should reject a stale reused pidfile"
+  pass "orca test suite rejects stale supervisor pidfiles"
+}
+
 # Build the test plan.
 test_use_orca_status_reports_state_without_mutating
 test_use_orca_status_does_not_leak_paths
@@ -427,6 +469,7 @@ test_use_orca_smoke_uses_configured_project_and_fm_home_data
 test_orca_test_suite_reads_config_from_fm_home
 test_orca_test_suite_json_survives_quoted_multiline_logs
 test_orca_test_suite_bootstrap_probe_is_detect_only
+test_orca_test_suite_rejects_stale_supervisor_pid
 
 if [ "${FAIL_COUNT:-0}" -eq 0 ]; then
   printf 'all use-orca tests passed\n'
