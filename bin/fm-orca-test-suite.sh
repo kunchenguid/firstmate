@@ -8,7 +8,7 @@
 #
 # Checks performed:
 #   1. orca binary on PATH
-#   2. node on PATH (orca adapter JSON parser)
+#   2. python3 on PATH (fmod/orca adapter JSON parsing)
 #   3. setsid available (supervisor needs it for daemon relaunch)
 #   4. config/backend = orca (or --expected-backend override)
 #   5. config/crew-harness set (the spawn target)
@@ -39,12 +39,14 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-FMOD="$FM_ROOT/bin/fmod"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FMOD=${FM_ORCA_FMOD:-"$FM_ROOT/bin/fmod"}
 SUPERVISOR="$FM_ROOT/bin/fm-supervise-orca.sh"
 FM_BOOTSTRAP="$FM_ROOT/bin/fm-bootstrap.sh"
 TESTS_DIR="$FM_ROOT/tests"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_ROOT/config}"
-STATE="${FM_STATE_OVERRIDE:-$FM_ROOT/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 NO_UNIT=0
 NO_SPAWN=0
@@ -55,14 +57,15 @@ SUITE_PASS=0
 SUITE_FAIL=0
 JSON_RESULTS="[]"
 
-for a in "$@"; do
-  case "$a" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --no-unit) NO_UNIT=1 ;;
     --no-spawn) NO_SPAWN=1 ;;
-    --expected-backend=*) EXPECTED_BACKEND=${a#--expected-backend=} ;;
+    --expected-backend=*) EXPECTED_BACKEND=${1#--expected-backend=} ;;
     --expected-backend) shift; EXPECTED_BACKEND=${1:-} ;;
     --json) JSON_OUT=1 ;;
   esac
+  shift || break
 done
 
 # Run a check: $1 = name, $2 = expected pass condition (0/1), $3 = log
@@ -102,8 +105,8 @@ print(json.dumps(arr))
 [ -x "$(command -v orca 2>/dev/null)" ] || true
 run_check "orca-binary" $([ -x "$(command -v orca 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v orca 2>/dev/null || echo 'missing')"
 
-# 2. node
-run_check "node-binary" $([ -x "$(command -v node 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v node 2>/dev/null || echo 'missing')"
+# 2. python3
+run_check "python3-binary" $([ -x "$(command -v python3 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v python3 2>/dev/null || echo 'missing')"
 
 # 3. setsid
 run_check "setsid-available" $([ -x "$(command -v setsid 2>/dev/null)" ] && echo 0 || echo 1) "$(command -v setsid 2>/dev/null || echo 'missing')"
@@ -195,10 +198,20 @@ fi
 # 11. end-to-end spawn (the real test)
 if [ "$NO_SPAWN" -eq 0 ]; then
   suite_id="fm-orca-test-$$"
-  data_dir="$FM_ROOT/data/$suite_id"
+  data_dir="$DATA/$suite_id"
+  smoke_project=${FM_ORCA_SMOKE_PROJECT:-}
+  if [ -z "$smoke_project" ] && [ -d "$FM_HOME/projects" ]; then
+    for candidate in "$FM_HOME"/projects/*; do
+      [ -d "$candidate/.git" ] || git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
+      smoke_project=$candidate
+      break
+    done
+  fi
   mkdir -p "$data_dir" 2>/dev/null || true
   printf '# %s\nFirstmate orca test-suite smoke. Confirm alive in one short sentence.\n' "$suite_id" > "$data_dir/brief.md"
-  if out=$(FM_HOME="$FM_ROOT" "$FM_ROOT/bin/fm-spawn.sh" "$suite_id" "$FM_ROOT/projects/falkordb-stak" --backend orca --harness "$(printf '%s' "$crew" | tr -d '[:space:]')" 2>&1); then
+  if [ -z "$smoke_project" ]; then
+    run_check "spawn-turn-end" 1 "no smoke project found (set FM_ORCA_SMOKE_PROJECT)"
+  elif out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-spawn.sh" "$suite_id" "$smoke_project" --backend orca --harness "$(printf '%s' "$crew" | tr -d '[:space:]')" 2>&1); then
     # Wait for turn-end. Pi on MiniMax-M3 is variable: 18s on a fast daemon,
     # 60-90s on a slow one. 120s is a comfortable bound for the daily-driver
     # check; the operator can override with --no-spawn for an instant verdict.
@@ -240,7 +253,7 @@ fi
 
 # 15. bootstrap diagnostic
 if [ -x "$FM_BOOTSTRAP" ]; then
-  bootstrap_line=$(FM_BACKEND=orca "$FM_BOOTSTRAP" 2>&1 | grep "^ORCA:" | head -1)
+  bootstrap_line=$(FM_HOME="$FM_HOME" FM_BACKEND=orca "$FM_BOOTSTRAP" 2>&1 | grep "^ORCA:" | head -1)
   if printf '%s' "$bootstrap_line" | grep -q "reachable\|recovered"; then
     run_check "bootstrap-ORCA-line" 0 "$bootstrap_line"
   else

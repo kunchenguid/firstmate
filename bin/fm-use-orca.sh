@@ -7,7 +7,7 @@
 #
 # Steps:
 #   1. Verify prerequisites (orca CLI on PATH, daemon reachable via fmod
-#      info, node on PATH for JSON parsing in the adapter).
+#      info, python3/fmod available for the adapter).
 #   2. Stop any running orca supervisor (idempotent).
 #   3. Write config/backend=orca (LOCAL, gitignored).
 #   4. If config/crew-harness is absent or empty, write config/crew-harness=pi
@@ -55,8 +55,16 @@ FAILS=0
 require_orca() {
   command -v orca >/dev/null 2>&1 || { fail "orca binary not on PATH"; return 1; }
   ok "orca at $(command -v orca)"
-  command -v node >/dev/null 2>&1 || { fail "node not on PATH (orca adapter parses JSON through node)"; return 1; }
-  ok "node at $(command -v node)"
+  command -v python3 >/dev/null 2>&1 || { fail "python3 not on PATH (fmod and orca adapter use it)"; return 1; }
+  ok "python3 at $(command -v python3)"
+  if [ -x "$FM_ROOT/bin/fmod" ]; then
+    ok "fmod at $FM_ROOT/bin/fmod"
+  elif command -v fmod >/dev/null 2>&1; then
+    ok "fmod at $(command -v fmod)"
+  else
+    fail "fmod not found (expected $FM_ROOT/bin/fmod or PATH)"
+    return 1
+  fi
   command -v setsid >/dev/null 2>&1 || { fail "setsid missing (install util-linux)"; return 1; }
   ok "setsid available"
   return 0
@@ -111,14 +119,27 @@ remove_autostart() {
 
 smoke() {
   step "smoke: trivial orca+pi spawn"
-  mkdir -p "$FM_ROOT/data/smoke-use-orca" 2>/dev/null || true
-  cat > "$FM_ROOT/data/smoke-use-orca/brief.md" <<'BRIEF'
+  local smoke_project candidate
+  smoke_project=${FM_ORCA_SMOKE_PROJECT:-}
+  if [ -z "$smoke_project" ] && [ -d "$FM_HOME/projects" ]; then
+    for candidate in "$FM_HOME"/projects/*; do
+      [ -d "$candidate/.git" ] || git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
+      smoke_project=$candidate
+      break
+    done
+  fi
+  if [ -z "$smoke_project" ]; then
+    fail "no smoke project found (set FM_ORCA_SMOKE_PROJECT or add a git repo under $FM_HOME/projects)"
+    return 1
+  fi
+  mkdir -p "$FM_HOME/data/smoke-use-orca" 2>/dev/null || true
+  cat > "$FM_HOME/data/smoke-use-orca/brief.md" <<'BRIEF'
 # smoke-use-orca
 
 Firstmate use-orca smoke. Confirm you are alive in one short sentence and identify the model/provider.
 Do not modify any files.
 BRIEF
-  if ! out=$(FM_HOME="$FM_ROOT" "$FM_ROOT/bin/fm-spawn.sh" smoke-use-orca projects/falkordb-stak --backend orca --harness pi 2>&1); then
+  if ! out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-spawn.sh" smoke-use-orca "$smoke_project" --backend orca --harness pi 2>&1); then
     fail "spawn refused: $out"
     return 1
   fi

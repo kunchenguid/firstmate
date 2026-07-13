@@ -749,9 +749,15 @@ EOF
         echo "error: orca secondmate requires an existing home at $PROJ_ABS" >&2
         exit 1
       fi
-      SECONDMATE_TERMINAL_ID="fm-secondmate-$(basename "$PROJ_ABS")"
-      # A recovery respawn reattaches to the same id; fm_backend_orca_create_terminal
-      # # fmod create with an existing id returns isNew: false and reuses the session.
+      SECONDMATE_HOME_REAL=$(cd "$PROJ_ABS" && pwd -P)
+      if command -v shasum >/dev/null 2>&1; then
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | shasum -a 256 | awk '{print substr($1,1,8)}')
+      elif command -v sha256sum >/dev/null 2>&1; then
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | sha256sum | awk '{print substr($1,1,8)}')
+      else
+        SECONDMATE_HOME_HASH=$(printf '%s' "$SECONDMATE_HOME_REAL" | cksum | awk '{printf "%08x", $1}')
+      fi
+      SECONDMATE_TERMINAL_ID="fm-secondmate-$ID-$SECONDMATE_HOME_HASH"
       ORCA_TERMINAL=$(fm_backend_orca_create_terminal "$SECONDMATE_TERMINAL_ID" "$PROJ_ABS" "$SECONDMATE_TERMINAL_ID") || exit 1
       ORCA_WORKTREE_ID="$PROJ_ABS"  # the home IS the worktree; recorded for meta/inspection
       ORCA_ABORT_CLEANUP=1

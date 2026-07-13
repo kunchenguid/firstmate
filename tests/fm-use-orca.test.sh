@@ -7,7 +7,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-use-orca-tests)
 USE_ORCA="$ROOT/bin/fm-use-orca.sh"
 
-# Helper: stub orca + node + setsid + fmod + pkill into a clean fakebin.
+# Helper: stub orca + setsid + fmod + pkill into a clean fakebin.
 # The fake orca is a no-op; the fake fmod is configurable per-test via
 # FM_TEST_FMOD_OUT (the JSON written to stdout).
 fakebin_full() {
@@ -22,12 +22,6 @@ fakebin_full() {
 exit 0
 SH
   chmod +x "$fb/orca"
-
-  cat > "$fb/node" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fb/node"
 
   cat > "$fb/setsid" <<'SH'
 #!/usr/bin/env bash
@@ -161,7 +155,7 @@ SH
   chmod +x "$fb/fm-supervise-orca.sh"
 
   # Run use-orca against a fake FM_ROOT (so it writes under our temp dir).
-  PATH="$fb:$PATH" FM_ROOT="$fake_root" FM_HOME="$fake_root" "$USE_ORCA" start >/dev/null 2>&1 || true
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$fake_root" "$USE_ORCA" start >/dev/null 2>&1 || true
 
   assert_contains "$(cat "$fake_root/config/backend" 2>/dev/null)" "orca" "fake-root config/backend should be orca"
   if [ ! -f "$fake_root/config/crew-harness" ] || ! grep -q . "$fake_root/config/crew-harness"; then
@@ -236,12 +230,86 @@ SH
   pass "stop is idempotent when no supervisor is running"
 }
 
+test_use_orca_smoke_uses_configured_project_and_fm_home_data() {
+  local case_dir=fm-use-orca-smoke-project
+  local home fake_root project log
+  home=$(fake_home "$case_dir")
+  fake_root="$TMP_ROOT/$case_dir/fakeroot"
+  project="$TMP_ROOT/$case_dir/project"
+  log="$TMP_ROOT/$case_dir/spawn.log"
+  mkdir -p "$fake_root/bin" "$project" "$home/data" "$home/state"
+  fm_git_init_commit "$project"
+
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_SPAWN_LOG:?}"
+mkdir -p "$FM_HOME/state"
+touch "$FM_HOME/state/$1.turn-ended"
+printf 'spawned %s\n' "$1"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  cat > "$fake_root/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'teardown %s complete\n' "$1"
+SH
+  chmod +x "$fake_root/bin/fm-teardown.sh"
+
+  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_TEST_SPAWN_LOG="$log" FM_ORCA_SMOKE_PROJECT="$project" \
+    "$USE_ORCA" smoke >/dev/null
+  assert_grep "$project" "$log" "smoke should pass the configured smoke project to fm-spawn"
+  assert_no_grep "projects/falkordb-stak" "$log" "smoke should not use a hardcoded project path"
+  assert_present "$home/data/smoke-use-orca/brief.md" "smoke brief should be written under FM_HOME/data"
+  pass "use-orca smoke uses configured project and FM_HOME data"
+}
+
+test_orca_test_suite_reads_config_from_fm_home() {
+  local case_dir=fm-orca-suite-fm-home
+  local home fakebin fmod out
+  home=$(fake_home "$case_dir")
+  fakebin="$TMP_ROOT/$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  printf 'orca\n' > "$home/config/backend"
+  printf 'pi\n' > "$home/config/crew-harness"
+
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/setsid"
+  fmod="$fakebin/fmod"
+  cat > "$fmod" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ping) printf '{"pong":true}\n' ;;
+  info) printf '{"daemon_reachable":true}\n' ;;
+  list) printf '[]\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fmod"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ORCA_FMOD="$fmod" \
+    "$ROOT/bin/fm-orca-test-suite.sh" --no-spawn --no-unit --expected-backend orca 2>&1 || true)
+  assert_contains "$out" "config-backend" "suite should print config-backend check"
+  assert_contains "$out" "orca (matches --expected-backend)" "suite should read config/backend from FM_HOME"
+  assert_contains "$out" "config-crew-harness" "suite should print crew harness check"
+  assert_contains "$out" "pi" "suite should read config/crew-harness from FM_HOME"
+  pass "orca test suite reads config from FM_HOME"
+}
+
 # Build the test plan.
 test_use_orca_status_reports_state_without_mutating
 test_use_orca_status_does_not_leak_paths
 test_use_orca_start_writes_config_backend
 test_use_orca_autostart_install_then_remove
 test_use_orca_stop_when_no_supervisor
+test_use_orca_smoke_uses_configured_project_and_fm_home_data
+test_orca_test_suite_reads_config_from_fm_home
 
 if [ "${FAIL_COUNT:-0}" -eq 0 ]; then
   printf 'all use-orca tests passed\n'

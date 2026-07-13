@@ -286,7 +286,11 @@ backlog_refresh_reminder() {
         done_cmd="tasks-axi done $ID --report $report_path"
         ;;
       secondmate)
-        done_cmd="tasks-axi done $ID --note \"retired\""
+        if [ "$BACKEND" = orca ]; then
+          done_cmd=
+        else
+          done_cmd="tasks-axi done $ID --note \"retired\""
+        fi
         ;;
       *)
         if [ "$MODE" = local-only ]; then
@@ -301,9 +305,17 @@ backlog_refresh_reminder() {
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    if [ -n "$done_cmd" ]; then
+      printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    else
+      printf '%s\n' "Backlog: $ID terminal closed; secondmate registry retained. Do not mark Done unless retiring it through the normal secondmate-retire flow."
+    fi
   else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    if [ "$KIND" = secondmate ] && [ "$BACKEND" = orca ]; then
+      printf '%s\n' "Backlog: $ID terminal closed; secondmate registry retained. Do not mark Done unless retiring it through the normal secondmate-retire flow."
+    else
+      printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    fi
   fi
 }
 
@@ -811,13 +823,7 @@ if [ "$BACKEND" != orca ] || [ "$KIND" = secondmate ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   if [ "$BACKEND" = orca ]; then
-    # Orca secondmate teardown: the orca terminal is the only ephemeral
-    # thing. The home is the secondmate's persistent state and was registered
-    # with fm-home-seed.sh, not acquired via treehouse get. Do not call
-    # remove_firstmate_home (which assumes a treehouse lease). Retire an
-    # orca secondmate by removing its data/secondmates.md entry and the
-    # home directory through the captain's normal secondmate-retire flow.
-    remove_secondmate_registry_entry "$ID"
+    :
   else
     [ -n "$HOME_PATH" ] || HOME_PATH=$WT
     remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

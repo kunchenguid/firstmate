@@ -1076,6 +1076,132 @@ test_fm_backend_orca_create_terminal_prints_session_id() {
   pass "fm_backend_orca_create_terminal: returns the session id on stdout for \$() capture"
 }
 
+test_fm_spawn_orca_secondmate_sessions_include_id_and_home_hash() {
+  fmod_case secondmate-session-id
+  local primary data state config base_a base_b home_a home_b
+  primary="$CASE_DIR/primary"
+  data="$primary/data"
+  state="$primary/state"
+  config="$primary/config"
+  base_a="$CASE_DIR/a"
+  base_b="$CASE_DIR/b"
+  home_a="$base_a/shared"
+  home_b="$base_b/shared"
+  mkdir -p "$data/sm-a" "$data/sm-b" "$state" "$config" \
+    "$home_a/bin" "$home_a/data" "$home_a/state" "$home_a/config" "$home_a/projects" \
+    "$home_b/bin" "$home_b/data" "$home_b/state" "$home_b/config" "$home_b/projects"
+  cat > "$FB/fmod" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FMOD_FAKE_LOG:?}"
+RESP="${FMOD_FAKE_RESPONSES:?}"
+{
+  printf 'fmod'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+case "${1:-}" in
+  info)
+    printf '{"socket_exists":true,"token_exists":true,"daemon_reachable":true,"daemon_pong":{"pong":true}}\n'
+    ;;
+  create)
+    session=${2:?}
+    cwd=
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cwd) shift; cwd=${1:-} ;;
+      esac
+      shift || break
+    done
+    printf '%s\n' "$cwd" > "$RESP/cwd-$session"
+    printf '{"isNew":true,"pid":12345,"shellState":"ready"}\n'
+    ;;
+  get-cwd)
+    cat "$RESP/cwd-${2:?}"
+    ;;
+  write|kill)
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+SH
+  chmod +x "$FB/fmod"
+  printf 'brief\n' > "$data/sm-a/brief.md"
+  printf 'brief\n' > "$data/sm-b/brief.md"
+  printf 'sm-a\n' > "$home_a/.fm-secondmate-home"
+  printf 'sm-b\n' > "$home_b/.fm-secondmate-home"
+  printf '# agents\n' > "$home_a/AGENTS.md"
+  printf '# agents\n' > "$home_b/AGENTS.md"
+
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm-a "$home_a" --backend orca --harness codex --secondmate >/dev/null \
+    || fail "first orca secondmate spawn failed"
+  PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm-b "$home_b" --backend orca --harness codex --secondmate >/dev/null \
+    || fail "second orca secondmate spawn failed"
+
+  python3 - "$LOG" <<'PY' || fail "secondmate fmod create session ids were not unique"
+import sys
+US = "\x1f"
+ids = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    parts = line.rstrip("\n").split(US)
+    if len(parts) >= 3 and parts[0] == "fmod" and parts[1] == "create":
+        ids.append(parts[2])
+secondmate_ids = [s for s in ids if s.startswith("fm-secondmate-")]
+assert len(secondmate_ids) == 2, secondmate_ids
+assert secondmate_ids[0] != secondmate_ids[1], secondmate_ids
+assert secondmate_ids[0].startswith("fm-secondmate-sm-a-"), secondmate_ids
+assert secondmate_ids[1].startswith("fm-secondmate-sm-b-"), secondmate_ids
+assert all(s != "fm-secondmate-shared" for s in secondmate_ids), secondmate_ids
+PY
+  rm -rf /tmp/fm-sm-a /tmp/fm-sm-b
+  pass "fm-spawn.sh: Orca secondmate session ids include id and home hash"
+}
+
+test_fm_teardown_orca_secondmate_preserves_registry_and_home() {
+  fmod_case secondmate-teardown-preserve
+  local primary data state config home out
+  primary="$CASE_DIR/primary"
+  data="$primary/data"
+  state="$primary/state"
+  config="$primary/config"
+  home="$CASE_DIR/secondmate-home"
+  mkdir -p "$data" "$state" "$config" "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'manual\n' > "$config/backlog-backend"
+  printf 'sm-orca\n' > "$home/.fm-secondmate-home"
+  printf '# agents\n' > "$home/AGENTS.md"
+  cat > "$state/sm-orca.meta" <<EOF
+window=fm-sm-orca
+worktree=$home
+project=$home
+backend=orca
+terminal=fm-secondmate-sm-orca-12345678
+harness=codex
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$home
+projects=alpha
+EOF
+  printf '%s\n' "- sm-orca - scope (home: $home; scope: alpha; projects: alpha; added 2026-07-13)" > "$data/secondmates.md"
+
+  out=$(PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    FM_HOME="$primary" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" sm-orca)
+  assert_contains "$out" "registry retained" "orca secondmate teardown should report preserved registry"
+  [ -d "$home" ] || fail "orca secondmate teardown removed the persistent home"
+  assert_grep "- sm-orca " "$data/secondmates.md" "orca secondmate teardown removed the registry route"
+  [ ! -e "$state/sm-orca.meta" ] || fail "orca secondmate teardown did not clear volatile meta"
+  assert_contains "$(cat "$LOG")" $'fmod\x1f''kill'$'\x1f''fm-secondmate-sm-orca-12345678' \
+    "orca secondmate teardown did not close the terminal"
+  pass "fm-teardown.sh: Orca secondmate teardown preserves persistent routing"
+}
+
 # ---- orca secondmate: refusal is removed ----
 # (the original fm-spawn.sh had an explicit refuse for orca+secondmate.
 # Verify the script does NOT print "does not support --secondmate" anymore.)
