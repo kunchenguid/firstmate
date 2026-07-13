@@ -16,10 +16,11 @@
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. The Orca backend creates the task git
-#   worktree directly and owns the terminal, so ship/scout Orca spawns do not
-#   run treehouse get; cmux is a session provider only, exactly like
-#   herdr/zellij, so it does. An
+#   herdr, zellij, orca, and cmux. The Orca backend creates ship/scout task git
+#   worktrees directly and owns their terminals, so ship/scout Orca spawns do not
+#   run treehouse get; Orca secondmates attach a terminal to the existing
+#   secondmate home. cmux is a session provider only, exactly like herdr/zellij,
+#   so it does. An
 #   auto-detected herdr or cmux spawns print a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected
 #   (always explicit). Default tmux spawns do not write backend= to meta;

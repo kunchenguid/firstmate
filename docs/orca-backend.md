@@ -19,6 +19,9 @@ Prerequisites:
 Select Orca by putting `orca` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=orca` when you launch your harness for a one-off session; telling the first mate in chat to use Orca also works.
 It is never auto-detected.
 When bootstrap resolves Orca from `FM_BACKEND=orca` or `config/backend=orca`, it checks for `fmod`, `python3`, and the universal tool set, and skips `tmux` and `treehouse`.
+For the full local setup path, run `bin/fm-use-orca.sh start`.
+It verifies prerequisites, writes `config/backend=orca`, starts `bin/fm-supervise-orca.sh`, installs the XDG autostart entry, and runs an Orca smoke spawn unless skipped.
+Use `bin/fm-use-orca.sh status` to inspect the wiring, and `bin/fm-use-tmux.sh start` to switch back to the tmux default.
 
 First run: before spawn mutates any repo or worktree state, firstmate runs `bin/fmod info` and requires the daemon to report `daemon_reachable=true` with a successful ping.
 Spawn fails closed if the runtime is not ready.
@@ -149,6 +152,7 @@ Live-Linux smoke (recorded against the captain's AppImage install, daemon protoc
 
 - `bin/fm-supervise-orca.sh start` then `pkill -KILL -x orca-ide` recovers the daemon in ~3s.
 - `bin/fm-spawn.sh <id> projects/<repo> --backend orca --harness pi` reaches pi's composer with the brief loaded, the per-task external turn-end extension (`state/<id>.pi-ext.ts`) loaded, and `state/<id>.turn-ended` touched after the first turn.
+- `bin/fm-spawn.sh <id> <secondmate-home> --backend orca --secondmate --harness pi` creates one deterministic daemon session for the persistent secondmate home and records `terminal=` plus `orca_worktree_id=<home path>`.
 - Two general bugs found and fixed: `fmod get-cwd` returns a trailing-slash path that the spawn's cwd-equality check did not normalize; pi 0.80's project-trust gate blocks unattended spawns and needs `--approve` on the launch template. Both fixes are general firstmate bugs and are candidates for upstream PRs.
 
 Fake-Orca tests cover:
@@ -157,6 +161,7 @@ Fake-Orca tests cover:
 - stale-session recreation, trailing-slash cwd normalization, and cwd-verification failure cleanup;
 - runtime readiness gating through `bin/fmod info`;
 - `fm-spawn.sh --backend orca` metadata creation and harness launch;
+- `fm-spawn.sh --backend orca --secondmate` terminal creation against a persistent home;
 - `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
 - scout teardown killing the recorded daemon session and removing the git worktree;
@@ -166,6 +171,10 @@ Run the focused suite with:
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-supervise-orca.test.sh
+tests/fm-use-orca.test.sh
+tests/fm-use-tmux.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+bin/fm-orca-test-suite.sh --no-spawn
 ```

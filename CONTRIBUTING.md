@@ -61,14 +61,14 @@ A crewmate picking up such a brief should load the skill even if the brief preda
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
-Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's test command to the same bash behavior suite as CI.
+Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint and test commands to the same shellcheck and bash behavior suite as CI.
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 
 Check and test the toolbelt before pushing:
 
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
-shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI enforces this
+shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI and no-mistakes commands.lint enforce this
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
@@ -112,6 +112,8 @@ tests/fm-backend-zellij.test.sh           # fake zellij CLI unit tests for the e
 tests/fm-backend-zellij-smoke.test.sh     # real zellij adapter smoke test, skipped when zellij or jq is unavailable, using an isolated throwaway FM_ZELLIJ_SESSION and guarded session cleanup
 tests/fm-backend-orca.test.sh             # fake fmod unit tests for the daemon-direct Orca adapter: runtime readiness, worktree lifecycle, capture, send, Enter/interrupt keys, stale-session recovery, cwd verification, spawn metadata, and guarded teardown
 tests/fm-supervise-orca.test.sh           # fake Orca daemon supervisor tests: start/stop/status, stale state cleanup, relaunch success, failure reporting, and singleton pid handling
+tests/fm-use-orca.test.sh                 # fake setup-switcher tests for fm-use-orca: prerequisite checks, config writes, supervisor start, autostart, smoke, and idempotent already-running handling
+tests/fm-use-tmux.test.sh                 # fake setup-switcher tests for fm-use-tmux: supervisor/autostart cleanup, tmux session guard, backend config clearing, and optional smoke
 tests/cmux-test-safety.sh                 # guarded cleanup helper for real-cmux tests, refusing to close anything except a matching fm-test- workspace
 tests/fm-backend-cmux.test.sh             # fake cmux CLI unit tests for the experimental cmux adapter, including socket auth, title scoping, target recovery, fresh-surface liveness, current-path probing, structural composer verification, and secondmate refusal
 tests/fm-backend-cmux-smoke.test.sh       # real cmux adapter smoke test, skipped when cmux or jq is unavailable or the socket is not password-mode authenticated, using fm-test- workspaces and guarded cleanup

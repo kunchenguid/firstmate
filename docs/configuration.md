@@ -63,10 +63,11 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.lint` plus `commands.test` so no-mistakes runs shellcheck and firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+The lint command runs `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`.
+The test command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
+Together they mirror the shellcheck and behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating either gate step to an agent.
 
 ## Captain preferences (data/captain.md)
 
@@ -227,6 +228,16 @@ FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned to locate t
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after border/prompt stripping
 FM_BACKEND_ORCA_COMPOSER_LINES=200  # orca-only: terminal-read lines scanned to locate the composer row for submit verification
 FM_BACKEND_ORCA_IDLE_RE='^Type a message\.\.\.$'  # orca-only: empty-composer placeholder regex after border/prompt stripping
+FM_ORCA_CHECK_INTERVAL=30  # orca supervisor: seconds between daemon reachability checks
+FM_ORCA_BIN=              # orca supervisor/setup: explicit Orca executable path when `orca` is not on PATH
+FM_ORCA_FMOD=             # orca backend/supervisor/setup: explicit fmod executable path instead of bundled bin/fmod or PATH
+FM_ORCA_RUNTIME_FILE=     # orca supervisor: override runtime state file path for tests or non-default layouts
+FM_ORCA_SOCKET_DIR=       # orca supervisor: override daemon socket directory for tests or non-default layouts
+FM_ORCA_SMOKE_PROJECT=    # fm-use-orca/fm-use-tmux/fm-orca-test-suite: git repo to use for smoke spawns
+FMOD_PROTOCOL_VERSION=    # fmod: pin Orca daemon protocol version instead of discovery
+FMOD_SOCKET=              # fmod: explicit daemon socket path
+FMOD_TOKEN=               # fmod: explicit daemon token path
+FMOD_PIDFILE=             # fmod: explicit daemon pidfile path
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
