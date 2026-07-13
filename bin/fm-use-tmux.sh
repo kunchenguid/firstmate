@@ -26,11 +26,12 @@
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-CONFIG="$FM_ROOT/config"
-STATE="$FM_ROOT/state"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PIDFILE="$STATE/.orca-supervisor.pid"
-AUTOSTART_FILE="$HOME/.config/autostart/fm-supervise-orca.desktop"
+AUTOSTART_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/fm-supervise-orca.desktop"
 SMOKE=1
 
 for a in "$@"; do

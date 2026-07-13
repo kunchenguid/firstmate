@@ -39,11 +39,12 @@
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-CONFIG="$FM_ROOT/config"
-STATE="$FM_ROOT/state"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PIDFILE="$STATE/.orca-supervisor.pid"
-AUTOSTART_DIR="$HOME/.config/autostart"
+AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/fm-supervise-orca.desktop"
 
 step() { printf '\n[fm-use-orca] %s\n' "$*"; }
@@ -183,10 +184,15 @@ start_all() {
   step "2. write config"
   write_config_orca
   step "3. start supervisor"
-  if start_supervisor; then
+  # fm-supervise-orca.sh start returns 3 when a supervisor is already live; that
+  # is idempotent success for use-orca's purposes (the daemon is supervised).
+  start_supervisor; rc=$?
+  if [ "$rc" -eq 0 ]; then
     ok "supervisor started"
+  elif [ "$rc" -eq 3 ]; then
+    ok "supervisor already live (idempotent)"
   else
-    fail "supervisor failed to start"
+    fail "supervisor failed to start (exit $rc)"
     return 1
   fi
   step "4. install autostart"
