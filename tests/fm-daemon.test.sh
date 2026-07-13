@@ -562,6 +562,10 @@ test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
   state="$dir/state"
+  # The meta is what puts this task on the books. The catch-all scan requires it:
+  # a status file with no meta belongs to a task teardown already retired, and
+  # re-escalating one of those is the coze-obj-rename-fix-y3 false positive.
+  fm_write_meta "$state/dup-t6.meta" "window=sess:fm-dup-t6" "kind=ship"
   printf 'done: ready\n' > "$state/dup-t6.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"

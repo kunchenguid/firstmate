@@ -51,6 +51,69 @@
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
+# Second busy signature: the SPINNER STATUS LINE.
+#
+# Why it exists (2026-07-13, verified live on claude 2.1.207): a busy claude
+# crewmate no longer renders an interrupt hint at all. Its mid-turn footer is
+#
+#   ✳ Meandering… (5m 46s · ↓ 18.2k tokens)
+#   ───────────────
+#   ❯
+#   ───────────────
+#       Opus 4.8 (1M context)  ctx 15% (154k)  session 49% ...
+#       session-id 8c284187-...
+#     ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+#
+# so FM_TMUX_BUSY_REGEX_DEFAULT matches nothing, AND the spinner sits 7 lines
+# from the bottom - outside the 6-line footer window the hint scan uses. A
+# demonstrably busy crew therefore read as NOT busy everywhere the pane is the
+# evidence: the daemon's wedge recheck (stale_window_is_busy) could not see that
+# a crew had resumed, so it escalated "stale persisted Ns (possible wedge)" on a
+# crew that was actively working, and fm-crew-state.sh's pane fallback reported
+# no positive working evidence for it.
+#
+# The pattern is the SHAPE of that line - a parenthesised elapsed-time counter
+# followed by a token counter - not the spinner glyph (locale-fragile) or the
+# verb (claude randomises it: Meandering/Simmering/Puttering/...).
+FM_TMUX_SPINNER_REGEX_DEFAULT='\([0-9]+[hms][^)]*token'
+# Footer window for the hint scan. Deliberately narrow (the TUI footer area) so
+# busy-looking strings in DISPLAYED CONTENT cannot suppress stale detection.
+FM_TMUX_BUSY_TAIL_DEFAULT=6
+# Wider window for the spinner scan: claude's own footer now occupies 6 lines
+# BELOW the spinner. Safe to widen because a spinner match is never trusted on
+# its own - see fm_pane_is_busy's liveness rule.
+FM_TMUX_SPINNER_TAIL_DEFAULT=12
+# Seconds between the two captures that prove a spinner is LIVE.
+FM_TMUX_BUSY_LIVENESS_SECS_DEFAULT=2
+
+# 0 if <pane-text>'s last few non-blank lines carry a harness interrupt hint.
+# Single-shot and self-sufficient: a hint is rendered only while a turn is in
+# flight, so it is trusted without a liveness check, exactly as before.
+fm_busy_hint_in_text() {  # <pane-text>
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' \
+    | tail -"${FM_BUSY_TAIL_LINES:-$FM_TMUX_BUSY_TAIL_DEFAULT}" \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+}
+
+# 0 if <pane-text> shows a spinner status line. NOT proof of busy on its own: a
+# wedged or dead harness leaves its last painted frame - spinner included - on
+# screen forever, so trusting a single frame would mask exactly the wedges this
+# fleet must catch. Callers pair it with a liveness check (fm_pane_is_busy) or
+# with an outer staleness check that already proves the pane is changing (the
+# watcher's pane-hash comparison).
+fm_spinner_in_text() {  # <pane-text>
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' \
+    | tail -"${FM_SPINNER_TAIL_LINES:-$FM_TMUX_SPINNER_TAIL_DEFAULT}" \
+    | grep -qE "${FM_SPINNER_REGEX:-$FM_TMUX_SPINNER_REGEX_DEFAULT}"
+}
+
+# 0 if two captures of the same pane differ, i.e. the pane is actually repainting.
+# This is what turns a spinner frame into evidence: a live spinner advances its
+# elapsed-time counter every second, a frozen one does not.
+fm_pane_text_advanced() {  # <text-t0> <text-t1>
+  [ "$1" != "$2" ]
+}
+
 fm_is_login_shell_name() {  # <command-name>
   local name=${1##*/}
   name=${name#-}
@@ -133,13 +196,23 @@ fm_pane_input_pending() {  # <target>
   [ "$(fm_tmux_composer_state "$1")" = pending ]
 }
 
-# fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
-# (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
+# fm_pane_is_busy: 0 if the pane shows an agent mid-turn. Scans a 40-line tail
+# like fm-watch.sh, and accepts EITHER busy signature:
+#   1. an interrupt hint in the footer window (single-shot, as before), or
+#   2. a spinner status line that is DEMONSTRABLY LIVE - it is still there, and
+#      the pane repainted, across two captures FM_BUSY_LIVENESS_SECS apart.
+# The liveness requirement is what keeps this from weakening wedge detection: a
+# wedged harness's last frame keeps whatever spinner it died on, but it stops
+# repainting, so it reads not-busy and still escalates.
 fm_pane_is_busy() {  # <target>
-  local win=$1 tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  local win=$1 t0 t1
+  t0=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  fm_busy_hint_in_text "$t0" && return 0
+  fm_spinner_in_text "$t0" || return 1
+  sleep "${FM_BUSY_LIVENESS_SECS:-$FM_TMUX_BUSY_LIVENESS_SECS_DEFAULT}"
+  t1=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  fm_spinner_in_text "$t1" || return 1
+  fm_pane_text_advanced "$t0" "$t1"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,

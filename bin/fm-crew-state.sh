@@ -32,6 +32,12 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
+#   3b. A PARKED run is idle by design (the pipeline waits for the agent), so the
+#      run-step alone cannot tell apart a crew composing its gate answer, a crew
+#      waiting on a decision, and a wedge. Only for a parked run, the pane and a
+#      declared `paused:` line are consulted: a busy pane is reported in the
+#      detail (`pane busy`), and otherwise a declared pause is reported as
+#      `paused`. Working and terminal run-steps stay untouchable.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
@@ -179,14 +185,20 @@ crew_pane_is_busy() {  # <target>
   case "$TASK_BACKEND" in
     tmux) fm_pane_is_busy "$1" ;;
     *)
-      local bs tail40
+      local bs t0 t1
       bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
       case "$bs" in
         busy) return 0 ;;
         *)
-          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-            | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+          t0=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+          fm_busy_hint_in_text "$t0" && return 0
+          # Same live-spinner signature as the tmux arm (fm_pane_is_busy): a
+          # frozen frame is never busy, a repainting one is.
+          fm_spinner_in_text "$t0" || return 1
+          sleep "${FM_BUSY_LIVENESS_SECS:-$FM_TMUX_BUSY_LIVENESS_SECS_DEFAULT}"
+          t1=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+          fm_spinner_in_text "$t1" || return 1
+          fm_pane_text_advanced "$t0" "$t1"
           ;;
       esac
       ;;
@@ -531,6 +543,37 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
+  fi
+
+  # A PARKED run is idle BY DESIGN: the pipeline is waiting for the agent (or,
+  # through it, the captain) to answer a gate. Nothing is executing, so the
+  # run-step alone cannot say whether the crew is composing its answer, waiting
+  # on a decision firstmate already escalated, or wedged. Two facts settle it,
+  # and until 2026-07-13 the run-step path consulted neither:
+  #
+  #   pane busy  - the crew is actively working on its gate response. Reported in
+  #                the detail so the classifier (fm-classify-lib.sh) can absorb it
+  #                instead of calling an actively-working crew a possible wedge.
+  #   paused:    - a DECLARED external wait (the crew's or firstmate's own append,
+  #                e.g. "paused: awaiting captain decision on the review-gate
+  #                findings"). The whole point of the verb is "this idle pane is
+  #                expected, stop wedge-nagging it" - but a parked run made this
+  #                path report `parked`, which is neither working nor paused, so
+  #                the watcher re-surfaced the crew as stale every poll. Verified
+  #                live 2026-07-13 on nm-6951-fullflow-e2e.
+  #
+  # Pane evidence outranks the declaration (a crew that resumed is working, not
+  # paused). Terminal and actively-running run states are untouched: only a run
+  # PARKED at a gate can be reported as paused, so a finished, failed, or running
+  # crew can never be hidden behind a stale pause line.
+  if [ "$RUN_STATE" = parked ]; then
+    if [ -n "$BACKEND_TARGET" ] && pane_readable "$BACKEND_TARGET" && crew_pane_is_busy "$BACKEND_TARGET"; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}pane busy"
+    elif status_is_paused "$LOG_LINE"; then
+      emit paused status-log "$(log_note_of "$LOG_LINE")${SEP}run parked at a gate (declared pause holds)"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}pane idle"
     fi
   fi
 

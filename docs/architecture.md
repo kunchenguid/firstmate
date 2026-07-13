@@ -14,8 +14,12 @@ Repeated provably-working stale escalations on the same unchanged pane add an es
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+That absorb holds even while the crew's no-mistakes run is parked at a gate: a parked run is idle by design, so it is not on its own evidence of a wedge, and `bin/fm-crew-state.sh` reports such a crew as `paused` when it has declared one and as working when its pane is busy.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
+Each distinct stale pane hash surfaces at most once: once surfaced, that hash ages toward the wedge cadence instead of re-waking the first mate on every poll.
+The pane busy signature is either a harness interrupt hint in the footer or a spinner status line proven live by a second capture, since a wedged harness leaves its last painted frame - spinner included - on screen forever.
+The status fleet-scan only considers tasks still on the books, meaning those that still have a `state/<id>.meta`, so a torn-down task's leftover status log can never be re-escalated.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.

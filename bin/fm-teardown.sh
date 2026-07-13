@@ -1086,6 +1086,24 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.check.error" "$STATE/$ID.check.fails" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+# Supervision bookkeeping for this task, keyed by task id and by backend target.
+# Left behind, these outlive the task itself: state/ accumulated markers for tasks
+# torn down days earlier, and a leftover dedupe marker is indistinguishable from a
+# live one when the supervisors reason about what they have already surfaced. The
+# task is off the books, so its supervision state must go with it.
+TASK_KEY=$(printf '%s' "$ID" | tr ':/.' '___')
+rm -f "$STATE/.hb-surfaced-$TASK_KEY" \
+      "$STATE/.subsuper-seen-status-$TASK_KEY" \
+      "$STATE/.subsuper-stale-$TASK_KEY" \
+      "$STATE/.subsuper-paused-$TASK_KEY" \
+      "$STATE/.seen-${ID}_status" "$STATE/.seen-${ID}_turn-ended"
+if [ -n "$T" ]; then
+  WIN_KEY=$(printf '%s' "$T" | tr ':/.' '___')
+  rm -f "$STATE/.hash-$WIN_KEY" "$STATE/.count-$WIN_KEY" "$STATE/.stale-$WIN_KEY" \
+        "$STATE/.stale-since-$WIN_KEY" "$STATE/.surfaced-$WIN_KEY" \
+        "$STATE/.wedge-escalations-$WIN_KEY" "$STATE/.paused-$WIN_KEY" \
+        "$STATE/.paused-rechecked-$WIN_KEY" "$STATE/.paused-resurfaced-$WIN_KEY"
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

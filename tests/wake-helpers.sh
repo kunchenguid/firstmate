@@ -283,3 +283,38 @@ dead_pid() {
   done
   printf '%s\n' "$p"
 }
+
+# --- watcher-subprocess helpers (shared by the watcher-driving tests) --------
+#
+# bin/fm-watch.sh EXITS on an actionable wake and KEEPS BLOCKING while it absorbs
+# a benign one, so "did it stay alive?" is how a test asserts an absorb, and
+# "did it exit?" is how a test asserts a surface. These helpers are the bounded
+# way to ask that of a real watcher subprocess.
+
+# wait_live <pid> [ticks]: wait up to <ticks> 0.1s ticks while <pid> stays alive.
+# 0 = still alive at the deadline (it absorbed), 1 = it exited (it woke).
+wait_live() {
+  local pid=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# reap <pid>: stop a still-blocking watcher and collect it.
+reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# seen_sig <file>: the signature a primed .seen-* marker must hold so the
+# watcher's per-poll signal scan does not fire on a PRE-EXISTING status file.
+# Mirrors fm-watch.sh's stat_sig exactly, and is platform-detected rather than
+# `stat -f || stat -c` (that fallback writes a partial filesystem dump on Linux).
+seen_sig() {
+  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+}
+
+# file_mtime <file>: mtime in epoch seconds, platform-detected for the same reason.
+file_mtime() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
