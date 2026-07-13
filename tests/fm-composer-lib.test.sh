@@ -105,6 +105,27 @@ test_idle_placeholder_is_empty() {
   pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
 }
 
+# Locale-invariance regression, guarded at the owner rather than only at a
+# single adapter: bin/fm-supervise-daemon.sh runs under a C/POSIX locale, where
+# a byte-count strip (${content#?}) removes ONE BYTE of the 3-byte ❯ and leaves
+# two stray bytes behind, so the idle placeholder no longer matches and an idle
+# composer reads pending. The glyph strip must match the literal glyph instead.
+# Every adapter (tmux, herdr, orca, cmux) routes its verdict through here, so
+# this one case covers them all.
+test_glyph_strip_is_locale_invariant() {
+  local idle='^Type a message\.\.\.$' out
+  out=$(LC_ALL=C classify 0 '❯ Type a message...' "$idle")
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after a '❯' glyph must still read empty, got '$out'"
+  out=$(LC_ALL=C classify 0 '❯')
+  [ "$out" = empty ] || fail "under LC_ALL=C a bare '❯' agent glyph must still read empty, got '$out'"
+  out=$(LC_ALL=C classify 0 '› Type a message...' "$idle")
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after a '›' glyph must still read empty, got '$out'"
+  # Real input must stay protected under the same locale.
+  out=$(LC_ALL=C classify 0 '❯ fix findings 1 and 3')
+  [ "$out" = pending ] || fail "under LC_ALL=C real text after a '❯' glyph must still read pending, got '$out'"
+  pass "fm_composer_classify_content: the leading-glyph strip is locale-invariant (LC_ALL=C)"
+}
+
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'type a message...' "$idle")
@@ -132,5 +153,6 @@ test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
+test_glyph_strip_is_locale_invariant
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

@@ -730,7 +730,33 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT='^[❯›]'
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-$FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT}
+
+# fm_backend_herdr_is_bare_prompt: does <trimmed-row> open with a bare AGENT
+# prompt glyph? The DEFAULT pattern is matched with a locale-invariant `case` on
+# the literal glyphs, never handed to grep, because under a C/POSIX locale (what
+# bin/fm-supervise-daemon.sh runs with) a bracket expression over multibyte
+# glyphs degenerates into the BYTE class {E2,9D,AF,80,BA}: every box-drawing
+# glyph starts with byte E2, so the composer box's own bottom border row (╰, E2
+# 95 B0) and the unbordered rule rows (─, E2 94 80) all falsely read as bare
+# prompt rows. The scan below keeps the BOTTOM-most match, so such a row - drawn
+# BELOW the live composer - outranks it; in a dark theme it then strips to empty
+# as a dark-truecolor ghost and the composer reads `empty` while the human's
+# unsubmitted text sits right above it. That is the false-EMPTY direction, and
+# the away-mode injector would type an escalation over real pending input. Same
+# root cause as the glyph strip in bin/fm-composer-lib.sh, in its regex form.
+# An operator-supplied override keeps its documented regex semantics via grep.
+fm_backend_herdr_is_bare_prompt() {  # <trimmed-row>
+  local row=$1
+  if [ "$FM_BACKEND_HERDR_BARE_PROMPT_RE" = "$FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT" ]; then
+    case "$row" in
+      '❯'*|'›'*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  printf '%s' "$row" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"
+}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
@@ -752,7 +778,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
-        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+        if fm_backend_herdr_is_bare_prompt "$trimmed"; then
           shape=bare
           raw_match=$line
           found=1

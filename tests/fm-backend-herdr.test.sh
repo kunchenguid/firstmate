@@ -1015,6 +1015,63 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: grok's real bright typed input still reads pending"
 }
 
+# Locale-invariance regression for the bare-prompt shape (same root cause as the
+# glyph strip in bin/fm-composer-lib.sh, in its REGEX form). bin/fm-supervise-daemon.sh
+# runs under a C/POSIX locale, where `grep -qE '^[❯›]'` degenerates into the BYTE
+# class {E2,9D,AF,80,BA}. Every box-drawing glyph starts with byte E2, so the
+# grok composer box's own dark bottom border row (╰, E2 95 B0) falsely matched as
+# a bare prompt row. The scan keeps the BOTTOM-most match, so that border row -
+# drawn BELOW the live composer - outranked it, then stripped to empty as a
+# dark-truecolor ghost. The composer read `empty` while the captain's real
+# unsubmitted text sat right above it: the FALSE-EMPTY direction, where the
+# away-mode injector types an escalation over real pending input.
+test_composer_state_border_row_is_not_a_bare_prompt_under_c_locale() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-border-clocale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf fix the login bug \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "under LC_ALL=C the composer box's own border row must not read as a bare prompt row - real unsubmitted text above it must still win as pending, got '$out' (false-empty: the away-mode injector would type over the captain's real input)"
+  pass "fm_backend_herdr_composer_state: a box border row is not misread as a bare prompt under LC_ALL=C (real text stays pending)"
+}
+
+# The same locale, the genuinely idle shape: the unbordered claude prompt row
+# with its rule rows (─, also byte E2) above and below. The bottom rule row used
+# to win the byte-class match and read as real text, wedging away-mode injection
+# behind a permanent false `pending` - the same overnight wedge, re-entered
+# through the locale door.
+test_composer_state_unbordered_idle_prompt_is_empty_under_c_locale() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare-idle-clocale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x9c\xbb Worked for 2s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  \xe2\x86\x90 for agents\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "under LC_ALL=C a genuinely idle unbordered '❯' row must still read empty - the rule/footer rows below it are not bare prompts, got '$out'"
+  pass "fm_backend_herdr_composer_state: an idle unbordered '❯' row still reads empty under LC_ALL=C"
+}
+
+# The documented override knob keeps its regex semantics: an operator-supplied
+# FM_BACKEND_HERDR_BARE_PROMPT_RE is still honored (here, a harness whose bare
+# prompt glyph is '»'), and is never silently dropped by the locale-invariant
+# fast path the DEFAULT pattern now takes.
+test_composer_state_bare_prompt_override_is_honored() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare-override"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xc2\xbb hello captain\n' > "$resp/1.out"
+  printf '\xc2\xbb hello captain\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_RE='^»' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "an operator-supplied bare-prompt override must still be honored, got '$out'"
+  # Without the override the same row is not a composer row at all.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "without the override a '»' row is not a known composer row, got '$out'"
+  pass "fm_backend_herdr_composer_state: an operator-supplied FM_BACKEND_HERDR_BARE_PROMPT_RE override is still honored"
+}
+
 test_composer_state_codex_bare_prompt_glyph_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-codex-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2027,6 +2084,9 @@ test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
+test_composer_state_border_row_is_not_a_bare_prompt_under_c_locale
+test_composer_state_unbordered_idle_prompt_is_empty_under_c_locale
+test_composer_state_bare_prompt_override_is_honored
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
