@@ -15,17 +15,31 @@
 # and a timed-out hook is warned and skipped exactly like a failing one. The
 # budget is enforced by 'timeout' or macOS 'gtimeout' with a 5s kill-after grace
 # when either is on PATH, and otherwise - the stock macOS case, which ships
-# neither - by a shell-native watchdog that runs the hook in the background,
-# polls it against the budget, then sends SIGTERM followed by SIGKILL after a
-# 5s grace, so even a hook that traps or ignores SIGTERM is stopped with no
-# external binary. FM_HOOK_TIMEOUT=0 is the only opt-out: it runs the hook with
-# no time limit.
+# neither - by a shell-native watchdog that runs the hook in its own process
+# group, polls it in whole-second ticks against the budget, then signals the
+# whole group with SIGTERM followed by SIGKILL after a 5s grace, so even a hook
+# that traps or ignores SIGTERM is stopped with no external binary. Both bounded
+# paths signal the process group, not just the hook itself, so a hook blocked in
+# a descendant leaves no orphan holding the caller's stdout: a caller reading
+# fm_hook_run's output through a command substitution can never be stalled by
+# one. FM_HOOK_TIMEOUT=0 is the only opt-out: it runs the hook with no time
+# limit. Every path runs the hook with the caller's own stdio.
 #
 # Each hook receives its values both as positional arguments and as FM_HOOK_*
 # environment variables, so a hook can read whichever is convenient; the
 # per-hook argument and environment sets are listed in docs/extension-points.md.
 # By convention the first positional argument is the task id, which the runner
 # also uses to label its warnings.
+
+# fm_hook_signal_group <signal> <pid>
+# Signal the hook's process group, falling back to the bare pid if the group is
+# already gone or was never created. Always returns 0.
+fm_hook_signal_group() {
+  local sig=$1 pid=$2
+  kill "-$sig" "-$pid" 2>/dev/null ||
+    kill "-$sig" "$pid" 2>/dev/null ||
+    true
+}
 
 # fm_hook_run <config-dir> <hook-name> [NAME=VALUE ...] -- <arg>...
 # Run <config-dir>/hooks/<hook-name> with the given positional arguments and
@@ -57,27 +71,31 @@ fm_hook_run() {
   fi
   local task_label=${1:-} timed_out=0
   if [ -n "$timeout_bin" ]; then
-    env ${hook_env[@]+"${hook_env[@]}"} "$timeout_bin" -k 5 "$budget" "$hook" "$@" || hook_status=$?
+    env ${hook_env[@]+"${hook_env[@]}"} "$timeout_bin" -k 5 "$budget" "$hook" "$@" 0<&0 || hook_status=$?
   elif [ "$budget" -eq 0 ]; then
-    env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" || hook_status=$?
+    env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" 0<&0 || hook_status=$?
   else
-    local hook_pid ticks=0 grace=0
-    local deadline=$((budget * 5))
-    env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" &
+    # Job control puts the hook in its own process group (pgid == its pid), so
+    # the kills below reach its descendants too, matching what 'timeout' does.
+    local hook_pid elapsed=0 grace=0 job_control=0
+    case "$-" in *m*) job_control=1 ;; esac
+    set -m
+    env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" 0<&0 &
     hook_pid=$!
+    [ "$job_control" -eq 1 ] || set +m
     while kill -0 "$hook_pid" 2>/dev/null; do
-      if [ "$ticks" -ge "$deadline" ]; then
+      if [ "$elapsed" -ge "$budget" ]; then
         timed_out=1
-        kill -TERM "$hook_pid" 2>/dev/null || true
-        while [ "$grace" -lt 25 ] && kill -0 "$hook_pid" 2>/dev/null; do
-          sleep 0.2
+        fm_hook_signal_group TERM "$hook_pid"
+        while [ "$grace" -lt 5 ] && kill -0 "$hook_pid" 2>/dev/null; do
+          sleep 1 || true
           grace=$((grace + 1))
         done
-        kill -KILL "$hook_pid" 2>/dev/null || true
+        fm_hook_signal_group KILL "$hook_pid"
         break
       fi
-      sleep 0.2
-      ticks=$((ticks + 1))
+      sleep 1 || true
+      elapsed=$((elapsed + 1))
     done
     wait "$hook_pid" 2>/dev/null || hook_status=$?
   fi

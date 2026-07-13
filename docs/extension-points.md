@@ -16,7 +16,7 @@ The failure semantics are the contract's core and hold at every hook point:
 
 - A hook never gates the calling flow: a hook that exits non-zero is warned to stderr and the flow continues, so a hook must never be relied on to block anything.
 - A hang cannot gate the flow either: the hook always runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120), enforced by `timeout` or `gtimeout` when either is on `PATH` and otherwise by a shell-native watchdog that needs no external binary, so the bound holds on a stock macOS home too.
-  Both paths send `SIGTERM` and then `SIGKILL` after a 5-second grace, so even a hook that traps or ignores `SIGTERM` is stopped, and a timed-out hook is warned and skipped exactly like a failing one.
+  Both paths run the hook in its own process group and signal that whole group with `SIGTERM` and then `SIGKILL` after a 5-second grace, so even a hook that traps or ignores `SIGTERM`, or one blocked in a descendant it spawned, is stopped rather than orphaned, and a timed-out hook is warned and skipped exactly like a failing one.
 - `FM_HOOK_TIMEOUT=0` is the one opt-out: it runs the hook with no time limit.
 
 Each hook receives its values both as positional arguments and as `FM_HOOK_*` environment variables, so a hook can read whichever is convenient.
@@ -39,6 +39,7 @@ A PR merged outside firstmate - the captain clicking Merge in the GitHub UI, say
 A `post-spawn` hook must therefore treat "this task is now running" rather than "this is new work" as its trigger, and stay idempotent for a task id it has already seen.
 
 Hooks run with the invoking script's working directory and stdio, so a hook that produces output should write to its own log or a display surface rather than polluting the calling script's stdout.
+A bounded hook runs in its own process group, so it must take its input from its arguments and environment rather than reading the terminal.
 Hooks are per-home local configuration and are not propagated into secondmate homes.
 
 ## Personal scripts (bin-local/)

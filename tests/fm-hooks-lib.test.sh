@@ -18,6 +18,8 @@
 #     (f) hook timed out (exit 124)        -> "timed out" warning, returns 0
 #     (k) no timeout binary, hanging hook  -> shell watchdog kills it, returns 0
 #     (l) no timeout binary, fast hook     -> completes normally, not killed
+#     (m) no timeout binary, hook blocked in a descendant -> the whole process
+#         group is killed, so no orphan survives holding the caller's stdout
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
@@ -242,6 +244,44 @@ test_watchdog_lets_a_fast_hook_finish_without_timeout_binary() {
   pass "with no timeout binary, a hook inside its budget completes normally"
 }
 
+test_watchdog_kills_descendants_and_never_stalls_the_caller() {
+  local case_dir minbin rc out started gc_pid waited=0
+  case_dir=$(make_case watchdog-descendant)
+  minbin=$(make_no_timeout_path "$case_dir")
+  # A hook blocked in a descendant: killing only the hook itself would orphan the
+  # 'sleep', which keeps the caller's stdout pipe open and stalls the command
+  # substitution below forever.
+  cat > "$case_dir/config/hooks/post-spawn" <<SH
+#!/usr/bin/env bash
+sleep 60 &
+printf '%s\n' "\$!" > '$case_dir/descendant.pid'
+wait
+SH
+  chmod +x "$case_dir/config/hooks/post-spawn"
+
+  started=$SECONDS
+  set +e
+  out=$(FM_HOOK_TIMEOUT=1 PATH="$minbin" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "descendant: fm_hook_run must still return 0"
+  [ $((SECONDS - started)) -lt 30 ] \
+    || fail "descendant: the caller was stalled by an orphaned descendant ($((SECONDS - started))s)"
+  case "$out" in
+    *"post-spawn hook timed out after 1s for task-x1; continuing"*) ;;
+    *) fail "descendant: expected a timed-out warning, got: $out" ;;
+  esac
+  gc_pid=$(cat "$case_dir/descendant.pid")
+  while kill -0 "$gc_pid" 2>/dev/null && [ "$waited" -lt 5 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -0 "$gc_pid" 2>/dev/null \
+    && fail "descendant: the hook's descendant ($gc_pid) survived the watchdog"
+  pass "the watchdog kills the hook's whole process group and never stalls the caller"
+}
+
 test_pr_check_fires_pr_ready_on_first_record_only() {
   local case_dir rc
   case_dir=$(make_case pr-check)
@@ -423,6 +463,7 @@ test_timeout_invocation_shape
 test_timed_out_hook_warns_and_returns_zero
 test_watchdog_kills_a_hanging_hook_without_timeout_binary
 test_watchdog_lets_a_fast_hook_finish_without_timeout_binary
+test_watchdog_kills_descendants_and_never_stalls_the_caller
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_fires_post_merge_after_merge
