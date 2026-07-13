@@ -22,7 +22,8 @@ After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervi
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed.
+`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps a live run-step authoritative even if the pane has closed.
+For a terminal historical run only, a trailing `paused:` declaration wins when its status-file mtime is strictly newer than the run's parseable terminal timestamp; unavailable or non-newer ordering leaves the terminal run authoritative.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
@@ -36,10 +37,12 @@ Optional X mode rides the same check path: the locked session-start bootstrap st
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
-`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
+`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and reports honest `started`, `attached`, restart-only `healthy`, wake, or `FAILED` output.
 On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
+A normal wake handoff stays quiet because the durable wake sequence advanced; if an owned or attached arm cycle instead ends without a handoff or healthy successor while tasks remain, it exits non-zero, prints `FAILED`, and writes `state/.watcher-arm-dead`.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
+An arm-death marker also forces that warning inside the normal beacon grace unless an independently healthy watcher is confirmed.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work is in flight and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.

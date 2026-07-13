@@ -103,6 +103,8 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+  .wake-queue.seq    monotonic wake sequence used to distinguish a normal watcher wake handoff from a silent arm-cycle death
+  .watcher-arm-dead  durable alarm from an arm cycle that ended without a wake handoff or healthy successor while tasks remain; cleared by a confirmed healthy arm or normal handoff
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
@@ -477,7 +479,8 @@ That checks-green status is owed at the CI-ready return point, when `/no-mistake
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 Judge a validating crewmate by the run's step status, never by whether its shell is still running.
-Read its current state with `bin/fm-crew-state.sh <id>`: a deterministic, token-tight one-line read that takes the matching no-mistakes run-step as the source of truth and reconciles it against the crewmate's `state/<id>.status` log.
+Read its current state with `bin/fm-crew-state.sh <id>`: a deterministic, token-tight one-line read that takes a matching live no-mistakes run-step as the source of truth and reconciles it against the crewmate's `state/<id>.status` log.
+For a terminal historical run only, a trailing `paused:` declaration wins when its status-file mtime is strictly newer than the run's parseable terminal timestamp; the terminal run remains authoritative when ordering is unavailable or the pause is not newer.
 Because the run-step is authoritative before pane liveness, a crewmate whose window closed after or during validation can still report `done` or `working` from its run; a missing pane becomes `unknown` only when no matching run exists.
 That log is an append-only wake-*event* log, not a current-state field, and it goes stale the moment a resolved gate lets the run resume: after you answer a `needs-decision`/`blocked` and the crewmate silently resumes (responds to the gate, the pipeline fixes, it re-validates), the log's last line still reads `needs-decision`/`blocked` while the run-step has moved on.
 So never infer current state from a `tail` of that log; `bin/fm-crew-state.sh` reports the live run-step state and explicitly flags the stale log line superseded, where a raw `tail` would mislead you into re-escalating settled work.

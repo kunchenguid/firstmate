@@ -27,6 +27,8 @@
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
 # secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# Relative report paths in those secondmate records are resolved against that
+# secondmate's home before they are emitted as landed artifacts.
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
