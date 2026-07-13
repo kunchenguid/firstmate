@@ -3,7 +3,8 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per problem or capability fact and exits 0.
 #          Silent = all good.
-#          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
+#          Lines: "MISSING: <tool> (install: <command>)",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -322,15 +323,20 @@ install_cmd() {
   esac
 }
 
-manual_install_hint() {
+manual_install_url() {
   case "$1" in
-    herdr) echo "see https://herdr.dev for install instructions" ;;
+    herdr) echo "https://herdr.dev" ;;
     *) return 1 ;;
   esac
 }
 
-install_hint() {
-  install_cmd "$1" || manual_install_hint "$1"
+missing_tool_diagnostic() {
+  local tool=$1 instructions
+  if instructions=$(manual_install_url "$tool"); then
+    echo "MISSING_MANUAL: $tool (instructions: $instructions)"
+    return 0
+  fi
+  echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
@@ -569,8 +575,8 @@ if [ "${1:-}" = "install" ]; then
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
     if ! cmd=$(install_cmd "$t"); then
-      hint=$(manual_install_hint "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
-      echo "error: $t requires manual installation ($hint)" >&2
+      instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+      echo "error: $t requires manual installation (instructions: $instructions)" >&2
       exit 1
     fi
     cmd=${cmd%%  #*}
@@ -585,10 +591,10 @@ if [ "$BACKEND_VALID" -eq 0 ]; then
 fi
 for t in $BACKEND_TOOLS; do
   fm_backend_required_tool_available "$BACKEND" "$t" \
-    || echo "MISSING: $t (install: $(install_hint "$t"))"
+    || missing_tool_diagnostic "$t"
 done
 for t in $COMMON_TOOLS; do
-  command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_hint "$t"))"
+  command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
 done
 # The treehouse lease-support upgrade check is only relevant when the resolved
 # backend actually requires treehouse (every backend except orca, which owns its

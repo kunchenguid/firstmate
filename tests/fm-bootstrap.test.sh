@@ -411,8 +411,16 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    missing="MISSING: $cli"
+    if [ "$backend" = herdr ]; then
+      missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
+    else
+      missing="MISSING: $cli"
+    fi
     assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
+    if [ "$backend" = herdr ]; then
+      assert_not_contains "$out" "MISSING: herdr (install:" \
+        "backend=herdr must not advertise manual guidance as an executable install command"
+    fi
     assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when its own CLI is missing"
   done <<'ROWS'
 herdr^herdr
@@ -427,7 +435,7 @@ test_herdr_install_requires_manual_action() {
   out=$("$ROOT/bin/fm-bootstrap.sh" install herdr 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "install herdr should fail instead of evaluating its manual-install hint"
-  [ "$out" = "error: herdr requires manual installation (see https://herdr.dev for install instructions)" ] \
+  [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
     || fail "install herdr should return actionable manual-install guidance, got: $out"
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
 }
