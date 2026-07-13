@@ -279,8 +279,9 @@ test_status_is_paused_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
-  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  local dir fakebin state open FM_STATE_OVERRIDE
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"; state="$dir/state"
+  FM_STATE_OVERRIDE=$state
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -291,6 +292,21 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  printf 'needs-decision [key=review]: choose a remediation\npaused: gate acknowledged; awaiting captain response\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review (ask-user: captain decision)'
+  [ "$(crew_absorb_class a)" = paused ] || fail "parked ask-user gate with latest paused: not classed paused"
+  open=$(status_open_decisions "$state/a.status")
+  printf '%s' "$open" | grep -F $'review\tneeds-decision\tchoose a remediation' >/dev/null \
+    || fail "trailing paused: masked the earlier open needs-decision"
+  printf 'needs-decision [key=review]: choose a remediation\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "unacknowledged parked gate was absorbed"
+  signal_reason_is_actionable "$state/a.status" || fail "unacknowledged parked gate wake was not actionable"
+  printf 'needs-decision [key=review]: choose a remediation\npaused: gate acknowledged; awaiting captain response\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  [ "$(crew_absorb_class a)" = working ] || fail "active run-step did not outrank a trailing paused: line"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review (ask-user: captain decision)'
+  printf 'working: later non-pause event\n' >> "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "later non-pause line did not clear the parked pause exemption"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -298,7 +314,7 @@ test_crew_absorb_class_classifier() {
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: parked gates require a latest pause, active runs win, and open decisions remain durable"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -609,7 +625,7 @@ test_nonterminal_stale_not_working_surfaced() {
 # uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
-test_nonterminal_stale_paused_absorbed_then_resurfaced() {
+test_parked_gate_latest_pause_absorbed_then_resurfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
@@ -619,14 +635,15 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   statusf="$state/held.status"
   # A DECLARED pause (not captain-relevant), .seen-* primed so the signal scan does
   # not pre-empt the stale path.
-  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf 'needs-decision [key=review]: choose a remediation\npaused: gate acknowledged; awaiting captain response\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # crew_absorb_class reads the declared pause from fm-crew-state.sh.
-  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+  # crew_absorb_class combines the authoritative parked gate with the latest
+  # explicit pause without closing the earlier durable decision.
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review (ask-user: captain decision)'
 
   # Phase A: a fresh pause (status file just written) under a high re-surface
   # threshold is absorbed - no wake, no wedge timer.
@@ -667,7 +684,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
-  pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+  pass "an acknowledged parked gate enters the existing long-cadence pause path without closing its decision"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1564,7 +1581,7 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
-test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_parked_gate_latest_pause_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

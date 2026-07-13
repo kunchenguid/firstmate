@@ -322,25 +322,34 @@ signal_reason_is_actionable() {  # <file> ...
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#             pause (paused:), or an authoritative parked run has a latest
+#             explicit paused: acknowledgement; either is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# One fm-crew-state.sh read serves BOTH absorb reasons at once. Active working
+# evidence is checked before the narrow parked-plus-latest-pause exception, so a
+# crew that appended paused: but then STARTED a run reports working, never paused.
+# A parked run without that latest explicit acknowledgement remains none, keeping
+# its first gate wake actionable; the status stream itself is never changed, so
+# status_open_decisions continues to own the durable open decision.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src status_dir last
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
+  src=${line#*source: }; src=${src%% *}
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  if [ "$state" = parked ] && [ "$src" = run-step ]; then
+    status_dir=${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-$_FM_CLASSIFY_LIB_DIR/..}/state}}
+    last=$(last_status_line "$status_dir/$id.status")
+    if status_is_paused "$last"; then printf 'paused'; return; fi
   fi
   printf 'none'
 }
