@@ -118,7 +118,7 @@ BRIEF
   fi
   ok "spawn: $out"
   sleep 8
-  if [ -f "$STATE/smoke-use-tmux.turn-ended" ]; then
+  if [ -f "${FM_STATE_OVERRIDE:-$STATE}/$suite_id.turn-ended" ]; then
     ok "turn-end extension fired"
   else
     fail "turn-end extension did NOT fire"

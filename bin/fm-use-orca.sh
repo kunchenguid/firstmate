@@ -44,6 +44,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/fm-supervise-orca.desktop"
 
@@ -217,12 +218,13 @@ BRIEF
   # pi needs time to load + process a brief + complete a turn. Poll the
   # turn-end marker rather than sleeping a fixed duration so the smoke is
   # honest about whether the agent actually fired the extension.
-  local waited=0
-  while [ ! -f "$STATE/smoke-use-orca.turn-ended" ] && [ "$waited" -lt 60 ]; do
+  local waited=0 state_dir
+  state_dir=$(FM_STATE_OVERRIDE="$STATE" printf '%s' "$STATE")
+  while [ ! -f "$state_dir/smoke-use-orca.turn-ended" ] && [ "$waited" -lt 60 ]; do
     sleep 2
     waited=$((waited + 2))
   done
-  if [ -f "$STATE/smoke-use-orca.turn-ended" ]; then
+  if [ -f "$state_dir/smoke-use-orca.turn-ended" ]; then
     ok "turn-end extension fired after ${waited}s (state/smoke-use-orca.turn-ended exists)"
   else
     fail "turn-end extension did NOT fire within 60s (state/smoke-use-orca.turn-ended missing)"
