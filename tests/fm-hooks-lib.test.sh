@@ -5,7 +5,8 @@
 # The contract under test: an absent or non-executable hook is a silent no-op,
 # a present hook runs with the documented positional args and FM_HOOK_* env, a
 # failing or timed-out hook is warned to stderr and never breaks the calling
-# flow, and the runner invokes the hook under 'timeout -k 5 <budget>'.
+# flow, and the hook is always time-bounded: under 'timeout -k 5 <budget>' when
+# a timeout binary exists, and under the shell-native watchdog when none does.
 #
 # Matrix:
 #   unit (fm_hook_run sourced directly):
@@ -15,6 +16,8 @@
 #     (d) failing hook                     -> stderr warning, returns 0
 #     (e) timeout invocation shape         -> 'timeout -k 5 <budget> <hook> <args>'
 #     (f) hook timed out (exit 124)        -> "timed out" warning, returns 0
+#     (k) no timeout binary, hanging hook  -> shell watchdog kills it, returns 0
+#     (l) no timeout binary, fast hook     -> completes normally, not killed
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
@@ -175,6 +178,68 @@ SH
   assert_grep 'post-spawn hook timed out after 7s for task-x1; continuing' "$case_dir/stderr" \
     "timed-out: expected a timed-out stderr warning"
   pass "a timed-out hook is warned to stderr and swallowed"
+}
+
+# A PATH that holds neither 'timeout' nor 'gtimeout', so fm_hook_run must fall
+# back to its shell-native watchdog - the stock macOS shape. Only the binaries
+# the runner and the test hooks actually need are linked in. Echoes the dir.
+make_no_timeout_path() {
+  local case_dir=$1 minbin bin src
+  minbin="$case_dir/minbin"
+  mkdir -p "$minbin"
+  for bin in bash env sleep; do
+    src=$(command -v "$bin") || fail "watchdog: '$bin' not found on PATH"
+    ln -sf "$src" "$minbin/$bin"
+  done
+  printf '%s\n' "$minbin"
+}
+
+test_watchdog_kills_a_hanging_hook_without_timeout_binary() {
+  local case_dir minbin rc started
+  case_dir=$(make_case watchdog-hang)
+  minbin=$(make_no_timeout_path "$case_dir")
+  cat > "$case_dir/config/hooks/post-spawn" <<SH
+#!/usr/bin/env bash
+printf 'started\n' > '$case_dir/hook.log'
+sleep 60
+printf 'finished\n' >> '$case_dir/hook.log'
+SH
+  chmod +x "$case_dir/config/hooks/post-spawn"
+
+  started=$SECONDS
+  set +e
+  FM_HOOK_TIMEOUT=1 PATH="$minbin" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "watchdog: fm_hook_run should swallow the watchdog timeout"
+  [ $((SECONDS - started)) -lt 30 ] \
+    || fail "watchdog: the hanging hook was not bounded (took $((SECONDS - started))s)"
+  assert_grep 'started' "$case_dir/hook.log" "watchdog: the hook never ran"
+  grep -q 'finished' "$case_dir/hook.log" \
+    && fail "watchdog: the hanging hook ran to completion instead of being killed"
+  assert_grep 'post-spawn hook timed out after 1s for task-x1; continuing' "$case_dir/stderr" \
+    "watchdog: expected a timed-out stderr warning"
+  pass "with no timeout binary, the shell watchdog kills a hanging hook and the caller continues"
+}
+
+test_watchdog_lets_a_fast_hook_finish_without_timeout_binary() {
+  local case_dir minbin rc
+  case_dir=$(make_case watchdog-fast)
+  minbin=$(make_no_timeout_path "$case_dir")
+  write_logging_hook "$case_dir" post-spawn 0 FM_HOOK_TASK_ID
+  set +e
+  FM_HOOK_TIMEOUT=30 PATH="$minbin" \
+    fm_hook_run "$case_dir/config" post-spawn "FM_HOOK_TASK_ID=task-x1" -- task-x1 \
+    2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "watchdog-fast: fm_hook_run should return 0"
+  assert_grep 'args:task-x1' "$case_dir/hook.log" "watchdog-fast: hook did not receive its args"
+  assert_grep 'FM_HOOK_TASK_ID=task-x1' "$case_dir/hook.log" "watchdog-fast: FM_HOOK_TASK_ID missing"
+  [ ! -s "$case_dir/stderr" ] \
+    || fail "watchdog-fast: a hook well inside its budget must not warn: $(cat "$case_dir/stderr")"
+  pass "with no timeout binary, a hook inside its budget completes normally"
 }
 
 test_pr_check_fires_pr_ready_on_first_record_only() {
@@ -356,6 +421,8 @@ test_present_hook_gets_args_and_env
 test_failing_hook_warns_and_returns_zero
 test_timeout_invocation_shape
 test_timed_out_hook_warns_and_returns_zero
+test_watchdog_kills_a_hanging_hook_without_timeout_binary
+test_watchdog_lets_a_fast_hook_finish_without_timeout_binary
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_fires_post_merge_after_merge

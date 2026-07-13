@@ -15,8 +15,9 @@ Every hook point shares one runner, `fm_hook_run` in `bin/fm-hooks-lib.sh`, whos
 The failure semantics are the contract's core and hold at every hook point:
 
 - A hook never gates the calling flow: a hook that exits non-zero is warned to stderr and the flow continues, so a hook must never be relied on to block anything.
-- A hang cannot gate the flow either: the hook runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120) via `timeout` or macOS `gtimeout` with a 5-second kill-after grace, and a timed-out hook is warned and skipped exactly like a failing one.
-- `FM_HOOK_TIMEOUT=0` is a deliberate opt-out that runs the hook with no time limit; when neither timeout binary is on `PATH`, the hook runs unbounded after a stderr warning.
+- A hang cannot gate the flow either: the hook always runs under a time budget of `FM_HOOK_TIMEOUT` seconds (default 120), enforced by `timeout` or `gtimeout` when either is on `PATH` and otherwise by a shell-native watchdog that needs no external binary, so the bound holds on a stock macOS home too.
+  Both paths send `SIGTERM` and then `SIGKILL` after a 5-second grace, so even a hook that traps or ignores `SIGTERM` is stopped, and a timed-out hook is warned and skipped exactly like a failing one.
+- `FM_HOOK_TIMEOUT=0` is the one opt-out: it runs the hook with no time limit.
 
 Each hook receives its values both as positional arguments and as `FM_HOOK_*` environment variables, so a hook can read whichever is convenient.
 The first positional argument is always the task id.

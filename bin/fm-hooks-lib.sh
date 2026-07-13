@@ -11,13 +11,15 @@
 # a missing or non-executable hook is silently skipped, a hook that exits
 # non-zero is warned to stderr and swallowed, and the caller continues either
 # way (fm_hook_run always returns 0). A hang cannot gate the flow either: the
-# hook runs under a time budget of FM_HOOK_TIMEOUT seconds (default 120) via
-# 'timeout' or macOS 'gtimeout' with a 5s kill-after grace, so even a hook that
-# traps or ignores SIGTERM is stopped, and a timed-out hook is warned and
-# skipped exactly like a failing one. FM_HOOK_TIMEOUT=0 is a deliberate opt-out
-# that runs the hook with no time limit. When neither timeout binary exists the
-# hook runs unbounded after a stderr warning - a missing timeout binary never
-# fails the calling flow.
+# hook always runs under a time budget of FM_HOOK_TIMEOUT seconds (default 120),
+# and a timed-out hook is warned and skipped exactly like a failing one. The
+# budget is enforced by 'timeout' or macOS 'gtimeout' with a 5s kill-after grace
+# when either is on PATH, and otherwise - the stock macOS case, which ships
+# neither - by a shell-native watchdog that runs the hook in the background,
+# polls it against the budget, then sends SIGTERM followed by SIGKILL after a
+# 5s grace, so even a hook that traps or ignores SIGTERM is stopped with no
+# external binary. FM_HOOK_TIMEOUT=0 is the only opt-out: it runs the hook with
+# no time limit.
 #
 # Each hook receives its values both as positional arguments and as FM_HOOK_*
 # environment variables, so a hook can read whichever is convenient; the
@@ -53,15 +55,35 @@ fm_hook_run() {
   elif command -v gtimeout >/dev/null 2>&1; then
     timeout_bin=gtimeout
   fi
-  local task_label=${1:-}
+  local task_label=${1:-} timed_out=0
   if [ -n "$timeout_bin" ]; then
     env ${hook_env[@]+"${hook_env[@]}"} "$timeout_bin" -k 5 "$budget" "$hook" "$@" || hook_status=$?
-  else
-    echo "warning: neither 'timeout' nor 'gtimeout' on PATH; $hook_name hook for $task_label runs unbounded" >&2
+  elif [ "$budget" -eq 0 ]; then
     env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" || hook_status=$?
+  else
+    local hook_pid ticks=0 grace=0
+    local deadline=$((budget * 5))
+    env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" &
+    hook_pid=$!
+    while kill -0 "$hook_pid" 2>/dev/null; do
+      if [ "$ticks" -ge "$deadline" ]; then
+        timed_out=1
+        kill -TERM "$hook_pid" 2>/dev/null || true
+        while [ "$grace" -lt 25 ] && kill -0 "$hook_pid" 2>/dev/null; do
+          sleep 0.2
+          grace=$((grace + 1))
+        done
+        kill -KILL "$hook_pid" 2>/dev/null || true
+        break
+      fi
+      sleep 0.2
+      ticks=$((ticks + 1))
+    done
+    wait "$hook_pid" 2>/dev/null || hook_status=$?
   fi
   if [ "$hook_status" -ne 0 ]; then
-    if [ -n "$timeout_bin" ] && { [ "$hook_status" -eq 124 ] || [ "$hook_status" -eq 137 ]; }; then
+    if [ "$timed_out" -eq 1 ] ||
+      { [ -n "$timeout_bin" ] && { [ "$hook_status" -eq 124 ] || [ "$hook_status" -eq 137 ]; }; }; then
       echo "warning: $hook_name hook timed out after ${budget}s for $task_label; continuing" >&2
     else
       echo "warning: $hook_name hook failed (exit $hook_status) for $task_label; continuing" >&2
