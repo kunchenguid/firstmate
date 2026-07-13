@@ -36,10 +36,12 @@
 # footer set (mirrors fm-watch.sh / the daemon).
 # Claude quota parking override: FM_RATELIMIT_REGEX matches only the footer
 # render inspected by fm_ratelimit_render_match, never the full transcript.
-# FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds for a quota wait
-# (default 3600s, ~an hourly reset). Transient "API Error: 529" overload parking
-# is opt-in: set FM_OVERLOAD_REGEX to a calibrated footer-line signature before
-# FM_OVERLOAD_FALLBACK (default 120s) is used.
+# The default quota matcher is bounded to the footer phrase, reset time, timezone,
+# and optional final period; prose that keeps writing after the timezone is not a
+# footer. FM_RATELIMIT_FALLBACK is the fallback reset delay in seconds for a quota
+# wait (default 3600s, ~an hourly reset). Transient "API Error: 529" overload
+# parking is opt-in: set FM_OVERLOAD_REGEX to a calibrated footer-line signature
+# before FM_OVERLOAD_FALLBACK (default 120s) is used.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -56,7 +58,7 @@
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+reached\.[[:space:]]+Your[[:space:]]+limit[[:space:]]+will[[:space:]]+reset[[:space:]]+at[[:space:]]+[^[:cntrl:]]+'
+FM_RATELIMIT_REGEX_DEFAULT='Claude[[:space:]]+usage[[:space:]]+limit[[:space:]]+reached\.[[:space:]]+Your[[:space:]]+limit[[:space:]]+will[[:space:]]+reset[[:space:]]+at[[:space:]]+([0-9]{1,2}(:[0-9]{2})?[[:space:]]*([AP]\.?M\.?)|[0-9]{1,2}:[0-9]{2})[[:space:]]+(\((UTC|GMT|Z|[A-Z]{2,5}|[+-][0-9]{2}:?[0-9]{2}|(UTC|GMT)[+-][0-9]{1,2}(:?[0-9]{2})?|[A-Za-z]+/[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)?)\)|(UTC|GMT|Z|[A-Z]{2,5}|[+-][0-9]{2}:?[0-9]{2}|(UTC|GMT)[+-][0-9]{1,2}(:?[0-9]{2})?|[A-Za-z]+/[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)?))\.?'
 # Transient overload 529 detection is disabled by default because no captured
 # real idle-529 render has calibrated a safe stock pattern. Operators can opt in
 # with FM_OVERLOAD_REGEX once they have a real footer-line sample; the same

@@ -74,6 +74,12 @@ In summary, Claude usage limit reached is just a phrase in this response.'
   fi
   text='ordinary transcript line
 another ordinary line
+Claude usage limit reached. Your limit will reset at 4 PM (UTC). This was only quoted transcript text.'
+  if fm_ratelimit_render_match "$text" >/dev/null; then
+    fail "quota footer phrase with trailing prose matched as a live footer"
+  fi
+  text='ordinary transcript line
+another ordinary line
 Claude usage limit reached. Your limit will reset at 4 PM (UTC).'
   match=$(fm_ratelimit_render_match "$text")
   case "$match" in
@@ -350,10 +356,10 @@ EOF
 $match
 EOF
   [ "$reset" = "$((now + 45))" ] || fail "FM_OVERLOAD_FALLBACK override not honored: reset=$reset"
-  # A quota footer with no parseable reset time still falls back to the hourly 3600s.
+  # A quota footer with a bounded but unparseable reset time still falls back to the hourly 3600s.
   match=$(fm_ratelimit_render_match 'ordinary line
 another line
-Claude usage limit reached. Your limit will reset at an unspecified time.' "$now")
+Claude usage limit reached. Your limit will reset at 25 PM (UTC).' "$now")
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
@@ -391,7 +397,7 @@ EOF
   [ "$reset" = 1111111111 ] || fail "overload reuse did not pin the reset: reset=$reset"
   # A non-numeric reuse value is ignored: the footer is re-parsed (fallback here).
   match=$(fm_ratelimit_render_match 'ordinary line
-Claude usage limit reached. Your limit will reset at an unspecified time.' "$now" 'not-a-number')
+Claude usage limit reached. Your limit will reset at 25 PM (UTC).' "$now" 'not-a-number')
   IFS=$(printf '\t') read -r reset kind <<EOF
 $match
 EOF
