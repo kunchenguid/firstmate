@@ -1765,7 +1765,7 @@ test_canonical_publication_failure_recovers_only_on_retry() {
 }
 
 test_obligation_namespace_compatibility() {
-  local dir state
+  local dir state rc
   dir=$(make_case legacy-noncanonical-obligation)
   state="$dir/home/state"
   mkdir -p "$state/.pr-check-quarantine"
@@ -1775,12 +1775,78 @@ test_obligation_namespace_compatibility() {
   printf 'legacy quarantined bytes\n' \
     > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
   chmod 0600 "$state/.pr-check-quarantine/"*
+  fm_write_meta "$state/_noncanonical.meta" \
+    'window=fm-_noncanonical' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod 0700 "$dir/fakebin/tmux"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" _noncanonical --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "legacy reserved namespace prevented safe task teardown"
+  [ -f "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+    || fail "task teardown removed the legacy pending obligation"
+  [ -f "$state/.pr-check-quarantine/_noncanonical.check.abc123" ] \
+    || fail "task teardown removed legacy reserved evidence"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "migration could not recover the previous reserved obligation namespace"
   [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
     || fail "legacy reserved retry retained its pending obligation"
-  [ -f "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical" ] \
-    || fail "legacy reserved retry did not publish its terminal outcome"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.check.abc123" ] \
+    || fail "legacy reserved retry retained evidence in the task namespace"
+  [ -f "$state/.pr-check-quarantine/!noncanonical.diagnostic.noncanonical" ] \
+    || fail "legacy reserved retry did not migrate its terminal outcome"
+  [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
+    || fail "legacy reserved retry did not migrate its quarantined evidence"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case unknown-diagnostic-obligation)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'unknown obligation\n' > "$state/.pr-check-quarantine/task-a.diagnostic.unknown"
+  chmod 0600 "$state/.pr-check-quarantine/task-a.diagnostic.unknown"
+  set +e
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted an unknown diagnostic obligation"
+  [ ! -e "$state/.pr-check-migration-v1" ] \
+    || fail "unknown diagnostic obligation allowed a completion marker"
+  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.unknown" ] \
+    || fail "unknown diagnostic refusal removed the ambiguous state"
+
+  dir=$(make_case malformed-diagnostic-obligation)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'wrong terminal outcome\n' > "$state/.pr-check-quarantine/task-a.diagnostic.canonical"
+  chmod 0600 "$state/.pr-check-quarantine/task-a.diagnostic.canonical"
+  printf 'fm-pr-check-migration-scan-v1\n' > "$state/.pr-check-migration-scan-v1"
+  printf 'fm-pr-check-migration-v1\n' > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  set +e
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration marker accepted malformed diagnostic content"
+  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.canonical" ] \
+    || fail "malformed diagnostic refusal removed the ambiguous state"
+
+  dir=$(make_case delimiter-quarantine-artifact)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'quarantined bytes\n' > "$state/.pr-check-quarantine/foo.diagnostic.bar.check.abc123"
+  chmod 0600 "$state/.pr-check-quarantine/foo.diagnostic.bar.check.abc123"
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "diagnostic namespace rejected a valid quarantine artifact"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
 
   dir=$(make_case diagnostic-delimiter-id)

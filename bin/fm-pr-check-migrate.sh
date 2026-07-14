@@ -103,6 +103,107 @@ private_migration_boundaries_valid() {
   fi
 }
 
+diagnostic_file_is_one_line() {
+  local file=$1 expected=$2 value
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  exec 6< "$file" || return 1
+  IFS= read -r value <&6 || { exec 6<&-; return 1; }
+  if IFS= read -r _extra <&6; then
+    exec 6<&-
+    return 1
+  fi
+  exec 6<&-
+  [ "$value" = "$expected" ]
+}
+
+diagnostic_obligation_message() {
+  local basename=$1 prefix kind suffix
+  MIGRATION_DIAGNOSTIC_KIND=
+  MIGRATION_DIAGNOSTIC_PREFIX=
+  MIGRATION_DIAGNOSTIC_MESSAGE=
+  kind=${basename##*.diagnostic.}
+  suffix=".diagnostic.$kind"
+  [ "$basename" != "$kind" ] || return 1
+  prefix=${basename%"$suffix"}
+  [ -n "$prefix" ] && [ "$prefix$suffix" = "$basename" ] || return 1
+  if [ "$prefix" = "$NONCANONICAL_PREFIX" ] \
+    || { [ "$prefix" = "$LEGACY_NONCANONICAL_PREFIX" ] \
+      && { [ "$kind" = pending-noncanonical ] || [ "$kind" = noncanonical ]; }; }; then
+    case "$kind" in
+      pending-noncanonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
+        ;;
+      noncanonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact quarantined and unarmed'
+        ;;
+      *) return 1 ;;
+    esac
+  else
+    fm_pr_task_id_valid "$prefix" || return 1
+    case "$kind" in
+      pending-canonical|pending-ambiguous)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: migration outcome tracking started before legacy poll handling"
+        ;;
+      canonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll rebuilt and armed"
+        ;;
+      failure-canonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
+        ;;
+      failure-ambiguous)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
+        ;;
+      failure-replacement)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: replacement poll lacks canonical provenance or metadata binding; poll remains unarmed; republish it through fm-pr-check.sh"
+        ;;
+      ambiguous)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
+        ;;
+      validated)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: validated replacement poll armed after legacy quarantine"
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  MIGRATION_DIAGNOSTIC_KIND=$kind
+  MIGRATION_DIAGNOSTIC_PREFIX=$prefix
+}
+
+quarantine_artifact_basename_valid() {
+  local basename=$1 random stem kind prefix
+  random=${basename##*.}
+  [[ "$random" =~ ^[A-Za-z0-9]{6}$ ]] || return 1
+  stem=${basename%.*}
+  kind=${stem##*.}
+  prefix=${stem%.*}
+  case "$kind" in
+    check|data|registration|replacement-check|replacement-data|replacement-registration) ;;
+    *) return 1 ;;
+  esac
+  [ "$prefix" = "$NONCANONICAL_PREFIX" ] \
+    || [ "$prefix" = "$LEGACY_NONCANONICAL_PREFIX" ] \
+    || fm_pr_task_id_valid "$prefix"
+}
+
+diagnostic_namespace_valid() {
+  local artifact basename
+  [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
+  for artifact in "$QUARANTINE"/*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    basename=${artifact##*/}
+    case "$basename" in
+      *.diagnostic.*)
+        if diagnostic_obligation_message "$basename"; then
+          diagnostic_file_is_one_line "$artifact" "$MIGRATION_DIAGNOSTIC_MESSAGE" || return 1
+        else
+          quarantine_artifact_basename_valid "$basename" || return 1
+        fi
+        ;;
+    esac
+  done
+}
+
 scan_complete() {
   local state_device
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
@@ -110,6 +211,7 @@ scan_complete() {
   fm_pr_private_file_valid "$SCAN_MARKER" 600 "$state_device" || return 1
   scan_marker_content_valid "$SCAN_MARKER" || return 1
   private_migration_boundaries_valid "$state_device" || return 1
+  diagnostic_namespace_valid || return 1
   current_checks_authenticated
 }
 
@@ -419,20 +521,6 @@ quarantine_artifact() {
   [ ! -e "$source" ] && [ ! -L "$source" ]
 }
 
-diagnostic_file_is_one_line() {
-  local file=$1 expected=$2 value
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
-  exec 6< "$file" || return 1
-  IFS= read -r value <&6 || { exec 6<&-; return 1; }
-  if IFS= read -r _extra <&6; then
-    exec 6<&-
-    return 1
-  fi
-  exec 6<&-
-  [ "$value" = "$expected" ]
-}
-
 diagnostic_file_contains() {
   local file=$1 expected=$2 line
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -490,57 +578,33 @@ record_diagnostic() {
   fi
 }
 
-diagnostic_obligation_message() {
-  local basename=$1 prefix kind suffix
-  MIGRATION_DIAGNOSTIC_KIND=
-  MIGRATION_DIAGNOSTIC_PREFIX=
-  MIGRATION_DIAGNOSTIC_MESSAGE=
-  kind=${basename##*.diagnostic.}
-  suffix=".diagnostic.$kind"
-  [ "$basename" != "$kind" ] || return 1
-  prefix=${basename%"$suffix"}
-  [ -n "$prefix" ] && [ "$prefix$suffix" = "$basename" ] || return 1
-  if [ "$prefix" = "$NONCANONICAL_PREFIX" ] \
-    || { [ "$prefix" = "$LEGACY_NONCANONICAL_PREFIX" ] \
-      && { [ "$kind" = pending-noncanonical ] || [ "$kind" = noncanonical ]; }; }; then
-    case "$kind" in
-      pending-noncanonical)
-        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
-        ;;
-      noncanonical)
-        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact quarantined and unarmed'
-        ;;
-      *) return 1 ;;
-    esac
-  else
-    fm_pr_task_id_valid "$prefix" || return 1
-    case "$kind" in
-      pending-canonical|pending-ambiguous)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: migration outcome tracking started before legacy poll handling"
-        ;;
-      canonical)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll rebuilt and armed"
-        ;;
-      failure-canonical)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
-        ;;
-      failure-ambiguous)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
-        ;;
-      failure-replacement)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: replacement poll lacks canonical provenance or metadata binding; poll remains unarmed; republish it through fm-pr-check.sh"
-        ;;
-      ambiguous)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
-        ;;
-      validated)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: validated replacement poll armed after legacy quarantine"
-        ;;
-      *) return 1 ;;
-    esac
-  fi
-  MIGRATION_DIAGNOSTIC_KIND=$kind
-  MIGRATION_DIAGNOSTIC_PREFIX=$prefix
+migrate_legacy_noncanonical_namespace() {
+  local source basename suffix destination
+  [ -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
+    || [ -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
+    || [ -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ] \
+    || [ -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ] \
+    || return 0
+  quarantine_tree_repair_and_validate || return 1
+  for source in "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.check."* \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.data."* \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.registration."* \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical"; do
+    [ -e "$source" ] || [ -L "$source" ] || continue
+    fm_pr_private_file_valid "$source" 600 "$STATE_DEVICE" || return 1
+    basename=${source##*/}
+    suffix=${basename#"$LEGACY_NONCANONICAL_PREFIX"}
+    destination="$QUARANTINE/$NONCANONICAL_PREFIX$suffix"
+    fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+    mv -- "$source" "$destination" || return 1
+    fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE" || return 1
+  done
+  [ ! -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
+    && [ ! -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
+    && [ ! -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ] \
+    && [ ! -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ]
 }
 
 ensure_diagnostic_obligation() {
@@ -854,6 +918,7 @@ process_diagnostic_obligations() {
   local obligation basename message
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
+  diagnostic_namespace_valid || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
     "$QUARANTINE"/*.diagnostic.pending-ambiguous \
     "$QUARANTINE"/*.diagnostic.pending-noncanonical \
@@ -896,6 +961,8 @@ process_diagnostic_obligations() {
 diagnostics_failed=0
 migration_failed=0
 if ! quarantine_tree_repair_and_validate \
+  || ! migrate_legacy_noncanonical_namespace \
+  || ! diagnostic_namespace_valid \
   || ! recover_pending_outcomes \
   || ! process_diagnostic_obligations; then
   diagnostics_failed=1
@@ -985,6 +1052,7 @@ if migration_needed; then
 fi
 
 if ! quarantine_tree_repair_and_validate \
+  || ! diagnostic_namespace_valid \
   || ! process_diagnostic_obligations; then
   diagnostics_failed=1
   migration_failed=1
