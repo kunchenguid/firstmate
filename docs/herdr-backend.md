@@ -17,6 +17,7 @@ The installer places `herdr` in `${HERDR_INSTALL_DIR:-$HOME/.local/bin}`.
 Set `HERDR_INSTALL_DIR` when validating or packaging into an isolated prefix.
 Homebrew users may instead run `brew install herdr`.
 Firstmate requires Herdr protocol 14 or newer, and this guide's full acceptance run verified Herdr 0.7.3 with protocol 16.
+The guarded lab helper also requires `lsof`, `ps`, `jq`, and standard POSIX process utilities to prove session ownership.
 Firstmate ensures that the selected named Herdr server is running before it creates a task endpoint.
 Firstmate requires session-scoped workspace, tab, pane, agent, event, send, capture, and close operations.
 Every Firstmate call passes an explicit trailing `--session <name>`.
@@ -150,8 +151,9 @@ Every adapter operation sets `HERDR_SESSION` and appends a trailing `--session <
 Ambient `HERDR_SESSION` alone is not accepted as isolation for lifecycle verification.
 The lab helper performs fresh baseline and ownership checks immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
 The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one running session named `default`, records that complete baseline, and rejects every foreign or contradictory record.
-After provisioning, the same state record captures every authoritative field of the created non-default lab session except its mutable `running` status.
-Later checks require both the exact baseline and that byte-identical stable identity before every stop, delete, teardown, or restart lifecycle action.
+After provisioning, the same state record binds a cryptographic launch nonce to the foreground server's socket-owning PID, process start identity, and persistent session marker.
+Later destructive checks require the exact baseline, byte-identical session record, matching process start identity, socket ownership, and the inherited launch nonce descriptor.
+Standalone stop verifies that the captured process exited and released its socket, while teardown deletes only a still-running proven instance and refuses deletion after standalone stop until guarded reprovision establishes a new live identity.
 
 ### ID stability
 
@@ -197,8 +199,8 @@ The live endpoint accepted a steer, `fm-crew-state.sh` reported `working`, and p
 The run produced `metadata_backend=absent resolved_backend=herdr spawn=ok steer=ok crew_state=working teardown=ok`.
 
 That run also reproduced a Herdr 0.7.3 cleanup race after closing the last task pane: the first guarded lab teardown observed the session briefly after delete, while an immediate retry found it absent.
-The helper now treats disappearance during guarded stop as successful idempotent cleanup and polls a bounded interval for confirmed absence after delete, while rejecting default or ambiguous session records at every destructive boundary.
-Regression coverage exercises delayed deletion with a nonzero delete exit, stop-time auto-collapse, and fail-closed default-session protection.
+The helper polls a bounded interval for confirmed process and inventory absence after delete while rejecting default or ambiguous session records at every destructive boundary.
+Regression coverage exercises delayed deletion with a nonzero delete exit, process-survival races after stop, instance replacement, and fail-closed default-session protection.
 
 The fix was verified again against real Herdr 0.7.3 through the canonical guide acceptance run below.
 Its first guarded teardown call succeeded, and the helper's fleet-state tripwire confirmed that the live `default` session was unchanged.
