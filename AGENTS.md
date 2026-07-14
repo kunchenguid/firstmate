@@ -575,7 +575,7 @@ bin/fm-supervision-instructions.sh  # render the current harness block or one-li
 bin/fm-watch-arm.sh                 # verified arm wrapper used by harness protocols that call it
 bin/fm-watch-arm.sh --restart       # home-scoped forced restart; never a broad pkill
 bin/fm-watch-checkpoint.sh          # bounded foreground watcher checkpoint for Codex-style protocols
-bin/fm-watch.sh                     # the watcher itself; exits with: signal|stale|check|heartbeat
+bin/fm-watch.sh                     # the watcher itself; runs detached, exits with: signal|stale|check|heartbeat, or a no-wake idle-exit when nothing needs supervising
 bin/fm-wake-drain.sh                # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>           # one-line current-state read; reconciles matching run-step, pane, and status log
 bin/fm-fleet-view.sh                # read-only Markdown whole-fleet view rendered from the structured snapshot

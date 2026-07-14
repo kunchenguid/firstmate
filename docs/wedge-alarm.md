@@ -40,7 +40,7 @@ See `docs/examples/wedge-alarm` for a copyable starting config.
 Every notifier channel (`osascript`, `herdr`, and `command:`) routes through a single seam, `FM_WEDGE_ALARM_EXEC`: when it is set, the daemon hands the fixed channel category and summary to that command instead of the real notifier (`wedge_alarm_emit` in `bin/fm-supervise-daemon.sh`).
 This makes it structurally impossible for a test to post a real desktop notification, and impossible for a future test author to forget to stub:
 
-- The daemon is only ever sourced (not executed) by tests - production `bin/fm-afk-start.sh` execs it.
+- The daemon is only ever sourced (not executed) by tests - production `bin/fm-afk-start.sh` runs it as a real process (exec'd in the foreground, or spawned detached under `--detach`).
   Whenever the daemon is sourced, its library-mode guard defaults `FM_WEDGE_ALARM_EXEC` to `discard`, which fires nothing.
   A real daemon a test later spawns inherits that default through the environment.
 - `tests/wake-helpers.sh` upgrades the default to an on-disk recorder that logs `<channel>\t<summary>` to `$FM_WEDGE_ALARM_LOG`, so the daemon and wake suites can assert channel selection without any real notifier.

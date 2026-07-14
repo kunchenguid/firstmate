@@ -95,7 +95,7 @@ The three earlier tool turns produced no guard follow-up because no work was in 
 Command used to fire the watcher: `printf 'done: pi e2e watcher fire\n' > "$FM_HOME/state/pi-e2e.status"`.
 Observed output after the wake: Pi ran `bin/fm-wake-drain.sh`, read the terminal status, called `fm_watch_arm_pi`, and rendered `watcher: started Pi extension arm child 2`.
 The complete pane contained one guard message and zero foreground `bin/fm-watch-arm.sh` bash calls.
-`/quit` printed `PI_EXIT=0`, and the second arm process plus its watcher child were both gone afterward.
+`/quit` printed `PI_EXIT=0`, and the second arm process plus its watcher child were both gone afterward (the watcher half of that observation was superseded on 2026-07-13, when the watcher became detached: see [the reaped background task](#2026-07-13-the-reaped-background-task-and-why-supervision-is-now-detached) below).
 
 Grok 0.2.91 was validated with a scratch `GROK_HOME` and symlinked auth/config.
 Hook file used for tracked project-hook loading: `<scratch-project>/.grok/hooks/fm-smoke.json`, matching the tracked `.grok/hooks/fm-primary-turnend-guard.json` location.

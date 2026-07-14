@@ -753,8 +753,8 @@ Dedupe (one wake per `->blocked` edge, marker cleared when the pane returns to `
 
 ## Away-mode daemon terminal launch (2026-07-12, herdr 0.7.3, protocol 16, macOS aarch64)
 
-`bin/fm-afk-start.sh` execs the supervise daemon in the FOREGROUND of whatever terminal it is already in.
-Harnesses with a native in-pane tracked-background tool (claude, grok) run it there and the daemon inherits the captain pane's env.
+`bin/fm-afk-start.sh` needs a host it can run the supervise daemon in: by default it execs the daemon in the FOREGROUND of whatever terminal it is already in.
+Harnesses with a native in-pane tracked-background tool (claude, grok) run it there with `--detach`, so the daemon survives that task being reaped, and it still inherits the captain pane's env (`bin/fm-afk-start.sh`'s header owns the detachment mechanism).
 A harness with NO native background mechanism (pi) has no place to run it, and manufacturing one by SPLITTING the captain's active pane visibly shrinks it: `herdr pane split <pane> --direction down --ratio 0.20 --no-focus` creates a second pane whose `tab_id` equals the captain pane's, so the two co-tenant one tab's viewport.
 `--no-focus` does not prevent this - it governs focus, not geometry.
 
