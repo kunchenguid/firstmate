@@ -106,9 +106,19 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 
 **Arm-time liveness canary.**
 The liveness guard fails closed, so a supervisor whose harness cannot be attributed on its backend (pi runs as a generic `node`) would defer every escalation for the whole session.
-At arm time the agent is provably alive, so the daemon probes once and prints a bordered `AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR` banner when the verdict is not `alive`, recording `agent_liveness=` in its startup log line.
-It is advisory: the daemon still arms, and away mode still works through the wedge alarm and the afk-exit catch-up flush.
-If that banner appears when starting away mode, tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
+At arm time the agent is provably alive, so anything but `alive` is a permanent property of this supervisor, and the fail-closed state must be announced rather than discovered from a wedge alarm 300 seconds later.
+`bin/fm-afk-canary-lib.sh` owns the probe, and every surface **re-derives it live** from the resolved supervisor pane - there is no marker file and no cached flag to go stale.
+Two surfaces are observable, and they are the ones to act on:
+
+- **The foreground arm path.** `bin/fm-afk-launch.sh start` and `start-native` re-probe after arming and print a bordered `AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR` warning on their own stderr - the output firstmate reads when it arms away mode.
+- **Session start.** `bin/fm-bootstrap.sh` re-probes whenever `state/.afk` exists and prints one `AFK_INJECTION_DISABLED:` line, so a cold or restarted session that re-enters afk from the flag still learns injection is off (`bootstrap-diagnostics` owns the handling).
+
+The daemon also records its own `agent_liveness=` verdict in `state/.supervise-daemon.log`, but that is a record for later diagnosis, not a captain-facing channel: on the path a bad verdict is most likely on, the daemon lives in a manufactured terminal nobody attaches to.
+
+The canary is advisory: away mode still arms and still works through the wedge alarm and the afk-exit catch-up flush.
+Read the cause the warning prints, because the two verdicts need opposite responses.
+A `dead` supervisor target is a bare shell while firstmate is provably running, so the target points at the wrong pane - a fixable misconfiguration; repoint it and re-arm.
+An `unknown` verdict is an unattributable harness, an accepted degradation - tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon

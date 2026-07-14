@@ -692,16 +692,27 @@ Consequence to know: a pi-based supervisor in away mode reads `unknown` and defe
 
 **Fail closed, but never fail silent.**
 Failing closed means a supervisor whose harness cannot be attributed on its backend loses away-mode injection for the whole session, not for one tick - so that state must be announced, not discovered 300s later from a wedge alarm.
-Two things make it honest.
-At arm time the daemon probes the supervisor pane once, right where the answer is known: firstmate is provably running there, because it just launched the daemon, so anything but `alive` is a permanent property of this supervisor and not a transient read.
-A non-`alive` verdict prints a bordered banner saying away-mode injection is disabled this session and that escalations will route through the wedge alarm and the afk-exit catch-up flush instead, and it records `agent_liveness=` in the startup log line.
-The canary is ADVISORY: a bad verdict (or a probe error, treated as `unknown`) warns and arms anyway, because degraded supervision beats none - unlike the unsupported-backend check above it, which refuses.
-And the wedge alarm no longer hardcodes "pane busy or wedged" as the cause: `inject_msg` records why each attempt did not land (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`), and the alarm reports that tag in its active alert and the full detail in its ERROR log and durable marker.
+Three things make it honest.
+
+First, the arm-time canary, on the surfaces the captain and firstmate actually read.
+The probe itself is the same one `inject_msg` gates on, and it has exactly one owner, `bin/fm-afk-canary-lib.sh`.
+It is **re-derived live** by every surface - like `bin/fm-guard.sh`'s worktree-tangle check, and for the same reason: a respawned agent, a retargeted pane, or a harness swap must change the answer immediately, and a stored marker would answer from a world that no longer exists.
+Where it is probed matters as much as that it is probed.
+The daemon's own arm-time probe is a RECORD (`agent_liveness=` in `state/.supervise-daemon.log`), not a channel: on the path a bad verdict is most likely on - a harness with no native background tool, whose daemon therefore runs in a manufactured non-visible terminal (a detached tmux session, a `--no-focus` herdr workspace) - nobody ever attaches to that process's stderr, so a banner printed there reaches no one.
+So `bin/fm-afk-launch.sh` re-probes in the FOREGROUND after every successful `start`/`start-native` and prints the bordered warning on its own stderr, which is the output firstmate reads as it arms away mode; and `bin/fm-bootstrap.sh` re-probes at every session start whenever `state/.afk` exists, printing one `AFK_INJECTION_DISABLED:` line, so a cold or restarted session that re-enters afk from the flag alone still learns injection is off.
+
+Second, the warning names the RIGHT cause, because `dead` and `unknown` are opposite problems.
+At arm time firstmate is provably running in the pane it resolved, so `dead` (a bare shell) means the resolved TARGET points somewhere else - a fixable misconfiguration, repoint `FM_SUPERVISOR_TARGET` and re-arm - while `unknown` means the harness cannot be attributed on this backend at all, which is the accepted pi degradation and nothing to repoint.
+Telling a wrong-target operator to accept degraded away mode would hide a bug behind a known limitation.
+The canary is ADVISORY throughout: a bad verdict (or a probe error, treated as `unknown`) warns and arms anyway, because degraded supervision beats none - unlike the unsupported-backend check above it, which refuses.
+
+Third, the wedge alarm no longer hardcodes "pane busy or wedged" as the cause: `inject_msg` records why each attempt did not land (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`), and the alarm reports that tag in its active alert and the full detail in its ERROR log and durable marker.
 Before this, the most likely permanent wedge the guard introduces - a dead or unverifiable agent - would have been reported to the captain as a busy pane.
 
 **Regression coverage.**
 `tests/fm-daemon.test.sh`'s `test_inject_msg_defers_on_empty_composer_dead_shell` (the hole: `empty` composer + `dead` agent must defer), `test_inject_msg_defers_on_empty_composer_unknown_liveness` (fail-closed on `unknown`), and `test_inject_msg_injects_when_agent_alive_and_composer_empty` (the positive path) pin the guard directly; each fails against the pre-fix daemon.
 `tests/fm-afk-inject-e2e.test.sh`'s Scenario D drives the genuine hazard end-to-end - a real login shell showing a bare starship `❯`, a real away-mode daemon, and an assertion that the digest is never typed into the shell.
+The observable canary surfaces are pinned too: `tests/fm-afk-launch.test.sh`'s `unit_canary_*` cases (the foreground arm path warns on a non-alive probe, distinguishes `dead` from `unknown`, stays silent on `alive`, and never fails the arm) and `tests/fm-bootstrap.test.sh`'s `test_afk_injection_canary_*` cases (the `AFK_INJECTION_DISABLED:` line is gated on `state/.afk`, and is re-derived live - flipping only the pane's foreground process flips the diagnostic, with no marker file in play).
 
 **Other injection paths.**
 `bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.

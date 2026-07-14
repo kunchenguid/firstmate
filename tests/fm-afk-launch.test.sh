@@ -860,8 +860,112 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# UNIT: the arm-time injection canary on the FOREGROUND arm path.
+#
+# The away-mode daemon injects only into a pane with a confirmed live agent
+# process, and it fails closed - so a supervisor whose harness a backend cannot
+# attribute (pi execs into a generic `node`) receives NO escalation for the whole
+# away session. The daemon probes that at arm time too, but it does so from inside
+# the terminal it was launched in: a detached tmux session or a --no-focus herdr
+# workspace nobody attaches to, on exactly the path a bad verdict is most likely
+# on. THIS script runs in the foreground of the pane away mode is armed from, so
+# its own stderr is the channel firstmate actually reads and relays. These cases
+# pin that warning, that it names the right cause (a `dead` target is the wrong
+# pane - fixable; an `unknown` harness is the accepted pi degradation), and that a
+# bad verdict NEVER turns into a failed arm.
+#
+# A fake tmux answers pane_current_command - the whole input to the liveness
+# verdict - and no-ops the terminal lifecycle, the same seam tests/fm-daemon.test.sh
+# uses for the daemon's own probe.
+make_canary_tmux() {  # <dir> -> prints the fakebin path
+  local fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
+    *pane_id*) printf '%s\n' '%1'; exit 0 ;;
+  esac
+done
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s' "$fakebin"
+}
+
+# Arm away mode with the supervisor pane running <pane-command>, capturing the
+# launcher's own stderr and exit status.
+run_canary_arm() {  # <case> <pane-command>
+  local fakebin
+  CANARY_HOME=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-canary-$1.XXXXXX")
+  CANARY_ERR="$CANARY_HOME/arm.err"
+  fakebin=$(make_canary_tmux "$CANARY_HOME")
+  PATH="$fakebin:$PATH" FM_HOME="$CANARY_HOME" FM_STATE_OVERRIDE="$CANARY_HOME/state" \
+    FM_SUPERVISOR_TARGET='%1' FM_SUPERVISOR_BACKEND=tmux \
+    FM_FAKE_TMUX_COMMAND="$2" FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    "$LAUNCH" start >/dev/null 2>"$CANARY_ERR"
+  CANARY_RC=$?
+}
+
+# Every non-alive verdict is ADVISORY: away mode must still be armed afterwards.
+assert_canary_still_armed() {  # <case>
+  [ "$CANARY_RC" -eq 0 ] \
+    || fail "canary($1): a non-alive probe must never fail the arm (exit $CANARY_RC)"
+  [ -e "$CANARY_HOME/state/.afk" ] \
+    || fail "canary($1): away mode did not arm"
+  [ -e "$CANARY_HOME/state/.afk-daemon-terminal" ] \
+    || fail "canary($1): the daemon terminal was not recorded, so the arm did not complete"
+}
+
+unit_canary_warns_on_dead_supervisor() {
+  run_canary_arm dead zsh
+  assert_canary_still_armed dead
+  grep -F 'AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR' "$CANARY_ERR" >/dev/null \
+    || fail "canary(dead): the foreground arm path printed no warning on its own stderr: $(cat "$CANARY_ERR")"
+  grep -F 'is a bare shell, not the pane running firstmate' "$CANARY_ERR" >/dev/null \
+    || fail "canary(dead): the warning did not name the wrong target as the cause"
+  grep -F 'point FM_SUPERVISOR_TARGET' "$CANARY_ERR" >/dev/null \
+    || fail "canary(dead): the warning gave no repoint remediation for a wrong target"
+  if grep -F 'generic node' "$CANARY_ERR" >/dev/null; then
+    fail "canary(dead): a wrong target was misreported as the accepted unattributable-harness degradation"
+  fi
+  pass "arm canary: a dead supervisor target warns in the foreground, names the wrong target, and still arms"
+  rm -rf "$CANARY_HOME"
+}
+
+unit_canary_warns_on_unattributable_harness() {
+  run_canary_arm unknown node
+  assert_canary_still_armed unknown
+  grep -F 'AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): an unattributable harness armed with no foreground warning: $(cat "$CANARY_ERR")"
+  grep -F 'cannot be attributed on backend' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): the warning did not name the unattributable harness as the cause"
+  grep -F 'accepted degradation' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): the warning did not say this is an accepted degradation"
+  if grep -F 'point FM_SUPERVISOR_TARGET' "$CANARY_ERR" >/dev/null; then
+    fail "canary(unknown): an unattributable harness was misreported as a repointable wrong target"
+  fi
+  pass "arm canary: an unattributable harness warns in the foreground as an accepted degradation, and still arms"
+  rm -rf "$CANARY_HOME"
+}
+
+unit_canary_silent_when_agent_alive() {
+  run_canary_arm alive claude
+  assert_canary_still_armed alive
+  if grep -F 'AWAY-MODE INJECTION IS DISABLED' "$CANARY_ERR" >/dev/null; then
+    fail "canary(alive): warned even though the supervisor agent was alive (false alarm)"
+  fi
+  pass "arm canary: a live supervisor agent arms with no warning"
+  rm -rf "$CANARY_HOME"
+}
+
 unit_clear_stale
 unit_fresh_vs_refresh
+unit_canary_warns_on_dead_supervisor
+unit_canary_warns_on_unattributable_harness
+unit_canary_silent_when_agent_alive
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state

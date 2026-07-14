@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, AFK_INJECTION_DISABLED, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -26,6 +26,12 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `AFK_INJECTION_DISABLED: <cause>; <remediation>` - away mode is armed, but the away-mode daemon's fail-closed agent-liveness guard cannot deliver an escalation into firstmate's own pane, so nothing reaches the captain until they are back.
+  Like `TANGLE:`, this is re-derived live on every run from the resolved supervisor pane, never read from a marker, so a corrected target or a respawned agent clears it on the next session start.
+  The two causes need different responses, and the printed line says which one it is.
+  A bare shell as the supervisor target means the target points at the wrong pane, which is a fixable misconfiguration: repoint `FM_SUPERVISOR_TARGET` at firstmate's own pane and re-arm away mode.
+  An unattributable harness (pi runs as a generic `node`) can never read `alive` on this backend, which is an accepted degradation, not a misconfiguration: tell the captain in plain outcome language that nothing will reach them while they are away, and that the work still surfaces on their return.
+  Away mode keeps running either way - escalations buffer, the wedge alarm fires, and the afk-exit catch-up flush delivers them - so never treat this line as a reason to refuse to supervise.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; continue with the normal fallback chain, resolve and pass the chosen fallback harness explicitly while the file remains present, fix the malformed schema, unverified harness name, unknown selector, or invalid harness/effort pair when convenient, and do not select a bad profile.
 - `CREW_DISPATCH: active config/crew-dispatch.json` - bootstrap validated the optional dispatch profile file and printed its active rules and `default:` when present.

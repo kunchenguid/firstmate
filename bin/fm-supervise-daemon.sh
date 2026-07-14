@@ -167,6 +167,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
+# Away-mode injection canary (fm_afk_canary_verdict/_warn/_cause/_fix). Shared
+# with bin/fm-afk-launch.sh's foreground arm path and bin/fm-bootstrap.sh's
+# session-start diagnostic, so "can this supervisor be injected into at all" is
+# derived and worded in exactly one place.
+# shellcheck source=bin/fm-afk-canary-lib.sh
+. "$FM_DAEMON_DIR/fm-afk-canary-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -1417,34 +1424,23 @@ fm_super_main() {
   # inject_msg's liveness guard fails CLOSED: it types only into a pane with a
   # confidently 'alive' agent process. Right here, at arm time, the supervisor
   # agent is PROVABLY alive - it just launched this daemon - so the probe has a
-  # known-good answer to give. Anything else is a permanent property of this
-  # supervisor for the whole session, not a transient read: a 'dead' pane means
-  # the target is wrong, and 'unknown' means this harness's process cannot be
-  # attributed on this backend (pi execs into a generic `node`), so EVERY
-  # escalation will defer and the captain would otherwise first learn of it
-  # ~MAX_DEFER_SECS later from a wedge alarm. Say it now, loudly, instead.
+  # known-good answer to give, and anything else is a permanent property of this
+  # supervisor for the whole away session rather than a transient read.
+  # This is the daemon's own RECORD of that verdict (the agent_liveness= field
+  # below, plus a WARNING in its log). It is deliberately NOT the captain-facing
+  # channel: on the path a bad verdict is most likely on - a harness with no
+  # native background tool, whose daemon therefore lives in a manufactured
+  # non-visible terminal - nobody ever attaches to this process's stderr. The
+  # surfaces the captain and firstmate actually read re-derive the same verdict
+  # live: bin/fm-afk-launch.sh warns in the FOREGROUND as away mode is armed, and
+  # bin/fm-bootstrap.sh re-probes at every session start (AFK_INJECTION_DISABLED).
   # Advisory by design: away mode still works degraded - escalations buffer, the
   # wedge alarm fires, and the afk-exit catch-up flush delivers them - so
   # refusing to arm would trade degraded supervision for none at all. A probe
   # error is treated exactly like 'unknown': warn, then arm.
-  local startup_liveness rule
-  startup_liveness=$(fm_backend_agent_alive "$BACKEND" "$TARGET" 2>/dev/null) || true
-  [ -n "$startup_liveness" ] || startup_liveness=unknown
-  if [ "$startup_liveness" != alive ]; then
-    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-    {
-      printf '●%s\n' "$rule"
-      printf '●  AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR\n'
-      printf '●  The agent-liveness probe reads %s (not alive) for %s on backend %s,\n' "'$startup_liveness'" "'$TARGET'" "'$BACKEND'"
-      printf '●  even though firstmate is running there right now. Injection fails closed, so it will\n'
-      printf '●  refuse EVERY escalation this session rather than risk typing into a shell.\n'
-      printf '●  Nothing is lost: escalations buffer, raise the wedge alarm after %ss, and flush on afk exit -\n' "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
-      printf '●  but no escalation will reach the pane while away.\n'
-      printf '●  Usual cause: a harness whose process cannot be attributed on this backend (pi runs as a bare node).\n'
-      printf '●%s\n' "$rule"
-    } >&2
+  local startup_liveness
+  startup_liveness=$(fm_afk_canary_warn "$BACKEND" "$TARGET") || \
     log "startup WARNING: supervisor agent liveness reads '$startup_liveness' (not alive) while firstmate is provably running; inject will defer every escalation this session (wedge alarm + afk-exit flush still deliver)"
-  fi
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"

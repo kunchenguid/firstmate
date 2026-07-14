@@ -39,6 +39,12 @@
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
+# Every successful start/start-native ends by re-deriving the away-mode injection
+# canary (bin/fm-afk-canary-lib.sh) against the captain pane and printing a loud
+# bordered warning on THIS script's stderr when the daemon's fail-closed liveness
+# guard could never deliver an escalation to it. Advisory only: the arm still
+# succeeds, and the exit status is unchanged.
+#
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
@@ -57,6 +63,8 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
+# shellcheck source=bin/fm-afk-canary-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-afk-canary-lib.sh"
 # fm-afk-start.sh provides the daemon-lock liveness helpers and
 # fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
 # main does not run on source. It sets `set -eu`, so turn errexit back off for
@@ -593,6 +601,23 @@ fm_afk_launch_stop() {
   return "$result"
 }
 
+# The captain-facing arm-time canary. The daemon probes the same thing, but it
+# does so from inside a terminal nobody attaches to (a detached tmux session, a
+# --no-focus herdr workspace) on exactly the path a bad verdict is most likely on,
+# so its banner reaches no one. This launcher runs in the FOREGROUND of the pane
+# away mode is armed from, so its own stderr IS the channel firstmate reads and
+# relays to the captain. Re-derived live on every arm, including a refresh of an
+# already-running daemon: the verdict must follow the pane's current reality, never
+# a stored flag (bin/fm-guard.sh's tangle check re-derives for the same reason).
+# ADVISORY - away mode is already armed by the time this runs, and a non-alive
+# verdict must never turn into a failed arm.
+fm_afk_launch_canary() {
+  local target backend
+  target=$(discover_supervisor_target) || return 0
+  backend=$(discover_supervisor_backend) || return 0
+  fm_afk_canary_warn "$backend" "$target" >/dev/null || true
+}
+
 fm_afk_launch_main() {
   local result
   fm_afk_launch_lock_acquire || return 1
@@ -608,6 +633,11 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
+  if [ "$result" -eq 0 ]; then
+    case "${1:-start}" in
+      start|start-native) fm_afk_launch_canary ;;
+    esac
+  fi
   fm_afk_launch_lock_release || result=1
   trap - EXIT INT TERM
   return "$result"

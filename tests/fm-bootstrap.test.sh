@@ -639,6 +639,94 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
+# A fake tmux that answers the two formats the away-mode injection canary asks
+# for: pane_id (does the supervisor pane exist) and pane_current_command (what is
+# RUNNING in it - the whole input to fm_backend_agent_alive's verdict).
+# FM_FAKE_TMUX_COMMAND is the only thing a case varies, which is the point: the
+# canary must be re-derived from the live pane, so changing the pane's foreground
+# process alone has to flip the diagnostic.
+make_liveness_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
+    *pane_id*) printf '%s\n' '%1'; exit 0 ;;
+  esac
+done
+exit 0
+SH
+  chmod +x "$1/tmux"
+}
+
+# AFK_INJECTION_DISABLED: away mode is armed, but the daemon's fail-closed
+# agent-liveness guard could never type an escalation into firstmate's own pane,
+# so nothing reaches the captain until they return. The arm-time warning belongs
+# to the session that armed away mode; a cold or restarted session re-enters afk
+# from state/.afk alone and would otherwise never learn injection is off - which
+# is exactly why session start RE-DERIVES the verdict instead of reading a marker.
+# `dead` (a bare shell target while firstmate provably runs elsewhere) and
+# `unknown` (a harness the backend cannot attribute, e.g. pi's generic node) are
+# opposite problems and must not share one remediation.
+test_afk_injection_canary() {
+  local label afk command mode expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label afk command mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/afk-canary-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    make_liveness_tmux "$fakebin"
+    [ "$afk" = 1 ] && date '+%s' > "$case_dir/home/state/.afk"
+    # No marker, no cached flag: TMUX_PANE names the supervisor pane and the fake
+    # tmux reports what is running in it, so this is the same live probe the
+    # launcher and the daemon make. Detect-only because the canary is a read-only
+    # diagnostic (it must reach a read-only session too, exactly like TANGLE), and
+    # it keeps the mutating sweeps out of a case that is only about the probe.
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      FM_FAKE_TMUX_COMMAND="$command" TMUX_PANE='%1' \
+      "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      grep)
+        printf '%s\n' "$out" | grep -F "$expect" >/dev/null \
+          || fail "$label: missing '$expect' (got: $out)" ;;
+    esac
+  done <<'ROWS'
+away mode armed with a live agent stays silent^1^claude^empty^
+away mode armed on a bare shell names the wrong target^1^zsh^grep^AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - supervisor target '%1' on backend 'tmux' is a bare shell, not the pane running firstmate; point FM_SUPERVISOR_TARGET at firstmate's own pane and re-arm away mode
+away mode armed on an unattributable harness names the accepted degradation^1^node^grep^AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - firstmate's harness cannot be attributed on backend 'tmux' (pi runs as a generic node), so target '%1' can never read alive; accepted degradation
+a dead supervisor pane with away mode OFF is not a diagnostic^0^zsh^empty^
+ROWS
+  # Same home, same (absent) state files: only the pane's foreground process
+  # changes. A cached verdict would keep reporting the dead shell here.
+  case_dir="$TMP_ROOT/afk-canary-rederive"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  make_liveness_tmux "$fakebin"
+  date '+%s' > "$case_dir/home/state/.afk"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TMUX_COMMAND=zsh TMUX_PANE='%1' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'AFK_INJECTION_DISABLED:' >/dev/null \
+    || fail "re-derive: a dead supervisor pane did not report AFK_INJECTION_DISABLED"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TMUX_COMMAND=claude TMUX_PANE='%1' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] \
+    || fail "re-derive: the canary did not clear when the pane came back alive (a stale marker would do this): $out"
+  [ ! -e "$case_dir/home/state/.afk-injection-disabled" ] \
+    || fail "re-derive: the canary wrote a durable marker; it must be re-derived live, never cached"
+  pass "bootstrap re-derives the away-mode injection canary live and names the right cause"
+}
+
 test_crew_dispatch_active_rules_are_surfaced() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -711,5 +799,6 @@ test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
+test_afk_injection_canary
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

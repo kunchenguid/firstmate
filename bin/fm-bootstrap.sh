@@ -11,6 +11,7 @@
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "AFK_INJECTION_DISABLED: <cause>; <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
@@ -41,6 +42,12 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          An AFK_INJECTION_DISABLED line means away mode is armed (state/.afk) but
+#          the away-mode daemon's fail-closed agent-liveness guard could never
+#          deliver an escalation into firstmate's own pane, so nothing reaches the
+#          captain until they are back. Re-derived live from the resolved supervisor
+#          pane on every run (bin/fm-afk-canary-lib.sh), never read from a marker,
+#          so a respawned agent or a corrected target clears it immediately.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -97,6 +104,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
+# shellcheck source=bin/fm-afk-canary-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-afk-canary-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -571,6 +582,28 @@ crew_dispatch_validate() {
   ' "$file"
 }
 
+# Away-mode injection canary, RE-DERIVED LIVE at every session start, exactly as
+# the worktree-tangle check above re-reads the branch instead of trusting a marker.
+# While away mode is armed, the daemon injects an escalation only into a pane with
+# a confirmed live agent process (bin/fm-supervise-daemon.sh's fail-closed liveness
+# guard), so a supervisor that reads dead or unattributable receives NOTHING until
+# the captain returns. The launcher warns about that when away mode is armed, but a
+# cold or restarted session never saw it - and firstmate's recovery re-enters afk
+# from the flag alone. So probe again here, from firstmate's own pane. Silent
+# unless away mode is actually armed AND the resolved supervisor pane exists AND
+# the probe is not confidently alive; an unresolvable pane stays quiet rather than
+# inventing a failure a real away session is not having.
+afk_injection_check() {
+  local target backend verdict
+  [ -e "$STATE/.afk" ] || return 0
+  target=$(discover_supervisor_target) || return 0
+  backend=$(discover_supervisor_backend) || return 0
+  fm_backend_target_exists "$backend" "$target" || return 0
+  verdict=$(fm_afk_canary_verdict "$backend" "$target")
+  [ "$verdict" = alive ] && return 0
+  echo "AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - $(fm_afk_canary_cause "$verdict" "$backend" "$target"); $(fm_afk_canary_fix "$verdict")"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -623,6 +656,7 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+afk_injection_check
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
