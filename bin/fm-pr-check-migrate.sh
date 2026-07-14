@@ -27,6 +27,18 @@ fi
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
+umask 077
+if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  mkdir -p "$STATE" || {
+    echo "PR_CHECK_MIGRATION: state directory could not be created; migration did not complete safely" >&2
+    exit 1
+  }
+fi
+if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
+  echo "PR_CHECK_MIGRATION: state directory is not a private ordinary directory; migration did not complete safely" >&2
+  exit 1
+fi
+
 migration_marker_content_valid() {
   local file=$1 value
   { exec 7< "$file"; } 2>/dev/null || return 1
@@ -135,8 +147,6 @@ if [ -f "$MARKER" ] && [ ! -L "$MARKER" ]; then
   rm -f -- "$MARKER" || exit 1
   [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || exit 1
 fi
-umask 077
-
 migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do

@@ -668,6 +668,24 @@ SH
   pass "migration pauses older watchers and acquires exclusion before its first scan or marker"
 }
 
+test_migration_initializes_fresh_state() {
+  local dir state rc
+  dir="$TMP_ROOT/migration-fresh-state"
+  state="$dir/home/state"
+  mkdir -p "$dir"
+
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "fresh-state migration failed: $(cat "$dir/migrate.err")"
+  [ -d "$state" ] && [ ! -L "$state" ] || fail "fresh-state migration did not create an ordinary state directory"
+  [ "$(file_mode "$state")" = 700 ] || fail "fresh-state migration did not create state with mode 0700"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  pass "migration creates and validates private state before watcher exclusion"
+}
+
 test_private_artifact_paths_refuse_symlinks_and_directories() {
   local artifact kind dir state destination rc
   for artifact in task-a.pr-poll task-a.check.sh; do
@@ -1539,6 +1557,7 @@ test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
+test_migration_initializes_fresh_state
 test_migration_excludes_older_watcher_before_scan
 test_private_artifact_paths_refuse_symlinks_and_directories
 test_marker_and_diagnostic_rename_fail_closed
