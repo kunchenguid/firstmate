@@ -1139,6 +1139,126 @@ SH
   pass "quarantine type and mode faults fail closed and recover only when a retry can validate them"
 }
 
+test_failed_outcomes_block_every_retry_until_repaired() {
+  local classification dir state rc pending success failure
+  for classification in canonical ambiguous; do
+    dir=$(make_case "retry-state-$classification")
+    state="$dir/home/state"
+    if [ "$classification" = canonical ]; then
+      fm_write_meta "$state/task-a.meta" \
+        'window=fm-task-a' \
+        'pr=https://github.com/o/r/pull/12'
+      printf 'legacy canonical bytes\n' > "$state/task-a.check.sh"
+      pending="$state/.pr-check-quarantine/task-a.diagnostic.pending-canonical"
+      success="$state/.pr-check-quarantine/task-a.diagnostic.canonical"
+      failure="$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical"
+    else
+      write_ambiguous_poll "$dir"
+      pending="$state/.pr-check-quarantine/task-a.diagnostic.pending-ambiguous"
+      success="$state/.pr-check-quarantine/task-a.diagnostic.ambiguous"
+      failure="$state/.pr-check-quarantine/task-a.diagnostic.failure-ambiguous"
+    fi
+    mkdir "$state/task-a.pr-poll"
+
+    set +e
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate-1.out" 2> "$dir/migrate-1.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$classification partial quarantine unexpectedly succeeded"
+    assert_grep 'migration did not complete safely' "$dir/migrate-1.err" \
+      "$classification partial quarantine did not report generic failure"
+    [ ! -e "$state/.pr-check-migration-v1" ] || fail "$classification partial quarantine published a marker"
+    [ ! -e "$state/task-a.check.sh" ] || fail "$classification first attempt left the legacy check runnable"
+    [ -d "$state/task-a.pr-poll" ] || fail "$classification first attempt changed the unrepaired sidecar directory"
+    [ -f "$pending" ] || fail "$classification first attempt did not persist its incomplete obligation"
+    [ -f "$failure" ] || fail "$classification first attempt did not persist a failure obligation"
+    [ ! -e "$success" ] || fail "$classification first attempt also persisted a contradictory success obligation"
+    printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+    chmod 0600 "$state/.pr-check-migration-v1"
+
+    set +e
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate-2.out" 2> "$dir/migrate-2.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$classification unrepaired retry unexpectedly succeeded"
+    [ ! -s "$dir/migrate-2.out" ] || fail "$classification unrepaired retry emitted a success outcome"
+    assert_grep 'migration did not complete safely' "$dir/migrate-2.err" \
+      "$classification unrepaired retry did not remain a generic failure"
+    [ ! -e "$state/.pr-check-migration-v1" ] || fail "$classification unrepaired retry published a marker"
+    [ -f "$pending" ] || fail "$classification unrepaired retry lost its incomplete obligation"
+    [ -f "$failure" ] || fail "$classification unrepaired retry lost its authoritative failure obligation"
+    [ ! -e "$success" ] || fail "$classification unrepaired retry created a contradictory success obligation"
+
+    rmdir "$state/task-a.pr-poll"
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate-3.out" 2> "$dir/migrate-3.err" \
+      || fail "$classification migration did not recover after sidecar repair"
+    assert_valid_migration_marker "$state/.pr-check-migration-v1"
+    [ ! -e "$pending" ] && [ ! -L "$pending" ] \
+      || fail "$classification repaired migration retained an incomplete obligation"
+    [ ! -e "$failure" ] && [ ! -L "$failure" ] \
+      || fail "$classification repaired migration retained a contradictory failure obligation"
+    [ -f "$success" ] || fail "$classification repaired migration did not persist its success obligation"
+    if [ "$classification" = canonical ]; then
+      [ "$(cat "$dir/migrate-3.out")" = 'PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home' ] \
+        || fail "canonical repaired retry did not report the armed outcome"
+      fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "canonical repaired retry did not arm a valid poll pair"
+    else
+      [ "$(cat "$dir/migrate-3.out")" = 'PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming' ] \
+        || fail "ambiguous repaired retry did not report the unarmed outcome"
+      [ ! -e "$state/task-a.check.sh" ] && [ ! -e "$state/task-a.pr-poll" ] \
+        || fail "ambiguous repaired retry left a task poll armed"
+    fi
+  done
+  pass "canonical and ambiguous failure obligations block every retry until all task artifacts are repaired"
+}
+
+test_canonical_publication_failure_recovers_only_on_retry() {
+  local dir state destination link_target gate rc pending success failure
+  dir=$(make_case canonical-publication-retry)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/13'
+  printf 'legacy canonical bytes\n' > "$state/task-a.check.sh"
+  destination="$state/task-a.check.sh"
+  link_target="$dir/external-sentinel"
+  gate="$dir/device-fault"
+  pending="$state/.pr-check-quarantine/task-a.diagnostic.pending-canonical"
+  success="$state/.pr-check-quarantine/task-a.diagnostic.canonical"
+  failure="$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical"
+  printf 'external sentinel\n' > "$link_target"
+  install_final_publication_fault "$dir"
+
+  set +e
+  FM_TEST_FINAL_PATH="$destination" FM_TEST_FINAL_ACTION=mode \
+    FM_TEST_FAULT_LINK_TARGET="$link_target" FM_TEST_FAULT_GATE="$gate" \
+    FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate-1.out" 2> "$dir/migrate-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "canonical publication fault unexpectedly succeeded"
+  assert_grep 'migration did not complete safely' "$dir/migrate-1.err" \
+    "canonical publication fault did not report generic failure"
+  assert_no_final_poll "$state"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "canonical publication fault published a marker"
+  [ -f "$pending" ] || fail "canonical publication fault did not persist an incomplete obligation"
+  [ -f "$failure" ] || fail "canonical publication fault did not persist a failure obligation"
+  [ ! -e "$success" ] || fail "canonical publication fault persisted contradictory outcomes"
+
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate-2.out" 2> "$dir/migrate-2.err" \
+    || fail "canonical publication failure did not recover on a clean retry"
+  [ "$(cat "$dir/migrate-2.out")" = 'PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home' ] \
+    || fail "canonical publication retry did not report the armed outcome"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "canonical publication retry did not arm a valid pair"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] \
+    || fail "canonical publication retry retained an incomplete obligation"
+  [ ! -e "$failure" ] && [ ! -L "$failure" ] \
+    || fail "canonical publication retry retained a failure obligation"
+  [ -f "$success" ] || fail "canonical publication retry did not persist its success obligation"
+  pass "canonical publication failure remains incomplete until a later clean retry rebuilds the poll"
+}
+
 test_nonexecuting_migration() {
   local dir state marker x_before x_after snap_before snap_after rc
   dir=$(make_case migration)
@@ -1323,6 +1443,8 @@ test_private_artifact_paths_refuse_symlinks_and_directories
 test_marker_and_diagnostic_rename_fail_closed
 test_postrename_marker_and_diagnostic_validation_retries
 test_quarantine_validation_and_retry_contract
+test_failed_outcomes_block_every_retry_until_repaired
+test_canonical_publication_failure_recovers_only_on_retry
 test_nonexecuting_migration
 test_bootstrap_migrates_before_other_mutations
 test_teardown_removes_poll_artifacts
