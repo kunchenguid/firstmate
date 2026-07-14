@@ -113,6 +113,6 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 case "$HOST_KIND" in
-  gitlab) glab mr merge "$MR_IID" -R "$MR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" ;;
+  gitlab) glab mr merge "$MR_IID" -R "$MR_REPO" --yes ${merge_args[@]+"${merge_args[@]}"} "$@" ;;
   *)      gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" ;;
 esac

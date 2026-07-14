@@ -231,8 +231,8 @@ test_gitlab_mr_url_merges_via_glab() {
   run_pr_merge "$case_dir" task-x1 https://gitlab.com/group/subgroup/repo/-/merge_requests/5924 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-merge: fm-pr-merge failed"
 
-  grep -qxF 'mr merge 5924 -R https://gitlab.com/group/subgroup/repo --squash' "$case_dir/glab.log" \
-    || fail "gitlab-merge: glab mr merge was not invoked with iid, host-explicit -R, and default --squash"
+  grep -qxF 'mr merge 5924 -R https://gitlab.com/group/subgroup/repo --yes --squash' "$case_dir/glab.log" \
+    || fail "gitlab-merge: glab mr merge was not invoked with iid, host-explicit -R, --yes, and default --squash"
   assert_grep 'pr=https://gitlab.com/group/subgroup/repo/-/merge_requests/5924' "$case_dir/state/task-x1.meta" \
     "gitlab-merge: MR URL was not recorded as pr="
   assert_grep 'pr_head=abc123def456abc123def456abc123def456abcd' "$case_dir/state/task-x1.meta" \
@@ -262,7 +262,7 @@ test_gitlab_explicit_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://gitlab.com/group/repo/-/merge_requests/12 -- --rebase \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-explicit-method: fm-pr-merge failed"
 
-  grep -qxF 'mr merge 12 -R https://gitlab.com/group/repo --rebase' "$case_dir/glab.log" \
+  grep -qxF 'mr merge 12 -R https://gitlab.com/group/repo --yes --rebase' "$case_dir/glab.log" \
     || fail "gitlab-explicit-method: caller --rebase was not forwarded without an extra default --squash"
   pass "fm-pr-merge does not add default --squash for a GitLab MR with an explicit merge method"
 }

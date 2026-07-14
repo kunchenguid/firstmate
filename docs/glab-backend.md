@@ -87,3 +87,30 @@ The one-call JSON read is preferred for the merge-poll since it also yields stat
 - GitLab MR: `https://<host>/<namespace>/-/merge_requests/<iid>` - `<namespace>` is one or more path segments (three for MR 5924), captured greedily up to the `/-/merge_requests/` marker; `<host>` may be self-hosted.
 
 The parser's stdout contract (`<kind>\t<host>\t<path>\t<number>`) and the classifier's `github`/`gitlab`/`unknown` tokens are documented in `bin/fm-git-host-lib.sh`'s header; increments #2/#3 parse that contract.
+
+## Command-flag verification (2026-07-13)
+
+Captured from `glab` v1.86.0 to record the exact flags increments #2/#3 rely on, so the merge and teardown surfaces are not re-derived from guesses.
+
+`glab mr merge --help` (flags firstmate uses):
+
+```
+-R --repo             Select another repository. Can use either `OWNER/REPO` or `GROUP/NAMESPACE/REPO` format. Also accepts full URL or Git URL.
+-s --squash           Squash commits on merge.
+   --squash-message   Custom squash commit message.
+-y --yes              Skip submission confirmation prompt.
+```
+
+`bin/fm-pr-merge.sh` passes `-R <host-explicit URL>`, `--yes`, and the default `--squash`.
+The `--yes` flag is required because firstmate merges from a non-TTY supervising shell where the submission-confirmation prompt would otherwise block.
+`--squash-message` is not passed, so `glab` uses its own default squash commit message non-interactively.
+
+`glab mr list --help` (flags firstmate uses):
+
+```
+-M --merged         Get only merged merge requests.
+-F --output         Format output as: text, json. (text)
+-s --source-branch  Filter by source branch <name>.
+```
+
+`bin/fm-teardown.sh`'s `mr_iid_from_branch` calls `glab mr list -R <repo> --source-branch=<branch> --merged -F json` and reads `.[0].iid` from the JSON array output (the `-F json` list shape is an array, unlike `mr view`'s single object).
