@@ -210,7 +210,7 @@ Absent `select` means use the first array element, or the only object in the sin
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-Codex supports `low`, `medium`, `high`, `xhigh`, and the distinct `max` reasoning effort; `fm-spawn.sh` passes each accepted value through as `-c 'model_reasoning_effort="<value>"'` without aliasing `max` to `xhigh`.
+Codex supports `low`, `medium`, `high`, `xhigh`, and the distinct `max` reasoning effort; `max` is empirically verified with `gpt-5.6-sol`, and `fm-spawn.sh` passes each accepted value through as `-c 'model_reasoning_effort="<value>"'` without aliasing `max` to `xhigh`.
 `quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
