@@ -728,34 +728,46 @@ FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
-# recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT='^[❯›]'
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-$FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT}
+# (claude) and › (codex) only, as a WHITESPACE-SEPARATED list of LITERAL glyphs.
+# Generic shell-style glyphs > $ % # are still recognized after a bordered
+# composer row has already been structurally found.
+#
+# This knob is a glyph SET rather than a regex, and it is never handed to grep,
+# because a regex over multibyte glyphs cannot be matched safely: under a C/POSIX
+# locale (what bin/fm-supervise-daemon.sh runs with) an ERE bracket expression
+# degenerates into the BYTE class {E2,9D,AF,80,BA}. Every box-drawing glyph starts
+# with byte E2, so the composer box's own bottom border row (╰, E2 95 B0) and the
+# unbordered rule rows (─, E2 94 80) all falsely read as bare prompt rows. The
+# scan below keeps the BOTTOM-most match, so such a row - drawn BELOW the live
+# composer - outranks it; in a dark theme it then strips to empty as a
+# dark-truecolor ghost and the composer reads `empty` while the human's unsubmitted
+# text sits right above it. That is the false-EMPTY direction, and the away-mode
+# injector would type an escalation over real pending input. Same root cause as
+# the glyph strip in bin/fm-composer-lib.sh, in its regex form.
+#
+# The set is threaded into the shared classifier too (fm_backend_herdr_composer_state
+# below), not just into the structural detection here: a glyph recognized as a
+# composer row but unknown to the classifier would leave that harness's idle
+# composer reading `pending` forever - the false-PENDING direction, where away-mode
+# defers every escalation behind input that was never there.
+FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS=${FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}
+
+# FM_BACKEND_HERDR_BARE_PROMPT_RE is the retired regex spelling of the knob above.
+# It cannot be honored: any regex form has to reach grep, which is exactly the
+# locale degeneration described above. Fail loudly rather than silently ignore it.
+if [ -n "${FM_BACKEND_HERDR_BARE_PROMPT_RE:-}" ] && [ -z "${FM_BACKEND_HERDR_BARE_PROMPT_RE_WARNED:-}" ]; then
+  FM_BACKEND_HERDR_BARE_PROMPT_RE_WARNED=1
+  printf '%s\n' \
+    "firstmate: WARNING: FM_BACKEND_HERDR_BARE_PROMPT_RE is set but is NO LONGER HONORED." \
+    "firstmate: a regex over multibyte glyphs is not locale-safe - under a C/POSIX locale its bracket class degenerates to bytes and box-drawing rows match as prompt rows." \
+    "firstmate: set FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS instead, a whitespace-separated list of literal prompt glyphs (currently: ${FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS})." >&2
+fi
 
 # fm_backend_herdr_is_bare_prompt: does <trimmed-row> open with a bare AGENT
-# prompt glyph? The DEFAULT pattern is matched with a locale-invariant `case` on
-# the literal glyphs, never handed to grep, because under a C/POSIX locale (what
-# bin/fm-supervise-daemon.sh runs with) a bracket expression over multibyte
-# glyphs degenerates into the BYTE class {E2,9D,AF,80,BA}: every box-drawing
-# glyph starts with byte E2, so the composer box's own bottom border row (╰, E2
-# 95 B0) and the unbordered rule rows (─, E2 94 80) all falsely read as bare
-# prompt rows. The scan below keeps the BOTTOM-most match, so such a row - drawn
-# BELOW the live composer - outranks it; in a dark theme it then strips to empty
-# as a dark-truecolor ghost and the composer reads `empty` while the human's
-# unsubmitted text sits right above it. That is the false-EMPTY direction, and
-# the away-mode injector would type an escalation over real pending input. Same
-# root cause as the glyph strip in bin/fm-composer-lib.sh, in its regex form.
-# An operator-supplied override keeps its documented regex semantics via grep.
+# prompt glyph? Matched with a locale-invariant `case` on the literal glyphs by
+# the shared owner, so an operator-supplied set is as locale-safe as the default.
 fm_backend_herdr_is_bare_prompt() {  # <trimmed-row>
-  local row=$1
-  if [ "$FM_BACKEND_HERDR_BARE_PROMPT_RE" = "$FM_BACKEND_HERDR_BARE_PROMPT_RE_DEFAULT" ]; then
-    case "$row" in
-      '❯'*|'›'*) return 0 ;;
-      *) return 1 ;;
-    esac
-  fi
-  printf '%s' "$row" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"
+  fm_composer_leading_agent_glyph "$1" "$FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS"
 }
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
@@ -806,11 +818,13 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
   fi
-  # Delegate the empty/pending/unknown decision to the shared owner. The bare
-  # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
-  # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  # Delegate the empty/pending/unknown decision to the shared owner, handing it
+  # the SAME glyph set the structural scan above matched on, so detection and
+  # classification cannot disagree. The bare shape only ever starts with an AGENT
+  # glyph, so a bare shell prompt never reaches here - it stays 'unknown' via the
+  # no-composer-row path above, exactly as before.
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE" \
+    sensitive "$stripped" "$FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,

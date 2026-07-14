@@ -1052,24 +1052,64 @@ test_composer_state_unbordered_idle_prompt_is_empty_under_c_locale() {
   pass "fm_backend_herdr_composer_state: an idle unbordered '❯' row still reads empty under LC_ALL=C"
 }
 
-# The documented override knob keeps its regex semantics: an operator-supplied
-# FM_BACKEND_HERDR_BARE_PROMPT_RE is still honored (here, a harness whose bare
-# prompt glyph is '»'), and is never silently dropped by the locale-invariant
-# fast path the DEFAULT pattern now takes.
+# The override knob is a LITERAL GLYPH SET, honored under the same C/POSIX locale
+# the default set is: an operator-supplied FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS
+# (here, a harness whose bare prompt glyph is '»') is matched with the same
+# locale-invariant `case`, so extending the set cannot reinstate the byte-class
+# degeneration a regex form would.
 test_composer_state_bare_prompt_override_is_honored() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-bare-override"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '\xc2\xbb hello captain\n' > "$resp/1.out"
   printf '\xc2\xbb hello captain\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_RE='^»' \
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS='❯ › »' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = pending ] || fail "an operator-supplied bare-prompt override must still be honored, got '$out'"
+  [ "$out" = pending ] || fail "an operator-supplied bare-prompt glyph override must still be honored, got '$out'"
   # Without the override the same row is not a composer row at all.
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
   [ "$out" = unknown ] || fail "without the override a '»' row is not a known composer row, got '$out'"
-  pass "fm_backend_herdr_composer_state: an operator-supplied FM_BACKEND_HERDR_BARE_PROMPT_RE override is still honored"
+  pass "fm_backend_herdr_composer_state: an operator-supplied FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS override is still honored"
+}
+
+# The half a detection-only override gets wrong: an IDLE composer on the
+# overridden harness. The glyph set must reach the SHARED classifier
+# (bin/fm-composer-lib.sh) too, not just herdr's structural row scan - a glyph the
+# classifier does not know is never stripped, so the idle row cannot match the
+# placeholder and reads `pending` forever. That is the false-PENDING direction:
+# away-mode defers every escalation behind input that was never there, the
+# overnight wedge of task afk-herdr-false-pending re-entered through the knob.
+test_composer_state_bare_prompt_override_idle_row_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare-override-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xc2\xbb\n' > "$resp/1.out"
+  printf '\xc2\xbb Type a message...\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS='❯ › »' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a bare overridden prompt glyph on its own row must read empty, got '$out' (false-pending: away-mode would defer every escalation forever)"
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS='❯ › »' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the idle placeholder after an overridden prompt glyph must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: an overridden prompt glyph classifies an idle composer as empty, not just detects its row"
+}
+
+# The retired regex spelling cannot be honored - any regex form has to reach grep,
+# which is the locale degeneration itself - so it must fail LOUDLY rather than be
+# silently ignored, naming the glyph-set knob that replaces it.
+test_bare_prompt_re_is_retired_loudly() {
+  local dir log resp fb err out
+  dir="$TMP_ROOT/composer-bare-prompt-re-retired"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  err="$dir/err"
+  printf '\xc2\xbb hello captain\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_BARE_PROMPT_RE='^»' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" 2>"$err" )
+  [ "$out" = unknown ] || fail "the retired regex knob must not be honored (a regex over multibyte glyphs cannot be matched locale-safely), got '$out'"
+  grep -q 'FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS' "$err" \
+    || fail "the retired regex knob must warn loudly on stderr and name its replacement, stderr was: $(cat "$err")"
+  pass "fm_backend_herdr_composer_state: the retired FM_BACKEND_HERDR_BARE_PROMPT_RE warns loudly and names its glyph-set replacement"
 }
 
 test_composer_state_codex_bare_prompt_glyph_is_empty() {
@@ -2087,6 +2127,8 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_border_row_is_not_a_bare_prompt_under_c_locale
 test_composer_state_unbordered_idle_prompt_is_empty_under_c_locale
 test_composer_state_bare_prompt_override_is_honored
+test_composer_state_bare_prompt_override_idle_row_is_empty
+test_bare_prompt_re_is_retired_loudly
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending

@@ -105,6 +105,17 @@ test_idle_placeholder_is_empty() {
   pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
 }
 
+# classify_in_c_locale: same as classify, but under a genuinely exported C
+# locale. The locale MUST be pinned in a child process, never as an assignment
+# prefix on the `classify` shell FUNCTION: bash does not re-run setlocale for a
+# function-call prefix, so `LC_ALL=C classify ...` keeps bash's own `case` and
+# ${var#pat} matching multibyte-aware and the resulting test passes against the
+# very byte-strip bug it is meant to catch. Repo precedent: the locale-pinned
+# child in tests/fm-watcher-lock.test.sh.
+classify_in_c_locale() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [glyphs]
+  LC_ALL=C bash -c '. "$1"; shift; fm_composer_classify_content "$@"' _ "$ROOT/bin/fm-composer-lib.sh" "$@"
+}
+
 # Locale-invariance regression, guarded at the owner rather than only at a
 # single adapter: bin/fm-supervise-daemon.sh runs under a C/POSIX locale, where
 # a byte-count strip (${content#?}) removes ONE BYTE of the 3-byte ❯ and leaves
@@ -114,16 +125,38 @@ test_idle_placeholder_is_empty() {
 # this one case covers them all.
 test_glyph_strip_is_locale_invariant() {
   local idle='^Type a message\.\.\.$' out
-  out=$(LC_ALL=C classify 0 '❯ Type a message...' "$idle")
+  out=$(classify_in_c_locale 0 '❯ Type a message...' "$idle")
   [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after a '❯' glyph must still read empty, got '$out'"
-  out=$(LC_ALL=C classify 0 '❯')
+  out=$(classify_in_c_locale 0 '❯')
   [ "$out" = empty ] || fail "under LC_ALL=C a bare '❯' agent glyph must still read empty, got '$out'"
-  out=$(LC_ALL=C classify 0 '› Type a message...' "$idle")
+  out=$(classify_in_c_locale 0 '› Type a message...' "$idle")
   [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after a '›' glyph must still read empty, got '$out'"
   # Real input must stay protected under the same locale.
-  out=$(LC_ALL=C classify 0 '❯ fix findings 1 and 3')
+  out=$(classify_in_c_locale 0 '❯ fix findings 1 and 3')
   [ "$out" = pending ] || fail "under LC_ALL=C real text after a '❯' glyph must still read pending, got '$out'"
+  # The dead-shell safety rule must not soften under the same locale either.
+  out=$(classify_in_c_locale 0 '$')
+  [ "$out" = unknown ] || fail "under LC_ALL=C a bare shell glyph must still read unknown, got '$out'"
   pass "fm_composer_classify_content: the leading-glyph strip is locale-invariant (LC_ALL=C)"
+}
+
+# The agent glyph set is a caller-supplied LITERAL set, so an adapter that
+# recognizes a further harness's prompt glyph gets the same empty|pending verdict
+# for it as for the built-in ❯ and ›. Without this threading, that harness's idle
+# composer reads pending forever and away-mode defers every escalation behind
+# input that was never there.
+test_caller_supplied_glyph_set_is_honored() {
+  local idle='^Type a message\.\.\.$' out
+  out=$(classify 0 '»' '' sensitive '' '❯ › »')
+  [ "$out" = empty ] || fail "a bare glyph from the caller's set must read empty, got '$out'"
+  out=$(classify_in_c_locale 0 '» Type a message...' "$idle" sensitive '' '❯ › »')
+  [ "$out" = empty ] || fail "under LC_ALL=C the idle placeholder after a caller-set glyph must read empty, got '$out'"
+  out=$(classify 0 '» fix the login bug' "$idle" sensitive '' '❯ › »')
+  [ "$out" = pending ] || fail "real text after a caller-set glyph must read pending, got '$out'"
+  # A glyph outside the caller's set stays unrecognized, so the safety rule holds.
+  out=$(classify 0 '»')
+  [ "$out" = pending ] || fail "without the caller's set a '»' row is not a known agent glyph, got '$out'"
+  pass "fm_composer_classify_content: a caller-supplied agent glyph set is honored for classification, not just detection"
 }
 
 test_idle_placeholder_case_mode_is_explicit() {
@@ -154,5 +187,6 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_glyph_strip_is_locale_invariant
+test_caller_supplied_glyph_set_is_honored
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

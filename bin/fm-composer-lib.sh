@@ -159,6 +159,49 @@ fm_composer_strip_ghost() {
   '
 }
 
+# THE AGENT PROMPT GLYPH SET: the prompt glyphs a harness draws in its own
+# composer - `❯` (claude) and `›` (codex) - as a WHITESPACE-SEPARATED list of
+# LITERAL glyphs, never a regex. A regex form cannot be made safe here: under a
+# C/POSIX locale (what bin/fm-supervise-daemon.sh runs with) an ERE bracket
+# expression over multibyte glyphs degenerates into the BYTE class
+# {E2,9D,AF,80,BA}, and since every box-drawing glyph starts with byte E2, a
+# composer box's own border row matches as a prompt row. A literal set compared
+# with a bash `case` matches whole strings and is locale-invariant, so it is the
+# only form this owner accepts. An adapter that recognizes a further harness's
+# prompt glyph extends the set and passes it in (bin/backends/herdr.sh threads
+# FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS through), so an adapter's structural row
+# detection and this classification can never disagree about which glyphs are
+# agent prompts - a glyph honored for detection but not for classification would
+# leave that harness's idle composer stuck on `pending` forever, wedging away-mode
+# injection behind input that was never there.
+# SHELL prompt glyphs (`>`, `$`, `%`, `#`) are deliberately NOT part of this set
+# and are never configurable: the safety rule at the top of this file turns on
+# telling them apart from agent glyphs.
+FM_COMPOSER_AGENT_GLYPHS_DEFAULT='❯ ›'
+FM_COMPOSER_AGENT_GLYPHS=${FM_COMPOSER_AGENT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}
+
+# fm_composer_leading_agent_glyph: set FM_COMPOSER_MATCHED_GLYPH to the agent
+# prompt glyph <content> starts with and return 0; return 1 and clear it when it
+# starts with none. [glyphs] overrides the glyph set for this call. The set is
+# split on ASCII whitespace, and pathname expansion is disabled around the split
+# so a glob character in an operator-supplied set stays literal.
+fm_composer_leading_agent_glyph() {  # <content> [glyphs]
+  local content=$1 glyphs=${2:-$FM_COMPOSER_AGENT_GLYPHS} g restore_glob=0
+  FM_COMPOSER_MATCHED_GLYPH=''
+  [ -n "$content" ] || return 1
+  case $- in *f*) : ;; *) restore_glob=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
+  set -- $glyphs
+  if [ "$restore_glob" = 1 ]; then set +f; fi
+  for g in "$@"; do
+    case "$content" in
+      "$g"*) FM_COMPOSER_MATCHED_GLYPH=$g; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -170,6 +213,10 @@ fm_composer_strip_ghost() {
 #              "Type a message...") that reads as empty; matched both before and
 #              after a leading prompt glyph is stripped, so a pattern written
 #              with or without the glyph both land.
+#   [glyphs]   optional agent prompt glyph set for this caller, defaulting to
+#              FM_COMPOSER_AGENT_GLYPHS. An adapter whose structural row
+#              detection recognizes an extra harness glyph MUST pass the same set
+#              here, or that harness's idle composer never classifies empty.
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
@@ -179,20 +226,24 @@ fm_composer_idle_matches() {
   esac
 }
 
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [glyphs]
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content glyphs
   plain_content=${5:-$content}
+  glyphs=${6:-$FM_COMPOSER_AGENT_GLYPHS}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
-    case "$plain_content" in
-      '❯'|'›') printf 'empty'; return 0 ;;
-      *) printf 'unknown'; return 0 ;;
-    esac
+    if fm_composer_leading_agent_glyph "$plain_content" "$glyphs" \
+      && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$plain_content" ]; then
+      printf 'empty'; return 0
+    fi
+    printf 'unknown'; return 0
   fi
   # A bare prompt glyph on its own row.
+  if fm_composer_leading_agent_glyph "$content" "$glyphs" \
+    && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$content" ]; then
+    # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
+    printf 'empty'; return 0
+  fi
   case "$content" in
-    '❯'|'›')
-      # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
-      printf 'empty'; return 0 ;;
     '>'|'$'|'%'|'#')
       # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
       # prompt). Bare, it is a dead-shell prompt - never a safe injection target.
@@ -209,15 +260,18 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # the exact glyph literal, not a character count: under a C/POSIX locale
   # ${content#?} counts a single BYTE, so it would leave two stray bytes of the
   # 3-byte ❯ behind and misread an idle composer as pending. The whitespace trim
-  # below drops any space that followed the glyph.
-  case "$content" in
-    '❯'*) content=${content#'❯'} ;;
-    '›'*) content=${content#'›'} ;;
-    '>'*) content=${content#'>'} ;;
-    '$'*) content=${content#'$'} ;;
-    '%'*) content=${content#'%'} ;;
-    '#'*) content=${content#'#'} ;;
-  esac
+  # below drops any space that followed the glyph. At most ONE leading glyph is
+  # stripped, so a shell glyph is only considered when no agent glyph led the row.
+  if fm_composer_leading_agent_glyph "$content" "$glyphs"; then
+    content=${content#"$FM_COMPOSER_MATCHED_GLYPH"}
+  else
+    case "$content" in
+      '>'*) content=${content#'>'} ;;
+      '$'*) content=${content#'$'} ;;
+      '%'*) content=${content#'%'} ;;
+      '#'*) content=${content#'#'} ;;
+    esac
+  fi
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
   [ -n "$content" ] || { printf 'empty'; return 0; }

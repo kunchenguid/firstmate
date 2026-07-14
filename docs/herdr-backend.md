@@ -317,7 +317,12 @@ A popup-close-with-placeholder-fill still reads as real content on that row, so 
 Known ghost/placeholder composer text (`Type a message...`, verified grok 0.2.82's empty-composer hint) is recognized and still reads as empty.
 When ANSI capture is available, the shared `fm_composer_strip_ghost` extractor removes de-emphasised ghost/placeholder runs before classification while retaining real typed input.
 The full dim/faint and dark-TRUECOLOR contract is recorded in the 2026-07-10 incident below.
-`FM_BACKEND_HERDR_IDLE_RE` extends that placeholder match, `FM_BACKEND_HERDR_BARE_PROMPT_RE` controls the recognized unbordered prompt glyphs, and `FM_BACKEND_HERDR_COMPOSER_LINES` controls the tail-window scan depth; all three are documented in [`docs/configuration.md`](configuration.md).
+`FM_BACKEND_HERDR_IDLE_RE` extends that placeholder match, `FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS` controls the recognized unbordered prompt glyphs, and `FM_BACKEND_HERDR_COMPOSER_LINES` controls the tail-window scan depth; all three are documented in [`docs/configuration.md`](configuration.md).
+`FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS` is a whitespace-separated list of literal glyphs, not a regex, and it is threaded into the shared classifier as well as this backend's structural row scan.
+Both properties are load-bearing.
+A regex cannot be matched safely here, because under the C/POSIX locale the supervise daemon runs with, an ERE bracket class over multibyte glyphs degenerates into a byte class; every box-drawing glyph starts with byte E2, so the composer box's own border row matches as a bare prompt row, outranks the live composer in the bottom-most-match scan, and the composer reads empty while real unsubmitted text sits above it.
+Honoring the set for row detection but not for classification is the mirror fault: an added glyph is never stripped, so that harness's idle composer reads pending forever and away-mode defers every escalation.
+The retired `FM_BACKEND_HERDR_BARE_PROMPT_RE` spelling is no longer honored and warns loudly on stderr.
 See `fm_backend_herdr_composer_state`, `fm_backend_herdr_wait_for_working`, and `fm_backend_herdr_send_text_submit` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections for the fake-harness coverage.
 
 ## Composer-state classifier: structural row read, not delta-based
