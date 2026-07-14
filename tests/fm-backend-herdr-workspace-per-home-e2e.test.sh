@@ -63,10 +63,11 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
-WT1=; WT2=
+WT1=; WT2=; WT3=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
+  [ -n "$WT3" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT3" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
@@ -77,11 +78,20 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab se
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
-# --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
+# --- scratch world: two independent primary homes, a secondmate home, three projects ---
 
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'trivial e2e primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm1/brief.md"
+
+# A SECOND, independent primary home - no secondmate marker either, exactly like
+# a captain running two separate firstmate installations (e.g. ~/code/firstmate
+# and ~/code/firstmate-herdr) against the one machine-global herdr session. Both
+# homes' labels used to be the bare constant "firstmate", so workspace_find
+# adopted whichever space already existed and the two fleets' tabs commingled.
+PRIMARY_HOME_B="$TMP_ROOT/primary-home-b"
+mkdir -p "$PRIMARY_HOME_B/state" "$PRIMARY_HOME_B/data/cm3" "$PRIMARY_HOME_B/config"
+printf 'trivial e2e second-primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME_B/data/cm3/brief.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects"
@@ -103,6 +113,7 @@ printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HO
 # (shadowing FM_HOME to the secondmate home) and the secondmate's own crewmate
 # spawn (its FM_HOME IS that home) resolve to.
 EXPECTED_CM1_LABEL=$(FM_HOME="$PRIMARY_HOME" fm_backend_hometag)
+EXPECTED_CM3_LABEL=$(FM_HOME="$PRIMARY_HOME_B" fm_backend_hometag)
 EXPECTED_SM_LABEL=$(FM_HOME="$SM_HOME" fm_backend_hometag)
 
 make_scratch_project() {  # <dir>
@@ -116,6 +127,7 @@ make_scratch_project() {  # <dir>
 
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
+PROJ3="$TMP_ROOT/scratch-project-3"; make_scratch_project "$PROJ3"
 
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 
@@ -144,6 +156,31 @@ CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "
 case "$EXPECTED_CM1_LABEL" in firstmate-*) : ;; *) fail "test setup: the primary home-tag should be 'firstmate-<hash>', got '$EXPECTED_CM1_LABEL'" ;; esac
 [ "$CM1_WS_LABEL" = "$EXPECTED_CM1_LABEL" ] || fail "a primary-shaped home's crewmate should land in the primary home-tag workspace ('$EXPECTED_CM1_LABEL'), got '$CM1_WS_LABEL'"
 pass "real herdr E2E: the primary-shaped home's crewmate landed in its own 'firstmate-<hash>' workspace"
+
+# --- 1b. a SECOND independent primary home: its crewmate lands in a DISTINCT
+# workspace, not the first primary's (the multi-primary collision fix) --------
+
+CM3_OUT="$TMP_ROOT/cm3.out"; CM3_ERR="$TMP_ROOT/cm3.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME_B" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm3 "$PROJ3" "sh -c 'echo primary-b-crew-ok'" --backend herdr \
+  >"$CM3_OUT" 2>"$CM3_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the second primary home's crewmate spawn failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM3_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM3_ERR")"
+
+CM3_META="$PRIMARY_HOME_B/state/cm3.meta"
+[ -f "$CM3_META" ] || fail "no meta written for cm3 (recorded in the SECOND primary's own state dir)"
+WT3=$(grep '^worktree=' "$CM3_META" | cut -d= -f2-)
+CM3_PANE=$(grep '^herdr_pane_id=' "$CM3_META" | cut -d= -f2-)
+[ -n "$CM3_PANE" ] || fail "cm3 meta missing herdr_pane_id"
+
+CM3_WSID=$(herdr pane get "$CM3_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ -n "$CM3_WSID" ] || fail "could not read cm3's pane workspace_id"
+CM3_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM3_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+case "$EXPECTED_CM3_LABEL" in firstmate-*) : ;; *) fail "test setup: the second primary's home-tag should be 'firstmate-<hash>', got '$EXPECTED_CM3_LABEL'" ;; esac
+[ "$EXPECTED_CM3_LABEL" != "$EXPECTED_CM1_LABEL" ] || fail "test setup: the two primary homes should hash to different tags"
+[ "$CM3_WS_LABEL" = "$EXPECTED_CM3_LABEL" ] || fail "the second primary's crewmate should land in ITS OWN home-tag workspace ('$EXPECTED_CM3_LABEL'), got '$CM3_WS_LABEL'"
+[ "$CM3_WSID" != "$CM1_WSID" ] || fail "two independent primary homes must not collapse into one shared workspace, but both tasks sit in $CM1_WSID"
+pass "real herdr E2E: a SECOND independent primary home's crewmate lands in its own distinct 'firstmate-<hash>' workspace, not the first primary's"
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
@@ -213,7 +250,17 @@ PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
 assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
+assert_not_contains_local "$PRIMARY_LIVE" "fm-cm3" "the primary home's list_live must not see the OTHER primary home's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
+
+# The other half of the multi-primary fix: recovery in each primary home sees
+# only its own fleet, where a shared bare-"firstmate" workspace would have shown
+# each primary the other's tasks as if they were its own.
+PRIMARY_B_LIVE=$(FM_HOME="$PRIMARY_HOME_B" fm_backend_herdr_list_live "$SESSION")
+assert_contains_local "$PRIMARY_B_LIVE" "fm-cm3" "the second primary home's list_live did not see its own task"
+assert_not_contains_local "$PRIMARY_B_LIVE" "fm-cm1" "the second primary home's list_live must not see the first primary's task"
+assert_not_contains_local "$PRIMARY_B_LIVE" "fm-cm2" "the second primary home's list_live must not see the secondmate-owned crewmate's task"
+pass "real herdr E2E: list_live from the second primary's own context sees only its own task, never the first primary's"
 
 # FM_ROOT is the secondmate's own home here too (as its own recovery process
 # would have it), and FM_HOME is what derives the home-tag: list_live resolves
@@ -243,8 +290,11 @@ fi
 if ! herdr pane get "$CM2_PANE" --session "$SESSION" >/dev/null 2>&1; then
   fail "tearing down cm1 must not have closed cm2's pane (wrong tab closed)"
 fi
+if ! herdr pane get "$CM3_PANE" --session "$SESSION" >/dev/null 2>&1; then
+  fail "tearing down cm1 must not have closed the OTHER primary home's pane (wrong tab closed)"
+fi
 WT1=
-pass "real herdr E2E: tearing down cm1 closes only its own tab - the secondmate's and cm2's tabs survive untouched"
+pass "real herdr E2E: tearing down cm1 closes only its own tab - the secondmate's, cm2's, and the other primary's tabs survive untouched"
 
 TD2_OUT="$TMP_ROOT/td2.out"
 FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$SM_HOME/data" \
@@ -261,6 +311,21 @@ if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
 fi
 WT2=
 pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
+
+TD3_OUT="$TMP_ROOT/td3.out"
+FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME_B/state" FM_DATA_OVERRIDE="$PRIMARY_HOME_B/data" \
+  FM_CONFIG_OVERRIDE="$PRIMARY_HOME_B/config" \
+  "$ROOT/bin/fm-teardown.sh" cm3 >"$TD3_OUT" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the second primary home's crewmate cm3"$'\n'"$(cat "$TD3_OUT")"
+if herdr pane get "$CM3_PANE" --session "$SESSION" >/dev/null 2>&1; then
+  fail "fm-teardown.sh did not close cm3's pane"
+fi
+if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
+  fail "tearing down cm3 must not have closed the secondmate's own pane (wrong tab closed)"
+fi
+WT3=
+pass "real herdr E2E: tearing down cm3 from the second primary home closes only its own tab"
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 

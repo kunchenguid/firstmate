@@ -297,7 +297,7 @@ test_list_live_scopes_to_own_home_tag() {
   own_title=$(zellij_expected_scoped_title fm-task1)
   foreign_title=$(zellij_expected_scoped_title fm-task2 "$other_root")
   # 1: list-tabs --json -> our own home-scoped tab, a DIFFERENT installation's
-  # home-scoped tab (same prefix shape, different FM_ROOT hash), and an
+  # home-scoped tab (same prefix shape, different home-path hash), and an
   # unrelated non-firstmate tab.
   zellij_multi_tab_response "$dir" 1 \
     3 "$own_title" \

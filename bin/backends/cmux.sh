@@ -310,7 +310,9 @@ fm_backend_cmux_container_ensure() {
 # relocation is already outside the supported recovery contract. Derivation
 # itself lives in bin/fm-backend-hometag-lib.sh, shared with zellij's
 # identical shared-namespace collision fix (docs/zellij-backend.md
-# "Home-scoped tab titles").
+# "Home-scoped tab titles") and with herdr's per-home workspace labels
+# (docs/herdr-backend.md "Label derivation"), so the three adapters' tags
+# cannot drift apart.
 fm_backend_cmux_home_label() {
   fm_backend_hometag
 }

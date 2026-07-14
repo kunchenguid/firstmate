@@ -110,8 +110,11 @@
 # file's own unit tests, which source it directly, resolve sanely. Mirrors
 # bin/backends/herdr.sh's identical fallback; unlike herdr this adapter still
 # has no per-home CONTAINER split (one shared session for every home), but
-# FM_HOME/FM_ROOT now also feed fm_backend_zellij_home_label's tab-title tag
-# below.
+# FM_HOME now also feeds fm_backend_zellij_home_label's tab-title tag below -
+# BOTH halves of it, the readable prefix and the path hash. FM_ROOT only backs
+# FM_HOME's own fallback here and is not itself part of the tag; deriving the
+# two halves from two different variables is the bug the shared lib's header
+# (bin/fm-backend-hometag-lib.sh) warns against.
 FM_BACKEND_ZELLIJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_ZELLIJ_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
