@@ -25,6 +25,7 @@ Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+A genuinely parked run whose status log ends in a declared `paused:` external wait agrees with that log and reports `paused` with the gate detail preserved, so a deliberate hold at an ask-user gate (typically a relayed captain decision) is absorbed on the pause cadence rather than treated as a possible wedge every poll; a parked run without a declared pause still surfaces.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
