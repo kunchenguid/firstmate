@@ -10,38 +10,17 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
-#   (e) base= declared and still carrying unmerged work, branch under review rooted in
-#       it -> diff against that base, not the repo default
-#   (f) base= declared but gone from origin -> fall back to the default branch with a
-#       warning, never a hard stop
-#   (g) base= declared, its work has already LANDED in the default branch (it merged,
-#       branch kept), and the branch under review was rebased onto the default branch ->
-#       fall back to the default branch: the branch sits there now, so that is its real
-#       fork point
-#   (h) base= declared and unlanded, but the branch under review was rebased onto the
-#       default branch (the pipeline always does) -> fall back to the default branch,
-#       because diffing against the base would show every default-branch commit since
-#       the base forked as part of the crewmate's change
-#   (i) base= declared, its work has LANDED by a SQUASH merge, but the branch under
-#       review is STILL ROOTED in the base's own pre-merge commits -> keep the base as
-#       the diff base. A squash leaves those commits out of the default branch by commit
-#       id, so falling back would take the old fork point as the merge base and present
-#       the base's already-merged work as the crewmate's change. Landedness does not move
-#       a branch; rootedness is what says where it sits, and it is asked first
-#   (j) base= declared, its work has LANDED by a SQUASH merge, its branch has been DELETED
-#       from origin, and the branch under review is still rooted in it -> diff against the
-#       recorded spawn-time tip (base_sha=). The fork point is still real, there is just no
-#       ref left to name it by, and bin/fm-pr-check.sh reasons from that very tip - so
-#       falling back to the default branch would both inflate the diff and disagree with the
-#       merge gate about the same PR
-#   (k) base= declared but origin cannot be asked at all -> stop, do not guess
-#   (l) base= absent -> unchanged default-branch diff base
-#
-# (e) through (k) are not decided here at all: they are fm_base_verdict's single verdict
-# (bin/fm-base-lib.sh), the same one bin/fm-pr-check.sh's guard gates the merge on, so the
-# review diff and the merge gate can never disagree about what a declared base means. The
-# verdict matrix itself is pinned in tests/fm-base-lib.test.sh; these cases only show that
-# the diff base honours it.
+#   (e) base= declared and that branch is still on origin -> diff against that base, not the
+#       repo default, so the review shows the crewmate's own change rather than the whole
+#       feature base's unmerged history on top of it
+#   (f) base= declared but GONE from origin -> fall back to the default branch with a
+#       warning, never a hard stop. What became of that base - merged, squashed, abandoned -
+#       is not a question this script answers, and bin/fm-pr-check.sh defers the same PR to a
+#       human, so review and merge never tell different stories
+#   (g) base= declared but origin cannot be asked at all -> say so; the diff cannot be taken
+#       against anything on an unreachable origin
+#   (h) base= absent -> unchanged default-branch diff base
+
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -222,10 +201,11 @@ test_no_declared_base_still_diffs_against_default() {
   pass "fm-review-diff without base= keeps the default-branch diff base"
 }
 
-# The normal END-STATE of a stacked PR: the intended base merged and its branch was
-# deleted from origin (GitHub does this by default). Erroring out on the missing
-# branch would leave firstmate unable to review a PR that is now perfectly ordinary,
-# so the diff falls back to the default branch and says why.
+# The normal END-STATE of a stacked PR: the intended base merged and its branch was deleted
+# from origin (GitHub does this by default). Review does not try to work out whether that
+# base merged or was abandoned - it cannot, and bin/fm-pr-check.sh defers the same PR to a
+# human for the same reason. Erroring out would leave firstmate unable to review the PR it
+# is being asked about, so the diff falls back to the default branch and says why.
 test_deleted_base_falls_back_to_default_with_warning() {
   local case_dir out rc
   case_dir=$(make_case deleted-base)
@@ -261,212 +241,10 @@ test_deleted_base_falls_back_to_default_with_warning() {
   pass "fm-review-diff falls back to the default branch when the declared base is gone from origin"
 }
 
-# The declared base merged but its branch was KEPT on origin (GitHub's delete-on-merge
-# is off by default), and the pipeline has left the branch under review rebased onto the
-# default branch. THAT is what makes the base the wrong diff base: the branch is not
-# rooted in it any more, so diffing against it would take the old fork point as the merge
-# base and dress every default-branch commit since then up as the crewmate's change.
-# Branch existence is not the question, and neither is landedness on its own - the
-# companion case below keeps a merged base as the diff base when the branch is still
-# rooted in it.
-test_landed_base_falls_back_to_default_with_warning() {
-  local case_dir out rc
-  case_dir=$(make_case landed-base)
 
-  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
-  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
-  git -C "$case_dir/wt" add base-only.txt
-  git -C "$case_dir/wt" commit -qm "feature base work"
-  git -C "$case_dir/wt" push -q origin feature/base
-
-  # feature/base is squash-merged into main; the branch stays on origin. The crewmate's
-  # branch is what the pipeline leaves behind: its fix, rebased onto main.
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-  git -C "$case_dir/wt" reset -q --hard origin/main
-  git -C "$case_dir/wt" merge -q --squash feature/base >/dev/null
-  git -C "$case_dir/wt" commit -qm "squash feature/base"
-  git -C "$case_dir/wt" push -q origin "fm/task-x1:main"
-  git -C "$case_dir/wt" fetch -q origin
-  git -C "$case_dir/wt" reset -q --hard origin/main
-  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
-  git -C "$case_dir/wt" add fix.txt
-  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
-
-  write_task_meta "$case_dir" "base=feature/base"
-
-  set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "landed-base: a merged base must not break the pre-merge review"
-  assert_contains "$out" 'diff base: origin/main' \
-    "landed-base: a base whose work is already in the default branch must not be the diff base"
-  assert_grep 'already merged' "$case_dir/stderr" \
-    "landed-base: the fallback must say why the declared base was not used"
-  assert_contains "$out" '+crew-fix' "landed-base: the crewmate's own change should still be shown"
-  assert_not_contains "$out" 'feature-base-work' \
-    "landed-base: the merged base's work is in main already and must not reappear as the crewmate's change"
-  pass "fm-review-diff falls back to the default branch when the declared base has already merged"
-}
-
-# The pre-retarget state firstmate actually reviews in, and the one every refusal from
-# fm-pr-check.sh sends the reader here to inspect: the base is live and unmerged, but
-# the no-mistakes pipeline has rebased the branch onto the default branch. The merge base
-# with the declared base is then the old fork point, so diffing against it would present
-# the whole default branch's history since the fork as the crewmate's change - exactly
-# the misleading diff a declared base exists to prevent, in the other direction. Firstmate
-# relays a summary of this diff to the captain, so the wrong content would reach them.
-test_unrooted_branch_falls_back_to_default_with_warning() {
-  local case_dir out rc
-  case_dir=$(make_case unrooted-branch)
-
-  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
-  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
-  git -C "$case_dir/wt" add base-only.txt
-  git -C "$case_dir/wt" commit -qm "feature base work"
-  git -C "$case_dir/wt" push -q origin feature/base
-
-  # main moves on after the base forked, and the pipeline rebases the crewmate's branch
-  # onto main - carrying none of feature/base's unmerged history.
-  git -C "$case_dir/wt" checkout -q -b main-work origin/main
-  printf 'unrelated-main-work\n' > "$case_dir/wt/main-only.txt"
-  git -C "$case_dir/wt" add main-only.txt
-  git -C "$case_dir/wt" commit -qm "unrelated work on main"
-  git -C "$case_dir/wt" push -q origin main-work:main
-  git -C "$case_dir/wt" fetch -q origin
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-  git -C "$case_dir/wt" reset -q --hard origin/main
-  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
-  git -C "$case_dir/wt" add fix.txt
-  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
-
-  write_task_meta "$case_dir" "base=feature/base"
-
-  set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "unrooted-branch: a rebased branch must not break the pre-merge review"
-  assert_contains "$out" 'diff base: origin/main' \
-    "unrooted-branch: a branch not rooted in the base's unmerged history must not be diffed against that base"
-  assert_grep 'not rooted' "$case_dir/stderr" \
-    "unrooted-branch: the fallback must say why the declared base was not used"
-  assert_contains "$out" '+crew-fix' "unrooted-branch: the crewmate's own change should be shown"
-  assert_not_contains "$out" 'unrelated-main-work' \
-    "unrooted-branch: the default branch's own history must not be dressed up as the crewmate's change"
-  pass "fm-review-diff falls back to the default branch when the branch under review was rebased off the declared base"
-}
-
-# The base SQUASH-merged - firstmate's own default merge method, and GitHub's most
-# common setting - and the branch under review is still stacked on it, which is the
-# ordinary direct-PR shape (the crewmate owns its branch and never rebases it). A squash
-# leaves the base's own commits out of the default branch by commit id, so the merge base
-# with the default branch is still the OLD fork point: falling back to the default branch
-# here would dress every one of the base's already-merged changes up as the crewmate's,
-# and firstmate relays a summary of this diff to the captain. Landedness does not make a
-# branch stop being rooted where it is rooted; rootedness is asked first, and it keeps the
-# base as the honest fork point.
-test_landed_base_still_rooted_keeps_the_base_as_diff_base() {
-  local case_dir out rc
-  case_dir=$(make_case landed-base-rooted)
-
-  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
-  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
-  git -C "$case_dir/wt" add base-only.txt
-  git -C "$case_dir/wt" commit -qm "feature base work"
-  git -C "$case_dir/wt" push -q origin feature/base
-
-  # The crewmate's branch stays stacked on feature/base, carrying the base's own commit.
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-  git -C "$case_dir/wt" reset -q --hard feature/base
-  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
-  git -C "$case_dir/wt" add fix.txt
-  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
-
-  # feature/base is then SQUASH-merged into main and its branch is kept on origin.
-  git -C "$case_dir/wt" checkout -q -b squash-main origin/main
-  git -C "$case_dir/wt" merge -q --squash feature/base >/dev/null
-  git -C "$case_dir/wt" commit -qm "squash feature/base"
-  git -C "$case_dir/wt" push -q origin squash-main:main
-  git -C "$case_dir/wt" fetch -q origin
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-
-  write_task_meta "$case_dir" "base=feature/base"
-
-  set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "landed-base-rooted: a merged base must not break the pre-merge review"
-  assert_contains "$out" 'diff base: origin/feature/base' \
-    "landed-base-rooted: a branch still rooted in the base must be diffed against that base, merged or not"
-  assert_contains "$out" '+crew-fix' "landed-base-rooted: the crewmate's own change should be shown"
-  assert_not_contains "$out" 'feature-base-work' \
-    "landed-base-rooted: the base's already-merged work was dressed up as part of the crewmate's change"
-  assert_grep 'still rooted' "$case_dir/stderr" \
-    "landed-base-rooted: the review must say the base merged while the branch still sits on its pre-merge commits"
-  pass "fm-review-diff keeps the declared base when the branch is still rooted in it, even after that base merged"
-}
-
-# The same branch, the same squash-merged base - but now GitHub auto-deleted the base
-# branch when it merged, which it does by default. The branch under review has not moved,
-# so it is still rooted in the base's pre-squash commits and the base is still its honest
-# fork point; there is simply no ref left to name it by. The recorded spawn-time tip
-# (base_sha=) IS that fork point, and it is reachable from the branch under review, so it
-# is the diff base. Falling back to the default branch here would take the old fork point
-# as the merge base and present the base's already-merged work as the crewmate's change -
-# and it would also disagree with bin/fm-pr-check.sh, which reasons from that very tip and
-# refuses this PR pending a rebase. Review and the merge gate must tell one story.
-test_gone_squash_merged_base_still_rooted_diffs_against_the_recorded_tip() {
-  local case_dir out rc base_sha
-  case_dir=$(make_case gone-base-rooted)
-
-  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
-  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
-  git -C "$case_dir/wt" add base-only.txt
-  git -C "$case_dir/wt" commit -qm "feature base work"
-  git -C "$case_dir/wt" push -q origin feature/base
-  base_sha=$(git -C "$case_dir/wt" rev-parse feature/base)
-
-  # The crewmate's branch stays stacked on feature/base.
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-  git -C "$case_dir/wt" reset -q --hard feature/base
-  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
-  git -C "$case_dir/wt" add fix.txt
-  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
-
-  # feature/base is SQUASH-merged into main and origin deletes the branch.
-  git -C "$case_dir/wt" checkout -q -b squash-main origin/main
-  git -C "$case_dir/wt" merge -q --squash feature/base >/dev/null
-  git -C "$case_dir/wt" commit -qm "squash feature/base"
-  git -C "$case_dir/wt" push -q origin squash-main:main
-  git -C "$case_dir/wt" push -q origin --delete feature/base
-  git -C "$case_dir/wt" fetch -q origin
-  git -C "$case_dir/wt" checkout -q fm/task-x1
-
-  write_task_meta "$case_dir" "base=feature/base" "base_sha=$base_sha"
-
-  set +e
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "gone-base-rooted: a gone base must not break the pre-merge review"
-  assert_contains "$out" "diff base: $base_sha" \
-    "gone-base-rooted: the branch is still rooted in the deleted base, so its recorded spawn-time tip is the honest diff base"
-  assert_contains "$out" '+crew-fix' "gone-base-rooted: the crewmate's own change should be shown"
-  assert_not_contains "$out" 'feature-base-work' \
-    "gone-base-rooted: the deleted base's already-merged work was dressed up as part of the crewmate's change"
-  assert_grep 'still rooted' "$case_dir/stderr" \
-    "gone-base-rooted: the review must say the head still sits on the merged base's pre-squash commits"
-  pass "fm-review-diff diffs against the recorded base tip when the declared base is gone but the branch still sits on it"
-}
-
-# A probe origin cannot ANSWER is not the same as a base that is gone: reviewing
-# against the wrong base silently would be worse than stopping.
+# An origin that cannot be ASKED is not a base that is gone. It is also an origin nothing
+# can be fetched from, so no honest diff can be taken at all: say which probe failed rather
+# than silently reviewing against whatever ref happens to be local.
 test_unreachable_origin_stops_instead_of_guessing() {
   local case_dir rc
   case_dir=$(make_case unreachable-origin)
@@ -490,9 +268,5 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_declared_base_is_the_diff_base
 test_deleted_base_falls_back_to_default_with_warning
-test_landed_base_falls_back_to_default_with_warning
-test_landed_base_still_rooted_keeps_the_base_as_diff_base
-test_gone_squash_merged_base_still_rooted_diffs_against_the_recorded_tip
-test_unrooted_branch_falls_back_to_default_with_warning
 test_unreachable_origin_stops_instead_of_guessing
 test_no_declared_base_still_diffs_against_default

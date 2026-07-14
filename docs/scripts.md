@@ -25,7 +25,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend; `--base` records a ship task's intended base and its spawn-time tip |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend; `--base` records a ship task's intended base |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -38,11 +38,10 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-config-push.sh`      | Push declared inheritable local config to live secondmate homes mid-session          |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
-| `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base: the declared `base=` when set, else the repo default |
+| `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base: the declared `base=` while that branch is on origin, else the repo default |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
-| `fm-base-lib.sh`         | The one owner of what a task's declared base means: branch-name and commit-id validation, whether the base's work has landed in the default branch, whether a head is rooted in the base's unmerged history, and the single verdict every base-aware consumer decides on rather than asking its own half of the question |
-| `fm-base-state.sh`       | Print what a task's declared base is right now (`live`, `landed`, `abandoned`, `unknown`) from its meta: the crewmate's accessor onto `fm-base-lib.sh`, which a based brief has it run before branching and before targeting a PR |
+| `fm-base-lib.sh`         | Shared facts about a task's declared base: branch-name validation, whether that branch exists on origin, and whether a head is rooted in the base's own history |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
@@ -63,7 +62,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-pr-check.sh`         | Guard any declared non-default `base=`, record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll |
+| `fm-pr-check.sh`         | Guard a declared non-default `base=` that is still on origin, record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |

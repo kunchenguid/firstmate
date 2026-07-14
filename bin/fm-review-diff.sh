@@ -6,33 +6,16 @@
 # it, and local-only projects against the local branch.
 # The diff base is the repo default branch, unless state/<id>.meta records a
 # non-default base= (a task whose intended base is a feature branch, declared
-# with fm-spawn.sh --base): then it is that base, so review shows the crewmate's
-# own change rather than the entire feature base's unmerged history on top of it.
+# with fm-spawn.sh --base) AND that base branch still exists on origin: then it is
+# that base, so review shows the crewmate's own change rather than the entire
+# feature base's unmerged history on top of it.
 #
-# WHICH BASE IS RIGHT IS NOT A QUESTION THIS SCRIPT ANSWERS. It resolves the base's state
-# and the branch's rootedness and asks bin/fm-base-lib.sh's fm_base_verdict, the same one
-# decision bin/fm-pr-check.sh's guard gates the merge on, so review and merge can never
-# reach opposite conclusions from the same facts. Branch existence decides nothing here
-# either; it only chooses which tip the predicates reason from.
-#
-#   STACKED_LIVE / STACKED_LANDED  the branch is rooted in the declared base - its fork
-#     point is a commit the default branch cannot reach - so the base is where the branch
-#     actually sits and it is the diff base. That stays true after the base MERGES: a
-#     squash leaves the base's own commits out of the default branch by commit id, so a
-#     branch still stacked on them still forks where it always did, and falling back to
-#     the default branch would take the OLD fork point as the merge base and present the
-#     base's already-merged work as the crewmate's change. When the base branch is gone
-#     from origin, the tip recorded at spawn (base_sha=) is the diff base instead - it is
-#     reachable from the branch under review, so the diff is still exactly this task's.
-#   ORDINARY / UNSTACKED / ABANDONED_BASE  the branch is not rooted in the base any more,
-#     so the default branch is its real fork point and the honest diff base: what the diff
-#     then shows is everything the PR would land on the default branch, which is precisely
-#     what firstmate needs to see. Warn and fall back rather than erroring out - deciding
-#     whether that is safe is fm-pr-check.sh's job, not review's, and review must never be
-#     blocked.
-#   INDETERMINATE  origin could not be asked at all is an infrastructure failure: stop,
-#     because reviewing silently against the wrong base is worse. Anything else
-#     indeterminate falls back to the default branch with a warning.
+# A declared base that is NOT on origin any more, or that origin cannot be asked about,
+# is not adjudicated here: this script does not try to work out whether that base merged
+# or was abandoned, because git cannot tell those apart without a guess. It falls back to
+# the default branch and SAYS SO in one line, so the reviewer knows the diff base was
+# substituted and why. bin/fm-pr-check.sh's guard reaches the same conclusion on the same
+# input - it defers that PR to a human - so review and merge never tell different stories.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
@@ -150,118 +133,50 @@ fi
 # diffing it against the repo default would present the whole feature base's
 # unmerged history as part of the crewmate's change.
 BASE_DECLARED=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
-BASE_SHA_DECLARED=$(grep '^base_sha=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$BASE_DECLARED" ] && ! fm_base_valid_branch_name "$BASE_DECLARED"; then
   echo "error: task $ID records base='$BASE_DECLARED', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-')" >&2
   exit 1
 fi
-if [ -n "$BASE_SHA_DECLARED" ] && ! fm_base_valid_commit_id "$BASE_SHA_DECLARED"; then
-  echo "error: task $ID records base_sha='$BASE_SHA_DECLARED', which is not a git object id" >&2
-  exit 1
-fi
 BASE_BRANCH=${BASE_DECLARED:-$DEFAULT}
-# Set only when the diff base is a bare commit rather than a branch: the declared base is
-# gone from origin, yet the branch under review is still rooted in it, so its recorded
-# spawn-time tip is the only ref-less fork point there is - and the honest one.
-BASE_REF_OVERRIDE=
 
 HAS_ORIGIN=false
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   HAS_ORIGIN=true
 fi
 
-# Update the remote-tracking ref itself; a bare single-branch fetch can leave
-# origin/<branch> stale on some Git versions and only refresh FETCH_HEAD. The refspec
-# is fully qualified so a dash-leading branch name cannot be read as an option.
-fetch_origin_branch() {  # <branch>; echoes the fetched commit
-  local branch=$1 err
-  if ! err=$(git -C "$WT" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>&1); then
-    echo "error: cannot fetch base branch $branch from origin for task $ID" >&2
-    [ -z "$err" ] || printf '  git: %s\n' "$err" >&2
-    return 1
-  fi
-  git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}"
-}
-
-# Which base is the honest one to diff against? Asked of fm_base_verdict, the same single
-# decision bin/fm-pr-check.sh's guard gates the merge on, so review can never tell the
-# captain a different story from the one the guard is about to enforce.
-PREFETCHED=""
+# A declared base is only the diff base while that branch is still on origin. Once it is
+# gone - or origin cannot be asked - review does not guess what became of it; it falls back
+# to the default branch and says so, which is the same call bin/fm-pr-check.sh's guard
+# makes on the same input (it defers that PR to a human). Review is never blocked by it:
+# what the fallback diff shows is everything the PR would land on the default branch, which
+# is exactly what firstmate needs while sorting the base out.
 if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
-  STATE_RC=0
-  fm_base_resolve_state "$WT" "$BASE_DECLARED" "$BASE_SHA_DECLARED" "$DEFAULT" || STATE_RC=$?
-  if [ "$FM_BASE_STATE_WHY" = probe-failed ]; then
-    # An origin that cannot be ASKED is an infrastructure failure, not a verdict.
-    # Reviewing silently against the wrong base would be worse than stopping.
-    echo "error: task $ID declares intended base $BASE_DECLARED, but origin could not be asked whether that branch still exists" >&2
-    [ -z "$FM_BASE_STATE_ERR" ] || printf '  git: %s\n' "$FM_BASE_STATE_ERR" >&2
-    exit 1
-  fi
-  COMPARE_SHA=$(git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}") \
-    || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
-  ROOTED_RC=0
-  if [ "$STATE_RC" -ne "$FM_BASE_STATE_UNKNOWN" ]; then
-    PREFETCHED=" $DEFAULT "
-    if "$FM_BASE_STATE_PRESENT"; then
-      PREFETCHED=" $BASE_DECLARED$PREFETCHED"
-    fi
-    fm_base_head_rooted "$WT" "$FM_BASE_STATE_TIP" "$COMPARE_SHA" \
-      "$FM_BASE_STATE_DEFAULT_SHA" || ROOTED_RC=$?
-  fi
-  VERDICT_RC=0
-  fm_base_verdict "$STATE_RC" "$ROOTED_RC" || VERDICT_RC=$?
-
-  if [ "$FM_BASE_STATE_PRESENT" = false ] && [ -n "$FM_BASE_STATE_TIP" ]; then
-    echo "notice: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin; reasoning from the tip recorded at spawn ($FM_BASE_STATE_TIP)" >&2
-  fi
-
-  case "$VERDICT_RC" in
-    "$FM_BASE_VERDICT_STACKED_LIVE")
-      : # The declared base is the fork point and the diff base, exactly as declared.
-      ;;
-    "$FM_BASE_VERDICT_STACKED_LANDED")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, and that base has already merged - its work is carried by $DEFAULT ($FM_BASE_VERDICT_WHY) - but the branch under review is still rooted in the base's own pre-merge commits, so $BASE_DECLARED remains its real fork point and the diff below is taken against it; the head must be rebased onto $DEFAULT before this can merge, and bin/fm-pr-check.sh refuses it until then" >&2
-      if [ "$FM_BASE_STATE_PRESENT" = false ]; then
-        BASE_REF_OVERRIDE=$FM_BASE_STATE_TIP
-        echo "  That branch is gone from origin, so the diff base is its recorded spawn-time tip $FM_BASE_STATE_TIP, which the branch under review still descends from." >&2
-      fi
-      ;;
-    "$FM_BASE_VERDICT_ORDINARY")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but that base has already merged - its work is carried by $DEFAULT ($FM_BASE_VERDICT_WHY), so it has no unmerged history left to subtract; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
+  PROBE_RC=0
+  fm_base_probe_origin "$WT" "$BASE_DECLARED" || PROBE_RC=$?
+  case "$PROBE_RC" in
+    "$FM_BASE_PRESENT") ;;
+    "$FM_BASE_ABSENT")
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin, so it cannot be the diff base; diffing against the default branch $DEFAULT instead, which shows everything this PR would land on $DEFAULT" >&2
       BASE_BRANCH=$DEFAULT
       ;;
-    "$FM_BASE_VERDICT_ABANDONED_BASE")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch was deleted from origin WITHOUT merging; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT - the abandoned base's own commits included. bin/fm-pr-check.sh refuses this PR before merge" >&2
-      BASE_BRANCH=$DEFAULT
-      ;;
-    "$FM_BASE_VERDICT_INDETERMINATE")
-      case "$FM_BASE_VERDICT_WHY" in
-        gone-no-tip|gone-tip-unknown)
-          echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin and its spawn-time tip is not usable ($FM_BASE_VERDICT_WHY), so whether it merged or was abandoned cannot be told apart; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
-          ;;
-        *)
-          echo "warning: task $ID declares intended base $BASE_DECLARED, but what became of that base could not be determined ($FM_BASE_VERDICT_WHY); diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT. bin/fm-pr-check.sh refuses this PR before merge until that question can be settled" >&2
-          ;;
-      esac
-      BASE_BRANCH=$DEFAULT
-      ;;
-    *)  # UNSTACKED
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but the branch under review is not rooted in that base's unmerged history (the pipeline rebased it onto $DEFAULT); diffing against it would present every $DEFAULT commit since the base forked as part of the change, so diffing against the default branch $DEFAULT instead" >&2
+    *)
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but origin could not be asked whether that branch still exists; diffing against the default branch $DEFAULT instead, which shows everything this PR would land on $DEFAULT" >&2
+      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
       BASE_BRANCH=$DEFAULT
       ;;
   esac
 fi
 
-if [ -n "$BASE_REF_OVERRIDE" ]; then
-  BASE="$BASE_REF_OVERRIDE"
-elif "$HAS_ORIGIN"; then
-  # fm_base_resolve_state already fetched the declared base (when it is still on origin)
-  # and the default branch into their remote-tracking refs, and BASE_BRANCH is one of
-  # them by then, so fetching again would just buy a second network round-trip.
-  case "$PREFETCHED" in
-    *" $BASE_BRANCH "*) : ;;
-    *) fetch_origin_branch "$BASE_BRANCH" >/dev/null || exit 1 ;;
-  esac
+if "$HAS_ORIGIN"; then
+  # Update the remote-tracking ref itself; a bare single-branch fetch can leave
+  # origin/<branch> stale on some Git versions and only refresh FETCH_HEAD. The refspec is
+  # fully qualified so a dash-leading branch name cannot be read as an option.
+  if ! FETCH_ERR=$(git -C "$WT" fetch --quiet origin \
+    "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" 2>&1); then
+    echo "error: cannot fetch base branch $BASE_BRANCH from origin for task $ID" >&2
+    [ -z "$FETCH_ERR" ] || printf '  git: %s\n' "$FETCH_ERR" >&2
+    exit 1
+  fi
   BASE="origin/$BASE_BRANCH"
 else
   BASE="$BASE_BRANCH"

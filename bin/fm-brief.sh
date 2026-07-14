@@ -15,27 +15,14 @@
 #   roots the branch step on that base and writes the mode-specific path to a
 #   correctly based PR. IT RECORDS NO STATE. state/<task-id>.meta is the single
 #   source of truth for a task's base, and bin/fm-spawn.sh writes it - so pass the
-#   SAME --base <branch> to fm-spawn.sh, which records base= and the base's tip on
-#   origin as base_sha=. fm-pr-check.sh then guards the PR's base before merge; its
-#   header owns that contract in full.
-#   THE BRIEF ASSUMES NOTHING ABOUT THE BASE; IT HAS THE CREWMATE ASK. This file is
-#   scaffolded once and relaunched with verbatim, while the base underneath it moves. A
-#   FIRST spawn is only launched against a LIVE base, but the base can merge WHILE the
-#   crewmate works - the base lands first and the child follows is the normal order of a
-#   stack - and fm-spawn.sh deliberately keeps the declaration and relaunches a task whose
-#   base merged mid-flight. Its branch may be kept or deleted afterwards.
-#   So the brief's every base instruction is conditioned on ONE question, asked as the
-#   crewmate's first action on EVERY launch (a relaunch included) and again before it
-#   targets a PR at the base: what is the base RIGHT NOW? bin/fm-base-state.sh answers it
-#   from the same predicates fm-spawn.sh, fm-pr-check.sh and fm-review-diff.sh decide on -
-#   `live` (the based task is on), `landed` (its work is in the default branch already, so
-#   this is an ordinary default-branch task now, whether or not the branch still exists),
-#   `abandoned` or `unknown` (do not guess: `blocked:`).
-#   WHAT THE CREWMATE MUST NEVER DO IS READ A FETCH'S EXIT STATUS. It separates nothing: a
-#   branch that is gone and an origin that cannot be reached fail it alike, and taking
-#   either for a merged base is the fail-open this design exists to close. Nor does branch
-#   existence answer it - a merged branch is usually kept, and GitHub's delete-on-merge is
-#   off by default.
+#   SAME --base <branch> to fm-spawn.sh, which records base=. fm-pr-check.sh then
+#   guards the PR's base before merge; its header owns that contract in full.
+#   THE CREWMATE NEVER ADJUDICATES ITS OWN BASE. A base can merge, or be deleted,
+#   between the writing of this brief and the run - the base lands first and the child
+#   follows is the normal order of a stack - and no crewmate can tell a merged base from
+#   an abandoned one, or either from an origin it could not reach. So the brief gives it
+#   exactly one rule for that: if the base cannot be fetched, do not guess and do not
+#   fall back to the default branch - report `blocked:` and stop. Firstmate decides.
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
@@ -346,89 +333,45 @@ EOF
 # default branch. This writes no state: fm-spawn.sh --base owns the durable record
 # (state/<id>.meta), so the same flag must be passed there too.
 BASE_SETUP=""
-BASE_CHECK=""
+BASE_BLOCKED="If \`git fetch origin $BASE\` fails for ANY reason - the branch is gone from origin, or origin cannot be reached - do NOT guess what became of it, and do NOT fall back to the default branch. A base that merged, a base that was abandoned, and an origin you could not reach look alike from here, and picking wrong is how a feature branch's unmerged work reaches the default branch. Append \`blocked: intended base $BASE could not be fetched from origin\` and stop; firstmate decides what that means."
 BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
 if [ -n "$BASE" ]; then
   if [ "$MODE" = local-only ]; then
     echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
     exit 1
   fi
-  # THE CREWMATE ASKS WHAT THE BASE IS; THE BRIEF NEVER ASSUMES IT. This file is scaffolded
-  # once and relaunched with verbatim, while the base underneath it moves: it can merge
-  # mid-flight (the normal end-state of a stacked PR - the base lands first, the child
-  # follows), with its branch kept or deleted. A brief that asked the question once, on the
-  # fresh-start path only, would leave every relaunched crewmate - and every crewmate whose
-  # base merges while it works - following base instructions that no longer apply.
-  #
-  # So the state is established FIRST, on every path, from bin/fm-base-state.sh: the same
-  # predicates fm-spawn.sh, fm-pr-check.sh and fm-review-diff.sh decide on. The crewmate
-  # never re-derives it, and above all never reads it off a fetch's exit status, which
-  # cannot tell a branch that is gone from an origin that could not be reached.
-  BASE_STATE_CMD=$(shell_quote "$FM_ROOT/bin/fm-base-state.sh")
   BASE_META=$(shell_quote "$STATE/$ID.meta")
-  BASE_CHECK="$BASE_STATE_CMD $BASE_META"
-  BRANCH_STEP="1. First action: find out what your intended base \`$BASE\` IS right now, before you touch a branch. Do this on every launch of this task, a relaunch included: a base can merge, or be deleted, between the writing of this brief and your run, and everything else here is conditioned on the answer.
+  BRANCH_STEP="1. First action: create your \`fm/$ID\` branch, rooted on your intended base \`$BASE\` - NOT on the default branch this worktree starts on.
    \`\`\`
-   $BASE_CHECK
+   git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD
    \`\`\`
-   It prints \`state=\`, along with \`base=\`, \`tip=\` and \`default=\`, and it asks firstmate's own base predicates. Act on the word it prints and on nothing else - in particular, never infer the base's fate from a fetch that failed, which cannot tell a branch that is gone from an origin that could not be reached. These are ALL the answers it has; every one of them has an instruction here, so you never have to improvise one.
+   $BASE_BLOCKED
 
-   - **\`state=live\`** - \`$BASE\` still carries unmerged work. This is the based task you were launched for, and every base instruction in this brief applies.
-   - **\`state=landed\`** - \`$BASE\`'s work is already in the default branch. Its branch may well still exist; a merged branch is usually kept, so do not go looking for its absence. There is nothing left to stack on, so THIS IS AN ORDINARY DEFAULT-BRANCH TASK from here: ignore every base instruction in the rest of this brief - do not root on \`$BASE\`, do not open or retarget a PR against it - and say so once:
-   \`\`\`
-   echo \"working: intended base $BASE has merged; proceeding as an ordinary default-branch task\" >> $STATUS_FILE
-   \`\`\`
-   - **\`state=abandoned\` or \`state=unknown\`** - the base was deleted without ever merging, or what became of it could not be settled. Do not guess and do not improvise a fallback:
-   \`\`\`
-   echo \"blocked: intended base $BASE is {the state printed}; cannot root this task on it\" >> $STATUS_FILE
-   \`\`\`
-   and stop.
-   - **\`state=none\`, or the check fails outright** (a non-zero exit, or no \`state=\` line at all) - your task's meta does not record this base, so firstmate's pre-merge base guard is NOT armed for it and nothing would catch a wrong-based PR. Do not proceed as a based task, and do not quietly proceed as an ordinary one either:
-   \`\`\`
-   echo \"blocked: intended base $BASE is not recorded in this task's meta; the PR-base guard is not armed\" >> $STATUS_FILE
-   \`\`\`
-   and stop. Firstmate relaunches the task with the base declared to the spawn, and you pick up from there.
-
-2. Get onto your \`fm/$ID\` branch, according to that state.
-
-   **If \`fm/$ID\` already exists** - \`git rev-parse --verify --quiet fm/$ID\` prints a commit - this task has been relaunched. Check it out rather than re-rooting it, and carry on with the work already on it:
-   \`\`\`
-   git checkout fm/$ID
-   \`\`\`
-   With \`state=live\` that is the whole step: your branch is rooted where it belongs.
-   With \`state=landed\` it is rooted on the commits \`$BASE\` had BEFORE it merged - and a squash merge leaves those commits out of the default branch by commit id, so merging your branch would land them all over again. Move your own commits onto the default branch and drop the base's, using the \`tip=\` and \`default=\` values the check printed:
-   \`\`\`
-   git fetch origin {default} && git rebase --onto origin/{default} {tip} fm/$ID
-   \`\`\`
-   Force-push with lease afterwards if you have already pushed this branch.
-
-   **Otherwise create it**, rooted according to that same state:
-   - \`state=live\`: \`git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD\`. The worktree starts on the DEFAULT branch, so branching without this would root your work on the wrong base.
-   - \`state=landed\`: \`git checkout -b fm/$ID\`. The default branch the worktree already sits on IS this task's base now."
-  # The Setup note and the definition of done must not disagree about whether the
-  # branch may end up rebased onto the default branch. Under direct-PR the
-  # crewmate owns the branch end to end, so "never rebase onto the default" is
-  # the whole truth. Under no-mistakes the pipeline WILL rebase it onto the
-  # default branch and there is no way to stop it, so saying "never" here would
-  # read as a violation the moment the pipeline runs and would send the crewmate
-  # to `blocked:` instead of to the retarget it is supposed to perform. State
-  # that once, and let the definition of done own the recovery.
+   If \`fm/$ID\` already exists (\`git rev-parse --verify --quiet fm/$ID\` prints a commit), this task has been relaunched: check it out with \`git checkout fm/$ID\` and carry on with the work already on it, rather than re-rooting it."
+  # The Setup note and the definition of done must not disagree about whether the branch
+  # may end up rebased onto the default branch. Under direct-PR the crewmate owns the
+  # branch end to end, so "never rebase onto the default" is the whole truth. Under
+  # no-mistakes the pipeline WILL rebase it onto the default branch and there is no way to
+  # stop it, so saying "never" here would read as a violation the moment the pipeline runs
+  # and would send the crewmate to `blocked:` instead of to the retarget it is supposed to
+  # perform. State that once, and let the definition of done own the recovery.
+  BASE_ARMED="Firstmate's pre-merge base guard only runs when this task's meta records the base. Confirm it once, before you start: \`grep -qxF 'base=$BASE' $BASE_META\`. If that does not match, the guard is NOT armed and nothing would catch a wrong-based PR - append \`blocked: intended base $BASE is not recorded in this task's meta\` and stop."
   if [ "$MODE" = direct-PR ]; then
     BASE_SETUP="
 
-**Base branch.** As long as step 1 reports \`state=live\`, this task targets base branch \`$BASE\`, not the repo default branch.
-Step 2 roots your \`fm/$ID\` branch on \`$BASE\`; keep it there and never rebase it onto the default branch yourself.
+**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+Step 1 roots your \`fm/$ID\` branch on \`$BASE\`; keep it there and never rebase it onto the default branch yourself.
 You open the PR against \`$BASE\` yourself - see the definition of done.
 Firstmate refuses to record or merge a PR whose head is not rooted in \`$BASE\`'s history, or whose base label is not \`$BASE\`.
-All of this is void the moment step 1 reports \`state=landed\`: that base has merged, and this is an ordinary default-branch task."
+$BASE_ARMED"
   else
     BASE_SETUP="
 
-**Base branch.** As long as step 1 reports \`state=live\`, this task targets base branch \`$BASE\`, not the repo default branch.
-Step 2 roots your \`fm/$ID\` branch on \`$BASE\`, and you must never rebase it onto the default branch by hand.
+**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+Step 1 roots your \`fm/$ID\` branch on \`$BASE\`, and you must never rebase it onto the default branch by hand.
 The no-mistakes pipeline WILL rebase it onto the default branch and open the PR there; it cannot be told a base. That is expected, it is not a failure, and it is not yours to fight.
 The definition of done below owns what to do about it, and you are not done until you have done it.
-All of this is void the moment step 1 reports \`state=landed\`: that base has merged, and this is an ordinary default-branch task."
+$BASE_ARMED"
   fi
 fi
 
@@ -446,13 +389,8 @@ EOF
 )
     [ -z "$BASE" ] || DOD="$DOD
 
-Re-run the base check from step 1 before you open the PR - a base merges most often exactly while its child is in flight:
-\`\`\`
-$BASE_CHECK
-\`\`\`
-- Still \`state=live\`: open the PR against base branch \`$BASE\`, not the repo default - \`gh-axi pr create --base $BASE ...\`.
-- Now \`state=landed\`: that base has merged. Rebase your branch onto the default branch as step 2 describes, open the PR against the default branch as usual, and do not target \`$BASE\` at all.
-- Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing): the base's fate is not settled, so follow step 1's rule for that same answer - append the \`blocked:\` line it gives and stop. Do NOT open the PR against a base you could not verify, and do not silently retarget it at the default branch instead."
+Open the PR against base branch \`$BASE\`, not the repo default: \`gh-axi pr create --base $BASE ...\`.
+If \`$BASE\` is gone from origin by then - a base merges most often exactly while its child is in flight - do not retarget the PR at the default branch on your own judgement: append \`blocked: intended base $BASE is gone from origin\` and stop. Firstmate decides."
     ;;
   local-only)
     SETUP2=""
@@ -468,12 +406,8 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    # A based branch step asks the base's state first and branches second, so the doctor
-    # step follows two, not one.
-    DOCTOR_STEP=2
-    [ -z "$BASE" ] || DOCTOR_STEP=3
     SETUP2="
-$DOCTOR_STEP. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     # A based task has one more gate than the stock flow, and both the gate and
     # the stricter done condition must sit BEFORE the "You are finished."
@@ -484,22 +418,17 @@ $DOCTOR_STEP. Run \`no-mistakes doctor\`; if it reports the repo is not initiali
     NM_DONE="After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished."
     if [ -n "$BASE" ]; then
       NM_BASE_SECTION="## Base branch \`$BASE\` - required before you are done
-This section applies while your base is \`live\`. If the base check reports \`state=landed\`, that base has merged: skip this section entirely, do not retarget anything, and CI green alone is your definition of done.
 This task targets base branch \`$BASE\`, not the repo default.
 The pipeline cannot be told a base: it always rebases onto the repo default branch and opens the PR against it. Do not try to talk it out of that, and do not hand-rebase mid-run.
-Instead, let the PR open as it will, then retarget it once it exists - but ask what the base IS first, because a base merges most often exactly while its child is in flight:
-\`\`\`
-$BASE_CHECK
-\`\`\`
-- Still \`state=live\`: retarget the PR - \`gh-axi pr edit {n} --base $BASE\`. The pipeline's monitor picks the new base up, re-rebases your branch onto \`$BASE\`, and force-pushes a clean head; you do not rebuild anything by hand. Then re-check \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
-- Now \`state=landed\`: the base merged while you worked. Do NOT retarget it - the pipeline has already left your head on the default branch, which is exactly where it belongs now, and CI green alone is your definition of done.
-- Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing): the base's fate is not settled, so follow step 1's rule for that same answer - append the \`blocked:\` line it gives and stop. Do NOT retarget the PR at a base you could not verify; a wrong-based PR is refused before merge, so nothing slips through while firstmate sorts it out.
-If the check still reports \`state=live\` and the retarget or the re-rebase does not take, append \`blocked: PR still based on the default branch, not $BASE\` and stop; a wrong-based PR is refused before merge, so it will not slip through - it will just sit.
+Instead, let the PR open as it will, then retarget it once it exists: \`gh-axi pr edit {n} --base $BASE\`.
+The pipeline's monitor picks the new base up, re-rebases your branch onto \`$BASE\`, and force-pushes a clean head; you do not rebuild anything by hand.
+Then confirm \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
+If the retarget fails because \`$BASE\` is gone from origin - a base merges most often exactly while its child is in flight - do not decide for yourself what that means and do not leave the PR on the default branch: append \`blocked: intended base $BASE is gone from origin\` and stop. Firstmate decides.
+If the retarget or the re-rebase simply does not take, append \`blocked: PR still based on the default branch, not $BASE\` and stop; a wrong-based PR is refused before merge, so it will not slip through - it will just sit.
 
 "
       NM_DONE="This task is done only when BOTH hold: /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), AND \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
 Reporting \`done\` while the PR is still based on the default branch is not done: it is refused before merge and will just sit.
-The base half of that drops away in exactly one case: the base check reports \`state=landed\`, so that base has merged, this is an ordinary default-branch task, CI green alone is done, and you must NOT retarget the PR.
 When you are done, append \`done: PR {url} checks green\` and stop. You are finished."
     fi
     DOD=$(cat <<EOF
