@@ -73,6 +73,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Keep `bin/*.sh` parseable by macOS system bash 3.2, whose command-substitution scanner rejects `$'...'` case patterns inside `$(...)`; use a literal-newline variable and `(pattern)` parens as in `bin/fm-fleet-snapshot.sh`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.

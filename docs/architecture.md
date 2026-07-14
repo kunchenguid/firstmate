@@ -171,6 +171,8 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+When GitHub rejects that merge because the default branch is protected by a merge queue, the helper falls back to enqueueing the PR via the GraphQL `enqueuePullRequest` mutation and reports the queue position, state, and estimated time to merge.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the rejection signatures and why those two GraphQL calls deliberately use plain `gh` instead of `gh-axi`.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
