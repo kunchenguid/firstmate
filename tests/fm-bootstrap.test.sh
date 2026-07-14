@@ -182,6 +182,30 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
+test_axi_install_commands_keep_browser_fallback_hook_free() {
+  local label tool expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label tool expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/axi-install-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    rm -f "$fakebin/$tool"
+
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "MISSING: $tool (install: $expect)" ] || \
+      fail "$label: expected hook policy in install output, got: $out"
+  done <<'ROWS'
+Chrome AXI installs without ambient session hooks^chrome-devtools-axi^npm install -g chrome-devtools-axi
+GitHub AXI retains session hook setup^gh-axi^npm install -g gh-axi && gh-axi setup hooks
+Lavish AXI retains session hook setup^lavish-axi^npm install -g lavish-axi && lavish-axi setup hooks
+ROWS
+  pass "bootstrap gives browser AXI a hook-free install command while retaining other AXI hooks"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -320,6 +344,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_axi_install_commands_keep_browser_fallback_hook_free
 test_orca_backend_gates_orca_tool_only_when_selected
 test_codex_app_backend_gates_codex_cli_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced

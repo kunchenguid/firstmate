@@ -54,6 +54,8 @@
 #          before - this flag is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
+#          gh-axi and lavish-axi install their session hooks; chrome-devtools-axi
+#          stays hook-free because it is a browser fallback, not an ambient preference.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,7 +183,8 @@ install_cmd() {
     codex) echo "brew install codex  # or install the Codex CLI from OpenAI" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
-    gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    gh-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    chrome-devtools-axi) echo "npm install -g $1" ;;
     tasks-axi) echo "npm install -g tasks-axi" ;;
     *) return 1 ;;
   esac

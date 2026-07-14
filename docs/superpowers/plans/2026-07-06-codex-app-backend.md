@@ -151,7 +151,7 @@ Expected: PASS for Codex archive and git-worktree removal.
 - [x] **Step 1: Write failing bootstrap test**
 
 Add a test case where `config/backend` contains `codex-app`.
-Assert bootstrap requires `codex`, `node`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`, and skips `tmux` and Treehouse.
+Assert bootstrap requires `codex`, `node`, `gh`, `no-mistakes`, `gh-axi`, hook-free `chrome-devtools-axi` as the browser fallback, and `lavish-axi`, and skips `tmux` and Treehouse.
 
 Run: `bash tests/fm-bootstrap.test.sh`
 Expected: FAIL because bootstrap does not know the backend.

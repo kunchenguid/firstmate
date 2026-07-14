@@ -222,6 +222,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+`chrome-devtools-axi` remains in that toolchain as the cross-harness browser fallback, but bootstrap installs it without `setup hooks` so it does not become an ambient browser preference.
+Interactive browser selection is native-first and follows the agent-only `browser-tool-policy` skill.
 When bootstrap resolves `backend=orca` from `FM_BACKEND` or `config/backend`, it requires `orca`, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When bootstrap resolves `backend=codex-app` from `FM_BACKEND` or `config/backend`, it requires `codex` with `app-server` support, keeps the universal `node` requirement, and skips `tmux` and `treehouse`.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.

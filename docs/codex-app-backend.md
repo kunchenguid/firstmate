@@ -273,6 +273,7 @@ No runtime auto-detection in the first pass.
 Running inside Codex Desktop is common for the primary supervisor, but auto-selecting the backend would surprise users who still want tmux, herdr, zellij, or cmux from inside Codex.
 
 When `backend=codex-app` is selected, bootstrap requires `codex`, `codex app-server --help`, `node`, `gh`, `jq`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, and `lavish-axi`.
+Browser-tool selection follows the agent-only [`browser-tool-policy`](../.agents/skills/browser-tool-policy/SKILL.md); `chrome-devtools-axi` stays installed as a hook-free cross-harness fallback rather than an ambient preference.
 It intentionally skips `tmux` and `treehouse` for this backend because Codex Desktop owns the visible thread and Firstmate uses a plain git worktree.
 It also skips Treehouse compatibility probes when Treehouse is not in the selected required-tool set.
 
