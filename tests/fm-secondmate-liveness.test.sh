@@ -100,6 +100,10 @@ test_tmux_agent_state_classifies() {
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
     || fail "a live devin foreground process should classify as alive"
 
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-devinventory" devinventory)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = unknown ] \
+    || fail "an unrelated devinventory foreground process should classify as unknown"
+
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-zsh" zsh)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = dead ] \
     || fail "a bare zsh foreground process should classify as dead"

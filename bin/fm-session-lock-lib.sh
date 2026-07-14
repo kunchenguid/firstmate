@@ -8,8 +8,9 @@
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
-# Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|devin|^pi$|^pi-signed$'
+FM_SESSION_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-harness-process.sh
+. "$FM_SESSION_LOCK_LIB_DIR/fm-harness-process.sh"
 
 # Walk the current process ancestry (up to 16 hops) and print a harness pid.
 # For every harness except Claude, the first match wins (innermost pid), which
@@ -27,29 +28,14 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|devin|^pi$|^pi-signed$'
 # as long as the session, unlike the transient subshell pid of any one tool
 # call.
 fm_harness_ancestry_pid() {
-  local pid=$$ comm args best='' bc extending=0 hit=0 is_claude=0
+  local pid=$$ comm args best='' harness extending=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    bc=$(basename -- "$comm")
-    hit=0; is_claude=0
-    if printf '%s' "$bc" | grep -qE "$FM_HARNESS_RE"; then
-      hit=1
-      case "$bc" in *claude*) is_claude=1 ;; esac
-    else
-      # Bare interpreter (e.g. node): match the harness name in its script path.
-      case "$comm" in
-        *node*|*python*)
-          if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-            hit=1
-            case "$args" in *claude*) is_claude=1 ;; esac
-          fi
-          ;;
-      esac
-    fi
-    if [ "$hit" -eq 1 ]; then
+    harness=$(fm_harness_process_name "$comm" "$args" 2>/dev/null) || harness=
+    if [ -n "$harness" ]; then
       best="$pid"
-      if [ "$is_claude" -eq 1 ]; then
+      if [ "$harness" = claude ]; then
         extending=1
       else
         break
@@ -69,16 +55,8 @@ fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  if printf '%s' "$(basename -- "$comm")" | grep -qE "$FM_HARNESS_RE"; then
-    return 0
-  fi
-  case "$comm" in
-    *node*|*python*)
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
-      printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"
-      ;;
-    *) return 1 ;;
-  esac
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  fm_harness_process_name "$comm" "$args" >/dev/null
 }
 
 # True when state dir $1 holds a session lock whose pid is the harness ancestor

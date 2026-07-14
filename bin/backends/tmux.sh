@@ -192,11 +192,15 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   }
   comm=${comm#-}
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # shellcheck source=bin/fm-harness-process.sh
+  . "$script_dir/fm-harness-process.sh"
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|devin|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
-    *) printf 'ambiguous' ;;
+    *)
+      if fm_harness_process_name "$comm" '' >/dev/null; then printf 'alive'; else printf 'ambiguous'; fi
+      ;;
   esac
 }
 
