@@ -70,7 +70,13 @@ cleanup_all() {
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+fm_herdr_lab_prepare "$SESSION"
+PREPARE_RC=$?
+if [ "$PREPARE_RC" -eq 2 ]; then
+  echo "skip: running default Herdr session required by the fleet-state tripwire"
+  exit 0
+fi
+[ "$PREPARE_RC" -eq 0 ] || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null

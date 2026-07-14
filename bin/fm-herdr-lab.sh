@@ -73,7 +73,7 @@ fm_herdr_lab_fleet_state() { # <session>
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
     fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
-    return 1
+    return 2
   }
   printf '%s\n' "$snapshot"
 }
@@ -101,8 +101,9 @@ fm_herdr_lab_prepare() { # <session>
     return 1
   }
   fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
+    local rc=$?
     rm -f "$tripwire"
-    return 1
+    return "$rc"
   }
 }
 

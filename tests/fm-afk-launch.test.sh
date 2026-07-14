@@ -844,7 +844,14 @@ e2e_herdr() {
     herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$home_tmp" 2>/dev/null || true
   }
-  fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
+  fm_herdr_lab_prepare "$SESSION"
+  local prepare_rc=$?
+  if [ "$prepare_rc" -eq 2 ]; then
+    echo "skip: running default Herdr session required by the fleet-state tripwire (herdr e2e)"
+    rm -rf "$home_tmp"
+    return 0
+  fi
+  [ "$prepare_rc" -eq 0 ] || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
   fm_backend_herdr_server_ensure "$SESSION" || { E2E_HERDR_CLEANUP; fail "herdr e2e: lab server did not start"; return 0; }
 
