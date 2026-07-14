@@ -15,6 +15,12 @@ FM_PR_POLL_DATA_TMP=
 FM_PR_POLL_CHECK_TMP=
 FM_PR_POLL_DATA_DEST=
 FM_PR_POLL_CHECK_DEST=
+FM_PR_POLL_EXPECT_URL=
+FM_PR_POLL_EXPECT_OWNER=
+FM_PR_POLL_EXPECT_REPO=
+FM_PR_POLL_EXPECT_NUMBER=
+FM_PR_POLL_TEMPLATE=
+FM_PR_POLL_STATE_DEVICE=
 
 fm_pr_task_id_valid() {
   local id=${1-}
@@ -52,6 +58,28 @@ fm_pr_file_mode() {
   else
     stat -c %a "$1" 2>/dev/null
   fi
+}
+
+fm_pr_file_device() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %d "$1" 2>/dev/null
+  else
+    stat -c %d "$1" 2>/dev/null
+  fi
+}
+
+fm_pr_regular_destination_or_absent() {
+  local path=$1
+  [ ! -L "$path" ] || return 1
+  if [ -e "$path" ]; then
+    [ -f "$path" ]
+  fi
+}
+
+fm_pr_regular_destination_on_device_or_absent() {
+  local path=$1 device=$2
+  fm_pr_regular_destination_or_absent "$path" || return 1
+  [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
 fm_pr_poll_data_parse() {
@@ -97,10 +125,19 @@ fm_pr_poll_prepare() {
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
   [ -f "$template" ] || return 1
 
+  [ ! -L "$state" ] || return 1
   mkdir -p "$state" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   umask 077
   FM_PR_POLL_DATA_DEST="$state/$id.pr-poll"
   FM_PR_POLL_CHECK_DEST="$state/$id.check.sh"
+  FM_PR_POLL_EXPECT_URL=$url
+  FM_PR_POLL_EXPECT_OWNER=$owner
+  FM_PR_POLL_EXPECT_REPO=$repo
+  FM_PR_POLL_EXPECT_NUMBER=$number
+  FM_PR_POLL_TEMPLATE=$template
+  FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
+  [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
   FM_PR_POLL_DATA_TMP=$(mktemp "$state/.fm-pr-poll-data.XXXXXX") || return 1
   FM_PR_POLL_CHECK_TMP=$(mktemp "$state/.fm-pr-poll-check.XXXXXX") || {
     fm_pr_poll_cleanup
@@ -124,10 +161,26 @@ fm_pr_poll_prepare() {
 
 fm_pr_poll_publish_prepared() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] || return 1
-  [ ! -d "$FM_PR_POLL_DATA_DEST" ] && [ ! -d "$FM_PR_POLL_CHECK_DEST" ] || return 1
+  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+
   mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST" || return 1
+  [ -f "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || return 1
+  [ "$(fm_pr_file_mode "$FM_PR_POLL_DATA_DEST")" = 600 ] || return 1
+  [ "$(fm_pr_file_device "$FM_PR_POLL_DATA_DEST")" = "$FM_PR_POLL_STATE_DEVICE" ] || return 1
+  fm_pr_poll_data_parse "$FM_PR_POLL_DATA_DEST" || return 1
+  [ "$FM_PR_DATA_URL" = "$FM_PR_POLL_EXPECT_URL" ] || return 1
+  [ "$FM_PR_DATA_OWNER" = "$FM_PR_POLL_EXPECT_OWNER" ] || return 1
+  [ "$FM_PR_DATA_REPO" = "$FM_PR_POLL_EXPECT_REPO" ] || return 1
+  [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_EXPECT_NUMBER" ] || return 1
   FM_PR_POLL_DATA_TMP=
+
+  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   mv -f -- "$FM_PR_POLL_CHECK_TMP" "$FM_PR_POLL_CHECK_DEST" || return 1
+  [ -f "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || return 1
+  [ "$(fm_pr_file_mode "$FM_PR_POLL_CHECK_DEST")" = 600 ] || return 1
+  [ "$(fm_pr_file_device "$FM_PR_POLL_CHECK_DEST")" = "$FM_PR_POLL_STATE_DEVICE" ] || return 1
+  cmp -s "$FM_PR_POLL_TEMPLATE" "$FM_PR_POLL_CHECK_DEST" || return 1
   FM_PR_POLL_CHECK_TMP=
 }
 

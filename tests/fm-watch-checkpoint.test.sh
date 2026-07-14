@@ -71,6 +71,8 @@ test_existing_singleton_watcher_is_not_success() {
   home=$(make_home singleton)
   out="$home/out.txt"
   err="$home/err.txt"
+  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
+  chmod 0600 "$home/state/.pr-check-migration-v1"
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
   status=0
