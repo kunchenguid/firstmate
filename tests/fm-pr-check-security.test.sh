@@ -1360,7 +1360,7 @@ test_bootstrap_migrates_before_other_mutations() {
 }
 
 test_teardown_removes_poll_artifacts() {
-  local dir fakebin kind rc
+  local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
@@ -1413,6 +1413,46 @@ SH
     || fail "teardown left the valid invalid task artifact"
   [ "$(cat "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123")" = 'noncanonical evidence' ] \
     || fail "teardown removed noncanonical quarantine evidence"
+
+  for artifact in check.sh pr-poll; do
+    dir=$(make_case "teardown-final-directory-${artifact//./-}")
+    fakebin="$dir/fakebin"
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      'window=fm-task-a' \
+      "worktree=$dir/missing-worktree" \
+      "project=$dir/project" \
+      'kind=ship' \
+      'mode=local-only'
+    if [ "$artifact" = check.sh ]; then
+      counterpart=pr-poll
+    else
+      counterpart=check.sh
+    fi
+    mkdir "$dir/home/state/task-a.$artifact"
+    printf 'directory sentinel\n' > "$dir/home/state/task-a.$artifact/sentinel"
+    printf 'counterpart sentinel\n' > "$dir/home/state/task-a.$counterpart"
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+exit 0
+SH
+    chmod +x "$fakebin/tmux"
+    touch "$dir/home/state/.last-watcher-beat"
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$dir/tmux.log" \
+      PATH="$fakebin:$BASE_PATH" "$TEARDOWN" task-a --force \
+      > "$dir/teardown.out" 2> "$dir/teardown.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "teardown accepted a directory-shaped $artifact"
+    [ -e "$dir/home/state/task-a.meta" ] || fail "teardown removed metadata before $artifact refusal"
+    [ "$(cat "$dir/home/state/task-a.$artifact/sentinel")" = 'directory sentinel' ] \
+      || fail "teardown changed the directory-shaped $artifact"
+    [ "$(cat "$dir/home/state/task-a.$counterpart")" = 'counterpart sentinel' ] \
+      || fail "teardown removed the counterpart before $artifact refusal"
+    grep -F 'kill-window' "$dir/tmux.log" >/dev/null 2>&1 \
+      && fail "teardown killed the endpoint before $artifact refusal"
+  done
 
   for kind in regular dangling directory; do
     dir=$(make_case "teardown-quarantine-link-$kind")
