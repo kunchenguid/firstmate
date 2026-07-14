@@ -53,6 +53,7 @@ Each secondmate has a persistent isolated `FM_HOME`, including its own state, ba
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds volatile runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the canonical portable record of captain preferences and `data/learnings.md` as curated fleet-local knowledge, regardless of harness memory.
+Captain-wait state under `state/.captain-wait/` and its lock are firstmate-owned; never touch them directly because `bin/fm-captain-wait.sh` owns their lifecycle.
 
 ## 3. Session start (run once at every session start)
 
