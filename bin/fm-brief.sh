@@ -18,13 +18,23 @@
 #   SAME --base <branch> to fm-spawn.sh, which records base= and the base's tip on
 #   origin as base_sha=. fm-pr-check.sh then guards the PR's base before merge; its
 #   header owns that contract in full.
-#   THE BRIEF TELLS ONE STORY ABOUT THE BASE, unconditionally, and it can because
-#   fm-spawn.sh only launches a based task against a LIVE base - one that still carries
-#   unmerged work. A base that has already merged, or that was abandoned, is refused at
-#   the spawn, so the crewmate never meets it and is never asked to work out which state
-#   it is in. The brief asks it to diagnose nothing: if the base cannot be fetched it
-#   stops and says so, because a base you cannot reach is not a base that merged, and
-#   only firstmate holds the recorded tip that can tell those apart (bin/fm-base-lib.sh).
+#   THE BRIEF COVERS EVERY BASE STATE A CREWMATE CAN ACTUALLY START IN, and never asks
+#   it to guess which one it is in. A FIRST spawn is only ever launched against a LIVE
+#   base, because fm-spawn.sh refuses one whose work has already merged and one that was
+#   abandoned. A RESPAWN is not: fm-spawn.sh deliberately keeps the declaration when the
+#   base merged mid-flight, which is the normal end-state of a stacked PR, and it relaunches
+#   with THIS SAME FILE - so the brief has to hold up in that state too, and it does. The
+#   task's branch already exists by then, so the crewmate resumes it rather than re-rooting
+#   anything; and a base that is definitively GONE from origin is one that merged, since an
+#   abandoned base is refused at the spawn, so the crewmate roots on the default branch and
+#   the task is an ordinary default-branch PR from there - exactly what fm-pr-check.sh's
+#   ORDINARY stand-down goes on to verify.
+#   WHAT THE CREWMATE MUST NOT DO IS READ A FETCH'S EXIT STATUS. It separates nothing: a
+#   branch that is gone and an origin that cannot be reached fail it alike, and taking
+#   either for a merged base is the fail-open this design exists to close. The brief has it
+#   ask `git ls-remote --exit-code` instead, the same discriminator bin/fm-base-lib.sh
+#   trusts - 2 means gone, anything else non-zero means origin could not be asked, which is
+#   an infrastructure failure and a `blocked:`.
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
@@ -341,25 +351,45 @@ if [ -n "$BASE" ]; then
     echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
     exit 1
   fi
-  # The brief tells ONE story about the base, and it can, because fm-spawn.sh will only
-  # launch a based task whose base is LIVE - it refuses a first spawn against a base whose
-  # work has already merged, and against one that was abandoned. So "fetch the base and
-  # root on it" is always the right instruction here, and there is no state the crewmate
-  # has to diagnose for itself.
+  # Three states a based crewmate can start in, each with the command that resolves it.
   #
-  # Which is why the fetch failing is NOT an invitation to improvise. A crewmate cannot
-  # tell "the branch is gone" from "origin is unreachable" by looking at a fetch's exit
-  # status, and reading either one as "the base must have merged" is the fail-open this
-  # whole design exists to close: it would silently turn a based task into an unbased one
-  # and hand firstmate a status line it believes. Stop instead. Firstmate holds the
-  # recorded tip and bin/fm-base-lib.sh, so it - and only it - can tell a base that merged
-  # from one that was abandoned.
-  BRANCH_STEP="1. First action: fetch the intended base and root your branch ON it. The worktree starts on the DEFAULT branch, so branching without this step would root your work on the wrong base:
+  # Its branch already exists. Only a RESPAWN reaches this, and fm-spawn.sh permits one
+  # whose base merged mid-flight, so re-rooting here would rebuild the branch on a base
+  # that has since squash-merged - a head fm-pr-check.sh is then guaranteed to refuse.
+  # Resume the branch instead; it is already rooted where it belongs.
+  #
+  # Fresh, base fetchable. The first-spawn case, and the base is LIVE by construction.
+  #
+  # Fresh, fetch failed. NOT an invitation to improvise: a fetch's exit status cannot tell
+  # a branch that is gone from an origin that cannot be reached, and reading either one as
+  # "the base must have merged" would silently turn a based task into an unbased one.
+  # `git ls-remote --exit-code` is the discriminator that CAN tell them apart, so the
+  # crewmate asks it and acts on a definite answer: gone means merged (an abandoned base
+  # never gets launched), and anything else means origin could not be asked - a `blocked:`.
+  BRANCH_STEP="1. First action: get onto your \`fm/$ID\` branch.
+
+   **If \`fm/$ID\` already exists** - \`git rev-parse --verify --quiet fm/$ID\` prints a commit - then this task has been relaunched and your branch is already rooted where it belongs. Check it out and carry on with the work already on it:
    \`\`\`
-   git fetch origin $BASE
-   git checkout -b fm/$ID FETCH_HEAD
+   git checkout fm/$ID
    \`\`\`
-   If that fetch does not succeed, STOP. Do not diagnose why, and do not fall back to the default branch: a base you cannot reach is not a base that merged, and rooting on the default branch would silently make this an unbased task. Report it and stop - firstmate can tell those apart and you cannot:
+   Do not re-root it and do not rebase it. The rest of this step is for a fresh start only.
+
+   **Otherwise root it on the intended base.** The worktree starts on the DEFAULT branch, so branching without this step would root your work on the wrong base:
+   \`\`\`
+   git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD
+   \`\`\`
+   If that does not succeed, do NOT guess why, and do NOT fall back on a hunch: a fetch's exit status cannot tell a branch that is gone from an origin that cannot be reached, and reading either one as \"the base must have merged\" would silently make this an unbased task. Ask origin the one question that has a definite answer:
+   \`\`\`
+   git ls-remote --exit-code --heads origin refs/heads/$BASE
+   \`\`\`
+   **Exit status 2 - \`$BASE\` is GONE from origin, which means it has MERGED.** Firstmate refuses to launch a task against a base that was abandoned without merging, so a declared base that has since disappeared is one whose work is now in the default branch. Root your branch on the default branch the worktree already sits on, and say so:
+   \`\`\`
+   git checkout -b fm/$ID
+   echo \"working: intended base $BASE is gone from origin, so it has merged; rooting on the default branch and proceeding as an ordinary default-branch task\" >> $STATUS_FILE
+   \`\`\`
+   From there this is an ordinary default-branch task and every base instruction in this brief is void - do not target \`$BASE\`. If that ever turns out to be wrong, nothing slips through: firstmate verifies the base independently before merge, from the tip it recorded while the base still existed.
+
+   **Any other non-zero exit status - origin could not be asked.** That is an infrastructure failure, not a merged base. Stop:
    \`\`\`
    echo \"blocked: intended base $BASE could not be fetched from origin\" >> $STATUS_FILE
    \`\`\`"
@@ -377,14 +407,16 @@ if [ -n "$BASE" ]; then
 **Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
 The step above roots your \`fm/$ID\` branch on \`$BASE\`; keep it there and never rebase it onto the default branch.
 You open the PR against \`$BASE\` yourself - see the definition of done.
-Firstmate refuses to record or merge a PR whose head is not rooted in \`$BASE\`'s history, or whose base label is not \`$BASE\`."
+Firstmate refuses to record or merge a PR whose head is not rooted in \`$BASE\`'s history, or whose base label is not \`$BASE\`.
+All of this is void in exactly one case: step 1 found \`$BASE\` gone from origin and rooted you on the default branch, so that base has merged and this is an ordinary default-branch task."
   else
     BASE_SETUP="
 
 **Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
 The step above roots your \`fm/$ID\` branch on \`$BASE\`, and you must never rebase it onto the default branch by hand.
 The no-mistakes pipeline WILL rebase it onto the default branch and open the PR there; it cannot be told a base. That is expected, it is not a failure, and it is not yours to fight.
-The definition of done below owns what to do about it, and you are not done until you have done it."
+The definition of done below owns what to do about it, and you are not done until you have done it.
+All of this is void in exactly one case: step 1 found \`$BASE\` gone from origin and rooted you on the default branch, so that base has merged and this is an ordinary default-branch task."
   fi
 fi
 
@@ -401,7 +433,8 @@ Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays
 EOF
 )
     [ -z "$BASE" ] || DOD="$DOD
-Open the PR against base branch \`$BASE\`, not the repo default: \`gh-axi pr create --base $BASE ...\`."
+Open the PR against base branch \`$BASE\`, not the repo default: \`gh-axi pr create --base $BASE ...\`.
+Unless step 1 found \`$BASE\` gone from origin and rooted you on the default branch: that base has merged, so open the PR against the default branch as usual."
     ;;
   local-only)
     SETUP2=""
@@ -429,6 +462,8 @@ EOF
     NM_DONE="After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished."
     if [ -n "$BASE" ]; then
       NM_BASE_SECTION="## Base branch \`$BASE\` - required before you are done
+This section applies only if step 1 rooted your branch on \`$BASE\`.
+If step 1 found \`$BASE\` gone from origin and rooted you on the default branch instead, that base has merged: skip this section entirely, do not retarget anything, and CI green alone is your definition of done.
 This task targets base branch \`$BASE\`, not the repo default.
 The pipeline cannot be told a base: it always rebases onto the repo default branch and opens the PR against it. Do not try to talk it out of that, and do not hand-rebase mid-run.
 Instead, let the PR open as it will, then retarget it the moment it exists:
@@ -439,7 +474,8 @@ If the retarget or the re-rebase does not take, append \`blocked: PR still based
 "
       NM_DONE="This task is done only when BOTH hold: /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), AND \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
 Reporting \`done\` while the PR is still based on the default branch is not done: it is refused before merge and will just sit.
-When both hold, append \`done: PR {url} checks green\` and stop. You are finished."
+The base half of that drops away in exactly one case: step 1 found \`$BASE\` gone from origin and rooted you on the default branch, so that base has merged, this is an ordinary default-branch task, CI green alone is done, and you must NOT retarget the PR.
+When you are done, append \`done: PR {url} checks green\` and stop. You are finished."
     fi
     DOD=$(cat <<EOF
 # Definition of done

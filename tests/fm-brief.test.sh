@@ -301,14 +301,17 @@ test_base_roots_branch_on_the_base() {
   pass "fm-brief.sh: --base roots the crewmate's branch on the intended base, not the default branch"
 }
 
-# A crewmate cannot tell "the branch is gone" from "origin is unreachable" by looking at a
-# fetch's exit status, and reading either one as "the base must have merged" is a fail-open:
-# it would silently turn a based task into an unbased one and hand firstmate a status line
-# it believes. The brief must therefore never invite that inference. It does not need to:
-# fm-spawn.sh only launches a based task against a LIVE base, so the fetch failing is a real
-# problem, and firstmate - which holds the recorded tip and bin/fm-base-lib.sh - is the only
-# one that can tell a merged base from an abandoned one.
-test_base_setup_never_infers_a_merge_from_a_failed_fetch() {
+# A fetch's exit status separates NOTHING: a base that is gone from origin and an origin that
+# cannot be reached both fail it, and reading either one as "the base must have merged" is the
+# fail-open that would silently turn a based task into an unbased one. So the brief must not
+# decide on the fetch at all. It asks `git ls-remote --exit-code`, the discriminator
+# bin/fm-base-lib.sh itself trusts, and gives a FOLLOWABLE instruction for each definite answer:
+# gone (root on the default branch - fm-spawn.sh refuses to launch against an abandoned base, so
+# a base that has since disappeared is one that merged) and unreachable (blocked). The gone case
+# is not hypothetical: fm-spawn.sh deliberately relaunches a task whose base merged mid-flight
+# with this very brief, so an instruction that could only stop there would dead-end a recovery
+# the spawn intends to proceed.
+test_base_setup_decides_on_a_definite_probe_not_a_failed_fetch() {
   local home id brief
   home="$TMP_ROOT/base-gone-home"
   mkdir -p "$home/data"
@@ -316,15 +319,59 @@ test_base_setup_never_infers_a_merge_from_a_failed_fetch() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
     || fail "base-gone: fm-brief.sh --base should exit 0"
   brief="$home/data/$id/brief.md"
-  assert_grep "If that fetch does not succeed, STOP" "$brief" \
-    "base-gone: the brief leaves the crewmate to improvise when the base cannot be fetched"
+  assert_grep "git ls-remote --exit-code --heads origin refs/heads/feature/x" "$brief" \
+    "base-gone: the brief never has the crewmate ask the one question that tells a gone base from an unreachable origin"
+  assert_grep "Exit status 2" "$brief" \
+    "base-gone: the brief does not name the exit status that definitively means the base is gone"
+  assert_grep "Root your branch on the default branch the worktree already sits on" "$brief" \
+    "base-gone: a definitively gone base leaves the crewmate with nothing to root on - the state fm-spawn.sh deliberately allows on a respawn"
+  assert_grep "working: intended base feature/x is gone from origin" "$brief" \
+    "base-gone: the crewmate never tells firstmate it fell back to the default branch"
   assert_grep "blocked: intended base feature/x could not be fetched from origin" "$brief" \
-    "base-gone: the crewmate is not told to report the unfetchable base, so firstmate never learns of it"
-  assert_no_grep "it merged" "$brief" \
-    "base-gone: the brief still reads a failed fetch as a merged base - the fail-open this closes"
-  assert_no_grep "IGNORE every other base-branch instruction" "$brief" \
-    "base-gone: the brief still tells the crewmate to discard its base instructions on a guess"
-  pass "fm-brief.sh: --base tells the crewmate to stop, not to guess, when the base cannot be fetched"
+    "base-gone: an origin that could not be asked is no longer reported as a blocker"
+  assert_no_grep "If that fetch does not succeed, STOP" "$brief" \
+    "base-gone: the brief still stops on the fetch's exit status alone, dead-ending the respawn the spawn allows"
+  pass "fm-brief.sh: --base decides the gone-base fallback on a definite probe, never on a failed fetch"
+}
+
+# fm-spawn.sh relaunches a task with the SAME brief.md, and by then its fm/<id> branch already
+# exists - rooted on the base it was originally rooted on. Re-rooting it there would rebuild the
+# branch on a base that may have squash-merged since, which is precisely the head fm-pr-check.sh
+# refuses. So the branch step must resume an existing branch rather than assume a fresh start.
+test_base_branch_step_resumes_an_existing_branch() {
+  local home id brief
+  home="$TMP_ROOT/base-resume-home"
+  mkdir -p "$home/data"
+  id="brief-base-resume1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-resume: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git rev-parse --verify --quiet fm/$id" "$brief" \
+    "base-resume: the brief never has the crewmate check whether its branch already exists"
+  assert_grep "git checkout fm/$id" "$brief" \
+    "base-resume: the brief gives no way to resume an existing branch, so a respawn re-roots it on a base that may have merged"
+  assert_grep "Do not re-root it and do not rebase it." "$brief" \
+    "base-resume: the brief does not forbid re-rooting a branch that already exists"
+  pass "fm-brief.sh: --base has a relaunched crewmate resume its branch instead of re-rooting it"
+}
+
+# The definition of done is the section a crewmate treats as its completion contract, and it is
+# read LAST. A base condition that is only qualified by a forward reference in Setup is one the
+# crewmate hits unqualified: it would try to retarget the PR onto a base that no longer exists,
+# fail, and stall. The qualification has to live in the done condition itself.
+test_base_done_condition_is_self_qualifying() {
+  local home id brief
+  home="$TMP_ROOT/base-selfqual-home"
+  mkdir -p "$home/data"
+  id="brief-base-selfqual1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-selfqual: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "The base half of that drops away in exactly one case" "$brief" \
+    "base-selfqual: the done condition demands the PR's base label report feature/x with no exception for a base that has merged"
+  assert_grep "CI green alone is done, and you must NOT retarget the PR" "$brief" \
+    "base-selfqual: the done condition does not say what done means once the base is gone"
+  pass "fm-brief.sh: the definition of done qualifies its own base condition, not by forward reference"
 }
 
 # The no-mistakes pipeline cannot be told a base: it always rebases onto the repo
@@ -548,7 +595,9 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
-test_base_setup_never_infers_a_merge_from_a_failed_fetch
+test_base_setup_decides_on_a_definite_probe_not_a_failed_fetch
+test_base_branch_step_resumes_an_existing_branch
+test_base_done_condition_is_self_qualifying
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
 test_base_equals_form
