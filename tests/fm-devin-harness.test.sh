@@ -52,7 +52,7 @@ test_primary_pretool_hook_blocks() {
 }
 
 test_spawn_launch_and_turnend_config() {
-  local d home proj wt fakebin id out log config project_config config_mode
+  local d home proj wt fakebin id out log config project_config user_config task_command config_mode
   d="$TMP_ROOT/spawn"
   home="$d/home"
   proj="$d/project"
@@ -61,11 +61,16 @@ test_spawn_launch_and_turnend_config() {
   log="$d/tmux.log"
   fakebin=$(fm_fakebin "$d/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  home=$(cd "$home" && pwd -P)
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   project_config="$wt/.devin/config.json"
   mkdir -p "$(dirname "$project_config")"
   printf '%s\n' '{"version":1,"model":"repo-model","hooks":{"PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":"repo-safety-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"repo-stop-hook"}]}]}}' > "$project_config"
+  user_config="$d/xdg/devin/config.json"
+  mkdir -p "$(dirname "$user_config")"
+  task_command="touch '$home/state/$id.turn-ended'"
+  jq -n --arg command "$task_command" '{version:1,theme_mode:"dark",hooks:{PreToolUse:[{matcher:"exec",hooks:[{type:"command",command:"user-safety-hook"}]}],Stop:[{hooks:[{type:"command",command:"user-stop-hook"}]},{hooks:[{type:"command",command:$command}]}]}}' > "$user_config"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -86,7 +91,7 @@ exit 97
 SH
   chmod +x "$fakebin/jq"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+  out=$(XDG_CONFIG_HOME="$d/xdg" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TMUX_LOG="$log" \
     TMUX='fake,1,0' PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" \
@@ -101,18 +106,21 @@ SH
   [ -f "$config" ] || fail "Devin per-task config was not created"
   if [ "$(uname)" = Darwin ]; then config_mode=$(stat -f '%Lp' "$config"); else config_mode=$(stat -c '%a' "$config"); fi
   [ "$config_mode" = 600 ] || fail "Devin per-task config permissions are not 0600"
-  jq -e '.model == "repo-model"
+  jq -e '.theme_mode == "dark"
     and .hooks.PreToolUse[0].matcher == "exec"
-    and .hooks.PreToolUse[0].hooks[0].command == "repo-safety-hook"
-    and .hooks.Stop[0].hooks[0].command == "repo-stop-hook"
-    and (.hooks.Stop[1].hooks[0].command | contains(".turn-ended"))' "$config" >/dev/null \
-    || fail "Devin task config did not preserve repository settings and hooks: $(cat "$config")"
+    and .hooks.PreToolUse[0].hooks[0].command == "user-safety-hook"
+    and .hooks.Stop[0].hooks[0].command == "user-stop-hook"
+    and ([.hooks.Stop[].hooks[] | select(.command | contains(".turn-ended"))] | length == 1)
+    and (has("model") | not)' "$config" >/dev/null \
+    || fail "Devin task config did not preserve only user settings and the task hook: $(cat "$config")"
   jq -e '.model == "repo-model" and (.hooks.Stop | length == 1)' "$project_config" >/dev/null \
     || fail "spawn modified the project-local Devin config: $(cat "$project_config")"
-  pass "fm-spawn composes the task Stop hook with repository Devin configuration"
+  jq -e '.theme_mode == "dark" and (.hooks.Stop | length == 2)' "$user_config" >/dev/null \
+    || fail "spawn modified the user-level Devin config: $(cat "$user_config")"
+  pass "fm-spawn composes user config with one task hook and leaves repository config native"
 }
 
-test_invalid_project_config_remains_recoverable() {
+test_invalid_user_config_remains_recoverable() {
   local name contents expected d home proj wt fakebin id out rc log config
   for name in malformed root-null root-array hooks-null hooks-array stop-null stop-shape; do
     case "$name" in
@@ -134,7 +142,7 @@ test_invalid_project_config_remains_recoverable() {
     mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
     printf 'brief\n' > "$home/data/$id/brief.md"
     fm_git_worktree "$proj" "$wt" "fm/$id"
-    config="$wt/.devin/config.json"
+    config="$d/xdg/devin/config.json"
     mkdir -p "$(dirname "$config")"
     printf '%s\n' "$contents" > "$config"
     cat > "$fakebin/tmux" <<'SH'
@@ -152,7 +160,7 @@ exit 0
 SH
     chmod +x "$fakebin/tmux"
     fm_fake_exit0 "$fakebin" treehouse gh-axi gh
-    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    out=$(XDG_CONFIG_HOME="$d/xdg" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TMUX_LOG="$log" \
       TMUX='fake,1,0' PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" \
@@ -163,7 +171,7 @@ SH
     [ -f "$home/state/$id.meta" ] || fail "$name failure did not persist recoverable task metadata"
     grep '^worktree=/' "$home/state/$id.meta" >/dev/null || fail "$name metadata omitted the isolated worktree"
   done
-  pass "invalid Devin project configs leave endpoints and worktrees recoverable"
+  pass "invalid Devin user configs leave endpoints and worktrees recoverable"
 }
 
 test_lock_recognizes_devin_holder() {
@@ -190,5 +198,5 @@ test_detection_marker
 test_primary_hook_wiring
 test_primary_pretool_hook_blocks
 test_spawn_launch_and_turnend_config
-test_invalid_project_config_remains_recoverable
+test_invalid_user_config_remains_recoverable
 test_lock_recognizes_devin_holder

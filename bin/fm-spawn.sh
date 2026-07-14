@@ -115,7 +115,7 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-#     __DEVINCONFIG__ absolute path to state/<task-id>.devin-config.json (project config plus task Stop hook)
+#     __DEVINCONFIG__ absolute path to state/<task-id>.devin-config.json (user config plus task Stop hook)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -1535,10 +1535,10 @@ EOF
       # the launch command via -c notify=[...] and __TURNEND__.
       ;;
     devin*)
-      # Crewmates use an isolated state-owned merge of project config and the task
-      # Stop hook, so firstmate never overwrites a project's own .devin/config.json.
-      # The same config is harmless for a secondmate, whose tracked primary hooks
-      # are loaded from its repository after the launch-time override is omitted.
+      # Crewmates use an isolated state-owned merge of user config and the task
+      # Stop hook. Devin continues to load repository config through its native
+      # project layer, so neither source file is overwritten or applied twice.
+      # Secondmates omit the override and load their tracked primary hooks natively.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1672,10 +1672,11 @@ DEVIN_CONFIG="$STATE/$ID.devin-config.json"
 if [ "$HARNESS" = devin ]; then
   if [ "$KIND" != secondmate ]; then
     turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
-    project_devin_config="$WT/.devin/config.json"
+    devin_config_home=${XDG_CONFIG_HOME:-${HOME:+$HOME/.config}}
+    user_devin_config="$devin_config_home/devin/config.json"
     rm -f "$DEVIN_CONFIG"
-    if [ -f "$project_devin_config" ]; then
-      (umask 077; node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG") <<'NODE'
+    if [ -n "$devin_config_home" ] && [ -f "$user_devin_config" ]; then
+      (umask 077; node - "$user_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG") <<'NODE'
 const fs = require("node:fs");
 const path = process.argv[2];
 try {
@@ -1689,7 +1690,11 @@ try {
   }
   if (config.hooks.Stop === undefined) config.hooks.Stop = [];
   if (!Array.isArray(config.hooks.Stop)) throw new Error("hooks.Stop must be an array");
-  config.hooks.Stop.push({ hooks: [{ type: "command", command: process.argv[3] }] });
+  const command = process.argv[3];
+  const present = config.hooks.Stop.some(group =>
+    group && Array.isArray(group.hooks) && group.hooks.some(hook =>
+      hook && hook.type === "command" && hook.command === command));
+  if (!present) config.hooks.Stop.push({ hooks: [{ type: "command", command }] });
   process.stdout.write(`${JSON.stringify(config)}\n`);
 } catch (error) {
   process.stderr.write(`error: invalid Devin config at ${path}: ${error.message}\n`);

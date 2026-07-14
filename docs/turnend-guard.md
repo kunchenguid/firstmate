@@ -150,6 +150,9 @@ Their payloads include `stop_hook_active`; when it is true, the shared guard exi
 Devin CLI 3000.1.27 was validated on 2026-07-13 in isolated git repositories and tmux sessions.
 Repository `.devin/config.json` loaded automatically, a Stop hook touched its sentinel after the model completed a turn, `devin` remained the foreground process, and the busy footer rendered `esc to interrupt`.
 The same build exposed the Claude-compatible `stop_hook_active` payload and direct hook exit semantics used by the shared guard.
+Devin CLI 3000.1.27 config layering was revalidated on 2026-07-14 with an isolated repository config and a separate `--config` file, each containing a distinct Stop hook.
+The exact launch was `DEVIN_CLI=1 devin --config ../override.json --permission-mode dangerous --respect-workspace-trust false -p 'Reply with exactly OK and do not use tools.'` from the isolated repository.
+It exited 0, printed `OK`, and created both `repo-stop.marker` and `override-stop.marker`, confirming that `--config` replaces the default user file while the repository layer still loads natively.
 
 OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.

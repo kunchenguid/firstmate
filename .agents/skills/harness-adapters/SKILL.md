@@ -194,7 +194,8 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Resume | `devin --resume <session-id>` or `devin --continue` |
 
 Launch with `DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust false --prompt-file <brief>`.
-Firstmate-launched crewmates add `--config <state-owned-config>` containing the repository configuration plus their task Stop hook, without overwriting the project's own `.devin/config.json`.
+Firstmate-launched crewmates add `--config <state-owned-config>` containing the native user configuration plus their task Stop hook, without overwriting the user's file.
+Devin loads the repository configuration through its native project layer alongside that override, so project settings and hooks are not copied or applied twice.
 Secondmates omit that override and load the tracked primary hooks from their Firstmate home.
 
 Devin automatically loads repository `.devin/config.json`.
