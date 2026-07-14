@@ -163,6 +163,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
   For `tasks-axi`, this appears only when `config/backlog-backend` is absent or set to `tasks-axi`; hand-edit fallback continues until the captain approves installation.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `BROWSER_HOOKS: chrome-devtools-axi ambient hooks detected ...` - explain that older ambient browser hooks override the native-first policy, wait for the captain's approval, then run the printed `bin/fm-bootstrap.sh migrate-browser-hooks` command.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
