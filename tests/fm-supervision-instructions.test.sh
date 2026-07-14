@@ -157,13 +157,15 @@ test_grok_command_sources_effective_config() {
 
 test_devin_uses_foreground_checkpoint() {
   local out
-  out=$($RENDER --harness devin)
+  out=$(FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness devin)
   assert_contains "$out" "Mode: Devin foreground checkpoint." "devin snippet missing foreground mode"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 180" "devin snippet missing checkpoint command"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "devin snippet did not use the checkpoint override"
+  assert_not_contains "$out" "__FM_CODEX_WATCH_CHECKPOINT__" "devin snippet leaked the checkpoint placeholder"
   assert_contains "$out" ".devin/config.json" "devin snippet missing native hook seatbelt"
   assert_not_contains "$out" "background: true" "devin must not claim an unverified background wake"
-  out=$($RENDER --harness devin --repair-line)
+  out=$(FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness devin --repair-line)
   assert_contains "$out" "foreground checkpoint" "devin repair line is not checkpoint-shaped"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "devin repair line did not use the checkpoint override"
   pass "devin supervision uses bounded foreground checkpoints"
 }
 
