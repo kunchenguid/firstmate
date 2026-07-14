@@ -122,18 +122,49 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state
+  local dir state open activity
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
+  status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
-  pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
+  printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
+  open=$(status_open_decisions "$state/keys.status")
+  printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
+    || fail "a key token in resolved note prose closed the keyed decision"
+  printf '%s' "$open" | grep -F $'prose\t' >/dev/null \
+    && fail "a key token in note prose changed the decision key"
+  printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
+    && fail "an invalid key slug entered the open-decision set"
+  cat > "$state/activity.status" <<'EOF'
+working [key=phase7]: Phase 7 started
+working [key=phase6]: Phase 6 started
+working [key=legal]: reviewing legal dependency
+done [key=phase6]: Phase 6 completed
+resolved [key=phase7]: Phase 7 completed and moved to Done
+paused [key=legal]: awaiting external counsel
+resolved [key=legal]: legal item returned to the queue
+working [key=phase8]: Phase 8 started
+EOF
+  activity=$(status_open_activities "$state/activity.status")
+  printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
+    || fail "the current keyed working phase was not retained"
+  printf '%s' "$activity" | grep -F $'phase7\t' >/dev/null \
+    && fail "a keyed resolved event did not close the older working phase"
+  printf '%s' "$activity" | grep -F $'phase6\t' >/dev/null \
+    && fail "a same-key terminal event did not supersede the older working phase"
+  printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
+    && fail "a keyed resolved event did not close the declared pause"
+  printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
+  [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
+    || fail "a legacy terminal event did not supersede the default working phase"
+  pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is

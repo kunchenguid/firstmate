@@ -11,6 +11,12 @@
 # the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
 set -u
 
+# This suite does not source tests/lib.sh, so exempt its teardown subprocess from
+# the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
+# the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
+# which the guard would otherwise refuse.
+export FM_GATE_REFUSE_BYPASS=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -52,9 +58,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  # fm-wake-lib.sh: symlink the REAL file (teardown sources it for fm_path_mtime,
-  # used by the stale worktree git-lock cleanup; unchanged by this fixture).
-  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
+  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -67,10 +75,10 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report not-compatible so
+  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
@@ -149,7 +157,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -161,7 +172,7 @@ exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META

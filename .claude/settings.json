@@ -7,6 +7,10 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
           }
         ]
       }

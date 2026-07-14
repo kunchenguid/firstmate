@@ -24,6 +24,13 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
+test_help_includes_entire_header() {
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  pass "fm-brief.sh: --help renders the complete header"
+}
+
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry defaults to no-mistakes.
 write_registry() {
@@ -181,6 +188,12 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
+  assert_grep 'working [key=<work-slug>]' "$brief" \
+    "secondmate charter did not key material routed-work phases"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter did not close a quietly ended routed-work phase"
+  assert_grep 'use the same key on its later' "$brief" \
+    "secondmate charter did not supersede working phases with later states"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
   fi
@@ -247,11 +260,14 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
+    assert_grep 'or a blocker clears' "$brief" \
+      "$kind brief did not require durable resolution when a blocker clears"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
 test_script_parses
+test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

@@ -3,7 +3,9 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per problem or capability fact and exits 0.
 #          Silent = all good.
-#          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
+#          Lines: "MISSING: <tool> (install: <command>)",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
@@ -311,7 +313,8 @@ secondmate_liveness_sweep() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -320,11 +323,35 @@ install_cmd() {
   esac
 }
 
+manual_install_url() {
+  case "$1" in
+    herdr) echo "https://herdr.dev" ;;
+    *) return 1 ;;
+  esac
+}
+
+missing_tool_diagnostic() {
+  local tool=$1 instructions
+  if instructions=$(manual_install_url "$tool"); then
+    echo "MISSING_MANUAL: $tool (instructions: $instructions)"
+    return 0
+  fi
+  echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+}
+
+# Required-tool detection follows the RESOLVED backend, not a one-size default:
+# a universal toolchain every home needs plus the backend-specific delta owned by
+# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
+# never told tmux is missing, and only orca drops treehouse. A backend value with
+# no verified dependency set is reported before the universal checks continue.
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
-case "$BACKEND" in
-  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
-esac
+BACKEND_VALID=1
+if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
+  BACKEND_VALID=0
+  BACKEND_TOOLS=""
+fi
+TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
 NO_MISTAKES_MIN_PATCH=2
@@ -478,7 +505,8 @@ crew_dispatch_validate() {
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif ($h == "codex" or $h == "grok" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
+      elif ($h == "codex" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "opencode" then false
       else true
       end;
@@ -547,7 +575,11 @@ if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
-    cmd=$(install_cmd "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+    if ! cmd=$(install_cmd "$t"); then
+      instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+      echo "error: $t requires manual installation (instructions: $instructions)" >&2
+      exit 1
+    fi
     cmd=${cmd%%  #*}
     echo "installing $t: $cmd"
     eval "$cmd"
@@ -555,10 +587,21 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-for t in $TOOLS; do
-  command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+if [ "$BACKEND_VALID" -eq 0 ]; then
+  echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
+fi
+for t in $BACKEND_TOOLS; do
+  fm_backend_required_tool_available "$BACKEND" "$t" \
+    || missing_tool_diagnostic "$t"
 done
-if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+for t in $COMMON_TOOLS; do
+  command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
+done
+# The treehouse lease-support upgrade check is only relevant when the resolved
+# backend actually requires treehouse (every backend except orca, which owns its
+# own worktrees); an orca home must not be told to upgrade a provider it never uses.
+if fm_backend_list_contains "$TOOLS" treehouse \
+  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then

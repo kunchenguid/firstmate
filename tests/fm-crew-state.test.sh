@@ -871,6 +871,21 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+test_no_run_idle_pane_uses_keyed_log() {
+  reset_fakes
+  local d; d=$(new_case keyed-idle)
+  make_repo_on_branch "$d/wt" fm/feat-keyed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-keyed.meta" "window=fm:fm-feat-keyed" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision [key=q1]: which database?\n' > "$d/state/feat-keyed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-keyed)
+  assert_contains "$out" "state: parked" "keyed needs-decision log -> parked"
+  assert_contains "$out" "which database?" "key token is excluded from status detail"
+  pass "no run + idle pane parses keyed status syntax"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -907,6 +922,40 @@ test_no_run_idle_pane_custom_paused_verb() {
   out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run_crew_state "$d" feat-custom-pause)
   assert_contains "$out" "state: unknown" "custom paused verb replaces the default"
   pass "no run + idle pane honors the configured paused verb"
+}
+
+# A trailing keyed resolved: event is a decision-CLOSING event, not a run-state
+# verb. It must never become the current state or leak its resolution prose as the
+# detail: a healthy idle secondmate that just closed a keyed decision falls through
+# to the idle default (unknown/none), not `unknown` with the resolution note as its
+# `doing`. Regression for the bearings render bug where such a secondmate showed
+# state=unknown with resolution prose. The one-owner keyed fold in fm-classify-lib.sh
+# is untouched; this only stops the deriver from reading a non-state event as state.
+test_no_run_idle_secondmate_resolved_event_not_state() {
+  reset_fakes
+  local d; d=$(new_case resolved-idle)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
+  printf 'needs-decision [key=race]: pick subscribe order\n' > "$d/state/mate.status"
+  printf 'resolved [key=race]: went with subscribe-before-write\n' >> "$d/state/mate.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
+  assert_contains "$out" "source: none" "a resolved event is not treated as a status-log state source"
+  assert_not_contains "$out" "subscribe-before-write" "resolution prose must not leak into the detail"
+  # A bare (non-keyed) resolved: closes the default key and behaves the same.
+  printf 'blocked: waiting on infra\nresolved: infra access granted\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "source: none" "a bare resolved: is not a state source either"
+  assert_not_contains "$out" "infra access granted" "bare resolution prose must not leak into the detail"
+  # Control: a genuine trailing state verb still renders from the log.
+  printf 'working: reconciling routed items\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: working" "a real trailing state verb still renders"
+  assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
+  pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
 test_dead_window_ignores_stale_status_log() {
@@ -1115,8 +1164,10 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
+test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
