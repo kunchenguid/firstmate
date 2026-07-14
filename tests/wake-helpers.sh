@@ -122,6 +122,12 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    # A pane that dies MID-RUN, under a daemon that already armed against it. The
+    # env flag above is fixed when the daemon is spawned, so a file is the only way
+    # to take the pane away afterwards (same trick as FM_FAKE_TMUX_SWALLOW_FILE).
+    if [ -n "${FM_FAKE_TMUX_PANE_GONE_FILE:-}" ] && [ -e "$FM_FAKE_TMUX_PANE_GONE_FILE" ]; then
+      exit 1
+    fi
     _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
     # Return the pane's foreground command when the format asks for it (the

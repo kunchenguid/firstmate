@@ -54,9 +54,11 @@ fm_afk_canary_verdict() {  # <backend> <target>
 # `dead`, and `unknown` are DIFFERENT problems and must never share one line.
 #
 # `gone` is the worst of the three: a LIVE daemon is injecting into a pane that no
-# longer exists. It cannot deliver, and with no pane it never reaches housekeeping
-# either, so not even the wedge alarm fires (bin/fm-supervise-daemon.sh's pane-gone
-# guard). Nothing at all reaches the captain until away mode is restarted.
+# longer exists, so it delivers NOTHING for the whole away window. The daemon does
+# raise the wedge alarm and its pane-independent active alert from its backoff path
+# (bin/fm-supervise-daemon.sh's pane_gone_wedge_alarm), but an alarm is a distress
+# signal, not a delivery: no escalation reaches the captain until away mode is
+# stopped and armed again.
 #
 # `dead` is definite: the probe read the target's foreground process and it is a
 # bare shell, while firstmate is provably running somewhere. The TARGET points at
@@ -72,7 +74,7 @@ fm_afk_canary_verdict() {  # <backend> <target>
 fm_afk_canary_cause() {  # <verdict> <backend> <target>
   case "$1" in
     gone)
-      printf "the running away-mode daemon injects into target '%s' on backend '%s', and that pane no longer exists - it cannot even raise the wedge alarm" "$3" "$2"
+      printf "the running away-mode daemon injects into target '%s' on backend '%s', and that pane no longer exists - it can raise the wedge alarm, but it can deliver nothing" "$3" "$2"
       ;;
     dead)
       printf "supervisor target '%s' on backend '%s' is a bare shell, not the pane running firstmate" "$3" "$2"
@@ -120,9 +122,9 @@ fm_afk_canary_banner() {  # <verdict> <backend> <target> [<source>]
   printf '●  AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR\n'
   if [ "$1" = gone ]; then
     printf "●  The pane the running away-mode daemon injects into ('%s' on backend '%s') is\n" "$3" "$2"
-    printf '●  GONE. It has nowhere to deliver an escalation, and with no pane it never reaches\n'
-    printf '●  housekeeping either, so not even the wedge alarm fires: NOTHING will reach the\n'
-    printf '●  captain, and nothing will say so, until away mode is restarted.\n'
+    printf '●  GONE. It has nowhere to deliver an escalation, so NOTHING reaches the captain\n'
+    printf '●  until away mode is restarted. The daemon can still raise the wedge alarm and its\n'
+    printf '●  active alert, but an alarm is a distress signal, not a delivery.\n'
   else
     printf "●  The agent-liveness probe reads '%s' (not alive) for '%s' on backend '%s',\n" "$1" "$3" "$2"
     printf '●  even though firstmate is running right now. Injection fails closed, so it will\n'

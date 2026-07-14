@@ -1061,9 +1061,9 @@ unit_canary_probes_the_running_daemons_target() {
 
 # The worst state in the design, and the one the surfaces above were built to
 # catch: the pane a LIVE daemon injects into is GONE (the captain's terminal died,
-# which is the ordinary reason firstmate gets restarted at all). The daemon delivers
-# nothing, and with no pane it never reaches housekeeping, so not even the wedge
-# alarm fires - every other channel is silent by construction. Treating the missing
+# which is the ordinary reason firstmate gets restarted at all). That daemon delivers
+# NOTHING for the rest of the away window; all it can still do is raise the wedge
+# alarm, and an alarm is a distress signal, not a delivery. Treating the missing
 # pane as "nothing to say", the way an unresolvable fallback pane is treated, would
 # make this the one failure that reports all-clear from every surface at once. Here
 # the non-existence IS the diagnosis.
@@ -1078,7 +1078,7 @@ unit_canary_reports_a_vanished_daemon_target() {
   grep -F 'no longer exists' "$CANARY_ERR" >/dev/null \
     || fail "canary(gone): the warning did not say the daemon's target is gone: $(cat "$CANARY_ERR")"
   grep -F 'wedge alarm' "$CANARY_ERR" >/dev/null \
-    || fail "canary(gone): the warning did not say the wedge alarm cannot fire either, which is what makes this state silent"
+    || fail "canary(gone): the warning did not say that the wedge alarm is all this daemon can still do, so a reader could mistake the alarm for delivery"
   grep -F 'stop away mode' "$CANARY_ERR" >/dev/null \
     || fail "canary(gone): the remediation did not say to stop the running daemon, so the printed fix is a no-op"
   pass "arm canary: a live daemon injecting into a vanished pane is reported loudly, not swallowed"

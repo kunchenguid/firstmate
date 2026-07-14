@@ -823,14 +823,13 @@ test_afk_injection_canary_follows_the_running_daemon() {
   pass "bootstrap's canary follows the running daemon's target and prints a fix that works on a running daemon"
 }
 
-# The state every other channel is silent about. The captain's terminal dies - the
-# ordinary reason firstmate gets restarted - so the pane the live daemon injects
-# into is GONE. It delivers nothing, and with no pane it skips housekeeping, so the
-# wedge alarm never fires either (bin/fm-supervise-daemon.sh's pane-gone guard).
-# Treating a missing pane as "nothing to say" here, the way an unresolvable fallback
-# pane is treated, would make the worst failure in the design the one that reports
-# all-clear from every surface at once. A live daemon asserted that pane; its absence
-# IS the diagnosis.
+# The captain's terminal dies - the ordinary reason firstmate gets restarted - so the
+# pane the live daemon injects into is GONE, and it delivers NOTHING for the rest of
+# the away window (the daemon's own pane-gone alarm is a distress signal, not a
+# delivery). Treating a missing pane as "nothing to say" here, the way an unresolvable
+# fallback pane is treated, would make the worst failure in the design the one that
+# reports all-clear from every surface at once. A live daemon asserted that pane; its
+# absence IS the diagnosis.
 test_afk_injection_canary_reports_a_vanished_daemon_target() {
   local out
   out=$(run_bootstrap_over_live_daemon gone FM_FAKE_MISSING_PANE='%5')
@@ -842,7 +841,7 @@ test_afk_injection_canary_reports_a_vanished_daemon_target() {
   printf '%s\n' "$out" | grep -F 'no longer exists' >/dev/null \
     || fail "gone: the diagnostic did not say the daemon's target is gone: $out"
   printf '%s\n' "$out" | grep -F 'wedge alarm' >/dev/null \
-    || fail "gone: the diagnostic did not say the wedge alarm cannot fire either, which is what makes this state silent: $out"
+    || fail "gone: the diagnostic did not say that the wedge alarm is all this daemon can still do, so a reader could mistake the alarm for delivery: $out"
   printf '%s\n' "$out" | grep -F 'stop away mode' >/dev/null \
     || fail "gone: the remediation did not say to stop the running daemon, so the printed fix is a no-op: $out"
   pass "bootstrap reports a live daemon injecting into a vanished pane instead of swallowing it"

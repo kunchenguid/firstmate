@@ -704,7 +704,7 @@ Both of those are OBSERVERS, so both enter through one function, `fm_afk_canary_
 
 WHICH pane they probe is its own question, and the wrong answer is a false all-clear.
 The daemon fixes its target once, at launch, and the launcher's already-running path deliberately does not retarget a live daemon - so away mode armed in one pane outlives firstmate's session: the captain restarts firstmate in a NEW pane, `state/.afk` is still set, recovery re-arms, and the daemon is still typing into the OLD one.
-Probing the pane the script happens to run in would find firstmate obviously alive there and say nothing, while every escalation lands in a pane nobody is reading - and if that pane is gone entirely, `inject_msg`'s pane-gone guard skips housekeeping, so not even the wedge alarm fires.
+Probing the pane the script happens to run in would find firstmate obviously alive there and say nothing, while every escalation lands in a pane nobody is reading - and if that pane is gone entirely, the daemon's main-loop pane-gone backoff (`fm_super_main`, not `inject_msg`'s same-named guard) used to `continue` past the housekeeping tick, so not even the wedge alarm fired (closed below).
 So the daemon publishes the endpoint it actually injects into (`<backend>\t<target>`) in the lock dir it holds, next to the lock's `pid-identity`, and `fm_afk_canary_resolve` probes THAT pane whenever a live daemon owns the lock, falling back to the current pane only for a fresh arm.
 Whether the lock's owner is a live daemon at all is decided by `bin/fm-afk-start.sh`'s existing gate (`daemon_lock_held_by_live_daemon`), which prefers the lock's `pid-identity` over a bare pid + command match and so cannot be fooled by pid reuse; a second, weaker gate in the canary would be one more contract to drift.
 That record is scoped to the process - the lock dir is created when the daemon takes the lock and removed when it releases it - so it cannot be read back from a daemon that is already gone, and it is deliberately not the startup log, which is size-capped and would trim the line away underneath a reader during a long away session.
@@ -718,8 +718,23 @@ The canary is ADVISORY throughout: a bad verdict (or a probe error, treated as `
 
 A missing pane means opposite things depending on where the target came from, so the existence gate branches on that rather than collapsing both into silence.
 An unresolvable pane from the fallback - no live daemon, so the pane in hand is just the one the observer is running in - stays QUIET rather than inventing a failure: with no pane there is no foreground process to read, so any verdict would be a guess dressed up as a diagnosis.
-But a LIVE daemon's own asserted target vanishing (`gone`) is the diagnosis, and it is the worst state in the design: that daemon delivers nothing, and having no pane it skips the housekeeping tick where `inject_wedge_alarm` lives, so the alarm built to catch a wedged injection is silent about exactly this.
-Treating it as "nothing to say" would make the one failure with no other channel the one every surface reports all-clear on, so it gets its own loud line naming the vanished pane.
+But a LIVE daemon's own asserted target vanishing (`gone`) is the diagnosis, and it is the worst state in the design: that daemon delivers nothing at all.
+Treating it as "nothing to say" would make the one failure with the fewest channels the one every surface reports all-clear on, so it gets its own loud line naming the vanished pane.
+
+**The vanished pane also had to alarm from inside the away window (pre-existing gap, closed here).**
+The two canary surfaces above are synchronous - the foreground arm path, and session start - so both speak only once the captain is already back at the keyboard.
+The state itself happens while they are AWAY, which is the only window this daemon exists for, and it happens the ordinary way a session ends: the captain's terminal dies, firstmate restarts in a new pane, and the daemon keeps typing at a pane that is not there.
+That gap predates the agent-liveness guard and is not something it introduced, but it made this PR's own promise - that a refused injection fails closed to the wedge alarm - false in exactly one case.
+The main loop's pane-gone backoff `continue`d past the housekeeping tick, and housekeeping is where `inject_wedge_alarm` lives, so the daemon logged `warn: supervisor target '%5' gone` every `INJECT_FAIL_SLEEP` and raised nothing for the whole night.
+It now raises the alarm from the backoff path itself (`pane_gone_wedge_alarm`), tagged `pane-gone` and naming the vanished pane.
+The active alert is what makes this worth doing: it is backend-independent and needs no pane, so it reaches a captain who is nowhere near the terminal - which is the entire point of an away-mode alarm, and the one channel a missing pane cannot take away.
+It is timed, not triggered: the absence must persist for a full max-defer window before it alarms, because a pane that blinks out for one poll is a backend hiccup or a restart mid-flight, and every other guard here treats a single failed read as transient.
+`inject_wedge_alarm`'s existing marker-age throttle then holds it to one alarm per window, and the backoff is otherwise unchanged.
+
+**Known follow-ups.**
+Two smaller canary defects are deferred rather than fixed here, and neither can cause an injection into a shell.
+`fm_afk_canary_daemon_endpoint` collapses "no live daemon" and "a live daemon that has not published its endpoint yet" into one answer, so a fresh arm can race the endpoint write and print the fresh-arm remediation when the stop-then-arm one is correct.
+And the `gone` verdict comes from a single unretried existence probe, so a flaky backend read (herdr's `pane get` is one bare RPC) can be reported as a vanished pane; the retry belongs in the same resolver.
 
 And the remediation has to be one that WORKS on a running daemon.
 Re-arming does not retarget one: `fm_afk_launch_start` returns early on a live daemon lock, refreshing `state/.afk` and nothing else, and there is no retarget subcommand.
@@ -734,6 +749,8 @@ Before this, the most likely permanent wedge the guard introduces - a dead or un
 `tests/fm-afk-inject-e2e.test.sh`'s Scenario D drives the genuine hazard end-to-end - a real login shell showing a bare starship `❯`, a real away-mode daemon, and an assertion that the digest is never typed into the shell.
 The observable canary surfaces are pinned too: `tests/fm-afk-launch.test.sh`'s `unit_canary_*` cases (the foreground arm path warns on a non-alive probe, distinguishes a definite `dead` from an ambiguous `unknown`, stays silent on `alive`, and never fails the arm) and `tests/fm-bootstrap.test.sh`'s `test_afk_injection_canary_*` cases (the `AFK_INJECTION_DISABLED:` line is gated on `state/.afk`, and is re-derived live - flipping only the pane's foreground process flips the diagnostic, with no marker file in play).
 The probed-pane rule has coverage on both halves: `unit_canary_probes_the_running_daemons_target` and `test_afk_injection_canary_follows_the_running_daemon` drive the restart case directly - a live daemon recorded against pane `%5` while the script itself runs in `%9` must warn about `%5`, and both fail if the canary probes its own pane - and `tests/fm-daemon.test.sh`'s `test_daemon_publishes_its_supervisor_endpoint` pins the producer half, that the daemon writes that record at all and that releasing its lock takes the record with it.
+The away-window half is pinned by `test_pane_gone_during_away_fires_wedge_alarm`, which runs the REAL daemon binary: it arms against a live pane, the pane dies under it, and the wedge marker, the ERROR log, and the backend-independent active alert must all name the vanished pane (it fails against the pre-fix daemon, which raised nothing at all).
+`test_pane_gone_alarm_waits_out_a_transient_absence` pins the other side of it - a pane missing for one poll must NOT alarm, and away mode being off must not alarm at all - so the fix cannot cry wolf on a backend hiccup.
 
 **Other injection paths.**
 `bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.

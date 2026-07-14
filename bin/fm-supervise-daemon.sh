@@ -195,6 +195,10 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Epoch the supervisor pane was first seen missing in this daemon process, 0 while
+# it resolves. The pane-gone alarm below times the absence from here, so a pane
+# that blinks out for a single poll never alarms.
+PANE_GONE_SINCE=0
 # Why the last inject attempt did not land, recorded by inject_msg and reported
 # verbatim by inject_wedge_alarm. A wedge has several possible causes - a busy
 # pane, a human's pending composer text, a swallowed Enter, and (since the
@@ -919,6 +923,41 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   fi
 }
 
+# The supervisor pane VANISHING is the one wedge nothing else can report. The main
+# loop backs off while the target does not resolve, and that backoff `continue`s
+# past the housekeeping tick where inject_wedge_alarm lives - so the alarm built
+# for undeliverable escalations was silent in the state where delivery is most
+# thoroughly impossible: no pane to inject into, no status line to flash, and
+# firstmate itself gone from the pane away mode was armed against. It is also the
+# ordinary way a session ends (the captain's terminal dies and firstmate restarts
+# elsewhere), and it happens while the captain is AWAY, which is the only window
+# this daemon exists for. The active alert needs no pane at all, so raise the
+# alarm from the backoff path.
+# Timed from the first missing read, not fired on it: a pane that blinks out for
+# one poll (a backend hiccup, a restart mid-flight) is not a wedge, and every
+# other guard here treats a single failed read as transient. Past a full max-defer
+# window of continuous absence it is not transient, and inject_wedge_alarm's own
+# marker-age throttle then holds it to one alarm per window.
+pane_gone_wedge_alarm() {  # <state> <backend> <target>
+  local state=$1 backend=$2 target=$3 max_defer now gone_for
+  if ! afk_active "$state"; then
+    PANE_GONE_SINCE=0
+    return 0
+  fi
+  max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
+  [ "$max_defer" -gt 0 ] || return 0
+  now=$(_now)
+  [ "$PANE_GONE_SINCE" -gt 0 ] || PANE_GONE_SINCE=$now
+  gone_for=$(( now - PANE_GONE_SINCE ))
+  [ "$gone_for" -ge "$max_defer" ] || return 0
+  # Recorded directly rather than through _inject_defer: no injection was
+  # attempted, because there is nowhere to attempt one, and the backoff already
+  # logs the absence every poll. inject_wedge_alarm reports both fields verbatim.
+  INJECT_LAST_DEFER_CAUSE='pane-gone'
+  INJECT_LAST_DEFER_REASON="supervisor pane '$target' no longer resolves on backend '$backend'; away mode can deliver nothing until it is stopped (bin/fm-afk-launch.sh stop) and armed again from firstmate's own pane"
+  inject_wedge_alarm "$state" "$gone_for"
+}
+
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
   [ -s "$f" ] || { echo 999999; return; }
@@ -1520,10 +1559,14 @@ fm_super_main() {
     # this delays rather than loses work.
     if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
-      # Flush is pointless with no pane; preserve any buffered escalations.
+      # Flush is pointless with no pane; preserve any buffered escalations. The
+      # ALARM is not pointless: its active alert needs no pane, and this backoff
+      # never reaches the housekeeping tick that normally raises it.
+      pane_gone_wedge_alarm "$STATE" "$BACKEND" "$TARGET"
       sleep "$INJECT_FAIL_SLEEP"
       continue
     fi
+    PANE_GONE_SINCE=0
 
     # --- (re)start watcher if it has exited --------------------------------
     if [ -z "${WATCHER_PID:-}" ] || ! kill -0 "${WATCHER_PID:-}" 2>/dev/null; then

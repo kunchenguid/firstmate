@@ -1913,6 +1913,100 @@ test_daemon_publishes_its_supervisor_endpoint() {
   fi
 }
 
+# The vanished-pane blackout. The main loop backs off while the supervisor target
+# does not resolve, and that backoff `continue`s past the housekeeping tick where
+# inject_wedge_alarm lives - so the ONE state in which nothing can be delivered at
+# all (no pane to inject into, no status line to flash) was also the one state that
+# raised no alarm and fired no active alert, for the whole away window. It is the
+# ordinary way a session ends: the captain's terminal dies, firstmate restarts
+# elsewhere, and the daemon keeps typing at a pane that is not there. The active
+# alert needs no pane, so the backoff path must raise it.
+# Drives the REAL daemon binary: it arms against a live pane, the pane dies under
+# it, and the alarm must reach a captain who is away from the keyboard.
+test_pane_gone_during_away_fires_wedge_alarm() {
+  local dir state fakebin err log marker alert gone pid i
+  dir=$(make_supercase pane-gone-alarm)
+  state="$dir/state"; fakebin="$dir/fakebin"; err="$dir/daemon.err"
+  log="$state/.supervise-daemon.log"
+  marker="$state/.subsuper-inject-wedged"
+  alert="$dir/alert.log"; : > "$alert"
+  gone="$dir/pane-gone"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_TMUX_COMMAND=claude FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_PANE_GONE_FILE="$gone" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" \
+    FM_MAX_DEFER_SECS=1 FM_INJECT_FAIL_SLEEP=1 FM_HOUSEKEEPING_TICK=60 \
+    FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+    "$DAEMON" >"$err" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q 'daemon starting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # The pane the daemon armed against now dies under it.
+  : > "$gone"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$marker" ] && [ -s "$alert" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  [ -s "$marker" ] \
+    || fail "a vanished supervisor pane raised no wedge alarm; away mode was silently undeliverable for the whole window (daemon log: $(cat "$log" 2>/dev/null))"
+  grep -F 'pane-gone' "$marker" >/dev/null \
+    || fail "the wedge marker did not name the vanished pane as the cause: $(cat "$marker")"
+  grep -F "s:0" "$marker" >/dev/null \
+    || fail "the wedge marker did not name WHICH pane vanished: $(cat "$marker")"
+  grep -F 'ERROR' "$log" | grep -F 'no longer resolves' >/dev/null \
+    || fail "the daemon logged no ERROR naming the vanished pane: $(grep -F ERROR "$log" || true)"
+  grep -F 'osascript' "$alert" >/dev/null \
+    || fail "no backend-independent active alert fired for a vanished pane, so nothing reaches an away captain (alert log: $(cat "$alert"))"
+  grep -F 'pane-gone' "$alert" >/dev/null \
+    || fail "the active alert did not carry the vanished-pane cause: $(cat "$alert")"
+  pass "a supervisor pane that vanishes mid-away-window raises the wedge alarm and its active alert (the backoff path no longer skips it)"
+}
+
+# The alarm must not cry wolf either: a pane missing for one poll is a backend
+# hiccup or a restart mid-flight, which every other guard here treats as transient.
+# It alarms only after a full max-defer window of continuous absence, and never
+# while away mode is off (the daemon injects nothing then, so nothing is wedged).
+test_pane_gone_alarm_waits_out_a_transient_absence() {
+  local dir state fakebin marker
+  dir=$(make_supercase pane-gone-transient)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  marker="$state/.subsuper-inject-wedged"
+  afk_enter "$state"
+
+  PANE_GONE_SINCE=0
+  PATH="$fakebin:$PATH" FM_MAX_DEFER_SECS=300 pane_gone_wedge_alarm "$state" tmux "s:0"
+  [ ! -e "$marker" ] \
+    || fail "a pane missing for a single poll alarmed immediately (a backend hiccup is not a wedge)"
+
+  # Backdate the first-missing epoch past the window: now the absence IS a wedge.
+  PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  WEDGE_ALARM_LAST_EPOCH=0
+  PATH="$fakebin:$PATH" FM_MAX_DEFER_SECS=300 pane_gone_wedge_alarm "$state" tmux "s:0"
+  [ -s "$marker" ] || fail "a pane gone for longer than MAX_DEFER did not alarm"
+
+  # Away mode over: nothing is being injected, so nothing is wedged, and the
+  # absence clock resets for the next away window.
+  rm -f "$marker"
+  afk_exit "$state"
+  PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  PATH="$fakebin:$PATH" FM_MAX_DEFER_SECS=300 pane_gone_wedge_alarm "$state" tmux "s:0"
+  [ ! -e "$marker" ] || fail "a gone pane alarmed while away mode was inactive"
+  [ "$PANE_GONE_SINCE" -eq 0 ] || fail "the absence clock was not reset when away mode ended"
+  pass "pane-gone alarm: fires only after a full MAX_DEFER of continuous absence, and never while away mode is off"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2015,3 +2109,5 @@ test_startup_liveness_canary_warns_and_still_arms
 test_startup_liveness_canary_silent_when_agent_alive
 test_daemon_publishes_its_supervisor_endpoint
 test_wedge_alarm_names_dead_agent_not_busy_pane
+test_pane_gone_during_away_fires_wedge_alarm
+test_pane_gone_alarm_waits_out_a_transient_absence

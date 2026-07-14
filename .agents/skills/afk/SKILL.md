@@ -122,7 +122,8 @@ Read the cause the warning prints, because the verdicts need opposite responses.
 A `dead` supervisor target is a bare shell while firstmate is provably running, so the target points at the wrong pane - a fixable misconfiguration.
 An `unknown` verdict is genuinely ambiguous and the warning says so: it is either an unattributable harness (pi's generic `node`) or a pane the probe could not read, and only the first is an accepted degradation.
 Confirm the target names firstmate's own pane before accepting it; once it does, tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
-The one verdict that is never an accepted degradation is a vanished pane: when a running daemon's own target no longer exists it delivers nothing AND never reaches the wedge alarm, so the captain hears nothing at all - report it and fix it rather than continuing away mode.
+The one verdict that is never an accepted degradation is a vanished pane: a running daemon whose own target no longer exists delivers nothing at all, so report it and fix it rather than continuing away mode.
+(The daemon does still alarm on it - see the max-defer escape below - but an alarm is not a delivery.)
 
 Do what the printed fix says, because the two forms are not interchangeable.
 Re-arming never retargets a running daemon - `bin/fm-afk-launch.sh start` returns early on a live daemon and only refreshes the flag - so when the verdict came from a running daemon's endpoint the fix is to stop away mode first (`bin/fm-afk-launch.sh stop`, which flushes what it buffered) and then arm it again from firstmate's own pane.
@@ -136,6 +137,7 @@ an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 Each names the recorded cause (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`) rather than assuming a busy pane, so a dead supervisor agent is not misreported as a wedged one.
+A supervisor pane that VANISHES raises the same alarm from the daemon's backoff path once it has been gone for a full max-defer window (`pane-gone`), because there is no pane left to attempt a delivery into and the active alert is the only channel a missing pane cannot take away.
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
