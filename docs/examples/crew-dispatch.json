@@ -11,18 +11,18 @@
       "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
-      "when": "The task is planning, architecture, or design work that benefits from the deepest Codex reasoning profile.",
+      "when": "The task includes planning, architecture, or design work.",
       "use": { "harness": "codex", "model": "gpt-5.6-sol", "effort": "max" },
-      "why": "Use Codex max as its own reasoning level for planning work; do not rewrite it to xhigh."
+      "why": "Always use Codex max as its own reasoning level for planning, architecture, and design work; do not rewrite it to xhigh."
     },
     {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
+      "when": "The task is implementation or verification work with no planning, architecture, or design component, such as a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.6-sol", "effort": "medium" }
       ],
       "select": "quota-balanced",
-      "why": "Use a strong coding profile for broad design and implementation work."
+      "why": "Use a strong coding profile for broad implementation and verification work."
     }
   ],
   "default": { "harness": "codex", "model": "gpt-5.6-sol", "effort": "medium" }
