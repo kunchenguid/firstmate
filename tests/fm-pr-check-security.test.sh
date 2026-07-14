@@ -1843,6 +1843,30 @@ SH
     || fail "identical legacy evidence was not deduplicated"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
 
+  dir=$(make_case legacy-terminal-marker)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'noncanonical task artifact quarantined and unarmed\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical"
+  printf 'legacy quarantined bytes\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
+  printf 'fm-pr-check-migration-scan-v1\n' > "$state/.pr-check-migration-scan-v1"
+  printf 'fm-pr-check-migration-v1\n' > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-quarantine/"* \
+    "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  FM_HOME="$dir/home" "$MIGRATE" --checks-safe > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "completed legacy namespace did not migrate past existing markers"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical" ] \
+    || fail "completed legacy terminal remained in the task namespace"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.check.abc123" ] \
+    || fail "completed legacy evidence remained in the task namespace"
+  [ -f "$state/.pr-check-quarantine/!noncanonical.diagnostic.noncanonical" ] \
+    || fail "completed legacy terminal did not enter the reserved namespace"
+  [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
+    || fail "completed legacy evidence did not enter the reserved namespace"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
   dir=$(make_case unknown-diagnostic-obligation)
   state="$dir/home/state"
   mkdir -p "$state/.pr-check-quarantine"

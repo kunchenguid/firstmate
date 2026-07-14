@@ -204,6 +204,15 @@ diagnostic_namespace_valid() {
   done
 }
 
+legacy_noncanonical_namespace_absent() {
+  local artifact
+  for artifact in \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" \
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] || return 1
+  done
+}
+
 scan_complete() {
   local state_device
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
@@ -212,6 +221,7 @@ scan_complete() {
   scan_marker_content_valid "$SCAN_MARKER" || return 1
   private_migration_boundaries_valid "$state_device" || return 1
   diagnostic_namespace_valid || return 1
+  legacy_noncanonical_namespace_absent || return 1
   current_checks_authenticated
 }
 
