@@ -56,10 +56,27 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+fm_herdr_lab_session_list_is_valid() { # <session-list-json>
+  printf '%s' "$1" | jq -e '
+    type == "object"
+    and (.sessions | type == "array")
+    and (.sessions | all(.[];
+      type == "object"
+      and (.name | type == "string" and length > 0)
+      and (.default | type == "boolean")
+      and (.running | type == "boolean")
+      and (.socket_path | type == "string" and length > 0)
+    ))
+    and (([.sessions[].name] | length) == ([.sessions[].name] | unique | length))
+    and (([.sessions[] | select(.default == true)] | length) <= 1)
+  ' >/dev/null 2>&1
+}
+
 fm_herdr_lab_session_state_from_list() { # <session> <session-list-json>
   local name=$1 info=$2 count flag
+  fm_herdr_lab_session_list_is_valid "$info" || return 1
   count=$(printf '%s' "$info" | jq -r --arg name "$name" \
-    '[.sessions[]? | select(.name == $name)] | length' 2>/dev/null) || return 1
+    '[.sessions[] | select(.name == $name)] | length' 2>/dev/null) || return 1
   case "$count" in
     0) printf 'absent'; return 0 ;;
     1) ;;
@@ -80,8 +97,12 @@ fm_herdr_lab_fleet_state() { # <session>
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
+  fm_herdr_lab_session_list_is_valid "$sessions" || {
+    fm_herdr_lab_error "cannot validate Herdr sessions for the fleet-state tripwire"
+    return 1
+  }
   snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true) | {name, default, running, socket_path}]
+    [.sessions[] | select(.default == true) | {name, default, running, socket_path}]
     | if length == 0
       then {default_sessions: []}
       elif length == 1 and .[0].name == "default" and .[0].running == true
@@ -106,7 +127,11 @@ fm_herdr_lab_prepare() { # <session>
     fm_herdr_lab_error "cannot list Herdr sessions before provisioning '$name'"
     return 1
   }
-  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
+  fm_herdr_lab_session_list_is_valid "$sessions" || {
+    fm_herdr_lab_error "invalid Herdr session inventory before provisioning '$name'"
+    return 1
+  }
+  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[] | select(.name == $name)' >/dev/null 2>&1; then
     fm_herdr_lab_error "session '$name' already exists; refusing to adopt or overwrite it"
     return 1
   fi
@@ -195,7 +220,11 @@ fm_herdr_lab_provision() { # <session>
     fm_herdr_lab_error "cannot list Herdr sessions before provisioning '$name'"
     return 1
   }
-  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
+  fm_herdr_lab_session_list_is_valid "$sessions" || {
+    fm_herdr_lab_error "invalid Herdr session inventory before provisioning '$name'"
+    return 1
+  }
+  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[] | select(.name == $name)' >/dev/null 2>&1; then
     tripwire=$(fm_herdr_lab_tripwire_path "$name")
     [ -f "$tripwire" ] || {
       fm_herdr_lab_error "missing fleet-state tripwire for existing session '$name'; refusing to adopt it"
@@ -203,7 +232,7 @@ fm_herdr_lab_provision() { # <session>
     }
     fm_herdr_lab_refuse_if_default "$name" || return 1
     running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
-      '.sessions[]? | select(.name == $name) | .running' 2>/dev/null)
+      '.sessions[] | select(.name == $name) | .running' 2>/dev/null)
     [ "$running" = false ] || {
       fm_herdr_lab_error "session '$name' is not stopped; refusing to re-provision it"
       return 1

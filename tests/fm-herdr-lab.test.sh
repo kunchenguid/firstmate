@@ -48,6 +48,10 @@ esac
 
 case "$1 ${2:-}" in
   "session list")
+    if [ -n "${FM_FAKE_HERDR_SESSION_LIST_JSON:-}" ]; then
+      printf '%s\n' "$FM_FAKE_HERDR_SESSION_LIST_JSON"
+      exit 0
+    fi
     if [ "$visible_lab_state" = absent ] || [ "$visible_lab_state" = deleted ]; then
       if [ "$default_present" = 1 ]; then
         jq -nc --arg socket "$default_socket" --argjson running "$default_running" \
@@ -124,6 +128,7 @@ run_with_fake() {
     FM_FAKE_HERDR_LAB_DEFAULT="${FM_FAKE_HERDR_LAB_DEFAULT:-0}" \
     FM_FAKE_HERDR_DEFAULT_PRESENT="${FM_FAKE_HERDR_DEFAULT_PRESENT:-1}" \
     FM_FAKE_HERDR_DEFAULT_RUNNING="${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}" \
+    FM_FAKE_HERDR_SESSION_LIST_JSON="${FM_FAKE_HERDR_SESSION_LIST_JSON:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -262,6 +267,44 @@ test_absent_default_fleet_state_is_preserved() {
   pass "fm-herdr-lab: absent default state is preserved and transitions fail closed"
 }
 
+test_malformed_session_inventories_fail_closed() {
+  local inventory name owned_name="fm-lab-malformed-owned-$$" index=0 status before
+  for inventory in \
+    '{}' \
+    '[]' \
+    '{"sessions":null}' \
+    '{"sessions":{}}' \
+    '{"sessions":[null]}' \
+    '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/default.sock"}]}' \
+    '{"sessions":[{"name":"default","default":"true","running":true,"socket_path":"/tmp/default.sock"}]}' \
+    '{"sessions":[{"name":"default","default":true,"running":"true","socket_path":"/tmp/default.sock"}]}' \
+    '{"sessions":[{"name":"default","default":true,"running":true,"socket_path":null}]}' \
+    '{"sessions":[{"name":"dup","default":false,"running":true,"socket_path":"/tmp/a"},{"name":"dup","default":false,"running":true,"socket_path":"/tmp/b"}]}'
+  do
+    index=$((index + 1))
+    name="fm-lab-malformed-$index-$$"
+    status=0
+    before=$(wc -l < "$FAKE_LOG")
+    FM_FAKE_HERDR_SESSION_LIST_JSON="$inventory" run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+    expect_code 1 "$status" "malformed session inventory must fail before provisioning"
+    assert_absent "$TRIPWIRES/$name.fleet-state.json" "malformed inventory created a tripwire"
+    assert_absent "$FAKE_STATE/$name" "malformed inventory started a lab session"
+    [ "$(wc -l < "$FAKE_LOG")" -eq $((before + 1)) ] \
+      || fail "malformed inventory reached a Herdr call after session list"
+  done
+
+  run_with_fake fm_herdr_lab_provision "$owned_name" || fail "malformed teardown fixture provision failed"
+  : > "$FAKE_LOG"
+  status=0
+  FM_FAKE_HERDR_SESSION_LIST_JSON='{}' run_with_fake fm_herdr_lab_teardown "$owned_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "malformed teardown inventory must fail closed"
+  assert_no_grep "session stop $owned_name" "$FAKE_LOG" "malformed inventory allowed session stop"
+  assert_no_grep "session delete $owned_name" "$FAKE_LOG" "malformed inventory allowed session delete"
+  assert_present "$TRIPWIRES/$owned_name.fleet-state.json" "malformed teardown discarded tripwire evidence"
+  run_with_fake fm_herdr_lab_teardown "$owned_name" || fail "malformed teardown fixture cleanup failed"
+  pass "fm-herdr-lab: malformed inventories fail before provisioning or destruction"
+}
+
 test_stopped_owned_lab_can_reprovision() {
   local name="fm-lab-reprovision-$$"
   : > "$FAKE_LOG"
@@ -360,6 +403,7 @@ test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_absent_default_fleet_state_is_preserved
+test_malformed_session_inventories_fail_closed
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_delayed_delete_converges_in_one_teardown
