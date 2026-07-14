@@ -31,6 +31,7 @@ default_socket=$(cat "$state/default-socket")
 default_present=${FM_FAKE_HERDR_DEFAULT_PRESENT:-1}
 default_running=${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}
 lab_socket=${FM_FAKE_HERDR_LAB_SOCKET:-/tmp/$session.sock}
+session_dir="$state/session-dirs/$session"
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 visible_lab_state=$lab_state
@@ -49,6 +50,15 @@ esac
 
 case "$1 ${2:-}" in
   "session list")
+    if [ -f "$state/$session.replace-list-count" ]; then
+      replace_count=$(cat "$state/$session.replace-list-count")
+      if [ "$replace_count" -le 1 ]; then
+        rm -f "$state/$session.replace-list-count"
+        lab_socket="/tmp/$session.replaced.sock"
+      else
+        printf '%s\n' "$((replace_count - 1))" > "$state/$session.replace-list-count"
+      fi
+    fi
     if [ -n "${FM_FAKE_HERDR_SESSION_LIST_JSON:-}" ]; then
       printf '%s\n' "$FM_FAKE_HERDR_SESSION_LIST_JSON"
       exit 0
@@ -74,11 +84,11 @@ case "$1 ${2:-}" in
         lab_socket="/tmp/$session.changed.sock"
       fi
       if [ "$default_present" = 1 ]; then
-        jq -nc --arg socket "$default_socket" --arg lab_socket "$lab_socket" --arg name "$session" --argjson running "$running" --argjson default_running "$default_running" --argjson lab_default "$lab_default" \
-          '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket},{default:$lab_default,name:$name,running:$running,socket_path:$lab_socket}]} '
+        jq -nc --arg socket "$default_socket" --arg lab_socket "$lab_socket" --arg session_dir "$session_dir" --arg name "$session" --argjson running "$running" --argjson default_running "$default_running" --argjson lab_default "$lab_default" \
+          '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket},{default:$lab_default,name:$name,running:$running,session_dir:$session_dir,socket_path:$lab_socket}]} '
       else
-        jq -nc --arg lab_socket "$lab_socket" --arg name "$session" --argjson running "$running" --argjson lab_default "$lab_default" \
-          '{sessions:[{default:$lab_default,name:$name,running:$running,socket_path:$lab_socket}]} '
+        jq -nc --arg lab_socket "$lab_socket" --arg session_dir "$session_dir" --arg name "$session" --argjson running "$running" --argjson lab_default "$lab_default" \
+          '{sessions:[{default:$lab_default,name:$name,running:$running,session_dir:$session_dir,socket_path:$lab_socket}]} '
       fi
     fi
     ;;
@@ -90,8 +100,12 @@ case "$1 ${2:-}" in
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
+    mkdir -p "$session_dir"
+    printf '%s\n' "$$" > "$state/$session.server-pid"
+    printf '%s\n' "$FM_HERDR_LAB_TOKEN_PATH" > "$state/$session.token-path"
     printf '%s\n' running > "$state/$session"
-    while [ -f "$state/$session" ] && [ "$(cat "$state/$session")" = running ]; do
+    while { [ -f "$state/$session" ] && [ "$(cat "$state/$session")" = running ]; } \
+      || [ -f "$state/$session.keep-server" ]; do
       "$FM_FAKE_HERDR_REAL_SLEEP" 0.05
     done
     ;;
@@ -107,6 +121,10 @@ case "$1 ${2:-}" in
     ;;
   "session stop")
     [ "$3" = "$session" ] || exit 91
+    if [ "${FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STOP:-0}" = 1 ]; then
+      printf '%s\n' '/tmp/mutated-on-stop.sock' > "$state/default-socket"
+    fi
+    [ "${FM_FAKE_HERDR_STOP_FAIL:-0}" = 0 ] || exit 95
     if [ "${FM_FAKE_HERDR_COLLAPSE_ON_STOP:-0}" = 1 ]; then
       printf '%s\n' deleted > "$state/$session"
     else
@@ -130,6 +148,42 @@ esac
 SH
 chmod +x "$FAKEBIN/herdr"
 
+cat > "$FAKEBIN/lsof" <<'SH'
+#!/usr/bin/env bash
+set -eu
+state=$FM_FAKE_HERDR_STATE
+pid_filter=
+target=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = -p ]; then
+    pid_filter=$arg
+  fi
+  previous=$arg
+  target=$arg
+done
+for pid_file in "$state"/*.server-pid; do
+  [ -f "$pid_file" ] || continue
+  session=${pid_file##*/}
+  session=${session%.server-pid}
+  pid=$(cat "$pid_file")
+  kill -0 "$pid" 2>/dev/null || continue
+  token=$(cat "$state/$session.token-path" 2>/dev/null || true)
+  socket="/tmp/$session.sock"
+  [ -z "${FM_FAKE_HERDR_LAB_SOCKET:-}" ] || socket=$FM_FAKE_HERDR_LAB_SOCKET
+  owner=$pid
+  [ "${FM_FAKE_HERDR_LSOF_FOREIGN_PID:-}" = "" ] || owner=$FM_FAKE_HERDR_LSOF_FOREIGN_PID
+  if [ "$target" = "$socket" ]; then
+    [ -z "$pid_filter" ] || [ "$pid_filter" = "$owner" ] || continue
+    printf '%s\n' "$owner"
+  elif [ "$target" = "$token" ]; then
+    [ -z "$pid_filter" ] || [ "$pid_filter" = "$pid" ] || continue
+    printf '%s\n' "$pid"
+  fi
+done
+SH
+chmod +x "$FAKEBIN/lsof"
+
 # shellcheck source=bin/fm-herdr-lab.sh
 . "$ROOT/bin/fm-herdr-lab.sh"
 
@@ -140,6 +194,7 @@ run_with_fake() {
     FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_SERVER_COLLISION="${FM_FAKE_HERDR_SERVER_COLLISION:-0}" \
+    FM_FAKE_HERDR_LSOF_FOREIGN_PID="${FM_FAKE_HERDR_LSOF_FOREIGN_PID:-}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_DELETE_LAG_LISTS="${FM_FAKE_HERDR_DELETE_LAG_LISTS:-0}" \
@@ -149,6 +204,8 @@ run_with_fake() {
     FM_FAKE_HERDR_LAB_SOCKET="${FM_FAKE_HERDR_LAB_SOCKET:-}" \
     FM_FAKE_HERDR_MUTATE_LAB_AFTER_STOP="${FM_FAKE_HERDR_MUTATE_LAB_AFTER_STOP:-0}" \
     FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STATUS="${FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STATUS:-0}" \
+    FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STOP="${FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STOP:-0}" \
+    FM_FAKE_HERDR_STOP_FAIL="${FM_FAKE_HERDR_STOP_FAIL:-0}" \
     FM_FAKE_HERDR_DEFAULT_PRESENT="${FM_FAKE_HERDR_DEFAULT_PRESENT:-1}" \
     FM_FAKE_HERDR_DEFAULT_RUNNING="${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}" \
     FM_FAKE_HERDR_SESSION_LIST_JSON="${FM_FAKE_HERDR_SESSION_LIST_JSON:-}" \
@@ -164,11 +221,15 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name arbitrary-session >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "non-lab prefix must be refused"
   fm_herdr_lab_validate_name fm-lab-safe-123 || fail "valid lab session name was refused"
+  status=0
+  run_with_fake fm_herdr_lab_prepare '../../escaped' >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "invalid lifecycle name must be refused before locking"
+  assert_absent "$TMP_ROOT/escaped.lifecycle-lock" "invalid name escaped the lifecycle lock directory"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
 }
 
 test_provision_run_and_guarded_teardown() {
-  local name='' line_count status=0 stop_line delete_line
+  local name='' line_count status=0 delete_line
   name="fm-lab-behavior-$$"
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_provision "$name" || fail "provision failed"
@@ -211,13 +272,10 @@ test_provision_run_and_guarded_teardown() {
     esac
   done < "$FAKE_LOG"
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')
-  stop_line=$(grep -n "^session stop $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
   delete_line=$(grep -n "^session delete $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
-  if [ -z "$stop_line" ] || [ -z "$delete_line" ] || [ "$line_count" -le "$delete_line" ]; then
-    fail "teardown did not emit explicit stop/delete followed by the after tripwire"
+  if [ -z "$delete_line" ] || [ "$line_count" -le "$delete_line" ]; then
+    fail "teardown did not emit guarded delete followed by the after tripwire"
   fi
-  sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
-    || fail "stop was not immediately preceded by a fresh refuse-default session list"
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
@@ -250,12 +308,17 @@ test_changed_default_trips_after_teardown() {
 
 test_absent_default_fleet_state_is_preserved() {
   local name="fm-lab-no-default-$$" transition_name="fm-lab-default-appeared-$$"
-  local disappearance_name="fm-lab-default-disappeared-$$" invalid_name="fm-lab-invalid-default-$$" status=0
+  local disappearance_name="fm-lab-default-disappeared-$$" invalid_name="fm-lab-invalid-default-$$" status=0 state
   : > "$FAKE_LOG"
   FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_provision "$name" \
     || fail "clean-runner provision required a pre-existing default session"
-  [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = '{"baseline":{"sessions":[]},"owned_session":{"default":false,"name":"'$name'","socket_path":"/tmp/'$name'.sock"}}' ] \
+  state=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  [ "$(printf '%s' "$state" | jq -r '.baseline.sessions | length')" = 0 ] \
     || fail "clean-runner tripwire did not record default-session absence"
+  [ "$(printf '%s' "$state" | jq -r '.owned_session.record.name')" = "$name" ] \
+    || fail "clean-runner tripwire did not capture the owned record"
+  [ "$(printf '%s' "$state" | jq -r '.owned_session.instance.token_nonce | length')" = 64 ] \
+    || fail "clean-runner tripwire did not capture an instance nonce"
   FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_teardown "$name" \
     || fail "clean-runner teardown did not preserve default-session absence"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" \
@@ -359,12 +422,16 @@ test_ambiguous_initial_and_owned_inventories_fail_closed() {
 }
 
 test_stopped_owned_lab_can_reprovision() {
-  local name="fm-lab-reprovision-$$"
+  local name="fm-lab-reprovision-$$" status=0
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_provision "$name" || fail "initial provision failed"
   run_with_fake fm_herdr_lab_stop "$name" || fail "guarded stop failed"
   [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "guarded stop did not stop the lab session"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "stop removed the lab ownership tripwire"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "stopped session without live instance identity must not be deleted"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "stopped session reached delete"
   run_with_fake fm_herdr_lab_provision "$name" || fail "re-provision after guarded stop failed"
   [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "re-provision did not restart the stopped lab session"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "re-provision removed the lab ownership tripwire"
@@ -378,7 +445,7 @@ test_failed_delete_retains_tripwire() {
   run_with_fake fm_herdr_lab_provision "$name" || fail "delete-failure fixture provision failed"
   FM_FAKE_HERDR_DELETE_FAIL=1 run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "failed delete must fail teardown"
-  [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "failed delete unexpectedly removed the lab session"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "failed delete changed the live lab session"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "failed delete removed the ownership tripwire"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "retry after failed delete did not clean up the lab session"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful retry left the ownership tripwire behind"
@@ -403,12 +470,13 @@ test_stop_auto_collapse_is_idempotent() {
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_provision "$name" || fail "stop-collapse fixture provision failed"
   FM_FAKE_HERDR_COLLAPSE_ON_STOP=1 run_with_fake fm_herdr_lab_teardown "$name" \
-    || fail "teardown rejected a lab session that safely disappeared during guarded stop"
+    || fail "teardown rejected the live proven lab session"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" \
     "stop-collapse teardown left the ownership tripwire behind"
-  assert_no_grep "session delete $name" "$FAKE_LOG" \
-    "teardown attempted delete after guarded stop had already removed the lab session"
-  pass "fm-herdr-lab: disappearance during guarded stop is an idempotent successful teardown"
+  assert_no_grep "session stop $name" "$FAKE_LOG" \
+    "teardown discarded live ownership before delete"
+  assert_grep "session delete $name" "$FAKE_LOG" "teardown omitted live-instance delete"
+  pass "fm-herdr-lab: teardown deletes only the live proven instance"
 }
 
 test_default_flag_still_blocks_teardown() {
@@ -420,7 +488,7 @@ test_default_flag_still_blocks_teardown() {
   assert_no_grep "session stop $name" "$FAKE_LOG" "default-flag guard allowed session stop"
   assert_no_grep "session delete $name" "$FAKE_LOG" "default-flag guard allowed session delete"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "default-flag refusal removed ownership evidence"
-  printf '%s\n' deleted > "$FAKE_STATE/$name"
+  printf '%s\n' running > "$FAKE_STATE/$name"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "default-guard fixture cleanup failed"
   pass "fm-herdr-lab: default-session protection remains fail-closed"
 }
@@ -474,18 +542,136 @@ test_changed_owned_identity_blocks_lifecycle() {
   pass "fm-herdr-lab: changed identity blocks every lifecycle action"
 }
 
+test_reused_fields_with_foreign_socket_owner_fail_closed() {
+  local name="fm-lab-reused-owner-$$" foreign_pid status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "reused-owner fixture provision failed"
+  "$REAL_SLEEP" 30 &
+  foreign_pid=$!
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_LSOF_FOREIGN_PID="$foreign_pid" \
+    run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "same fields with a foreign socket owner must fail closed"
+  assert_no_grep "session stop $name" "$FAKE_LOG" "foreign socket owner reached stop"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "foreign socket owner reached delete"
+  kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "reused-owner fixture cleanup failed"
+  pass "fm-herdr-lab: reused fields cannot replace the launched process"
+}
+
+test_replacement_immediately_before_delete_fails_closed() {
+  local name="fm-lab-predelete-replace-$$" status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "predelete replacement fixture provision failed"
+  printf '%s\n' 2 > "$FAKE_STATE/$name.replace-list-count"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "replacement immediately before delete must fail closed"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "predelete replacement reached delete"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "predelete replacement discarded evidence"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "predelete replacement fixture cleanup failed"
+  pass "fm-herdr-lab: delete uses a fresh live-instance proof"
+}
+
+test_reused_pid_with_changed_start_identity_fails_closed() {
+  local name="fm-lab-reused-pid-$$" original tampered status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "reused-pid fixture provision failed"
+  original=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  tampered=$(printf '%s' "$original" | jq -S -c '.owned_session.instance.process_identity = "reused pid identity"')
+  printf '%s\n' "$tampered" > "$TRIPWIRES/$name.fleet-state.json"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "changed process start identity must fail closed"
+  assert_no_grep "session stop $name" "$FAKE_LOG" "reused pid identity reached stop"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "reused pid identity reached delete"
+  printf '%s\n' "$original" > "$TRIPWIRES/$name.fleet-state.json"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "reused-pid fixture cleanup failed"
+  pass "fm-herdr-lab: process start identity prevents pid reuse"
+}
+
 test_identity_change_after_stop_blocks_delete() {
   local name="fm-lab-change-after-stop-$$" status=0
   run_with_fake fm_herdr_lab_provision "$name" || fail "post-stop identity fixture provision failed"
   : > "$FAKE_LOG"
   FM_FAKE_HERDR_MUTATE_LAB_AFTER_STOP=1 \
-    run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "identity change after stop must block delete"
+    run_with_fake fm_herdr_lab_stop "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "identity change after stop must fail its postcheck"
   assert_grep "session stop $name" "$FAKE_LOG" "post-stop identity fixture never reached guarded stop"
   assert_no_grep "session delete $name" "$FAKE_LOG" "post-stop identity change reached delete"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "post-stop identity change discarded evidence"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "post-stop identity fixture re-provision failed"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "post-stop identity fixture cleanup failed"
-  pass "fm-herdr-lab: identity is rechecked immediately before delete"
+  pass "fm-herdr-lab: stop postcheck rejects changed identity before later delete"
+}
+
+test_standalone_stop_always_postchecks() {
+  local changed_name="fm-lab-stop-default-change-$$" failed_name="fm-lab-stop-failed-$$"
+  local collapsed_name="fm-lab-stop-collapsed-$$" status=0 output
+  run_with_fake fm_herdr_lab_provision "$changed_name" || fail "stop-postcheck fixture provision failed"
+  output=$(FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STOP=1 \
+    run_with_fake fm_herdr_lab_stop "$changed_name" 2>&1) || status=$?
+  expect_code 1 "$status" "standalone stop must fail when default changes during stop"
+  assert_contains "$output" "FLEET-STATE TRIPWIRE FAILED" \
+    "standalone stop omitted the baseline postcheck violation"
+  assert_present "$TRIPWIRES/$changed_name.fleet-state.json" "failed stop postcheck discarded evidence"
+  printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  run_with_fake fm_herdr_lab_provision "$changed_name" || fail "stop-postcheck fixture re-provision failed"
+  run_with_fake fm_herdr_lab_teardown "$changed_name" || fail "stop-postcheck fixture cleanup failed"
+
+  status=0
+  run_with_fake fm_herdr_lab_provision "$failed_name" || fail "failed-stop fixture provision failed"
+  output=$(FM_FAKE_HERDR_MUTATE_DEFAULT_ON_STOP=1 FM_FAKE_HERDR_STOP_FAIL=1 \
+    run_with_fake fm_herdr_lab_stop "$failed_name" 2>&1) || status=$?
+  expect_code 1 "$status" "failed stop with baseline mutation must fail"
+  assert_contains "$output" "session stop failed" "standalone stop lost the original stop failure"
+  assert_contains "$output" "FLEET-STATE TRIPWIRE FAILED" "failed stop omitted its postcheck violation"
+  assert_present "$TRIPWIRES/$failed_name.fleet-state.json" "failed stop discarded evidence"
+  printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  run_with_fake fm_herdr_lab_teardown "$failed_name" || fail "failed-stop fixture cleanup failed"
+
+  run_with_fake fm_herdr_lab_provision "$collapsed_name" || fail "collapsed-stop fixture provision failed"
+  FM_FAKE_HERDR_COLLAPSE_ON_STOP=1 run_with_fake fm_herdr_lab_stop "$collapsed_name" \
+    || fail "standalone stop rejected a confirmed disappearance"
+  assert_present "$TRIPWIRES/$collapsed_name.fleet-state.json" "standalone stop removed its tripwire"
+  run_with_fake fm_herdr_lab_teardown "$collapsed_name" || fail "collapsed-stop fixture cleanup failed"
+  pass "fm-herdr-lab: standalone stop preserves errors and verifies post-state"
+}
+
+test_stop_postcheck_requires_process_exit() {
+  local stopped_name="fm-lab-stop-live-stopped-$$" absent_name="fm-lab-stop-live-absent-$$" status=0
+  run_with_fake fm_herdr_lab_provision "$stopped_name" || fail "live-stopped fixture provision failed"
+  : > "$FAKE_STATE/$stopped_name.keep-server"
+  run_with_fake fm_herdr_lab_stop "$stopped_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "stopped inventory with a live server must fail postcheck"
+  assert_present "$TRIPWIRES/$stopped_name.fleet-state.json" "live-stopped postcheck discarded evidence"
+  rm -f "$FAKE_STATE/$stopped_name.keep-server"
+  "$REAL_SLEEP" 0.2
+  run_with_fake fm_herdr_lab_provision "$stopped_name" || fail "live-stopped fixture re-provision failed"
+  run_with_fake fm_herdr_lab_teardown "$stopped_name" || fail "live-stopped fixture cleanup failed"
+
+  status=0
+  run_with_fake fm_herdr_lab_provision "$absent_name" || fail "live-absent fixture provision failed"
+  : > "$FAKE_STATE/$absent_name.keep-server"
+  FM_FAKE_HERDR_COLLAPSE_ON_STOP=1 run_with_fake fm_herdr_lab_stop "$absent_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "absent inventory with a live server must fail postcheck"
+  assert_present "$TRIPWIRES/$absent_name.fleet-state.json" "live-absent postcheck discarded evidence"
+  rm -f "$FAKE_STATE/$absent_name.keep-server"
+  "$REAL_SLEEP" 0.2
+  run_with_fake fm_herdr_lab_teardown "$absent_name" || fail "live-absent fixture cleanup failed"
+  pass "fm-herdr-lab: stop postcheck requires the launched process to exit"
+}
+
+test_absent_inventory_with_live_process_retains_evidence() {
+  local name="fm-lab-absent-live-$$" status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "absent-live fixture provision failed"
+  : > "$FAKE_STATE/$name.keep-server"
+  printf '%s\n' deleted > "$FAKE_STATE/$name"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "absent inventory with a live process must fail teardown"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "absent-live teardown discarded evidence"
+  rm -f "$FAKE_STATE/$name.keep-server"
+  "$REAL_SLEEP" 0.2
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "absent-live fixture cleanup failed"
+  pass "fm-herdr-lab: absent inventory cannot hide a live launched process"
 }
 
 test_timed_out_provision_cancels_late_launch() {
@@ -553,6 +739,12 @@ test_default_flag_still_blocks_teardown
 test_same_name_foreign_session_is_never_adopted
 test_launch_collision_cannot_capture_foreign_identity
 test_changed_owned_identity_blocks_lifecycle
+test_reused_fields_with_foreign_socket_owner_fail_closed
+test_replacement_immediately_before_delete_fails_closed
+test_reused_pid_with_changed_start_identity_fails_closed
 test_identity_change_after_stop_blocks_delete
+test_standalone_stop_always_postchecks
+test_stop_postcheck_requires_process_exit
+test_absent_inventory_with_live_process_retains_evidence
 test_timed_out_provision_cancels_late_launch
 test_timeout_surfaces_default_mutation_postcheck
