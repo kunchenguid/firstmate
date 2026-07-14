@@ -79,7 +79,7 @@ fm_herdr_lab_fleet_state() { # <session>
 }
 
 fm_herdr_lab_prepare() { # <session>
-  local name=$1 sessions state_dir tripwire
+  local name=$1 sessions state_dir tripwire rc
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -101,7 +101,6 @@ fm_herdr_lab_prepare() { # <session>
     return 1
   }
   fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
-    local rc
     rc=$?
     rm -f "$tripwire"
     return "$rc"

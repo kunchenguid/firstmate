@@ -33,13 +33,16 @@ lab_state=absent
 
 case "$1 ${2:-}" in
   "session list")
+    default_running=${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}
     if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+      jq -nc --arg socket "$default_socket" --argjson running "$default_running" \
+        '{sessions:[{default:true,name:"default",running:$running,socket_path:$socket}]}'
     else
       running=false
       [ "$lab_state" = running ] && running=true
       jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+        --argjson default_running "$default_running" \
+        '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
     ;;
   "server --session")
@@ -82,6 +85,7 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_DEFAULT_RUNNING="${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -98,6 +102,14 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
   [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
+}
+
+test_prepare_preserves_tripwire_failure_status() {
+  local name="fm-lab-no-default-$$" status=0
+  FM_FAKE_HERDR_DEFAULT_RUNNING=false run_with_fake fm_herdr_lab_prepare "$name" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "prepare must preserve the missing-default tripwire status"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "failed prepare left an empty tripwire"
+  pass "fm-herdr-lab: prepare preserves fleet-state tripwire failures"
 }
 
 test_provision_run_and_guarded_teardown() {
@@ -235,6 +247,7 @@ SH
 }
 
 test_refuses_unsafe_names
+test_prepare_preserves_tripwire_failure_status
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
