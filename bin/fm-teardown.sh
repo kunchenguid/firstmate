@@ -1025,6 +1025,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    rm -f "$sub_state/$child_id.resource" "$sub_state/$child_id.agentpid" "$sub_state/$child_id.postmortem" "$sub_state/$child_id.postmortem.prev" "$sub_state/$child_id.postmortem.logshow"
   done
 }
 
@@ -1146,6 +1147,12 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.check.error" "$STATE/$ID.check.fails" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+# Resource-sampling and kill-evidence artifacts (bin/fm-resource-sample.sh,
+# bin/fm-agent-postmortem.sh). They describe an agent that no longer exists once
+# the task is off the books, and a left-behind postmortem would keep being
+# surfaced as this id's cause of death by a future task reusing the id.
+rm -f "$STATE/$ID.resource" "$STATE/$ID.agentpid" "$STATE/$ID.postmortem" \
+      "$STATE/$ID.postmortem.prev" "$STATE/$ID.postmortem.logshow"
 # Supervision bookkeeping for this task, keyed by task id and by backend target.
 # Left behind, these outlive the task itself: state/ accumulated markers for tasks
 # torn down days earlier, and a leftover dedupe marker is indistinguishable from a

@@ -44,6 +44,9 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-afk-start.sh`        | Enter away mode and run the sub-supervisor daemon as a tracked foreground process    |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-resource-sample.sh`  | One cheap pass sampling each agent's RSS and the machine's memory pressure; detects a vanished agent |
+| `fm-agent-postmortem.sh` | Record why a task's agent process died: exit signal, jetsam/kernel termination reports, memory picture |
+| `fm-resource-lib.sh`     | Shared memory-snapshot, agent-pid resolution, and sample-log primitives              |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
