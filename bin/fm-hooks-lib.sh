@@ -273,19 +273,24 @@ fm_hook_run() {
   # captured stderr to and fd 9 is how the runner reads it back once the file is
   # unlinked.
   # shellcheck disable=SC2094
-  if [ -n "$hook_err" ] && [ -n "$hook_fifo" ] && exec 7>"$hook_err" 9<"$hook_err"; then
+  # Both FIFO ends are opened here, before the fork: fd 8 read-write (which cannot
+  # block on a reader) and fd 6 read-only (which cannot block either, because fd 8
+  # is already the write end). The cap writer is then forked with fd 6 as its
+  # stdin, so it never opens the FIFO by path and the unlink below cannot race its
+  # open. Every open is guarded, because the library is sourced under 'set -eu' and
+  # a bare failing 'exec' would abort the calling flow - a failure here degrades to
+  # discarding the hook's stderr instead.
+  if [ -n "$hook_err" ] && [ -n "$hook_fifo" ] &&
+    exec 7>"$hook_err" 9<"$hook_err" && exec 8<>"$hook_fifo" 6<"$hook_fifo"; then
     have_errfd=1
     rm -f "$hook_err" 2>/dev/null || true
-    # Opening the FIFO read-write cannot block on a reader, so the runner is safe
-    # even if the cap writer never comes up; the writer's own read-only open then
-    # finds this write end already there and cannot block either.
-    exec 8<>"$hook_fifo"
     fm_hook_cap_writer "$(fm_hook_max_stderr_bytes)" \
-      < "$hook_fifo" 8>&7 >/dev/null 2>/dev/null &
+      <&6 8>&7 >/dev/null 2>/dev/null &
     cap_pid=$!
-    exec 7>&-
+    exec 6<&- 7>&-
     fm_hook_fifo_cleanup "$hook_fifo"
   else
+    exec 6<&- 7>&- 9<&-
     [ -z "$hook_err" ] || rm -f "$hook_err" 2>/dev/null || true
     fm_hook_fifo_cleanup "$hook_fifo"
     exec 8>/dev/null

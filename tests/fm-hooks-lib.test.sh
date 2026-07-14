@@ -356,9 +356,10 @@ SH
   pass "a hook that leaves a background descendant behind never stalls the caller"
 }
 
-# The captured stderr reaches the operator, and the file it was captured in is
-# gone by the time the hook is done - firstmate unlinks it as soon as it holds
-# the descriptors, so an interrupt mid-hook can leave nothing behind in TMPDIR.
+# The captured stderr reaches the operator, and neither the file it was captured
+# in nor the FIFO it was carried through is still there by the time the hook is
+# done - firstmate unlinks both as soon as it and the cap writer hold their
+# descriptors, so an interrupt mid-hook can leave nothing behind in TMPDIR.
 test_hook_stderr_is_relayed_and_leaves_no_tempfile() {
   local case_dir rc tmp leftovers
   case_dir=$(make_case errfile)
@@ -378,6 +379,9 @@ test_hook_stderr_is_relayed_and_leaves_no_tempfile() {
   leftovers=$(find "$tmp" -name 'fm-hook-err.*' | wc -l | tr -d ' ')
   [ "$leftovers" = 0 ] \
     || fail "errfile: a hook stderr temp file was left behind in TMPDIR"
+  leftovers=$(find "$tmp" -name 'fm-hook-cap.*' | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] \
+    || fail "errfile: a hook stderr FIFO was left behind in TMPDIR"
   pass "hook stderr is relayed and its temp file never outlives the hook"
 }
 
