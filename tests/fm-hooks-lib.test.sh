@@ -31,11 +31,16 @@
 #         already unlinked, so nothing is left behind in TMPDIR
 #     (p) no mktemp, planted symlink at the fallback errfile name -> skipped
 #         rather than written through
+#     (q) chatty hook -> stderr relayed only up to FM_HOOK_STDERR_MAX_BYTES,
+#         with the truncation warned rather than dumped whole into the caller
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
 #     (g) fm-pr-check fires pr-ready on first pr= record only; a failing hook
 #         does not break fm-pr-check (exit 0, merge poll still armed)
+#     (r) fm-pr-merge, whose nested fm-pr-check does the first pr= record, fires
+#         pr-ready exactly once and only after the merge, so a slow hook cannot
+#         delay the merge; a re-merge of a recorded PR does not re-fire it
 #     (h) fm-pr-merge fires post-merge with the PR URL after a successful
 #         merge; a failing hook does not fail the merge
 #     (i) fm-merge-local fires post-merge with the merged branch as ref
@@ -438,6 +443,90 @@ test_pr_check_fires_pr_ready_on_first_record_only() {
   pass "fm-pr-check fires pr-ready once per recorded PR and survives a failing hook"
 }
 
+# fm-pr-merge records pr= through fm-pr-check before merging, so a pr-ready hook
+# fired there would sit between the recording and the merge and could hold the
+# merge for the whole hook budget. It is deferred to after the merge instead, and
+# still fires exactly once per (task, PR URL) - never twice, never zero times.
+test_pr_merge_defers_pr_ready_until_after_the_merge() {
+  local case_dir order
+  case_dir=$(make_case pr-merge-pr-ready)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "kind=ship" "mode=no-mistakes"
+  fm_fake_exit0 "$case_dir/fakebin" gh
+  # A merge fake and a pr-ready hook that append to one log, so the log's order
+  # is the real order: a hook firing before the merge would show up first.
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+printf 'merged:%s\n' "\$*" >> '$case_dir/hook.log'
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  cat > "$case_dir/config/hooks/pr-ready" <<SH
+#!/usr/bin/env bash
+sleep 2
+printf 'pr-ready:%s|%s\n' "\$1" "\$2" >> '$case_dir/hook.log'
+exit 0
+SH
+  chmod +x "$case_dir/config/hooks/pr-ready"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "pr-merge/pr-ready: merge failed: $(cat "$case_dir/stderr")"
+
+  assert_grep 'pr-ready:task-x1|https://github.com/example/repo/pull/9' "$case_dir/hook.log" \
+    "pr-merge/pr-ready: the deferred pr-ready hook never fired"
+  expect_code 1 "$(grep -c '^pr-ready:' "$case_dir/hook.log")" \
+    "pr-merge/pr-ready: pr-ready must fire exactly once per (task, PR URL)"
+  order=$(grep -n -e '^merged:' -e '^pr-ready:' "$case_dir/hook.log" | cut -d: -f2 | tr '\n' ' ')
+  case "$order" in
+    'merged pr-ready '*) ;;
+    *) fail "pr-merge/pr-ready: the slow hook delayed the merge (order: $order)" ;;
+  esac
+
+  # A second merge of an already-recorded PR must not re-fire it.
+  rm -f "$case_dir/hook.log"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "pr-merge/pr-ready: re-merge failed: $(cat "$case_dir/stderr")"
+  grep -q '^pr-ready:' "$case_dir/hook.log" \
+    && fail "pr-merge/pr-ready: an already-recorded PR re-fired the pr-ready hook"
+  pass "fm-pr-merge fires pr-ready once, after the merge, and never re-fires it"
+}
+
+# A chatty or looping hook must not dump an unbounded volume into a caller that
+# captures firstmate's output (bin/fm-bootstrap.sh reads fm-spawn.sh that way).
+test_hook_stderr_relay_is_bounded() {
+  local case_dir rc bytes
+  case_dir=$(make_case errfile-cap)
+  cat > "$case_dir/config/hooks/post-spawn" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 200 ]; do
+  printf 'noise-%s-%s\n' "$i" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >&2
+  i=$((i + 1))
+done
+exit 0
+SH
+  chmod +x "$case_dir/config/hooks/post-spawn"
+  set +e
+  FM_HOOK_STDERR_MAX_BYTES=512 PATH="$case_dir/fakebin:$PATH" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "errfile-cap: fm_hook_run should return 0"
+  assert_grep 'noise-0-' "$case_dir/stderr" "errfile-cap: the relayed prefix is missing"
+  assert_grep 'post-spawn hook stderr truncated after 512 bytes for task-x1' "$case_dir/stderr" \
+    "errfile-cap: the truncation was not warned"
+  bytes=$(wc -c < "$case_dir/stderr" | tr -d ' ')
+  [ "$bytes" -lt 1024 ] \
+    || fail "errfile-cap: relayed $bytes bytes despite a 512-byte cap"
+  pass "a chatty hook's stderr is relayed as a bounded prefix and the truncation is warned"
+}
+
 test_pr_merge_fires_post_merge_after_merge() {
   local case_dir rc
   case_dir=$(make_case pr-merge)
@@ -581,8 +670,10 @@ test_watchdog_lets_a_fast_hook_finish_without_timeout_binary
 test_watchdog_kills_descendants_and_never_stalls_the_caller
 test_orphaned_descendant_never_stalls_the_caller
 test_hook_stderr_is_relayed_and_leaves_no_tempfile
+test_hook_stderr_relay_is_bounded
 test_errfile_fallback_refuses_a_planted_symlink
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
+test_pr_merge_defers_pr_ready_until_after_the_merge
 test_pr_merge_fires_post_merge_after_merge
 test_merge_local_fires_post_merge_with_branch_ref

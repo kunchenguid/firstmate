@@ -34,10 +34,20 @@
 # still reach the operator; an orphaned descendant can hold nothing but that temp
 # file, so firstmate can never be stalled by a hook. Only stdin stays inherited.
 #
+# The relay is bounded at FM_HOOK_STDERR_MAX_BYTES (default 65536): a chatty or
+# looping hook gets its first bytes relayed and the rest discarded with an
+# explicit truncation warning, so it can never dump an unbounded volume into a
+# caller that captures firstmate's output - bin/fm-bootstrap.sh's session-start
+# liveness sweep reads fm-spawn.sh through out=$(... 2>&1) straight into the
+# session-start digest.
+#
 # The temp file is created private (mode 0600, and never through a pre-planted
 # symlink) and is unlinked as soon as the runner holds its descriptors, so hook
 # stderr - which can carry tokens or URLs - is never readable by another user and
-# nothing is left behind in TMPDIR even if firstmate is interrupted mid-hook.
+# nothing is left behind in TMPDIR even if firstmate is interrupted mid-hook. Its
+# blocks are reclaimed the moment the hook and any descendant holding the
+# inherited descriptor exit, so a runaway hook's stderr is transient rather than
+# accumulating in TMPDIR.
 #
 # Each hook receives its values both as positional arguments and as FM_HOOK_*
 # environment variables, so a hook can read whichever is convenient; the
@@ -79,15 +89,43 @@ fm_hook_errfile() {
   printf '%s\n' "$file"
 }
 
-# fm_hook_drain_errfd
+# fm_hook_drain_errfd <hook-name> <task-label>
 # Relay a finished hook's captured stderr - held open on fd 9 by fm_hook_run,
-# whose file is already unlinked - to firstmate's stderr. Uses only builtins to
-# read, so it works on a minimal PATH. Returns 0.
+# whose file is already unlinked - to firstmate's stderr, up to
+# FM_HOOK_STDERR_MAX_BYTES (default 65536). Beyond that the rest is discarded and
+# the truncation is warned, so a chatty or looping hook cannot flood a caller that
+# captures firstmate's output. Reads in fixed chunks with builtins only, so it
+# works on a minimal PATH and an enormous single line is bounded too. Returns 0.
 fm_hook_drain_errfd() {
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    printf '%s\n' "$line" >&2
-  done <&9
+  local hook_name=$1 task_label=$2
+  local chunk relayed=0 truncated=0 tail_char=""
+  local max="${FM_HOOK_STDERR_MAX_BYTES:-65536}"
+  case "$max" in
+    ''|*[!0-9]*) max=65536 ;;
+  esac
+  while [ "$relayed" -lt "$max" ]; do
+    chunk=""
+    IFS= read -r -N 4096 chunk <&9 || true
+    [ -n "$chunk" ] || break
+    if [ "$((relayed + ${#chunk}))" -gt "$max" ]; then
+      chunk=${chunk:0:$((max - relayed))}
+      truncated=1
+    fi
+    printf '%s' "$chunk" >&2
+    relayed=$((relayed + ${#chunk}))
+    tail_char=${chunk: -1}
+  done
+  if [ "$truncated" -eq 0 ] && [ "$relayed" -ge "$max" ]; then
+    chunk=""
+    IFS= read -r -N 1 chunk <&9 || true
+    [ -z "$chunk" ] || truncated=1
+  fi
+  if [ -n "$tail_char" ] && [ "$tail_char" != $'\n' ]; then
+    printf '\n' >&2
+  fi
+  if [ "$truncated" -eq 1 ]; then
+    echo "warning: $hook_name hook stderr truncated after ${max} bytes for $task_label; the rest was discarded" >&2
+  fi
   return 0
 }
 
@@ -119,17 +157,23 @@ fm_hook_run() {
   # once, so nothing survives an interrupt and only these descriptors can reach
   # it. The hook gets neither fd, just its stderr on a copy of fd 8.
   hook_err=$(fm_hook_errfile)
+  # SC2094 reads this as reading and writing one file by accident; opening both
+  # ends of the same file is the point - fd 8 is what the hook writes its stderr
+  # to and fd 9 is how the runner reads it back once the file is unlinked.
+  # shellcheck disable=SC2094
   if [ -n "$hook_err" ] && exec 8>"$hook_err" 9<"$hook_err"; then
     have_errfd=1
     rm -f "$hook_err" 2>/dev/null || true
   else
     exec 8>/dev/null
   fi
+  # Every launch below hands the hook stdout on /dev/null and stderr on a copy of
+  # fd 8, and keeps fd 8 and fd 9 out of its table; stdin stays inherited.
   if [ "$budget" -eq 0 ]; then
     # The documented opt-out: no time limit at all, on every host, rather than
     # relying on a timeout binary's own "a duration of 0 disables it" semantics.
     env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" \
-      0<&0 >/dev/null 2>&8 8>&- 9<&- || hook_status=$?
+      >/dev/null 2>&8 8>&- 9<&- || hook_status=$?
   else
     if command -v timeout >/dev/null 2>&1; then
       timeout_bin=timeout
@@ -138,26 +182,32 @@ fm_hook_run() {
     fi
     if [ -n "$timeout_bin" ]; then
       env ${hook_env[@]+"${hook_env[@]}"} "$timeout_bin" -k 5 "$budget" "$hook" "$@" \
-        0<&0 >/dev/null 2>&8 8>&- 9<&- || hook_status=$?
+        >/dev/null 2>&8 8>&- 9<&- || hook_status=$?
     else
       # Job control puts the hook in its own process group (pgid == its pid), so
-      # the kills below reach its descendants too, matching what 'timeout' does.
+      # the kills below reach its descendants too, matching what 'timeout' does,
+      # and it also keeps the backgrounded hook's stdin inherited rather than
+      # redirected from /dev/null, as on the two foreground paths.
       # SECONDS, not a tick count, measures the budget, so the bound holds even
-      # if a poll sleep is short-circuited.
+      # if a poll sleep is short-circuited. It counts whole-second boundaries
+      # crossed since the hook started, so it reaches N somewhere between N-1 and
+      # N real seconds; the kill therefore waits for it to EXCEED the budget,
+      # which is what makes a short budget still give the hook its full time
+      # rather than killing it the instant the first boundary happens to fall.
       local hook_pid started grace_started job_control=0
       case "$-" in *m*) job_control=1 ;; esac
       set -m
       env ${hook_env[@]+"${hook_env[@]}"} "$hook" "$@" \
-        0<&0 >/dev/null 2>&8 8>&- 9<&- &
+        >/dev/null 2>&8 8>&- 9<&- &
       hook_pid=$!
       [ "$job_control" -eq 1 ] || set +m
       started=$SECONDS
       while kill -0 "$hook_pid" 2>/dev/null; do
-        if [ "$((SECONDS - started))" -ge "$budget" ]; then
+        if [ "$((SECONDS - started))" -gt "$budget" ]; then
           timed_out=1
           fm_hook_signal_group TERM "$hook_pid"
           grace_started=$SECONDS
-          while [ "$((SECONDS - grace_started))" -lt 5 ] && kill -0 "$hook_pid" 2>/dev/null; do
+          while [ "$((SECONDS - grace_started))" -le 5 ] && kill -0 "$hook_pid" 2>/dev/null; do
             sleep 0.2 || true
           done
           fm_hook_signal_group KILL "$hook_pid"
@@ -170,7 +220,7 @@ fm_hook_run() {
   fi
   exec 8>&-
   if [ "$have_errfd" -eq 1 ]; then
-    fm_hook_drain_errfd
+    fm_hook_drain_errfd "$hook_name" "$task_label"
     exec 9<&-
   fi
   if [ "$hook_status" -ne 0 ]; then

@@ -5,9 +5,12 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # When pr= is NEWLY recorded, also runs the best-effort pr-ready hook point
 # (bin/fm-hooks-lib.sh; docs/extension-points.md), so the hook fires once per
-# (task, PR URL) - a re-run, including the recording re-run inside
-# bin/fm-pr-merge.sh, never re-fires it. The hook fires last, after the poll is
-# armed, so hook latency never delays arming it.
+# (task, PR URL) - a re-run never re-fires it. The hook fires last, after the
+# poll is armed, so hook latency never delays arming it.
+# FM_PR_READY_HOOK=defer is an internal handoff, not part of the operator-facing
+# hook contract: bin/fm-pr-merge.sh calls this script before its own merge, so it
+# suppresses the hook here and fires pr-ready itself after the merge, keeping the
+# hook off the merge's critical path without firing it twice or not at all.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -110,7 +113,7 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 # Fire the pr-ready hook last, once per (task, PR URL), only when pr= was newly
 # recorded: a slow hook cannot delay arming the merge poll and an interrupt
 # mid-hook cannot leave pr= recorded with no poll armed.
-if [ "$PR_NEWLY_RECORDED" = 1 ]; then
+if [ "$PR_NEWLY_RECORDED" -eq 1 ] && [ "${FM_PR_READY_HOOK:-}" != "defer" ]; then
   fm_hook_run "$CONFIG" pr-ready \
     "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
     -- "$ID" "$URL"
