@@ -15,10 +15,18 @@
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
-# Session stop is available only through guarded stop, and session delete is
-# available only through teardown after a verified guarded stop.
-# Both paths perform fresh baseline and ownership checks immediately before
-# each destructive call.
+# Session stop is available only through guarded stop.
+# On Herdr 0.7.3, guarded teardown can stop a verified owned lab session, but
+# deletion is refused fail-closed because the backend exposes no conditional
+# instance identity after stop.
+# The stopped session, fleet-state tripwire, and ownership evidence are
+# preserved with recovery diagnostics.
+# Reprovision through this helper to establish fresh live ownership before a
+# later teardown; deletion remains unavailable until the backend provides an
+# atomic conditional-delete proof.
+# Both lifecycle paths perform fresh baseline and ownership checks immediately
+# before every destructive call and reject default, replaced, or ambiguous
+# session records.
 # Provision records the initial fleet baseline and a nonce-bound process and
 # storage identity, and every lifecycle operation requires both to match.
 set -u
@@ -1081,7 +1089,7 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^set -u$/{ /^set -u$/d; s/^# \{0,1\}//; p; }' "${BASH_SOURCE[0]}"
 }
 
 fm_herdr_lab_main() {

@@ -242,6 +242,22 @@ fm_test_replace_lock_owner() {
   "$REAL_SLEEP" 1
 }
 
+test_usage_describes_fail_closed_teardown() {
+  local output
+  output=$(fm_herdr_lab_usage) || fail "usage rendering failed"
+  assert_contains "$output" "guarded teardown can stop a verified owned lab session" \
+    "usage did not describe guarded stop during teardown"
+  assert_contains "$output" "deletion is refused fail-closed" \
+    "usage claimed delete was available"
+  assert_contains "$output" "fleet-state tripwire, and ownership evidence are" \
+    "usage did not describe retained teardown evidence"
+  assert_contains "$output" "Reprovision through this helper" \
+    "usage omitted stopped-session recovery guidance"
+  assert_contains "$output" "deletion remains unavailable until the backend provides an" \
+    "usage omitted the backend requirement for delete"
+  pass "fm-herdr-lab: usage documents stop-and-refuse teardown"
+}
+
 test_refuses_unsafe_names() {
   local status=0
   fm_herdr_lab_validate_name default >/dev/null 2>&1 || status=$?
@@ -871,6 +887,7 @@ SH
 }
 
 test_refuses_unsafe_names
+test_usage_describes_fail_closed_teardown
 test_provision_run_and_guarded_teardown
 test_running_delete_is_rejected_by_backend_contract
 test_lifecycle_lock_signal_cleanup
