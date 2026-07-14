@@ -23,7 +23,8 @@ Apply these rules in order.
 2. Prefer a purpose-built connector, API, or CLI when browser interaction is unnecessary.
    Use the browser only when the task needs interactive page state, visual inspection, or browser-only behavior.
 3. When interactive browser work is needed and the user did not choose a surface, prefer a browser capability native to the active harness and session.
-   Treat a native capability as available only when its skill and required runtime tools are actually exposed and usable in the current session.
+   Treat a native capability as available only when its required tool surface is actually exposed and usable in the current session.
+   Follow that surface's own skill or instructions when they are present.
    An installed package or plugin alone does not prove session availability or connection state.
 4. In Codex Desktop, use the built-in Browser for public sites, local apps, or work that should start in a separate browser session.
    Use the OpenAI Chrome extension when the task depends on existing tabs, signed-in state, a Chrome profile, or Chrome extensions.
