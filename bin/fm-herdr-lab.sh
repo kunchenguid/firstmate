@@ -57,19 +57,46 @@ fm_herdr_lab_session_list() { # <session>
 }
 
 fm_herdr_lab_session_list_is_valid() { # <session-list-json>
-  printf '%s' "$1" | jq -e '
-    type == "object"
-    and (.sessions | type == "array")
-    and (.sessions | all(.[];
+  printf '%s' "$1" | jq -se '
+    length == 1
+    and (.[0] | type == "object")
+    and (.[0].sessions | type == "array")
+    and (.[0].sessions | all(.[];
       type == "object"
       and (.name | type == "string" and length > 0)
       and (.default | type == "boolean")
       and (.running | type == "boolean")
       and (.socket_path | type == "string" and length > 0)
     ))
-    and (([.sessions[].name] | length) == ([.sessions[].name] | unique | length))
-    and (([.sessions[] | select(.default == true)] | length) <= 1)
+    and (([.[0].sessions[].name] | length) == ([.[0].sessions[].name] | unique | length))
+    and (([.[0].sessions[] | select(.default == true)] | length) <= 1)
   ' >/dev/null 2>&1
+}
+
+fm_herdr_lab_baseline_from_list() { # <session> <session-list-json> <allow-owned>
+  local name=$1 info=$2 allow_owned=$3
+  fm_herdr_lab_session_list_is_valid "$info" || return 1
+  printf '%s' "$info" | jq -S -c -s --arg name "$name" --argjson allow_owned "$allow_owned" '
+    .[0] as $inventory
+    | [$inventory.sessions[] | select(.name == $name)] as $owned
+    | [$inventory.sessions[] | select(.name != $name)] as $baseline
+    | if (
+        (($owned | length) == 0 or ($allow_owned and ($owned | length) == 1))
+        and all($owned[]; .default == false)
+        and (
+          ($baseline | length) == 0
+          or (
+            ($baseline | length) == 1
+            and $baseline[0].name == "default"
+            and $baseline[0].default == true
+            and $baseline[0].running == true
+          )
+        )
+      )
+      then $inventory | .sessions = $baseline
+      else empty
+      end
+  ' 2>/dev/null
 }
 
 fm_herdr_lab_session_state_from_list() { # <session> <session-list-json>
@@ -97,28 +124,16 @@ fm_herdr_lab_fleet_state() { # <session>
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
-  fm_herdr_lab_session_list_is_valid "$sessions" || {
-    fm_herdr_lab_error "cannot validate Herdr sessions for the fleet-state tripwire"
-    return 1
-  }
-  snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[] | select(.default == true) | {name, default, running, socket_path}]
-    | if length == 0
-      then {default_sessions: []}
-      elif length == 1 and .[0].name == "default" and .[0].running == true
-      then {default_sessions: .}
-      else empty
-      end
-  ' 2>/dev/null)
+  snapshot=$(fm_herdr_lab_baseline_from_list "$name" "$sessions" true) || snapshot=""
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires either no default session or exactly one running session named 'default'"
+    fm_herdr_lab_error "fleet-state tripwire found malformed, foreign, contradictory, or ambiguous session state"
     return 1
   }
   printf '%s\n' "$snapshot"
 }
 
 fm_herdr_lab_prepare() { # <session>
-  local name=$1 sessions state_dir tripwire
+  local name=$1 sessions state_dir tripwire baseline
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -143,21 +158,36 @@ fm_herdr_lab_prepare() { # <session>
     fm_herdr_lab_error "tripwire already exists for '$name'; refusing ambiguous ownership"
     return 1
   }
-  fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
+  baseline=$(fm_herdr_lab_baseline_from_list "$name" "$sessions" false) || baseline=""
+  [ -n "$baseline" ] || {
+    fm_herdr_lab_error "initial fleet-state must be exactly empty or exactly one running default session"
+    rm -f "$tripwire"
+    return 1
+  }
+  printf '%s\n' "$baseline" > "$tripwire" || {
     rm -f "$tripwire"
     return 1
   }
 }
 
 fm_herdr_lab_refuse_if_default() { # <session>
-  local name=$1 info state
+  local name=$1 info state tripwire before after
   fm_herdr_lab_validate_name "$name" || return 1
+  tripwire=$(fm_herdr_lab_tripwire_path "$name")
+  [ -f "$tripwire" ] || {
+    fm_herdr_lab_error "refusing destructive call without a fleet-state tripwire for '$name'"
+    return 1
+  }
   info=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "refusing destructive call because session list failed"
     return 1
   }
   state=$(fm_herdr_lab_session_state_from_list "$name" "$info") || state=invalid
-  [ "$state" = nondefault ] && return 0
+  after=$(fm_herdr_lab_baseline_from_list "$name" "$info" true) || after=""
+  before=$(cat "$tripwire")
+  if [ "$state" = nondefault ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
+    return 0
+  fi
   fm_herdr_lab_error "refusing destructive call for '$name': session is absent, default, or ambiguous (state=$state)"
   return 1
 }
@@ -333,6 +363,7 @@ fm_herdr_lab_teardown() { # <session>
     nondefault) ;;
     *) fm_herdr_lab_error "refusing delete for '$name': unsafe session state '$state'"; return 1 ;;
   esac
+  fm_herdr_lab_refuse_if_default "$name" || return 1
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   while [ "$attempt" -lt 20 ]; do
     sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
