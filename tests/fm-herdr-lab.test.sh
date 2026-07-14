@@ -30,16 +30,31 @@ session=$last
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
+visible_lab_state=$lab_state
+case "$1 ${2:-}:$lab_state" in
+  "session list:deleting:"*)
+    remaining=${lab_state#deleting:}
+    if [ "$remaining" -gt 0 ]; then
+      printf 'deleting:%s\n' "$((remaining - 1))" > "$state/$session"
+      visible_lab_state=stopped
+    else
+      printf '%s\n' deleted > "$state/$session"
+      visible_lab_state=deleted
+    fi
+    ;;
+esac
 
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
+    if [ "$visible_lab_state" = absent ] || [ "$visible_lab_state" = deleted ]; then
       jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
     else
       running=false
-      [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      [ "$visible_lab_state" = running ] && running=true
+      lab_default=false
+      [ "${FM_FAKE_HERDR_LAB_DEFAULT:-0}" != 1 ] || lab_default=true
+      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" --argjson lab_default "$lab_default" \
+        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:$lab_default,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]} '
     fi
     ;;
   "server --session")
@@ -57,12 +72,21 @@ case "$1 ${2:-}" in
     ;;
   "session stop")
     [ "$3" = "$session" ] || exit 91
-    printf '%s\n' stopped > "$state/$session"
+    if [ "${FM_FAKE_HERDR_COLLAPSE_ON_STOP:-0}" = 1 ]; then
+      printf '%s\n' deleted > "$state/$session"
+    else
+      printf '%s\n' stopped > "$state/$session"
+    fi
     ;;
   "session delete")
     [ "$3" = "$session" ] || exit 92
     [ "${FM_FAKE_HERDR_DELETE_FAIL:-}" != 1 ] || exit 93
-    printf '%s\n' deleted > "$state/$session"
+    if [ "${FM_FAKE_HERDR_DELETE_LAG_LISTS:-0}" -gt 0 ]; then
+      printf 'deleting:%s\n' "$FM_FAKE_HERDR_DELETE_LAG_LISTS" > "$state/$session"
+    else
+      printf '%s\n' deleted > "$state/$session"
+    fi
+    [ "${FM_FAKE_HERDR_DELETE_EXIT:-0}" = 0 ] || exit "$FM_FAKE_HERDR_DELETE_EXIT"
     ;;
   *)
     printf '%s\n' '{"ok":true}'
@@ -82,6 +106,10 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_DELETE_LAG_LISTS="${FM_FAKE_HERDR_DELETE_LAG_LISTS:-0}" \
+    FM_FAKE_HERDR_DELETE_EXIT="${FM_FAKE_HERDR_DELETE_EXIT:-0}" \
+    FM_FAKE_HERDR_COLLAPSE_ON_STOP="${FM_FAKE_HERDR_COLLAPSE_ON_STOP:-0}" \
+    FM_FAKE_HERDR_LAB_DEFAULT="${FM_FAKE_HERDR_LAB_DEFAULT:-0}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -205,6 +233,46 @@ test_failed_delete_retains_tripwire() {
   pass "fm-herdr-lab: failed deletion retains ownership until absence is confirmed"
 }
 
+test_delayed_delete_converges_in_one_teardown() {
+  local name="fm-lab-delayed-delete-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "delayed-delete fixture provision failed"
+  FM_FAKE_HERDR_DELETE_LAG_LISTS=2 FM_FAKE_HERDR_DELETE_EXIT=93 \
+    run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "teardown did not wait for an asynchronously disappearing lab session"
+  [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "delayed deletion never reached absent state"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "successful delayed deletion left the ownership tripwire behind"
+  pass "fm-herdr-lab: delayed deletion converges in one guarded teardown even when delete exits nonzero"
+}
+
+test_stop_auto_collapse_is_idempotent() {
+  local name="fm-lab-stop-collapse-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "stop-collapse fixture provision failed"
+  FM_FAKE_HERDR_COLLAPSE_ON_STOP=1 run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "teardown rejected a lab session that safely disappeared during guarded stop"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "stop-collapse teardown left the ownership tripwire behind"
+  assert_no_grep "session delete $name" "$FAKE_LOG" \
+    "teardown attempted delete after guarded stop had already removed the lab session"
+  pass "fm-herdr-lab: disappearance during guarded stop is an idempotent successful teardown"
+}
+
+test_default_flag_still_blocks_teardown() {
+  local name="fm-lab-default-flag-$$" status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "default-guard fixture provision failed"
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_LAB_DEFAULT=1 run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a lab-named session reported as default must block teardown"
+  assert_no_grep "session stop $name" "$FAKE_LOG" "default-flag guard allowed session stop"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "default-flag guard allowed session delete"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "default-flag refusal removed ownership evidence"
+  printf '%s\n' deleted > "$FAKE_STATE/$name"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "default-guard fixture cleanup failed"
+  pass "fm-herdr-lab: default-session protection remains fail-closed"
+}
+
 test_timed_out_provision_cancels_late_launch() {
   local name="fm-lab-late-launch-$$" status=0
   cat > "$FAKEBIN/sleep" <<'SH'
@@ -237,4 +305,7 @@ test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
+test_delayed_delete_converges_in_one_teardown
+test_stop_auto_collapse_is_idempotent
+test_default_flag_still_blocks_teardown
 test_timed_out_provision_cancels_late_launch

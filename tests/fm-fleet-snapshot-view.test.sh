@@ -19,28 +19,19 @@ make_fakebin() {  # <dir>
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-target=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-t" ]; then target=$arg; fi
-  prev=$arg
-done
-case "${1:-}" in
-  display-message)
-    case "$*" in
-      *pane_current_command*)
-        case "$target" in
-          *dead-secondmate*) printf 'zsh\n' ;;
-          *) printf 'codex\n' ;;
-        esac
-        ;;
-      *) printf '%%1\n' ;;
-    esac
-    ;;
-  capture-pane)
+target=${3:-}
+case "${1:-} ${2:-}" in
+  'status --json') printf '{"server":{"running":true}}\n' ;;
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"/tmp"}}}\n' "$target" ;;
+  'agent get')
+    case "$target" in
+      *dead-secondmate*) printf '{"error":{"code":"agent_not_found"}}\n' ;;
+      *) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+    esac ;;
+  'pane read')
     case "$target" in
       *ship-task*|*active-secondmate*) printf 'work in progress\nesc to interrupt\n' ;;
       *) printf 'all quiet\n> \n' ;;
@@ -49,7 +40,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  chmod +x "$fb/no-mistakes" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -351,7 +342,7 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | herdr | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
   assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
@@ -368,7 +359,7 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  assert_contains "$view" "| ship-task | working / pane | ship | alpha | herdr | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
@@ -376,7 +367,7 @@ test_view_renders_snapshot() {
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | herdr | present / alive |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -397,9 +388,9 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | herdr | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | herdr | present / dead | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
 }

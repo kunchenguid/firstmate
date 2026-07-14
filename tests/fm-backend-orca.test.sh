@@ -59,20 +59,20 @@ SH
   printf '%s\n' "$root"
 }
 
-add_tmux_fake() {
+add_herdr_fake() {
   local fb=$1
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
 LOG="${FM_ORCA_LOG:?}"
 {
-  printf 'tmux'
+  printf 'herdr'
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
 exit 0
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
 }
 
 test_capture_reads_terminal_tail_json() {
@@ -200,7 +200,7 @@ test_composer_state_popup_placeholder_fill_is_pending() {
 # Dead-shell injection safety (task fm-composer-shellglyph-safety): a pane whose
 # agent has exited to a bare login shell has no bordered composer row, so the
 # classifier finds nothing and reports `unknown` - NOT a safe (empty) injection
-# target. Covers the same guarantee herdr/cmux/tmux tests pin for their backends.
+# target. Covers the same guarantee herdr/cmux/herdr tests pin for their backends.
 test_composer_state_bare_shell_prompt_is_unknown() {
   local out
   orca_case composer-bare-shell
@@ -1164,7 +1164,7 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
   orca_case secondmate-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
-  add_tmux_fake "$FB"
+  add_herdr_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1206,7 +1206,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
     "backend=orca" "orca_worktree_id=wt-child-mismatch"
   orca_case secondmate-child-mismatch
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-mismatch","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
-  add_tmux_fake "$FB"
+  add_herdr_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1246,7 +1246,7 @@ test_secondmate_force_teardown_removes_partial_orca_child() {
     "backend=orca" "orca_worktree_id=wt-partial-child"
   orca_case secondmate-partial-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-child","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
-  add_tmux_fake "$FB"
+  add_herdr_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \

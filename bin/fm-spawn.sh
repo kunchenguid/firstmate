@@ -11,19 +11,18 @@
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
-#   runtime auto-detection (the runtime firstmate itself is executing inside -
-#   $TMUX, HERDR_ENV=1, or cmux runtime signals; bin/fm-backend.sh's
-#   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
-#   then tmux.
-#   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
+#   runtime auto-detection (HERDR_ENV=1 or cmux runtime signals), then Herdr.
+#   Spawn-capable backends are herdr, zellij, orca, and cmux.
+#   Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
-#   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   blocked backend contract.
+#   Default Herdr spawns do not write backend= to meta; absent backend= means
+#   Herdr.
+#   cmux does not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -164,10 +163,9 @@ esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
+# default Herdr (fm_backend_name). fm_backend_validate_spawn refuses unknown or
 # non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
+# recorded in meta only when it is not Herdr.
 # so the default path's meta stays byte-identical.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
@@ -319,7 +317,7 @@ launch_template() {
     # prefix scoped to this firstmate-launched agent; it never touches the captain's
     # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
     # does NOT suppress the interactive ghost text (verified empirically), so the env
-    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
+# var is the correct control. The shared composer reader is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
@@ -647,7 +645,7 @@ fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
+# Every backend's own current-path read (Herdr's
 # foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
 # report the OS-level, physically-resolved cwd, so comparing it against a
 # still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
@@ -666,9 +664,8 @@ real_path_or_raw() {  # <path>
   fi
 }
 
-# Session-provider container-ensure + task creation. tmux stays exactly as P1
-# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-HOME,
+# Session-provider container-ensure + task creation.
+# A Herdr spawn goes through the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
@@ -694,18 +691,6 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 W="fm-$ID"
 case "$BACKEND" in
-  tmux)
-    SES=$(fm_backend_tmux_container_ensure)
-    T="$SES:$W"
-    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
-    WT_TARGET="$WID"
-    ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
@@ -793,15 +778,12 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
-# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
-# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
-# Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+# Every backend addresses its pane or surface by the id already in $T.
+# The shared treehouse-get and worktree-detection steps must never reference an
+# unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
@@ -810,7 +792,6 @@ spawn_send_text_line() {  # <target> <text>
 }
 spawn_current_path() {  # <target>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
@@ -818,7 +799,6 @@ spawn_current_path() {  # <target>
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
     herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
@@ -827,7 +807,6 @@ spawn_send_literal() {  # <target> <text>
 }
 spawn_send_key() {  # <target> <key>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
     herdr) fm_backend_herdr_send_key "$1" "$2" ;;
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
@@ -838,10 +817,9 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
+  # Target the stable backend endpoint id, never a mutable label.
+  # This keeps worktree discovery bound to the task pane instead of another
+  # endpoint that happens to carry a similar human-facing name.
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
@@ -1001,10 +979,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # backend= is written only for a non-default backend.
+  # An absent value resolves to Herdr.
+  [ "$BACKEND" = herdr ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

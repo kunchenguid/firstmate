@@ -104,14 +104,14 @@ event_wait_or_sleep
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
-# --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
+# --- event_wait_or_sleep: a non-push backend never runs the event path ----------
 
 reset_state
-fm_write_meta "$STATE_DIR/tk4.meta" "window=fmses:fm-tk4" "kind=ship"   # no backend= -> tmux
+fm_write_meta "$STATE_DIR/tk4.meta" "window=fmses:fm-tk4" "backend=zellij" "kind=ship"
 fm_backend_wait_transition() { printf 'CALLED\n' > "$TMP/wtcalled"; return 1; }
 event_wait_or_sleep
-[ ! -e "$TMP/wtcalled" ] || fail "a tmux-only home must never invoke the event wait path"
-grep -q 'SLEEP' "$SLEEP_LOG" || fail "a tmux-only home must sleep POLL exactly as before"
+[ ! -e "$TMP/wtcalled" ] || fail "a zellij-only home must never invoke the Herdr event wait path"
+grep -q 'SLEEP' "$SLEEP_LOG" || fail "a zellij-only home must sleep for the poll interval"
 pass "event_wait_or_sleep: a home with no push-capable window is inert (sleeps POLL, never touches the event path)"
 
 # --- event_wait_or_sleep: runtime failures disable the event path (fail-closed)

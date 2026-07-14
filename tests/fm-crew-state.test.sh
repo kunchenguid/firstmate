@@ -7,7 +7,7 @@
 # reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
 # pane busy-signature) and reconciles the possibly-stale log against it. These
 # cases pin every branch of that logic, hermetically, over real throwaway git
-# repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
+# repos with a fake `no-mistakes` (run-step source) and a fake `herdr` (pane
 # source):
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
@@ -47,7 +47,7 @@ make_repo_on_branch() {  # <dir> <branch>
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
-# fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
+# fake `herdr` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
@@ -76,20 +76,6 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  display-message)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
-  capture-pane)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
-    else printf 'all quiet\n> \n'; fi ;;
-esac
-exit 0
-SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -103,9 +89,13 @@ case "${1:-}" in
     exit 0 ;;
   pane)
     case "${2:-}" in
+      get)
+        [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
+        printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"/tmp"}}}\n' "${3:-w1:p1}"
+        exit 0 ;;
       read)
         [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
-        if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+        if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ] || [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
         else printf 'all quiet\n> \n'; fi
         exit 0 ;;
     esac ;;
@@ -119,14 +109,14 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
+  for tool in bash git grep sed head cut tail dirname jq perl; do
     real=$(command -v "$tool" || true)
     [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
     ln -s "$real" "$tb/$tool"
@@ -154,12 +144,12 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
-  FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_HERDR_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -794,7 +784,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" "backend=herdr"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
-  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_BUSY=1
   FM_FAKE_HERDR_AGENT_STATUS=""
   local out; out=$(run_crew_state "$d" feat-herdr)
@@ -825,7 +815,7 @@ test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane() {
   # the only remaining signal.
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
-  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=1
   local out; out=$(run_crew_state "$d" feat-herdr-idle)
@@ -846,7 +836,7 @@ test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle() {
   printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
-  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=0
   local out; out=$(run_crew_state "$d" feat-herdr-stopped)
@@ -967,7 +957,7 @@ test_dead_window_ignores_stale_status_log() {
   printf 'done: old completion event\n' > "$d/state/feat-dead.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
-  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
   assert_contains "$out" "source: none" "dead window -> none source"
@@ -987,7 +977,7 @@ test_dead_window_still_reports_terminal_run_step() {
   fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
-  FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
+  FM_FAKE_HERDR_MISSING=1   # the crew's window has closed
   local out; out=$(run_crew_state "$d" feat-dead-done)
   assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
   assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
@@ -1004,7 +994,7 @@ test_dead_window_still_reports_active_run_step() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dead-act.meta" "window=fm:fm-feat-dead-act" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-act)"
-  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead-act)
   assert_contains "$out" "state: working" "closed pane still reports active run-step"
   assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
@@ -1027,7 +1017,7 @@ while :; do :; done
 SH
   chmod +x "$d/fakebin/no-mistakes"
   toolbin=$(make_no_timeout_toolbin "$d")
-  fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-timeout.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship"
   FM_FAKE_BUSY=1
   start=$SECONDS
   out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)

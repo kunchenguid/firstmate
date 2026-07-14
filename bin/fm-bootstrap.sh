@@ -36,8 +36,8 @@
 #          bin/fm-spawn.sh --secondmate, and skipped means the probe could not
 #          confidently classify the endpoint (never acted on - a false-dead
 #          reading would spin up a duplicate agent). Session-start scope only;
-#          see AGENTS.md "Session start" and docs/tmux-backend.md /
-#          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
+#          see AGENTS.md "Session start" and docs/herdr-backend.md
+#          "Agent liveness probe" for the empirical basis.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -256,8 +256,7 @@ secondmate_liveness_sweep() {
   # with a recorded window=), run the deeper fm_backend_agent_alive probe
   # (bin/fm-backend.sh) and act only on a CONFIDENT verdict:
   #   alive   - no-op.
-  #   dead    - kill the stale endpoint first (best-effort; the tmux adapter
-  #             refuses to create a same-named window over a live one) then
+#   dead    - kill the stale endpoint first, then
   #             respawn via the existing recovery path (bin/fm-spawn.sh <id>
   #             --secondmate; secondmate-provisioning).
   #   unknown - NEVER acted on. A false-dead reading would spin up a DUPLICATE
@@ -313,7 +312,7 @@ secondmate_liveness_sweep() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -342,7 +341,8 @@ missing_tool_diagnostic() {
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
+# never demands an inactive backend's tools, and only Orca drops treehouse.
+# A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)

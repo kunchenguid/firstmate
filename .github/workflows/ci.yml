@@ -28,7 +28,7 @@ jobs:
     name: Behavior tests
     runs-on: ubuntu-latest
     # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
-    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
+    # hung watcher or backend test instead of riding GitHub's 360-minute default.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -39,14 +39,6 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Require tmux for e2e tests
-        run: |
-          set -eu
-          command -v tmux >/dev/null || {
-            echo "::error::tmux is required for real afk injection e2e coverage"
-            exit 1
-          }
-          tmux -V
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu

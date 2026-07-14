@@ -3,23 +3,21 @@
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into firstmate's own pane.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS` (the pane is genuinely busy or wedged, or its Enter is swallowed), `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 
-## Why an active channel beyond the status-line flash
+## Why an active channel is required
 
-Before this change the only ACTIVE signal `inject_wedge_alarm` sent was a tmux `display-message` status-line flash, guarded by `if [ "$backend" = tmux ]`.
-That flash is a client-side OSD with no cross-backend equivalent, so on every non-tmux supervisor backend it was skipped entirely.
-On 2026-07-10 a `claude`-on-`herdr` primary wedged past max-defer overnight: the tmux flash was skipped, and only the passive `state/.subsuper-inject-wedged` marker was written.
+Before the active channel existed, a wedged Herdr supervisor wrote only the passive `state/.subsuper-inject-wedged` marker.
 Nothing surfaces that marker until the next fleet action, so 20 escalations sat buffered for roughly 8.5 hours with no active alert.
 The classifier-side half of that incident shipped separately (PR #429); this is the alarm-channel half.
 
 `inject_wedge_alarm` now also calls `wedge_alarm_notify`, a configurable active alert that does not depend on any pane or its backend status-line.
-The durable marker and the tmux flash are unchanged; the active alert is added alongside them.
+The durable marker remains alongside the active alert.
 
 ## Channels
 
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive (used by the tests).
 
-- `off` - position-independent kill switch that disables every active alert; the marker and tmux flash remain.
+- `off` - position-independent kill switch that disables every active alert; the durable marker remains.
 - `auto` / `default` - platform default. macOS resolves to `osascript`; other platforms have no built-in OS channel, so `auto` there fires nothing and logs that the durable marker is the only signal (configure a `command:` directive instead).
 - `osascript` - a macOS Notification Center banner via `osascript`. OS-level, so it reaches the captain even when every pane and its status-line is unreadable.
 - `herdr` - a herdr UI notification via `herdr notification show`. herdr's own surface, separate from the pane and its status-line.

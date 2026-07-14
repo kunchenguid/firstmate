@@ -63,7 +63,7 @@ export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
-#   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
+#   $CASE/fakebin/      - mocks for treehouse, herdr (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
 #   $CASE/project/      - clone of origin; acts as the firstmate project dir
 #   $CASE/wt/           - a worktree of the project (the task worktree)
@@ -81,9 +81,9 @@ make_case() {
 # `treehouse return --force <wt>`: succeed silently.
 exit 0
 SH
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+# Herdr pane cleanup calls succeed silently.
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -105,7 +105,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  chmod +x "$fakebin/treehouse" "$fakebin/herdr" "$fakebin/gh-axi" "$fakebin/gh"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"

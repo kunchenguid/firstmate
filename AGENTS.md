@@ -78,7 +78,7 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
-config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
+config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = Herdr unless cmux runtime auto-detection selects cmux; Herdr is the verified reference backend (docs/herdr-backend.md), while zellij, Orca, and cmux are supported alternatives (docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - zellij and Orca are always explicit, and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
@@ -115,7 +115,7 @@ state/               volatile runtime signals; gitignored
 The shell working directory persists between commands, so after any `cd` away from the home, invoke `bin/` scripts by the absolute path to this repo's `bin/` directory; the scripts self-locate internally, so only invocation is cwd-fragile.
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-For the tmux backend, the task window is always named `fm-<id>`; per-backend window/tab naming and workspace scoping for herdr, zellij, orca, and cmux live in `docs/configuration.md` ("Runtime backend") and each backend's own doc.
+Herdr task tabs are named `fm-<id>`; per-backend window/tab naming and workspace scoping for Herdr, zellij, Orca, and cmux live in `docs/configuration.md` ("Runtime backend") and each backend's own doc.
 
 ## 3. Session start (run at every session start)
 
@@ -242,7 +242,7 @@ Reconcile reality with your records before doing anything else, working from the
    Treat those status tails as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
    If older wake-event history matters, read the individual full status log named in the digest instead of bulk-reading every status file.
 4. Use the `window=` values from the digest's `state/*.meta` entries as the live direct-report set, and read the digest's per-task `endpoint: alive|dead` line for each - that cheap check is already done; do not re-probe it yourself.
-   Do not sweep every `fm-*` tmux window, herdr tab, zellij tab, Orca terminal, or cmux workspace across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
+   Do not sweep every `fm-*` Herdr tab, zellij tab, Orca terminal, or cmux workspace across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
 5. If the digest reports a recorded direct-report's endpoint as `dead` (or a meta has no `window=`), reconcile it through its meta as described below.
 6. For meta with no window, or an endpoint the digest reported dead, reconcile by kind.
    For ordinary crewmates, check the recorded backend metadata first; use `treehouse status` for treehouse-backed tasks, and the recorded `orca_worktree_id=`/`terminal=` for Orca tasks.
@@ -257,7 +257,7 @@ Reconcile reality with your records before doing anything else, working from the
 10. Having already handled the drained wakes from the digest, follow the emitted supervision operating block through the digest's own closing reminder; if the lock was refused or `state/.afk` exists, follow the digest's no-direct-supervision guidance.
 
 A firstmate restart must be a non-event.
-All truth lives in each task's backend live-task inventory (tmux by hard default, herdr or cmux when explicitly selected or auto-detected, and zellij/orca when explicitly selected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, treehouse, and Orca's recorded worktree/terminal ids; your conversation memory is a cache.
+All truth lives in each task's backend live-task inventory (Herdr by default, cmux when explicitly selected or auto-detected, and zellij/Orca when explicitly selected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, treehouse, and Orca's recorded worktree/terminal ids; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -384,7 +384,7 @@ A project may appear in several `projects:` clone lists, so choose the secondmat
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
 If a secondmate's scope fits, steer that secondmate from an active firstmate session by sending one concise instruction via `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> '<work request>'` unless `FM_HOME` is already set to the active firstmate home, and let it run the normal lifecycle inside its own home.
 The stable `fm-<id>` label printed by lifecycle commands still works, but exact task ids resolve first through this home's `state/<id>.meta`; pass an explicit backend target containing `:` only when intentionally targeting an endpoint outside this firstmate home.
-`fm-send` is fail-closed: `FM_HOME` must be set, and any target that cannot be resolved through this home's metadata or a well-formed explicit backend target exits non-zero instead of guessing a tmux window.
+`fm-send` is fail-closed: `FM_HOME` must be set, and any target that cannot be resolved through this home's metadata or a well-formed explicit backend target exits non-zero instead of guessing a live endpoint.
 A secondmate is itself a firstmate, so a request reaches it in its own chat, which you never read - the return channel that wakes you is its status file.
 So `fm-send` to a task selector whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
 Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
@@ -415,7 +415,7 @@ Load `harness-adapters` before spawning or recovering any direct report so trust
 ```sh
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness only when no crew-dispatch.json is active
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
-bin/fm-spawn.sh <id> projects/<repo> --backend <tmux|herdr|zellij|orca|cmux>   # explicit runtime backend (docs/configuration.md "Runtime backend")
+bin/fm-spawn.sh <id> projects/<repo> --backend <herdr|zellij|orca|cmux>   # explicit runtime backend (docs/configuration.md "Runtime backend")
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> [<firstmate-home>] --secondmate   # launch or recover a persistent secondmate in its home
 bin/fm-spawn.sh <id1>=projects/<repo1> <id2>=projects/<repo2> [--scout]   # batch: one call, several tasks
@@ -596,7 +596,7 @@ When a task reaches a terminal state on any of these wakes (a `done`/merge `chec
 When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as part of handling the wake, so the primary's clone never sits stale until the next session start or teardown.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-Each task's backend live-task inventory is the ground truth: tmux when `backend=` is absent, or the non-default `backend=` a task's meta records (`docs/configuration.md` "Runtime backend" owns the backend set).
+Each task's backend live-task inventory is the ground truth: Herdr when `backend=` is absent, or the non-default backend a task's meta records (`docs/configuration.md` "Runtime backend" owns the backend set).
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

@@ -62,23 +62,18 @@
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
-#                                   auto-discovered per backend - $TMUX_PANE
-#                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
-#                                   tmux target or a herdr "<session>:<pane-id>"
-#                                   target; which one it's read as is decided by
-#                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
+#                                   auto-discovered as "<session>:<pane-id>"
+#                                   from $HERDR_PANE_ID under Herdr).
+#          FM_SUPERVISOR_BACKEND    supervisor pane backend (Herdr;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
-#                                   executing inside - $TMUX_PANE selects tmux,
-#                                   $HERDR_ENV=1 selects herdr - falling back to
-#                                   tmux). zellij, orca, and cmux are not yet
+#                                   executing inside.
+#                                   $HERDR_ENV=1 selects Herdr.
+#                                   Zellij, Orca, and cmux are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
-#                                   tmux primitives against a non-tmux pane.
+#                                   unsupported primitives against another pane.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -124,7 +119,7 @@
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
-#                                   structural and style-aware (bin/fm-tmux-lib.sh):
+#                                   structural and style-aware:
 #                                   it drops dim/faint ghost text and strips the
 #                                   harness's box borders before deciding, so a
 #                                   ghost-only or bordered-but-empty composer is
@@ -143,13 +138,6 @@ set -u
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-
-# Shared tmux pane primitives for supervisor injection (busy/composer detection
-# + verify-retry submit). Sourced at top level so BOTH the executed daemon and
-# the unit tests (which source this file for its pure functions) get the
-# corrected composer detection. Stale task rechecks use fm-backend.sh below.
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
@@ -174,9 +162,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # daemon has no verified composer/busy primitives wired up for them yet - see
 # docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
-# instead of silently running tmux primitives against a pane that is not a tmux
-# pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+# instead of silently running unsupported primitives against another pane.
+FM_SUPERVISOR_SUPPORTED_BACKENDS="herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -192,9 +179,7 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection and the tmux busy-footer fallback live in
-# bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
-# FM_BUSY_REGEX still overrides the fallback busy set here, as before.
+# FM_BUSY_REGEX overrides the shared fallback busy set.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -525,9 +510,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
   esac
 }
 
-# Busy + composer-empty detection are the shared primitives in fm-tmux-lib.sh
-# (one source of truth with fm-send.sh). These thin wrappers keep the daemon's
-# call sites and the unit tests stable.
+# Busy and composer-empty detection dispatch through the backend abstraction.
 #
 # pane_input_pending returns 0 (pending) when the cursor line holds real
 # unsubmitted text - a human's half-typed line (the return race) or a previous
@@ -535,32 +518,28 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # strips the harness's composer box borders, so a ghost-only or idle bordered
 # claude composer ("│ > … │") is correctly read as empty, not pending (incidents
 # afk-invx-i5 and composer-robust).
-# pane_is_busy / pane_input_pending: BACKEND-AWARE now (previously tmux-only
-# direct calls). <backend> defaults to tmux when omitted, so every existing
-# caller/test that passes only <target> is unaffected. Dispatch goes through
+# The backend defaults to Herdr when omitted.
+# Dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives (fm_backend_busy_state,
 # fm_backend_capture, fm_backend_composer_state) rather than hand-rolling a
 # case statement here, mirroring the same fallback pattern
 # stale_window_is_busy already uses for per-task panes: try the backend's
 # native busy-state first, and fall back to the shared regex-over-capture
-# reader whenever it does not report "busy" (tmux has no native busy-state
-# primitive, so it always takes this fallback path - byte-identical to the
-# pre-existing fm_pane_is_busy, since fm_backend_capture's tmux arm runs the
-# exact same `tmux capture-pane -p -t <target> -S -40`).
+# reader whenever it does not report "busy".
 pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} bs tail40
+  local target=$1 backend=${2:-herdr} bs tail40
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_BUSY_REGEX_DEFAULT}"
 }
 
 # pane_input_pending: the standalone "is there real unsubmitted text" predicate,
-# dispatching through fm_backend_composer_state (byte-identical to a direct
-# fm_tmux_composer_state call for the default/omitted-backend case). inject_msg
+# dispatching through fm_backend_composer_state.
+# inject_msg
 # no longer routes its composer-guard through this boolean: a safe injection
 # target must be affirmatively 'empty', and a boolean pending/not-pending check
 # cannot distinguish an empty agent composer from a bare dead-shell prompt or an
@@ -568,7 +547,7 @@ pane_is_busy() {  # <target> [backend]
 # verdict directly. This predicate is retained as the shared pending check and
 # as the vehicle for the composer-classifier dispatch regression tests.
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
+  local target=$1 backend=${2:-herdr}
   [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
 }
 
@@ -589,7 +568,7 @@ stale_window_is_busy() {  # <window> <state>
     busy) return 0 ;;
   esac
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_BUSY_REGEX_DEFAULT}"
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -617,8 +596,7 @@ escalate_flush() {  # <state>
 }
 
 # --- backend-independent active wedge alert ---------------------------------
-# The tmux status-line flash in inject_wedge_alarm below is a cosmetic,
-# client-side OSD with no cross-backend equivalent, so a wedged non-tmux primary
+# The durable wedge marker and active alert cover a wedged primary.
 # (the 2026-07-10 overnight incident: a claude-on-herdr primary) got NO active
 # signal - only the passive state/.subsuper-inject-wedged marker, which nothing
 # surfaces until the next fleet action (that night, 20 escalations sat buffered
@@ -626,7 +604,7 @@ escalate_flush() {  # <state>
 # on any pane or its backend status-line: an OS-level macOS notification, a
 # herdr notification, or a captain-supplied command (push to a phone, etc.).
 # Every channel is best-effort - a missing or failing channel logs and is
-# skipped, never crashing the daemon loop - and the durable marker plus the tmux
+# skipped, never crashing the daemon loop - and the durable marker plus the
 # flash stay exactly as before.
 #
 # Config: config/wedge-alarm (local, gitignored), one channel directive per
@@ -850,7 +828,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
 # is swallowed). The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, flashes
-# the tmux supervisor client's status line when applicable, and attempts a
+# an active alert channel, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
@@ -874,17 +852,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
-  # Best-effort status-line flash. tmux's display-message is a client-side OSD
-  # with no herdr equivalent; the log line + durable marker above are already
-  # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
-  if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
-  fi
-  # Backend-independent active alert. Unlike the tmux flash above (skipped on
-  # every non-tmux backend), this can reach the captain even when every pane and
+  # The backend-independent active alert can reach the operator even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
@@ -957,8 +925,7 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    # Reconstruct the backend target from metadata, with the live tmux list as the
-    # legacy fallback for old markers that predate meta lookup.
+    # Reconstruct the backend target from metadata.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
@@ -1020,7 +987,7 @@ housekeeping() {  # <state>
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux. The
+#     classifier may have missed). Cheap: status files only.
   #     captain-relevant filtering is the shared classifier's
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
@@ -1038,17 +1005,13 @@ housekeeping() {  # <state>
 
 # Find a recorded or live window target whose task id matches the marker key.
 window_for_task() {  # <task-key> [state]
-  local key=$1 state=${2:-$(_state_root)} meta task w t
+  local key=$1 state=${2:-$(_state_root)} meta task w
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     [ "$(_stale_key "$task")" = "$key" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] && { printf '%s' "$w"; return 0; }
-  done
-  for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
-    t=$(window_to_task "$w" "$state")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done
   return 1
 }
@@ -1065,8 +1028,8 @@ window_for_task() {  # <task-key> [state]
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
 #   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     For tmux that means a cleared composer; for herdr's normal idle-baseline
-#     path it means native agent-state observed a real turn start.
+#     For Herdr's normal idle-baseline path it means native agent-state observed
+#     a real turn start.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
 #     this strict daemon path.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
@@ -1087,12 +1050,9 @@ inject_msg() {  # <message> [state]
   msg=$(_collapse_newlines "$msg")
   msg="${FM_INJECT_MARK}${msg}"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
-  # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
-  # via the herdr adapter instead of always assuming tmux. Falls back to tmux
-  # when unset (sourced/test contexts that never ran fm_super_main's startup
-  # discovery), matching this function's pre-existing default assumption.
-  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  # Dispatch through bin/fm-backend.sh so the Herdr supervisor pane is checked
+  # through the adapter.
+  backend="${FM_SUPERVISOR_BACKEND:-herdr}"
   fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use pane.
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
@@ -1118,9 +1078,7 @@ inject_msg() {  # <message> [state]
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
   # buffer is preserved (strict) rather than cleared.
-  # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
-  # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
-  # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
+  # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh).
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
@@ -1275,9 +1233,9 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
-  # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
-  # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
+# --- auto-discover the supervisor backend first ----------------------------
+# Priority: FM_SUPERVISOR_BACKEND override, then $HERDR_ENV=1, then Herdr.
+# Resolved before the target below, since target
   # discovery composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
@@ -1286,9 +1244,7 @@ fm_super_main() {
   local discovered_backend backend_source
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
-    if [ -n "${TMUX_PANE:-}" ]; then
-      backend_source="TMUX_PANE"
-    elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"
     else
       backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
@@ -1299,12 +1255,12 @@ fm_super_main() {
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
+# Herdr-specific call against it (zellij, Orca, and cmux have no verified
   # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
   # harness-verification discipline). This is the clear refusal the task calls
-  # for, instead of a confusing "does not resolve to a tmux pane" error.
+# for, instead of a confusing target error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=herdr and FM_SUPERVISOR_TARGET to run Firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
@@ -1312,35 +1268,30 @@ fm_super_main() {
   fi
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
-  # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
-  # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
+# Priority: FM_SUPERVISOR_TARGET override, then $HERDR_PANE_ID composed into
+# "<session>:<pane-id>".
+# Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
   # (which reads that env var) use the discovered pane without an extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
-    if [ -n "${TMUX_PANE:-}" ]; then
-      target_source="TMUX_PANE"
-    elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
     else
-      target_source="FALLBACK(firstmate:0)"
+      target_source="none"
     fi
   fi
   if discovered=$(discover_supervisor_target); then
     : # resolved cleanly
   else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+    echo "error: could not auto-discover supervisor pane; set FM_SUPERVISOR_TARGET or run inside Herdr" >&2
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
-  # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
+  # Dispatches through bin/fm-backend.sh so the Herdr supervisor pane is checked
+  # through the adapter.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"

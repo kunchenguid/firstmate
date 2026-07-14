@@ -40,7 +40,7 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
-export FM_BACKEND=tmux
+export FM_BACKEND=herdr
 
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
@@ -235,16 +235,12 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
+# A herdr stub that accepts every subcommand and prints nothing, so no window
 # pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
-make_noop_tmux() {
+make_noop_herdr() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_write_basic_herdr "$fakebin/herdr"
   printf '%s\n' "$fakebin"
 }
 
@@ -267,13 +263,13 @@ make_seeded_home() {
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
-  fakebin=$(make_noop_tmux "$world/tmux-$id")
+  fakebin=$(make_noop_herdr "$world/herdr-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
   [ -n "$harness" ] && spawn_args+=("$harness")
   spawn_args+=(--secondmate)
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+  PATH="$fakebin:$BASE_PATH" HERDR='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
@@ -380,10 +376,10 @@ test_spawn_unverified_secondmate_harness_refused() {
   mkdir -p "$w/home/config" "$w/home/state"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
-  fakebin=$(make_noop_tmux "$w/tmux")
+  fakebin=$(make_noop_herdr "$w/herdr")
   err="$w/spawn.err"
   rc=0
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+  PATH="$fakebin:$BASE_PATH" HERDR='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -406,41 +402,16 @@ test_spawn_unverified_secondmate_harness_refused() {
 
 meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
-# A tmux stub that behaves like make_noop_tmux but also captures the literal
+# A herdr stub that behaves like make_noop_herdr but also captures the literal
 # `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
 # `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
 # for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
-make_launch_capturing_tmux() {
+make_launch_capturing_herdr() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
-    exit 0
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_write_basic_herdr "$fakebin/herdr"
   printf '%s\n' "$fakebin"
 }
 
@@ -451,9 +422,9 @@ spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
-  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  fakebin=$(make_launch_capturing_herdr "$world/herdr-$id")
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+  PATH="$fakebin:$BASE_PATH" HERDR='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
@@ -653,16 +624,16 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   home="$w/home"
   proj="$w/crew-project"
   wt="$w/crew-wt"
-  fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
+  fakebin=$(make_launch_capturing_herdr "$w/herdr-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+  PATH="$fakebin:$BASE_PATH" HERDR="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_HERDR_CWD="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
@@ -720,7 +691,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" herdr node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0

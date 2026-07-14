@@ -75,7 +75,6 @@ This covers statically-visible literal words in command position; opaque dynamic
 `bin/fm-watch.sh` is protected but is not a blessed entry point.
 A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
 
-The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
 
 Literal `sh`, `bash`, or `zsh` `-c` payloads and literal `eval` payloads are recursively classified.
 A literal nested payload that only runs a data-bearing command is allowed.
@@ -170,10 +169,8 @@ The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directl
 ## Live validation record, 2026-07-09
 
 Validation ran in a git-initialized scratch firstmate-shaped project under this task worktree.
-The scratch project contained copies of the modified checker and policy, unchanged tracked adapters, a dummy checkpoint, a dummy arm script, a harmless `tmux` argument-capture fixture, and a private sentinel path.
 No modified file was installed into the primary checkout or a live harness configuration.
 No live watcher, fleet state, or herdr lifecycle command was used.
-The OpenCode interactive check used the dedicated tmux socket `fm-pretool-smoke`.
 
 Harness versions were:
 
@@ -191,7 +188,6 @@ Every harness was instructed to issue these exact shell command strings as separ
 printf 'UNRELATED_EXECUTED\n'
 pgrep -fl '/bin/fm-watch.sh' || true
 source '<scratch-project>/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180
-tmux send-keys -t isolated-pi-lab "printf '%s\n' 'bin/fm-watch-arm.sh &'"; tmux send-keys -t isolated-pi-lab Enter
 bin/fm-watch-arm.sh &
 ```
 
@@ -205,7 +201,6 @@ OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 ```
 
-Observed output for the four allowed calls was `UNRELATED_EXECUTED`, a successful read-only `pgrep`, `CHECKPOINT_EXECUTED`, and two `TMUX_ARGS:` lines that preserved the watcher text as data.
 Each harness blocked the final command with exit 2 mapped through its native adapter behavior.
 The stable reason was `[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown`.
 The dummy arm body would have created `<harness>.sentinel` if the denied command executed.
@@ -221,7 +216,6 @@ Native supervision paths were also validated in the same scratch project:
 - Claude ran `bin/fm-watch-arm.sh --restart` with its native tracked background option and produced `watcher: started pid=<scratch> (scratch)`.
 - Grok ran the same exact command with `background: true`, its hook returned exit 0, and the dummy arm produced the same started line.
 - Codex ran the foreground checkpoint above and produced `CHECKPOINT_EXECUTED`.
-- OpenCode ran in an interactive TUI on `tmux -L fm-pretool-smoke`, reached `session.idle`, and its unchanged watch-arm plugin created the scratch automatic-arm marker.
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.

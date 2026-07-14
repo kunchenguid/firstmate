@@ -125,6 +125,48 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+test_strip_ghost_drops_dim_and_keeps_real_text() {
+  local out
+  out=$(printf '❯ \033[2mpredicted text\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = '❯ ' ] || fail "a dim suggestion was not removed: '$out'"
+  out=$(printf '❯ real text\n' | fm_composer_strip_ghost)
+  [ "$out" = '❯ real text' ] || fail "normal text changed: '$out'"
+  out=$(printf '\033[1mbold typed\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = 'bold typed' ] || fail "bold real text was removed: '$out'"
+  pass "fm_composer_strip_ghost: dim suggestions are removed while normal and bold text remain"
+}
+
+test_strip_ghost_handles_sgr_boundaries() {
+  local out
+  out=$(printf '❯ \033[2;37mpredicted\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = '❯ ' ] || fail "combined dim and color was not removed: '$out'"
+  out=$(printf '\033[2mghost\033[22mREALTAIL\n' | fm_composer_strip_ghost)
+  [ "$out" = REALTAIL ] || fail "normal-intensity boundary did not restore real text: '$out'"
+  out=$(printf 'keep\033[0;2mdrop\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = keep ] || fail "reset-then-dim was not interpreted in order: '$out'"
+  pass "fm_composer_strip_ghost: combined and boundary SGR codes preserve intensity semantics"
+}
+
+test_strip_ghost_preserves_color_payloads() {
+  local out
+  out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = 'green typed' ] || fail "palette payload 2 was mistaken for dim: '$out'"
+  out=$(printf '\033[38;2;224;222;244mbright typed\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = 'bright typed' ] || fail "bright truecolor text was removed: '$out'"
+  out=$(printf '\033[58::5::2munderline typed\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = 'underline typed' ] || fail "underline color payload was removed: '$out'"
+  pass "fm_composer_strip_ghost: color payloads containing 2 are not mistaken for dim"
+}
+
+test_strip_ghost_drops_dark_truecolor_placeholder() {
+  local out
+  out=$(printf '❯ \033[38;2;50;47;70mType a message...\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = '❯ ' ] || fail "dark truecolor placeholder was not removed: '$out'"
+  out=$(printf '❯ deploy\033[2m the staging environment\033[0m\n' | fm_composer_strip_ghost)
+  [ "$out" = '❯ deploy' ] || fail "real text before a trailing ghost was removed: '$out'"
+  pass "fm_composer_strip_ghost: dark placeholders and trailing suggestions are removed without losing real text"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -134,3 +176,7 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_strip_ghost_drops_dim_and_keeps_real_text
+test_strip_ghost_handles_sgr_boundaries
+test_strip_ghost_preserves_color_payloads
+test_strip_ghost_drops_dark_truecolor_placeholder

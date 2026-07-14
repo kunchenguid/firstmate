@@ -21,11 +21,10 @@ disable_project_settings: true
 # diverge from CI again (parity asserted by tests/fm-lint.test.sh).
 # The test command mirrors the Linux behavior job in .github/workflows/ci.yml:
 # iterate every tests/*.test.sh, run each, and fail the step if any one exits
-# non-zero (an agent-driven test step has crashed the daemon). The e2e tests need
-# tmux on PATH, which the firstmate environment provides.
+# agent-driven test step has crashed the daemon).
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
+  test: 'rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

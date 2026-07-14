@@ -1,7 +1,6 @@
 # cmux runtime backend (experimental)
 
 This document records the empirical verification behind `bin/backends/cmux.sh`, the cmux session-provider adapter.
-It is the cmux equivalent of the tmux facts recorded in the `harness-adapters` skill and of `docs/herdr-backend.md`'s/`docs/zellij-backend.md`'s/`docs/orca-backend.md`'s facts for those backends.
 
 cmux is [a Ghostty-based macOS terminal](https://cmux.com) built for AI coding agents, with vertical tabs, notifications, and a CLI/socket JSON-RPC control API (`cmux <verb> ...`).
 Verified against the real installed app: cmux 0.64.17 (build 97), macOS aarch64.
@@ -11,7 +10,6 @@ It never enumerates-and-closes, touches no existing workspace, closes only its o
 
 ## Setup
 
-Pick cmux if you already run it as your terminal and want firstmate crew tabs to live there instead of tmux.
 cmux is **macOS-only** and **GUI-first** - selecting this backend means a real GUI window exists and is running, exactly like Orca's posture.
 
 Prerequisites:
@@ -49,9 +47,7 @@ A configured password is harmless if you later switch to Automation mode: cmux's
 Do not edit `~/.config/cmux/cmux.json` by hand for any of this: the mode change cannot be applied over the socket that is itself still rejecting connections, and the app's config writer drops a hand-added `socketPassword` key entirely (see "Socket control modes" below for that finding).
 
 Ask the firstmate crew to select cmux by putting `cmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=cmux` for a one-off session; telling the first mate in chat to use cmux also works.
-cmux is also selected by **runtime auto-detection**: a firstmate process itself running inside a cmux-spawned terminal (`CMUX_WORKSPACE_ID` set - or, when cmux's bundled claude wrapper stripped that marker, the bundle-id/ancestry fallback signals - checked after `$TMUX`/`HERDR_ENV=1` since cmux is the outermost terminal application, not a nestable multiplexer) spawns new tasks into cmux by default, with no config needed, exactly like herdr's own auto-detection - see "Runtime auto-detection" below.
 Auto-detection only ever picks a SESSION provider; it never touches the one-time socket-access setup above, which stays required regardless of how cmux was selected.
-A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured or was rejected; the refusal names every viable mode with Automation mode as the recommendation, plus the `config/backend`/`--backend tmux` opt-out for a caller who ended up on cmux only because auto-detection picked it.
 
 No first-run provisioning beyond the socket-access setup above and having `jq` installed; firstmate creates the workspace it needs on first spawn, launching the app itself (`open -a cmux`) if it is not already running.
 
@@ -66,28 +62,20 @@ Limitations: cmux is experimental, macOS-only, GUI-first (never viable for a hea
 
 ## Status: experimental
 
-cmux is experimental, exactly like every non-tmux backend in this design.
 Select it by putting `cmux` in a local `config/backend` file, by exporting `FM_BACKEND=cmux`, by telling the first mate in chat to use cmux, or implicitly by runtime auto-detection when firstmate itself is already running inside a cmux-spawned terminal - see "Runtime auto-detection" below.
 GUI-first and macOS-only stay unchanged by that: cmux is never a candidate for a headless/CI/SSH-only instance, because auto-detection can only fire from inside a live cmux terminal in the first place, which such an instance never is.
-Absent `backend=` in a task's meta always means `tmux`; only a cmux task ever carries an explicit `backend=cmux` line.
 A cmux spawn refuses loudly if the `cmux` CLI cannot be found, the installed version is older than the verified minimum (0.64), or the control socket is unreachable/unauthenticated (`fm_backend_cmux_version_check`, `fm_backend_cmux_ensure_running`).
 
 ## Runtime auto-detection
 
 Verified from the shipped app source (`Packages/macOS/CmuxTerminal/Sources/CmuxTerminal/Spawn/TerminalSurface+StartupEnvironment.swift`'s `applyManagedCmuxContextEnvironment`, cloned read-only from `github.com/manaflow-ai/cmux` at the commit current on 2026-07-04): every terminal surface cmux spawns gets `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, and `CMUX_SOCKET_PATH` (plus the legacy `CMUX_TAB_ID`/`CMUX_PANEL_ID` aliases) injected into its environment, and all five keys are marked `protectedKeys` - non-overridable by anything the spawned shell or its own env config does afterward.
-cmux's own CLI corroborates this is a legitimate ambient-identity marker, not incidental: `cmux_open.swift` reads `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` from the environment as its own fallback target when a caller does not pass `--workspace`/`--surface`, exactly how `$TMUX` and `HERDR_ENV`/`HERDR_PANE_ID` work for their own backends.
 
 `fm_backend_detect` (`bin/fm-backend.sh`) checks `CMUX_WORKSPACE_ID` (non-empty) as the PRIMARY cmux marker, not `CMUX_SOCKET_PATH`: the latter is separately documented as a user-settable override for pointing the CLI at a non-default socket path, so its mere presence would not reliably mean "running inside a cmux-spawned terminal" the way `CMUX_WORKSPACE_ID` does.
-Nesting still resolves innermost-first, exactly as it does for herdr: `$TMUX` is checked first, then `HERDR_ENV=1`, then the cmux checks last.
 cmux is checked last deliberately, not because it is a "lesser" backend, but because it is a terminal application - the outermost layer, like iTerm2/Terminal.app - not a session multiplexer.
-Both tmux and herdr can run nested inside a cmux-provided shell (someone starts a tmux or herdr session from within a cmux terminal), but cmux itself cannot run nested inside either of them, so whenever a multiplexer marker is present alongside a cmux signal, that multiplexer really is the innermost, currently-executing layer and must win.
-An auto-detected cmux spawn prints the same loud stderr `NOTICE` herdr's auto-detection prints, naming the winning signal and the `config/backend`/`--backend tmux` opt-out; a fallback-signal detection (below) says so explicitly in that notice, so it is visibly distinct from the primary-marker case.
 
 Auto-detection selects the SESSION provider only.
 It has no bearing on the one-time socket-access setup ("Setup" above): a viable `automation.socketControlMode` is still required for the very first cmux-backed spawn to succeed, auto-detected or explicit, and the existing loud spawn refusal (`fm_backend_cmux_ensure_running`) still fires when it is missing.
-That refusal message names the viable modes and the `config/backend`/`--backend tmux` opt-out, so a captain who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: finish the socket setup to actually use cmux, or opt out back to tmux.
 
-The original build's env-injection finding rested on the source read above alone; it has since been corroborated live (2026-07-04, cmux 0.64.17 build 97): the inherited environment of a tmux server started from a cmux tab on the reference machine carries `CMUX_WORKSPACE_ID`, `CMUX_TAB_ID`, `CMUX_SOCKET_PATH`, `CMUX_BUNDLE_ID`, and `__CFBundleIdentifier=com.cmuxterm.app` into every pane, and firstmate separately confirmed the full injected set on a live tab shell via `ps eww`.
 
 ### The bundled claude wrapper strips `CMUX_*` (unanticipated, load-bearing finding)
 
@@ -112,7 +100,6 @@ Other harnesses launched from a cmux tab are unaffected (cmux ships no wrapper s
 
 ### Fallback signals: bundle id first, then process ancestry
 
-When (and only when) `CMUX_WORKSPACE_ID` is absent - and `$TMUX`/`HERDR_ENV` did not already win - `fm_backend_detect` consults two macOS-only fallback signals, in order (`fm_backend_detect_cmux_fallback`, guarded on `uname` = `Darwin` since cmux itself is macOS-only):
 
 1. **Bundle id:** `__CFBundleIdentifier` equal to `com.cmuxterm.app`.
    LaunchServices sets this app-identity variable for every process an app bundle launches, it is inherited down the process tree, and the wrapper does not strip it (verified in the fake-claude repro above).
@@ -124,12 +111,8 @@ Which signal is authoritative when:
 
 - **Wrapper-stripped claude directly in a cmux tab** (the common case): both signals are present; the bundle id is checked first because it is a pure env read, and it is authoritative.
 - **Environment-scrubbed launch under cmux** (an `env -i`-style invocation with no inherited `__CFBundleIdentifier`): ancestry is the only signal left, and it is authoritative.
-- **Inside a tmux server that was started from a cmux tab**: ancestry is structurally UNUSABLE - the tmux server reparents to launchd (verified live: the reference machine's own cmux-started tmux server has ppid 1), so the walk can never reach cmux - while the bundle id IS inherited into every pane and WOULD false-positive.
-  `$TMUX` winning first is what keeps that correct; the fallbacks are never consulted when a multiplexer marker is present.
-  `tests/fm-backend.test.sh` pins this exact case (`test_backend_detect_cmux_fallback_tmux_nested_false_positive`), alongside the bundle-id, ancestry (pid and comm), non-Darwin-guard, and launchd-stop paths.
 - **SSH sessions, cron, launchd agents**: neither signal fires - sshd/cron reset the environment (no bundle id) and their ancestry ends at launchd.
 
-The positive ancestry walk itself is exercised by fake `ps`/`lsappinfo` unit tests rather than live (running a probe process genuinely parented under the captain's live cmux tabs was judged too intrusive, the same posture as this document's screenshot note); every negative live fact above - the strip, the wrapper ping failure, the tmux reparenting, the bundle-id inheritance, the lsappinfo resolution shapes - was verified against the real machine on 2026-07-04.
 
 ## Worktree provider stays treehouse
 
@@ -140,8 +123,6 @@ The feasibility report searched cmux's source for a shipped git-worktree-owning 
 ## Task container shape: one workspace per task, one surface
 
 cmux's hierarchy is macOS window -> workspace (a vertical-tab entry, cmux's rough analogue of a herdr/zellij tab) -> surface (a pane/split within that workspace).
-There is no "session" concept to multiplex the way tmux/herdr/zellij have - there is just "the app" (one running GUI instance, optionally split across native macOS windows).
-firstmate uses **one cmux workspace per task**, keyed by the caller-facing `fm-<id>` label, with exactly one surface inside it - mirroring tmux's one-window-per-task and zellij's one-tab-per-task shape.
 The caller-facing task label stays `fm-<id>`, but the visible cmux workspace title is `fm-<home-label>-<id>`.
 The home label keeps the same readable identity as herdr's workspace split - `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id - and appends a short stable hash of the resolved `FM_ROOT` path.
 That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible workspace title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
@@ -176,10 +157,8 @@ No session field is needed - unlike herdr/zellij there is no session layer to re
 | Liveness / target readiness | `cmux list-panes --workspace <id> --json --id-format uuids`, checking the surface id appears in `.panes[].surface_ids` | Structural existence check, NOT a content read - see "read-screen fails on a genuinely fresh surface" below for why `read-screen` cannot be used here. Verified reliable on a completely untouched fresh surface, unlike `read-screen`. |
 | Send literal (unsubmitted) | `cmux send --workspace <id> --surface <id> -- <text>` | Verified live: does NOT auto-submit - text sits at the prompt, unexecuted, until a separate Enter. Matches every other backend's "literal-then-separate-Enter" contract. The `--` separator keeps option-shaped text such as `--help` literal. |
 | Send key | `cmux send-key --workspace <id> --surface <id> <key>` | Verified names: `enter`, `escape`, `ctrl-c` all work directly (lowercase, hyphenated). Escape is natively supported (unlike Orca); Ctrl-C correctly interrupted a running `sleep 100` in a live test. cmux's own key vocabulary is richer still (`ctrl-d`/`ctrl-z`/`ctrl-\\`, semantic aliases `sigint`/`sigtstp`/`sigquit`), but firstmate's shared vocabulary only needs these three today. |
-| Send + submit, composed | `send` then `send-key enter` | cmux has no single-call atomic "type and submit" primitive (unlike tmux's `send-keys ... Enter` or herdr's `pane run`); `fm_backend_cmux_send_text_line` composes the two calls, mirroring zellij's equivalent composition. |
 | Bounded capture | `cmux read-screen --workspace <id> --surface <id> --scrollback --lines <N> --json`, trimmed locally with `tail` | No herdr-style small-N empty-result bug: N=1..10 all verified to return correctly-clamped, non-empty content on an already-interacted-with surface. A single call is still bounded by the surface's actual current viewport height regardless of the requested `--lines` value (verified: capped at 16 rows in a headless/no-attached-window test run), so "fetch generous, trim locally" is kept for consistency even though the specific herdr bug does not reproduce. |
 | Worktree-path discovery | marked active cwd probe + capture-scrape (`fm_backend_cmux_current_path`), NOT `current_directory` | `current_directory` DOES reflect a `cd` run directly in the surface's own top-level shell, but stays FROZEN at wherever that shell was when it launched a foreground subshell (exactly what `treehouse get` does) - zellij-shape, not herdr-shape. See "Worktree-path discovery: current_directory does not track a subshell" below. |
-| Busy state | *(no native primitive)* | cmux has agent-awareness elsewhere (Claude Code hooks integration, session-resume tokens) but exposes nothing over the socket API for generic busy/idle classification; `surface.health`/`surface-health` is render health, not agent status. `fm_backend_busy_state`'s dispatcher (`bin/fm-backend.sh`) falls through to `unknown` for cmux via its wildcard case, exactly like tmux/zellij/Orca - the watcher's existing pane-hash + regex path is the only busy-state source for this backend. |
 | Kill | `cmux close-workspace --workspace <id>`, preceded by a throwaway `new-workspace --window <win> --focus false --id-format uuids` when the target is the only workspace in its window | See "Closing the last workspace in a window" below. The backend owns the whole task workspace; kill closes it best-effort (`\|\| true`), but cmux silently refuses to close the LAST workspace in a window, so kill first detects that case (`fm_backend_cmux_window_of_workspace`) and adds a throwaway sibling before closing, matching every other backend's `kill` contract. |
 | Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and `FM_ROOT` hash. |
 
@@ -323,13 +302,11 @@ The app source (`Sources/App/CmuxCLIPathInstaller.swift`) reveals cmux ships an 
 
 ## Duplicate-title behavior (verified, expected finding)
 
-Same as herdr's tabs and zellij's tabs, unlike tmux's own window-name uniqueness: cmux enforces no title uniqueness at all for workspaces or for surfaces/tabs within a workspace.
 Verified live: two workspaces created with the identical title `fm-test-dup` both succeeded and listed simultaneously with distinct ids; two surfaces within one workspace both renamed to the identical tab title also succeeded.
 `fm_backend_cmux_create_task`'s own title-based duplicate check is therefore required, mirroring both prior adapters' posture exactly.
 
 ## Composer verification: structural border-row classification (adapted from herdr)
 
-cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and herdr's `--format ansi` path for ANSI-aware ghost/placeholder classification.
 Per this build task's explicit direction, `fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural border-row classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach: it locates the composer's own row as the only captured line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain ASCII `|`), scanning forward and keeping the LAST match so an earlier border-shaped line can never outrank the real bottom-anchored composer row.
 After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt with no boxed composer row reads `unknown`, not empty.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
@@ -364,7 +341,6 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 
 ## Known gaps left for a follow-up
 
-- **No event push at all**, not even herdr's semantic busy-state: cmux has agent-awareness elsewhere (Claude Code hooks, session-resume) but nothing exposed over the socket API for generic busy/idle classification, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux/zellij/Orca path.
 - **GUI-first, macOS-only, requires the app running** - identical posture to Orca.
   Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (cmux runtime signals; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place.
   The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.

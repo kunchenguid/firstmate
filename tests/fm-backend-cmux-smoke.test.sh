@@ -137,7 +137,7 @@ pass "real cmux: send_key C-c (normalized to the verified 'ctrl-c' name) succeed
 
 bs=$(fm_backend_busy_state cmux "$TARGET")
 [ "$bs" = unknown ] || fail "fm_backend_busy_state should report unknown for cmux (no native primitive), got '$bs'"
-pass "real cmux: fm_backend_busy_state reports unknown (watcher falls back to pane-regex, same as tmux/zellij/orca)"
+pass "real cmux: fm_backend_busy_state reports unknown (watcher falls back to pane-regex, same as herdr/zellij/orca)"
 
 # --- window_of_workspace: real-cmux window/count detection -------------------
 # The last-workspace-in-a-window teardown fix (docs/cmux-backend.md "Closing the

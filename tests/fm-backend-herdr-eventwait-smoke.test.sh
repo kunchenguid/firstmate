@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+if [ "${FM_RUN_ISOLATED_HERDR_E2E:-0}" != 1 ]; then
+  printf 'ok - real Herdr event-wait e2e is opt-in\n'
+  exit 0
+fi
 # tests/fm-backend-herdr-eventwait-smoke.test.sh - REAL-herdr smoke test for the
 # native pane.agent_status_changed push escalation (fm_backend_herdr_wait_transition,
 # bin/backends/herdr.sh, and its raw-socket reader bin/backends/herdr-eventwait.py).
@@ -33,13 +37,14 @@ cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+herdr_test_provision "$SESSION" || fail "could not provision the isolated Herdr lab session"
+herdr_test_route_calls "$SESSION"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
-HERDR_VERSION=$(herdr --version 2>/dev/null | head -1)
+HERDR_VERSION=$(fm_herdr_lab_cli "$SESSION" status --json 2>/dev/null | jq -r '.client.version')
 
 # --- real capability gate ----------------------------------------------------
 

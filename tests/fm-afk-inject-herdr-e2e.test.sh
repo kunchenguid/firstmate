@@ -1,28 +1,23 @@
 #!/usr/bin/env bash
-# tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
-# away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
-# counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
-# Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
-# isolation patterns: everything runs on a throwaway, named, NEVER-default
-# HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
-# herdr or jq is not installed.
+if [ "${FM_RUN_ISOLATED_HERDR_E2E:-0}" != 1 ]; then
+  printf 'ok - real Herdr injection e2e is opt-in\n'
+  exit 0
+fi
+# tests/fm-afk-inject-herdr-e2e.test.sh - real-Herdr end-to-end test for the
+# away-mode daemon's Herdr transport in bin/fm-supervise-daemon.sh.
+# Every call is routed through bin/fm-herdr-lab.sh in a generated non-default
+# session, including adapter calls through the PATH shim below.
 #
-# Unlike the tmux e2e (which redirects a bare `tmux` PATH shim to a private
-# socket), herdr already supports named-session isolation via --session, so no
-# PATH redirection is needed for the happy path - the daemon is simply pointed
-# at FM_SUPERVISOR_BACKEND=herdr, FM_SUPERVISOR_TARGET="<session>:<pane-id>",
-# and HERDR_SESSION="<the isolated session>". A thin herdr SHIM is still used,
-# but only to simulate a swallowed Enter (Scenario B) - herdr's real CLI has no
-# built-in way to drop a keystroke, so the shim intercepts exactly one
-# `pane send-keys <pane> enter` call and forwards everything else to the real
-# binary untouched.
+# Named-session isolation is enforced by a PATH shim that routes every normal
+# command through fm-herdr-lab.sh with an explicit generated session.
+# The shim also simulates a swallowed Enter in Scenario B by intercepting
+# exactly one `pane send-keys <pane> enter` call.
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
 # binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
 # bordered branch of fm_backend_herdr_composer_state, and logs every submitted
-# line (hex + text + injection/user classification) - the same technique
-# tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
-# test asserts on submitted CONTENT, not pane appearance. It ALSO registers
+# line with hex, text, and injection/user classification fields, so this test
+# asserts on submitted content rather than pane appearance. It also registers
 # itself as a real herdr agent via `herdr pane report-agent` and reports an
 # idle/working/idle cycle around each submission, because
 # fm_backend_herdr_send_text_submit's confirmation is native agent-state
@@ -38,16 +33,15 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+SESSION=$("$LAB_HELPER" name afk-herdr-e2e)
 export HERDR_SESSION="$SESSION"
-STATE_DIR=
-HERDR_SHIM_DIR=
+STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
+HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
+REAL_PATH=$PATH
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_TARGET=
@@ -60,12 +54,37 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  PATH="$REAL_PATH" "$LAB_HELPER" teardown "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+
+cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
+#!/usr/bin/env bash
+set -euo pipefail
+args=("\$@")
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = send-keys ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
+  found_enter=0
+  for arg in "\${args[@]}"; do [ "\$arg" = enter ] && found_enter=1; done
+  if [ "\$found_enter" = 1 ]; then
+    rm -f "$STATE_DIR/.swallow-enter"
+    exit 0
+  fi
+fi
+n=\${#args[@]}
+if [ "\$n" -ge 2 ] && [ "\${args[\$((n-2))]}" = --session ]; then
+  [ "\${args[\$((n-1))]}" = "$SESSION" ] || exit 97
+  args=("\${args[@]:0:\$((n-2))}")
+else
+  [ "\${HERDR_SESSION:-}" = "$SESSION" ] || exit 98
+fi
+PATH="$REAL_PATH" exec "$LAB_HELPER" run "$SESSION" "\${args[@]}"
+SHIM
+chmod +x "$HERDR_SHIM_DIR/herdr"
+PATH="$HERDR_SHIM_DIR:$REAL_PATH"
+export PATH
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=bin/fm-supervise-daemon.sh
@@ -76,7 +95,6 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
-STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
 mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
@@ -92,10 +110,10 @@ EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
 
-# A second, independent live task tab in the same workspace, mirroring the tmux
+# A second, independent live task tab in the same workspace, mirroring the herdr
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for
-# parity so this test's shape matches the tmux e2e's.
+# parity so this test's shape matches the herdr e2e's.
 FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
   || fail "could not create the fake crewmate scratch tab"
 read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
@@ -103,8 +121,7 @@ $FAKE_CREW_IDS
 EOF
 
 # --- deterministic bordered-composer loop, drawn in the scratch pane ---------
-# Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
-# "│ > <buf> │" border so the bordered branch of
+# Draws a "│ > <buf> │" border so the bordered branch of
 # fm_backend_herdr_composer_state recognizes it, exactly like a bordered-TUI
 # harness composer. ALSO registers itself as a real herdr agent via `herdr
 # pane report-agent` and reports idle/working transitions around each
@@ -126,10 +143,11 @@ cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\xE2\x81\xA3'
 LOG="$1"
+LAB_HELPER="$2"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
 report_agent_state() {  # <idle|working>
-  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
+  "$LAB_HELPER" run "$HERDR_SESSION" pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" >/dev/null 2>&1
 }
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
@@ -199,26 +217,9 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
+fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE' '$LAB_HELPER'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
-
-# --- herdr shim: forwards to the real binary, optionally swallows one Enter --
-REAL_HERDR=$(command -v herdr)
-HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
-cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
-#!/usr/bin/env bash
-if [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  found_enter=0
-  for _a in "\$@"; do [ "\$_a" = "enter" ] && found_enter=1; done
-  if [ "\$found_enter" = 1 ]; then
-    rm -f "$STATE_DIR/.swallow-enter"
-    exit 0
-  fi
-fi
-exec "$REAL_HERDR" "\$@"
-SHIM
-chmod +x "$HERDR_SHIM_DIR/herdr"
 
 wait_daemon_started() {
   local label=${1:-daemon} start_line=${2:-0} i=0 new_log

@@ -55,8 +55,8 @@ mkdir -p "$STATE"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
 # (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
 # synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
-# no native event push. tmux always reports unknown busy-state, preserving the
-# original regex path. A push-capable backend (herdr) additionally replaces this
+# no native event push.
+# A push-capable backend (Herdr) additionally replaces this
 # watcher's blind terminal sleep with a bounded wait on its native event stream
 # (event_wait_or_sleep below), so a crew entering `blocked` wakes its supervisor
 # sub-second; the poll loop stays live every cycle as the permanent fail-closed
@@ -175,7 +175,7 @@ hash_pane() {
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
 # fm_session_busy_state gets real semantics"); falls back to the existing
-# pane-tail regex ONLY when the backend reports unknown (tmux always does, so
+# pane-tail regex only when the backend reports unknown, so
 # its path is unchanged byte-for-byte). <tail40> is the same bounded capture
 # already read for hashing, so this adds no extra backend calls on the
 # regex-fallback path.
@@ -204,18 +204,18 @@ window_kind() {
 }
 
 # window_backend: the backend recorded in the meta whose window= matches <w>,
-# defaulting to tmux (absent backend= means tmux; the P1 compatibility
+# defaulting to Herdr (absent backend= means Herdr;
 # contract) when no matching meta carries the field, or none matches at all.
 window_backend() {
   local w=$1 meta backend
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
     backend=$(grep '^backend=' "$meta" | cut -d= -f2- || true)
-    [ -n "$backend" ] || backend=tmux
+    [ -n "$backend" ] || backend=herdr
     echo "$backend"
     return 0
   fi
-  echo tmux
+  echo herdr
 }
 
 window_label() {

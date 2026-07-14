@@ -3,11 +3,11 @@
 # Usage: fm-send.sh <target> <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target. fm-send refuses unresolved guesses rather than falling back to a
-#   tmux window search, because a "successful" send to the wrong endpoint is
+#   target.
+#   fm-send refuses unresolved guesses because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
+# Key support is backend-specific: Herdr supports Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
@@ -15,8 +15,7 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
-# Submission dispatches through the target's recorded backend; the tmux adapter
-# shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
+# Submission dispatches through the target's recorded backend.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
@@ -154,11 +153,11 @@ fm_send_resolve_target() {  # <raw-target>
   case "$raw" in
     *:*)
       colons=$(fm_send_count_colons "$raw")
-      if [ "$colons" -ge 2 ]; then
-        assumed=herdr
-      else
-        assumed=tmux
+      if [ "$colons" -lt 2 ]; then
+        echo "error: explicit target '$raw' has no unambiguous backend shape; use a recorded task selector" >&2
+        return 1
       fi
+      assumed=herdr
       if ! fm_backend_target_exists "$assumed" "$raw"; then
         echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
         return 1

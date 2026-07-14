@@ -174,7 +174,7 @@ pass "real zellij: send_key C-c (normalized to the verified 'Ctrl c' name) succe
 
 bs=$(fm_backend_busy_state zellij "$TARGET")
 [ "$bs" = unknown ] || fail "fm_backend_busy_state should report unknown for zellij (D5: no native primitive), got '$bs'"
-pass "real zellij: fm_backend_busy_state reports unknown (D5 - watcher falls back to pane-regex, same as tmux)"
+pass "real zellij: fm_backend_busy_state reports unknown (D5 - watcher falls back to pane-regex, same as herdr)"
 
 # --- kill -----------------------------------------------------------------
 
