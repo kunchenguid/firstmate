@@ -130,6 +130,9 @@ case "$1 ${2:-}" in
     else
       printf '%s\n' stopped > "$state/$session"
     fi
+    if [ -f "$state/$session.replace-after-stop" ]; then
+      printf '%s\n' foreign-stopped > "$state/$session"
+    fi
     ;;
   "session delete")
     [ "$3" = "$session" ] || exit 92
@@ -187,6 +190,14 @@ chmod +x "$FAKEBIN/lsof"
 
 # shellcheck source=bin/fm-herdr-lab.sh
 . "$ROOT/bin/fm-herdr-lab.sh"
+
+fm_herdr_lab_backend_atomic_delete() {
+  local name=$1 authorization=$2
+  [ "$(printf '%s' "$authorization" | jq -r '.session')" = "$name" ] || return 1
+  [ "$(cat "$FM_FAKE_HERDR_STATE/$name" 2>/dev/null)" = stopped ] || return 1
+  printf 'atomic delete proof --session %s\n' "$name" >> "$FM_FAKE_HERDR_LOG"
+  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1
+}
 
 run_with_fake() {
   PATH="$FAKEBIN:$PATH" \
@@ -301,8 +312,10 @@ test_provision_run_and_guarded_teardown() {
   fi
   sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "stop was not immediately preceded by a fresh refuse-default session list"
-  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
+  sed -n "$((delete_line - 2))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
+  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "atomic delete proof --session $name" >/dev/null \
+    || fail "delete was not immediately preceded by its consumed backend-atomic proof"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
 }
 
@@ -677,6 +690,20 @@ test_stopped_replacement_with_reused_fields_fails_closed() {
   pass "fm-herdr-lab: same-directory stopped replacements cannot authorize delete"
 }
 
+test_replacement_in_authorized_window_fails_closed() {
+  local name="fm-lab-authorized-window-$$" status=0 token
+  run_with_fake fm_herdr_lab_provision "$name" || fail "authorized-window fixture provision failed"
+  touch "$FAKE_STATE/$name.replace-after-stop"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "replacement in the authorized stop-delete window must fail closed"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "authorized-window replacement reached delete"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "authorized-window replacement discarded evidence"
+  token=$(jq -r '.owned_session.instance.token_path' "$TRIPWIRES/$name.fleet-state.json")
+  rm -f "$token" "$TRIPWIRES/$name.fleet-state.json" "$FAKE_STATE/$name" "$FAKE_STATE/$name.replace-after-stop"
+  pass "fm-herdr-lab: authorized-window replacements fail closed"
+}
+
 test_generic_socket_parent_cannot_prove_storage_identity() {
   local name="fm-lab-generic-storage-$$" status=0 token
   FM_FAKE_HERDR_LAB_SOCKET="/tmp/$name.sock" \
@@ -863,6 +890,7 @@ test_changed_owned_identity_blocks_lifecycle
 test_reused_fields_with_foreign_socket_owner_fail_closed
 test_replacement_immediately_before_delete_fails_closed
 test_stopped_replacement_with_reused_fields_fails_closed
+test_replacement_in_authorized_window_fails_closed
 test_generic_socket_parent_cannot_prove_storage_identity
 test_reused_pid_with_changed_start_identity_fails_closed
 test_identity_change_after_stop_blocks_delete
