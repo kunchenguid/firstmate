@@ -1,0 +1,22 @@
+{
+  "name": "@krakenloop/memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KrakenLoop canonical memory registry CLI for FirstMate PR-1.",
+  "type": "module",
+  "bin": {
+    "mem": "./bin/mem.mjs"
+  },
+  "engines": {
+    "node": ">=20.11.0 <23"
+  },
+  "scripts": {
+    "bootstrap": "npm ci && node ./scripts/install-shim.mjs",
+    "install-shim": "node ./scripts/install-shim.mjs",
+    "health": "node ./bin/mem.mjs doctor",
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "dependencies": {
+    "zod": "3.25.76"
+  }
+}

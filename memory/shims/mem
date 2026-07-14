@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${MEM_CLI:-}" ]]; then
+  exec node "$MEM_CLI" "$@"
+fi
+
+ROOT="${FM_HOME:-$HOME/fleet/firstmate-runtime}"
+CLI="$ROOT/memory/bin/mem.mjs"
+
+if [[ ! -f "$CLI" ]]; then
+  echo "mem: canonical CLI not found at $CLI; fix: cd \"$ROOT/memory\" && npm ci" >&2
+  exit 127
+fi
+
+exec node "$CLI" "$@"

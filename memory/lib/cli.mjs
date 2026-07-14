@@ -1,0 +1,148 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { appendRegistryEvent, auditRegistry, buildActiveIndex, foldRegistry, recoverRegistry, snapshotRegistry } from './registry.mjs';
+import { checkDoctor } from './doctor.mjs';
+import { registryDir, registryPaths } from './paths.mjs';
+
+function parseArgs(args) {
+  const out = { _: [] };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (!arg.startsWith('--')) out._.push(arg);
+    else {
+      const key = arg.slice(2);
+      const next = args[i + 1];
+      if (!next || next.startsWith('--')) out[key] = true;
+      else {
+        if (out[key] === undefined) out[key] = next;
+        else if (Array.isArray(out[key])) out[key].push(next);
+        else out[key] = [out[key], next];
+        i += 1;
+      }
+    }
+  }
+  return out;
+}
+
+function list(value) {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function fieldsFromFlags(flags) {
+  return {
+    summary: flags.summary,
+    body: flags.body || '',
+    scope: flags.scope || 'fleet',
+    projects: list(flags.project).length ? list(flags.project) : ['*'],
+    taskKinds: list(flags.kind).length ? list(flags.kind) : ['*'],
+    keywords: list(flags.keyword),
+    aliases: list(flags.alias),
+    entities: list(flags.entity),
+    commands: list(flags.command),
+    failureModes: list(flags['failure-mode']),
+    relatedTerms: list(flags['related-term']),
+    confidence: flags.confidence || 'unverified',
+    riskClass: flags['risk-class'] || 'standard'
+  };
+}
+
+function evidence(flags) {
+  return list(flags.evidence).map((entry) => {
+    const [type, ...rest] = entry.split(':');
+    return { type, ref: rest.join(':') || entry };
+  });
+}
+
+function actor(flags) {
+  return { kind: flags['actor-kind'] || 'firstmate', id: flags.actor || 'mem-cli' };
+}
+
+function print(value, json = false) {
+  if (json) console.log(JSON.stringify(value, null, 2));
+  else if (typeof value === 'string') console.log(value);
+  else console.log(JSON.stringify(value, null, 2));
+}
+
+export async function main(args, options = {}) {
+  const flags = parseArgs(args);
+  const verb = flags._[0];
+  const dir = registryDir(process.env);
+  try {
+    if (verb === 'propose') {
+      if (!flags.summary) throw new Error('propose requires --summary');
+      const result = await appendRegistryEvent(dir, { event: 'proposed', actor: actor(flags), fields: fieldsFromFlags(flags), evidence: evidence(flags), reason: flags.reason });
+      buildActiveIndex(dir);
+      print({ memId: result.event.memId, eventId: result.event.eventId, skipped: result.skipped }, flags.json);
+    } else if (verb === 'activate') {
+      const memId = flags._[1];
+      if (!memId) throw new Error('activate requires MEM id');
+      const result = await appendRegistryEvent(dir, { event: 'activated', memId, actor: actor(flags), fields: { confidence: flags.confidence || 'observed' }, evidence: evidence(flags), validation: { method: flags.method || 'captain', by: flags.actor || 'mem-cli', ref: flags.validation || flags.evidence }, reason: flags.reason });
+      buildActiveIndex(dir);
+      print({ memId, eventId: result.event.eventId }, flags.json);
+    } else if (verb === 'update') {
+      const memId = flags._[1];
+      if (!memId) throw new Error('update requires MEM id');
+      const result = await appendRegistryEvent(dir, { event: 'updated', memId, actor: actor(flags), fields: fieldsFromFlags(flags), evidence: evidence(flags), reason: flags.reason });
+      buildActiveIndex(dir);
+      print({ memId, eventId: result.event.eventId }, flags.json);
+    } else if (['supersede', 'retire', 'quarantine'].includes(verb)) {
+      const memId = flags._[1];
+      if (!memId) throw new Error(`${verb} requires MEM id`);
+      const event = verb === 'supersede' ? 'superseded' : `${verb}d`;
+      const result = await appendRegistryEvent(dir, { event, memId, actor: actor(flags), successor: flags.successor, evidence: evidence(flags), reason: flags.reason });
+      buildActiveIndex(dir);
+      print({ memId, eventId: result.event.eventId }, flags.json);
+    } else if (verb === 'show') {
+      const memId = flags._[1];
+      const fold = foldRegistry(dir);
+      const record = fold.records.get(memId);
+      if (!record) throw new Error(`record not found: ${memId}`);
+      if (flags.chain) {
+        const chain = [record, ...[...(record.supersedes || []), record.supersededBy].filter(Boolean).map((id) => fold.records.get(id)).filter(Boolean)];
+        print({ record, chain, registry: fold.watermark, health: fold.health }, flags.json);
+      } else print(flags.json ? { record, registry: fold.watermark, health: fold.health } : `${record.id} [${record.status}] ${record.summary}\n${record.body}`, flags.json);
+    } else if (verb === 'audit') {
+      const audit = auditRegistry(dir);
+      if (flags.json) print(audit, true);
+      else {
+        console.log(`Registry: ${audit.registry.health} ${audit.registry.watermark.seq}:${audit.registry.watermark.eventId || 'none'}`);
+        console.log(`Records: ${audit.records.total} total, ${audit.records.active} active`);
+        console.log(`Active index: ${audit.activeIndex.status}`);
+        if (audit.registry.corrupt) console.log(`CRITICAL: ${audit.registry.corrupt.reason}`);
+      }
+      process.exitCode = audit.ok ? 0 : 1;
+    } else if (verb === 'project' || (verb === 'index' && flags._[1] === 'rebuild')) {
+      const index = buildActiveIndex(dir);
+      print({ index: registryPaths(dir).index, registry: index.registry, records: index.recordCount }, flags.json);
+    } else if (verb === 'snapshot') {
+      print(snapshotRegistry(dir), flags.json);
+    } else if (verb === 'recover') {
+      print(await recoverRegistry(dir), flags.json);
+    } else if (verb === 'doctor') {
+      const doctor = checkDoctor(options.root || path.resolve('.', 'memory'), process.env);
+      if (flags.json) print(doctor, true);
+      else {
+        console.log(`Memory CLI: ${doctor.cli.available ? 'available' : 'missing'} (${doctor.cli.path})`);
+        console.log(`Canonical checkout: ${doctor.canonicalCheckout.path}`);
+        console.log(`Node: ${doctor.node.version} (${doctor.node.compatible ? 'compatible' : 'incompatible'})`);
+        console.log(`Package lock: ${doctor.packageLock.current ? 'current' : 'not current'}`);
+        console.log(`Required dependencies: ${doctor.requiredDependencies.ok ? 'available' : `missing ${doctor.requiredDependencies.missing.join(', ')}`}`);
+        console.log(`PGlite: ${doctor.pglite.available ? 'available' : doctor.pglite.status}`);
+        console.log(`Vector extension: ${doctor.vectorExtension.available ? 'available' : doctor.vectorExtension.status}`);
+        console.log(`Embedding provider: ${doctor.embeddingProvider.configured ? 'configured' : 'not configured (optional)'}`);
+        console.log(`Registry: ${doctor.registry.status} (${doctor.registry.path})`);
+        console.log(`Active-memory index: ${doctor.activeIndex.status}`);
+      }
+      process.exitCode = doctor.ok ? 0 : 1;
+    } else if (verb === 'help' || !verb) {
+      console.log('Usage: mem propose|activate|show|update|supersede|retire|quarantine|audit|project|index rebuild|snapshot|recover|doctor');
+    } else {
+      throw new Error(`unknown command: ${verb}`);
+    }
+  } catch (error) {
+    if (flags.json) console.log(JSON.stringify({ ok: false, error: error.message, code: error.code || null }, null, 2));
+    else console.error(`mem: ${error.message}`);
+    process.exitCode = 1;
+  }
+}
