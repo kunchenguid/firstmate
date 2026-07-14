@@ -9,6 +9,9 @@
 #   one fail closed unless --unrestricted explicitly opts this spawn into the
 #   harness's autonomous mode with the captain's per-task approval. Raw launch
 #   commands are recorded as permissions=custom unless --unrestricted is also present.
+#   An unrestricted secondmate launch also records which harness received that
+#   approval, and bootstrap recovery replays it only when the current resolved
+#   secondmate harness still matches that recorded approval.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -232,6 +235,7 @@ orca_spawn_abort_cleanup() {
           echo "harness=$HARNESS"
           echo "kind=$KIND"
           echo "permissions=$PERMISSIONS"
+          [ "$PERMISSIONS" != unrestricted ] || echo "approved_harness=$HARNESS"
           echo "mode=${MODE:-no-mistakes}"
           echo "yolo=${YOLO:-off}"
           echo "tasktmp=${TASK_TMP:-}"
@@ -1038,6 +1042,7 @@ META_WINDOW=$T
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "permissions=$PERMISSIONS"
+  [ "$PERMISSIONS" != unrestricted ] || echo "approved_harness=$HARNESS"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"

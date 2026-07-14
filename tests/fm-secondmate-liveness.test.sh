@@ -243,7 +243,7 @@ new_world() {
 # worktree; a non-git home just makes the unrelated fast-forward sweep log a
 # harmless "not a git repo" skip.
 add_sm_home() {
-  local w=$1 id=$2 window=$3 harness=${4:-claude} permissions=${5:-}
+  local w=$1 id=$2 window=$3 harness=${4:-claude} permissions=${5:-} approved_harness=${6:-}
   local home="$w/$id"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -254,6 +254,7 @@ add_sm_home() {
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
     [ -z "$permissions" ] || printf 'permissions=%s\n' "$permissions"
+    [ -z "$approved_harness" ] || printf 'approved_harness=%s\n' "$approved_harness"
     printf 'home=%s\n' "$home"
   } > "$w/home/state/$id.meta"
 }
@@ -355,7 +356,7 @@ test_sweep_replays_recorded_unrestricted_permissions() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unrestricted-replay)
   printf 'pi\n' > "$w/home/config/secondmate-harness"
-  add_sm_home "$w" sm1 firstmate:fm-sm1 pi unrestricted
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi unrestricted pi
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
@@ -365,7 +366,49 @@ test_sweep_replays_recorded_unrestricted_permissions() {
     "a recorded unrestricted secondmate should replay that approval during bootstrap recovery"
   assert_contains "$(cat "$log")" "new-window" \
     "replaying unrestricted permissions should relaunch the dead secondmate"
+  assert_grep "permissions=unrestricted" "$w/home/state/sm1.meta" \
+    "replayed unrestricted recovery should preserve the recorded permission class"
+  assert_grep "approved_harness=pi" "$w/home/state/sm1.meta" \
+    "replayed unrestricted recovery should preserve the approved harness binding"
   pass "sweep: bootstrap replays recorded unrestricted secondmate permissions"
+}
+
+test_sweep_legacy_unrestricted_meta_falls_back_fail_closed() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-legacy-unrestricted)
+  printf 'pi\n' > "$w/home/config/secondmate-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi unrestricted
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed: error: harness 'pi' has no verified bounded launch profile" \
+    "legacy unrestricted metadata without an approved-harness binding must fall back to bounded fail-closed recovery"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "legacy unrestricted metadata must not replay an unrestricted launch without a matching approval binding"
+  pass "sweep: legacy unrestricted metadata falls back to bounded fail-closed recovery"
+}
+
+test_sweep_drops_unrestricted_when_current_harness_changes() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unrestricted-mismatch)
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi unrestricted pi
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a changed secondmate harness should still recover, but without replaying an old unrestricted approval"
+  assert_grep "harness=claude" "$w/home/state/sm1.meta" \
+    "respawn should re-resolve the current secondmate harness"
+  assert_grep "permissions=bounded" "$w/home/state/sm1.meta" \
+    "a mismatched approved harness must drop back to the bounded profile"
+  assert_no_grep "approved_harness=" "$w/home/state/sm1.meta" \
+    "a bounded respawn on the new harness must not retain the old unrestricted approval binding"
+  pass "sweep: a changed secondmate harness drops an old unrestricted approval"
 }
 
 test_sweep_skipped_under_detect_only() {
@@ -413,6 +456,8 @@ test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_replays_recorded_unrestricted_permissions
+test_sweep_legacy_unrestricted_meta_falls_back_fail_closed
+test_sweep_drops_unrestricted_when_current_harness_changes
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 

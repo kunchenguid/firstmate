@@ -91,8 +91,8 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
-  secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
+Default fields: schema, home, generated, prs, in_flight{id,kind,permissions,state,doing},
+  secondmates{id,state,permissions,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -285,6 +285,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def permission_summary($xs):
+    ($xs | map(if . == null or . == "" then "unknown" else . end) | unique) as $p
+    | if ($p | length) == 1 then $p[0] else "unknown" end;
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
@@ -310,13 +313,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
          | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
   | ([ if .secondmate_current.registry.available == false then
-         {id:"(registry)",state:"unknown",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
+         {id:"(registry)",state:"unknown",permissions:"unknown",
+          doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
           freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
           age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable")}
        else empty end ]
      + [ (.secondmate_current.records // [])[]
        | {id,state:.current.state,
+          permissions:(permission_summary([.endpoints[]?.permissions])),
           doing:((if .current.state == "active_child_work" then
                     ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
                   elif .current.state == "captain_decision" then
@@ -329,14 +334,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[] | select(.kind != "secondmate") | {
-        id, kind,
+        id, kind, permissions:(.permissions // "unknown"),
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ (.secondmate_current.records // [])[]
          | select(.current.state == "active_child_work")
-         | {id,kind:"secondmate",state:.current.state,
+         | {id,kind:"secondmate",
+            permissions:(permission_summary([.active_children[]?.permissions])),
+            state:.current.state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .tasks[] as $t | select($t.kind != "secondmate") | ($t.hints.open_decisions // [])[]
        | {id:$t.id, key, verb, summary:(.summary | trunc(90)),owner:"(main)"} ]

@@ -134,8 +134,9 @@ Harnesses with verified bounded profiles launch bounded by default, and `fm-spaw
 Claude and Codex are the currently verified bounded adapters; OpenCode, Pi, and Grok fail closed by default because Firstmate has not verified a bounded unattended contract for them.
 `--unrestricted` is the explicit per-spawn escape hatch and must only be used with the captain's approval for that task.
 Raw launch commands remain an adapter-development escape hatch and are classified as custom unless the caller explicitly marks them unrestricted.
-Every new task records `permissions=bounded`, `permissions=unrestricted`, or `permissions=custom` in its meta file, and the Fleet snapshot projects that value for dashboard consumers.
+Every new task records `permissions=bounded`, `permissions=unrestricted`, or `permissions=custom` in its meta file, and the Fleet snapshot, Fleet view, and bearings projection surface that value.
 Legacy task metadata without the field is surfaced as `unknown` instead of inferring a safety guarantee.
+For secondmates, bootstrap recovery replays an unrestricted launch only when the current resolved secondmate harness still matches the harness that originally received that explicit approval.
 
 ## Optional secondmates
 

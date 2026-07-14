@@ -33,8 +33,10 @@
 #          distinct from the endpoint pane-presence check): already-live is a
 #          no-op, respawned means a confirmed-dead endpoint (a bare shell left
 #          behind by an exited secondmate agent) was killed and relaunched via
-#          bin/fm-spawn.sh --secondmate, and skipped means the probe could not
-#          confidently classify the endpoint (never acted on - a false-dead
+#          bin/fm-spawn.sh --secondmate, replaying an already-recorded
+#          unrestricted approval only when today's resolved secondmate harness
+#          still matches that approved harness, and skipped means the probe could
+#          not confidently classify the endpoint (never acted on - a false-dead
 #          reading would spin up a duplicate agent). Session-start scope only;
 #          see AGENTS.md "Session start" and docs/tmux-backend.md /
 #          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
@@ -275,8 +277,10 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out permissions
+  local meta id window harness backend target verdict out permissions approved_harness
+  local current_secondmate_harness
   local -a respawn_args
+  current_secondmate_harness=
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -298,8 +302,14 @@ secondmate_liveness_sweep() {
         ;;
       dead)
         permissions=$(fm_meta_get "$meta" permissions)
+        approved_harness=$(fm_meta_get "$meta" approved_harness)
         respawn_args=("$id" --secondmate)
-        [ "$permissions" != unrestricted ] || respawn_args+=(--unrestricted)
+        if [ "$permissions" = unrestricted ] && [ -n "$approved_harness" ]; then
+          if [ -z "$current_secondmate_harness" ]; then
+            current_secondmate_harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
+          fi
+          [ "$approved_harness" != "$current_secondmate_harness" ] || respawn_args+=(--unrestricted)
+        fi
         fm_backend_kill "$backend" "$target" 2>/dev/null || true
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1); then
           echo "SECONDMATE_LIVENESS: secondmate $id: respawned"

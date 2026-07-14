@@ -117,6 +117,8 @@ test_no_profile_uses_bounded_claude_launch() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_no_grep "approved_harness=" "$HOME_DIR/state/$id.meta" \
+    "bounded claude spawn should not record an unrestricted approval binding"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode acceptEdits \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
@@ -375,6 +377,8 @@ test_unrestricted_profile_preserves_bypass_launches() {
   status=$?
   expect_code 0 "$status" "explicit unrestricted Claude spawn should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default unrestricted
+  assert_grep "approved_harness=claude" "$HOME_DIR/state/$id.meta" \
+    "explicit unrestricted spawn must bind its approval to the launched harness"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --dangerously-skip-permissions" \
     "explicit unrestricted profile did not preserve Claude's bypass launch"

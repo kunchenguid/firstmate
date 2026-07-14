@@ -109,6 +109,7 @@ EOF
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
     "harness=codex" \
+    "permissions=bounded" \
     "kind=ship" \
     "mode=no-mistakes" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
@@ -811,6 +812,24 @@ EOF
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
 }
 
+test_permission_classification_surfaces_in_bearings() {
+  local home fakebin toon json
+  home=$(make_home permissions); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  toon=$(run "$home" "$fakebin")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.[]; .id == "ship-task" and .permissions == "bounded"))
+      and (.in_flight | any(.[]; .id == "scout-x" and .permissions == "unknown"))
+      and (.secondmates | any(.[]; .id == "mate" and .permissions == "unknown"))
+  ' >/dev/null || fail "bearings did not surface task and secondmate permission classifications: $json"
+  assert_contains "$toon" 'in_flight[3]{id,kind,permissions,state,doing}:' \
+    "TOON bearings output did not expose the in-flight permissions field"
+  assert_contains "$toon" 'secondmates[1]{id,state,permissions,doing,provenance,freshness,age_seconds,contradiction,reason}:' \
+    "TOON bearings output did not expose the secondmate permissions field"
+  pass "bearings surfaces bounded and unknown permission classifications"
+}
+
 test_default_is_bounded_and_local_only() {
   local home fakebin toon json
   home=$(make_home bounded); write_fixture "$home"
@@ -1218,6 +1237,7 @@ test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
+test_permission_classification_surfaces_in_bearings
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
