@@ -88,7 +88,7 @@ state/               volatile runtime signals; gitignored
   <id>.check.sh      optional slow poll; PR merge polls use byte-static source and are published only after their validated data sidecar
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
-  .pr-check-migration.log  private actionable diagnostics for polls that migration could not rebuild
+  .pr-check-migration.log  private per-task outcomes distinguishing rebuilt armed polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-v1  private completion marker that keeps the one-time migration idempotent
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)

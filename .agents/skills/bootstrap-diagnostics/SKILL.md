@@ -35,12 +35,14 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
-- `PR_CHECK_MIGRATION: canonical polls rebuilt; resume supervision for this home` - the non-executing migration replaced older task polls from validated metadata and paused the prior watcher while it did so.
+- `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
+  Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
+- `PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming` - one or more ambiguous or invalid task polls were quarantined without execution and remain unarmed.
+  Read the private mode-`0600` per-task outcome record, verify the task's recorded PR independently, and rearm only through `bin/fm-pr-check.sh` with canonical inputs.
+- `PR_CHECK_MIGRATION: migration completed safely; resume supervision for this home` - migration crossed the update boundary without rebuilding or quarantining a task poll after pausing the prior watcher.
   Resume the emitted supervision protocol after finishing the session-start wake handling.
-- `PR_CHECK_MIGRATION: review state/.pr-check-migration.log before rearming polls` - one or more ambiguous task polls were quarantined without execution and left unarmed.
-  Read the private mode-`0600` diagnostic, verify the task's recorded PR independently, and rearm only through `bin/fm-pr-check.sh` with canonical inputs.
-- Any other `PR_CHECK_MIGRATION:` refusal means watcher exclusion could not be proved.
-  Leave PR polls unarmed, inspect the named private state path, and do not bypass the migration or execute a quarantined artifact.
+- Any other `PR_CHECK_MIGRATION:` refusal means migration did not complete safely, whether because watcher exclusion, a private path, a diagnostic, quarantine validation, or marker publication could not be proved.
+  Keep PR polls unavailable, inspect the named private state path, and do not bypass the migration or execute a quarantined artifact.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inheritable-config propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions or inherited settings may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>` - the session-start liveness sweep checked a live secondmate's recorded endpoint for a real agent process.
   Treat `already-live` and `respawned` as handled; investigate `skipped` or `respawn failed` because that secondmate is not guaranteed live.

@@ -884,8 +884,8 @@ test_marker_and_diagnostic_rename_fail_closed() {
     FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
       || fail "diagnostic rename $action did not recover on retry"
     assert_valid_migration_marker "$state/.pr-check-migration-v1"
-    assert_grep 'task task-a: poll metadata is ambiguous or invalid' "$state/.pr-check-migration.log" \
-      "diagnostic rename retry forgot the required diagnostic"
+    assert_grep 'task task-a: ambiguous or invalid legacy poll quarantined and unarmed' "$state/.pr-check-migration.log" \
+      "diagnostic rename retry forgot the required outcome"
   done
   pass "marker and diagnostic rename errors and signals fail closed and recover durably on retry"
 }
@@ -906,7 +906,7 @@ test_postrename_marker_and_diagnostic_validation_retries() {
           ;;
         obligation)
           write_ambiguous_poll "$dir"
-          destination="$state/.pr-check-quarantine/task-a.diagnostic.ambiguous"
+          destination="$state/.pr-check-quarantine/task-a.diagnostic.pending-ambiguous"
           ;;
       esac
       link_target="$dir/external-sentinel"
@@ -922,6 +922,8 @@ test_postrename_marker_and_diagnostic_validation_retries() {
       rc=$?
       set -e
       [ "$rc" -ne 0 ] || fail "post-rename $artifact $action fault was reported as success"
+      assert_grep 'migration did not complete safely' "$dir/migrate.err" \
+        "generic migration failure for $artifact $action did not state that migration was incomplete"
       [ ! -e "$state/.pr-check-migration-v1" ] && [ ! -L "$state/.pr-check-migration-v1" ] \
         || fail "post-rename $artifact $action fault left a trusted marker"
       if [ "$artifact" = diagnostic ]; then
@@ -942,8 +944,8 @@ test_postrename_marker_and_diagnostic_validation_retries() {
         || fail "post-rename $artifact $action retry did not recover"
       assert_valid_migration_marker "$state/.pr-check-migration-v1"
       if [ "$artifact" = diagnostic ] || [ "$artifact" = obligation ]; then
-        assert_grep 'task task-a: poll metadata is ambiguous or invalid' "$state/.pr-check-migration.log" \
-          "$artifact $action retry forgot the durable obligation"
+        assert_grep 'task task-a: ambiguous or invalid legacy poll quarantined and unarmed' "$state/.pr-check-migration.log" \
+          "$artifact $action retry forgot the durable outcome"
       fi
     done
   done
@@ -1157,10 +1159,17 @@ SH
 
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "canonical legacy migration failed"
+  [ "$(cat "$dir/migrate.out")" = 'PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home' ] \
+    || fail "canonical migration stdout did not state that the rebuilt poll is armed"
+  assert_grep 'task task-a: canonical legacy poll rebuilt and armed' "$state/.pr-check-migration.log" \
+    "canonical migration log did not record the armed outcome"
+  assert_no_grep 'quarantined and unarmed' "$state/.pr-check-migration.log" \
+    "canonical migration log mislabeled the rebuilt poll as unarmed"
   [ ! -e "$marker" ] || fail "migration executed legacy bytes"
   cmp -s "$POLL" "$state/task-a.check.sh" || fail "migration did not rebuild a canonical static poll"
   [ "$(file_mode "$state/task-a.check.sh")" = 600 ] || fail "migrated check mode was not 0600"
   [ "$(file_mode "$state/task-a.pr-poll")" = 600 ] || fail "migrated sidecar mode was not 0600"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "canonical migration did not leave a validated armed poll"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
     || fail "legacy check was not quarantined"
@@ -1187,13 +1196,15 @@ SH
   printf 'legacy ambiguous bytes\n' > "$state/task-b.check.sh"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "ambiguous migration failed to quarantine"
+  [ "$(cat "$dir/migrate.out")" = 'PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming' ] \
+    || fail "ambiguous migration stdout did not state that quarantined polls remain unarmed"
   [ ! -e "$state/task-b.check.sh" ] || fail "ambiguous migration left a runnable check"
   [ ! -e "$state/task-b.pr-poll" ] || fail "ambiguous migration built a sidecar"
   find "$state/.pr-check-quarantine" -name 'task-b.check.*' -type f | grep . >/dev/null \
     || fail "ambiguous poll was not quarantined"
   [ "$(file_mode "$state/.pr-check-migration.log")" = 600 ] || fail "migration diagnostics were not private"
-  assert_grep 'task task-b: poll metadata is ambiguous or invalid' "$state/.pr-check-migration.log" \
-    "migration diagnostic was not actionable"
+  assert_grep 'task task-b: ambiguous or invalid legacy poll quarantined and unarmed' "$state/.pr-check-migration.log" \
+    "migration diagnostic did not record the quarantined unarmed outcome"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
 
   dir=$(make_case migration-invalid-id)
@@ -1205,8 +1216,8 @@ SH
   set -e
   [ "$rc" -eq 0 ] || fail "noncanonical artifact migration failed"
   [ ! -e "$state/bad_id.check.sh" ] || fail "noncanonical artifact remained runnable"
-  assert_grep 'noncanonical task artifact' "$state/.pr-check-migration.log" \
-    "noncanonical artifact diagnostic was missing"
+  assert_grep 'noncanonical task artifact quarantined and unarmed' "$state/.pr-check-migration.log" \
+    "noncanonical artifact outcome diagnostic was missing"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   pass "migration never executes legacy checks, preserves X mode, quarantines ambiguity, and is idempotent"
 }

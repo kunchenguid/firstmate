@@ -28,7 +28,7 @@ fi
 
 migration_marker_content_valid() {
   local file=$1 value
-  exec 7< "$file" 2>/dev/null || return 1
+  { exec 7< "$file"; } 2>/dev/null || return 1
   IFS= read -r value <&7 || { exec 7<&-; return 1; }
   if IFS= read -r _extra <&7; then
     exec 7<&-
@@ -115,7 +115,7 @@ trap migration_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
-  echo "PR_CHECK_MIGRATION: state directory is not a private ordinary directory; migration remains incomplete" >&2
+  echo "PR_CHECK_MIGRATION: state directory is not a private ordinary directory; migration did not complete safely" >&2
   exit 1
 fi
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
@@ -301,7 +301,6 @@ revoke_migration_log() {
   [ ! -e "$LOG" ] && [ ! -L "$LOG" ]
 }
 
-diagnostics_added=0
 record_diagnostic() {
   local message=$1
   diagnostic_log_contains "$message" && return 0
@@ -327,36 +326,53 @@ record_diagnostic() {
     revoke_migration_log || true
     return 1
   fi
-  diagnostics_added=1
 }
 
 diagnostic_obligation_message() {
   local basename=$1 prefix kind
+  MIGRATION_DIAGNOSTIC_KIND=
+  MIGRATION_DIAGNOSTIC_PREFIX=
   MIGRATION_DIAGNOSTIC_MESSAGE=
-  case "$basename" in
-    invalid.diagnostic.noncanonical)
-      MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: poll remains unarmed pending private review'
-      ;;
-    *.diagnostic.canonical|*.diagnostic.ambiguous)
-      prefix=${basename%%.diagnostic.*}
-      kind=${basename##*.diagnostic.}
-      fm_pr_task_id_valid "$prefix" || return 1
-      case "$kind" in
-        canonical)
-          MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll required migration; inspect private record before rearming"
-          ;;
-        ambiguous)
-          MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: poll metadata is ambiguous or invalid; poll remains unarmed pending private review"
-          ;;
-      esac
-      ;;
-    *) return 1 ;;
-  esac
+  prefix=${basename%%.diagnostic.*}
+  kind=${basename##*.diagnostic.}
+  if [ "$prefix" = invalid ]; then
+    case "$kind" in
+      pending-noncanonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
+        ;;
+      noncanonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact quarantined and unarmed'
+        ;;
+      *) return 1 ;;
+    esac
+  else
+    fm_pr_task_id_valid "$prefix" || return 1
+    case "$kind" in
+      pending-canonical|pending-ambiguous)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: migration outcome tracking started before legacy poll handling"
+        ;;
+      canonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll rebuilt and armed"
+        ;;
+      failure-canonical)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical poll migration did not complete safely; poll remains unarmed pending private review"
+        ;;
+      ambiguous)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  MIGRATION_DIAGNOSTIC_KIND=$kind
+  MIGRATION_DIAGNOSTIC_PREFIX=$prefix
 }
 
 ensure_diagnostic_obligation() {
   local prefix=$1 kind=$2 message=$3 destination
-  case "$kind" in canonical|ambiguous|noncanonical) ;; *) return 1 ;; esac
+  case "$kind" in
+    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|ambiguous|noncanonical) ;;
+    *) return 1 ;;
+  esac
   [ "$prefix" = invalid ] || fm_pr_task_id_valid "$prefix" || return 1
   ensure_quarantine_dir || return 1
   destination="$QUARANTINE/$prefix.diagnostic.$kind"
@@ -387,6 +403,63 @@ ensure_diagnostic_obligation() {
   fi
 }
 
+ensure_outcome_obligation() {
+  local prefix=$1 kind=$2 basename
+  basename="$prefix.diagnostic.$kind"
+  diagnostic_obligation_message "$basename" || return 1
+  ensure_diagnostic_obligation "$prefix" "$kind" "$MIGRATION_DIAGNOSTIC_MESSAGE"
+}
+
+quarantined_artifact_exists() {
+  local prefix=$1 kind=$2 artifact
+  for artifact in "$QUARANTINE/$prefix.$kind."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] || return 1
+    return 0
+  done
+  return 1
+}
+
+reconcile_pending_outcomes() {
+  local obligation basename prefix kind source
+  [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
+  quarantine_tree_repair_and_validate || return 1
+  for obligation in "$QUARANTINE"/*.diagnostic.pending-*; do
+    [ -e "$obligation" ] || [ -L "$obligation" ] || continue
+    basename=${obligation##*/}
+    diagnostic_obligation_message "$basename" || return 1
+    prefix=$MIGRATION_DIAGNOSTIC_PREFIX
+    kind=$MIGRATION_DIAGNOSTIC_KIND
+    case "$kind" in
+      pending-canonical)
+        if fm_pr_poll_artifacts_valid "$STATE" "$prefix" "$TEMPLATE"; then
+          ensure_outcome_obligation "$prefix" canonical || return 1
+        else
+          source="$STATE/$prefix.check.sh"
+          if [ ! -e "$source" ] && [ ! -L "$source" ] \
+            && quarantined_artifact_exists "$prefix" check; then
+            ensure_outcome_obligation "$prefix" failure-canonical || return 1
+          fi
+        fi
+        ;;
+      pending-ambiguous)
+        source="$STATE/$prefix.check.sh"
+        if [ ! -e "$source" ] && [ ! -L "$source" ] \
+          && quarantined_artifact_exists "$prefix" check; then
+          ensure_outcome_obligation "$prefix" ambiguous || return 1
+        fi
+        ;;
+      pending-noncanonical)
+        if quarantined_artifact_exists invalid check; then
+          ensure_outcome_obligation invalid noncanonical || return 1
+        fi
+        ;;
+    esac
+  done
+}
+
+canonical_rebuilt=0
+quarantined_unarmed=0
 process_diagnostic_obligations() {
   local obligation basename message
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
@@ -398,6 +471,10 @@ process_diagnostic_obligations() {
     message=$MIGRATION_DIAGNOSTIC_MESSAGE
     diagnostic_file_is_one_line "$obligation" "$message" || return 1
     record_diagnostic "$message" || return 1
+    case "$MIGRATION_DIAGNOSTIC_KIND" in
+      canonical) canonical_rebuilt=1 ;;
+      ambiguous|noncanonical) quarantined_unarmed=1 ;;
+    esac
   done
   for obligation in "$QUARANTINE"/*.diagnostic.*; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
@@ -409,14 +486,16 @@ process_diagnostic_obligations() {
 
 diagnostics_failed=0
 migration_failed=0
-if ! quarantine_tree_repair_and_validate || ! process_diagnostic_obligations; then
+if ! quarantine_tree_repair_and_validate \
+  || ! reconcile_pending_outcomes \
+  || ! process_diagnostic_obligations; then
   diagnostics_failed=1
   migration_failed=1
 fi
 
 if migration_needed; then
   if ! ensure_quarantine_dir; then
-    echo "PR_CHECK_MIGRATION: private quarantine is unavailable; migration remains incomplete" >&2
+    echo "PR_CHECK_MIGRATION: private quarantine is unavailable; migration did not complete safely" >&2
     exit 1
   fi
 
@@ -435,8 +514,8 @@ if migration_needed; then
         owner=$MIGRATION_OWNER
         repo=$MIGRATION_REPO
         number=$MIGRATION_NUMBER
-        message="task $id: canonical legacy poll required migration; inspect private record before rearming"
-        if ! ensure_diagnostic_obligation "$prefix" canonical "$message" \
+        message="task $id: migration outcome tracking started before legacy poll handling"
+        if ! ensure_diagnostic_obligation "$prefix" pending-canonical "$message" \
           || ! process_diagnostic_obligations; then
           diagnostics_failed=1
           migration_failed=1
@@ -448,9 +527,10 @@ if migration_needed; then
           || ! fm_pr_poll_publish_prepared; then
           migration_failed=1
         fi
+        reconcile_pending_outcomes || migration_failed=1
       else
-        message="task $id: poll metadata is ambiguous or invalid; poll remains unarmed pending private review"
-        if ! ensure_diagnostic_obligation "$prefix" ambiguous "$message" \
+        message="task $id: migration outcome tracking started before legacy poll handling"
+        if ! ensure_diagnostic_obligation "$prefix" pending-ambiguous "$message" \
           || ! process_diagnostic_obligations; then
           diagnostics_failed=1
           migration_failed=1
@@ -460,21 +540,25 @@ if migration_needed; then
           || ! quarantine_artifact "$data" "$prefix" data; then
           migration_failed=1
         fi
+        reconcile_pending_outcomes || migration_failed=1
       fi
     else
-      message='noncanonical task artifact: poll remains unarmed pending private review'
-      if ! ensure_diagnostic_obligation invalid noncanonical "$message" \
+      message='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
+      if ! ensure_diagnostic_obligation invalid pending-noncanonical "$message" \
         || ! process_diagnostic_obligations; then
         diagnostics_failed=1
         migration_failed=1
         continue
       fi
       quarantine_artifact "$check" invalid check || migration_failed=1
+      reconcile_pending_outcomes || migration_failed=1
     fi
   done
 fi
 
-if ! quarantine_tree_repair_and_validate || ! process_diagnostic_obligations; then
+if ! quarantine_tree_repair_and_validate \
+  || ! reconcile_pending_outcomes \
+  || ! process_diagnostic_obligations; then
   diagnostics_failed=1
   migration_failed=1
 fi
@@ -485,15 +569,20 @@ fi
 
 if [ "$migration_failed" -ne 0 ]; then
   if [ "$diagnostics_failed" -eq 1 ]; then
-    echo "PR_CHECK_MIGRATION: private diagnostics could not be published; migration remains incomplete" >&2
+    echo "PR_CHECK_MIGRATION: private diagnostics are unavailable; migration did not complete safely" >&2
   else
-    echo "PR_CHECK_MIGRATION: migration remains incomplete; inspect private state before rearming polls" >&2
+    echo "PR_CHECK_MIGRATION: migration did not complete safely; inspect private state before rearming polls" >&2
   fi
   exit 1
 fi
 
-if [ "$diagnostics_added" -eq 1 ]; then
-  echo "PR_CHECK_MIGRATION: review state/.pr-check-migration.log before rearming polls"
-elif [ "$stopped_watcher" -eq 1 ]; then
-  echo "PR_CHECK_MIGRATION: canonical polls rebuilt; resume supervision for this home"
+if [ "$canonical_rebuilt" -eq 1 ]; then
+  echo "PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home"
+fi
+if [ "$quarantined_unarmed" -eq 1 ]; then
+  echo "PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming"
+fi
+if [ "$canonical_rebuilt" -eq 0 ] && [ "$quarantined_unarmed" -eq 0 ] \
+  && [ "$stopped_watcher" -eq 1 ]; then
+  echo "PR_CHECK_MIGRATION: migration completed safely; resume supervision for this home"
 fi
