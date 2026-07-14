@@ -337,6 +337,22 @@ INVALID_IDS=(
   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 )
 
+UNSAFE_LIFECYCLE_IDS=(
+  '../escape'
+  'a/b'
+  '.'
+  '..'
+  '.task'
+  'task a'
+  $'task\ta'
+  $'task\na'
+  'task*'
+  "task'a"
+  'task"a'
+  'task;a'
+  'task$a'
+)
+
 test_parser_matrix() {
   local id row url owner repo number
   while IFS='|' read -r url owner repo number; do
@@ -356,6 +372,10 @@ EOF
   done
   for id in -task task- task--a Task-a task_a task.a; do
     fm_pr_task_id_valid "$id" || fail "task ID validator rejected a safe lifecycle-compatible slug"
+  done
+  for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+    fm_task_id_path_safe "$id" || fail "legacy task ID was not path-safe for teardown"
+    ! fm_pr_task_id_valid "$id" || fail "creation validator accepted a reserved or overlong task ID"
   done
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
@@ -414,7 +434,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
     [ "$after" = "$before" ] || fail "merge invalid task ID changed state"
   done
 
-  for value in "${INVALID_IDS[@]}"; do
+  for value in "${UNSAFE_LIFECYCLE_IDS[@]}"; do
     before=$(state_snapshot "$dir/home/state")
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
@@ -514,6 +534,33 @@ SH
     || fail "safe lifecycle-compatible task ID could not be torn down"
   [ ! -e "$dir/home/state/Task_A.1.meta" ] \
     || fail "safe lifecycle-compatible task teardown retained metadata"
+
+  for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+    dir=$(make_case "legacy-teardown-${id:0:12}")
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" \
+      "worktree=$dir/missing-worktree" \
+      "project=$dir/project" \
+      'kind=ship' \
+      'mode=local-only'
+    mkdir -p "$dir/home/state/.pr-check-quarantine"
+    chmod 0700 "$dir/home/state/.pr-check-quarantine"
+    printf 'reserved migration evidence\n' \
+      > "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence"
+    chmod 0600 "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence"
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod 0700 "$dir/fakebin/tmux"
+    touch "$dir/home/state/.last-watcher-beat"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+      "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+      || fail "legacy path-safe task ID could not be torn down"
+    [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
+    [ "$(cat "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence")" = 'reserved migration evidence' ] \
+      || fail "legacy task teardown changed the reserved migration namespace"
+  done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 

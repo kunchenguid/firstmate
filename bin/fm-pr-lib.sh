@@ -42,13 +42,18 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 
-fm_pr_task_id_valid() {
+fm_task_id_path_safe() {
   local id=${1-}
   local LC_ALL=C
-  [ "${#id}" -ge 1 ] && [ "${#id}" -le 64 ] || return 1
   case "$id" in
-    .*|_noncanonical|*[!A-Za-z0-9._-]*) return 1 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
+}
+
+fm_pr_task_id_valid() {
+  local id=${1-}
+  fm_task_id_path_safe "$id" || return 1
+  [ "${#id}" -le 64 ] && [ "$id" != _noncanonical ]
 }
 
 fm_pr_url_parse() {
